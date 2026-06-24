@@ -49,7 +49,29 @@ internal class FakeTmuxClient(
         extraBufferCapacity = 64,
     )
 
-    override val events: Flow<ControlEvent> = emittedEvents
+    /**
+     * Issue #896: when set, the [events] flow THROWS this exception on the
+     * next emission instead of delivering the event — faithfully reproducing a
+     * close/EOF-cascade collector (the `bridgeScope.launch { client.events
+     * .collect {} }` at TmuxSessionViewModel.bindClientObservers) firing IO
+     * against an already-dead transport during teardown. The captured June-8
+     * specimen was an `SshException: SSH session is not connected`; this seam
+     * lets a unit test inject exactly that shape and assert the view model's
+     * scope-level CoroutineExceptionHandler swallows it (process kept alive)
+     * rather than letting it reach the thread's uncaught-exception handler.
+     * Cleared after it fires once so subsequent emissions flow normally.
+     */
+    var throwFromEventsCollectorOnNextEmit: Throwable? = null
+
+    override val events: Flow<ControlEvent> = kotlinx.coroutines.flow.flow {
+        emittedEvents.collect { event ->
+            throwFromEventsCollectorOnNextEmit?.let { boom ->
+                throwFromEventsCollectorOnNextEmit = null
+                throw boom
+            }
+            emit(event)
+        }
+    }
 
     var decoupleOutputForFromEvents: Boolean = false
 

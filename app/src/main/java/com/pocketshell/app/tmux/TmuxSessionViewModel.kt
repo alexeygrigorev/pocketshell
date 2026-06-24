@@ -21,6 +21,7 @@ import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.conversation.ConversationDiagnostics
+import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
@@ -104,6 +105,7 @@ import com.pocketshell.core.tmux.TmuxSessionNotFoundException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
@@ -1712,6 +1714,94 @@ public class TmuxSessionViewModel @Inject constructor(
     private val scannedConversationPortEventKeys: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
 
+    // Issue #896: scope-level safety net for the SSH/tmux close/EOF cascade.
+    //
+    // The crash class: closing the attached/last session → the gateway kill
+    // destroys tmux → the live `-CC` control client EOFs → that EOF fans out
+    // to several `bridgeScope.launch {}` collectors (client.events →
+    // onControlEvent, client.disconnected, per-pane output/port, agent tail /
+    // detection / conversation watchdog) AT THE SAME MOMENT the scopes are
+    // torn down. A SupervisorJob isolates SIBLING cancellation but does NOT
+    // swallow a child's exception — so a single unguarded suspend-IO call that
+    // throws (e.g. `SshException: SSH session is not connected`, the captured
+    // June-8 specimen) against the already-dead transport propagates to
+    // `Thread.defaultUncaughtExceptionHandler` → CrashReporter saves it then
+    // re-delegates to the platform handler → PROCESS DEATH. (Proven specimen:
+    // RealSshSession.ensureConnected → tail → AgentConversationRepository →
+    // startAgentConversationForPane, thread main, StandaloneCoroutine{Cancelling}.)
+    //
+    // This handler converts such a teardown-race THROW into a logged,
+    // recoverable event instead of a crash. It records to DiagnosticEvents AND
+    // the CrashReporter store (so a swallowed throw stays VISIBLE — it never
+    // becomes a silent black hole), then returns without re-throwing.
+    //
+    // CRITICAL (anti-#895-masking): this handler does NOT and CANNOT eat a
+    // genuine transport DROP that must drive the connection lifecycle. A real
+    // `-CC` drop arrives as a normal EMISSION on `client.disconnected`
+    // (a latched StateFlow) → handlePassiveClientDisconnect →
+    // reduceConnection(TransportDropped) → ConnectionController, which surfaces
+    // the escapable Reconnecting/Reconnect band (#895's concern). A
+    // CoroutineExceptionHandler is only ever invoked for an UNCAUGHT THROW; it
+    // is never on the path of a normal flow emission, so the drop→band routing
+    // is preserved by construction. The handler's sole job is to stop a
+    // teardown-time throw from killing the process.
+    //
+    // CancellationException is intentionally untouched: kotlinx.coroutines never
+    // routes CancellationException to a CoroutineExceptionHandler (it is normal
+    // cooperative cancellation), so adding this handler does not change
+    // cancellation semantics across the connection core (D28). The explicit
+    // re-throw below is defensive belt-and-braces for that invariant.
+    private val bridgeExceptionHandler = CoroutineExceptionHandler { context, throwable ->
+        if (throwable is CancellationException) throw throwable
+        onBridgeCoroutineFailure(context, throwable)
+    }
+
+    /**
+     * Issue #896: handle (log + record, no re-throw) a teardown-race throw on
+     * the close/EOF cascade. Exposed as a member so tests can observe the
+     * safety net firing without crashing the test process (the #780 synthetic
+     * model) — the load-bearing assertion is that an unguarded cascade throw
+     * lands HERE, not in the thread's uncaught-exception handler.
+     */
+    internal fun onBridgeCoroutineFailure(
+        context: kotlin.coroutines.CoroutineContext,
+        throwable: Throwable,
+    ) {
+        Log.w(
+            ISSUE_896_BRIDGE_SAFETY_NET_TAG,
+            "Swallowed uncaught coroutine failure on the SSH/tmux close cascade " +
+                "(process kept alive); recorded as a non-fatal report",
+            throwable,
+        )
+        runCatching {
+            DiagnosticEvents.record(
+                "connection",
+                "bridge_coroutine_uncaught",
+                "source" to "bridge_exception_handler",
+                "classification" to "teardown_race_throw_swallowed",
+                "exceptionClass" to throwable.javaClass.name,
+                "message" to throwable.message,
+                "coroutineName" to context[kotlinx.coroutines.CoroutineName]?.name,
+                "generation" to connectGeneration,
+            )
+        }
+        // Persist a NON-FATAL crash report so the swallowed throw remains
+        // visible in the in-app crash-reports list (anti-masking). Does not
+        // re-delegate to the platform handler, so the process survives.
+        runCatching { CrashReporter.recordNonFatal(applicationContext, throwable) }
+        bridgeCoroutineFailureProbe?.invoke(throwable)
+    }
+
+    /**
+     * Test-only probe (issue #896). When set, [onBridgeCoroutineFailure]
+     * invokes it after recording, so an instrumentation/unit test can assert
+     * the safety net caught the cascade throw (rather than the throw reaching
+     * the thread's uncaught handler / killing the process). Null in production.
+     */
+    @get:androidx.annotation.VisibleForTesting
+    @set:androidx.annotation.VisibleForTesting
+    internal var bridgeCoroutineFailureProbe: ((Throwable) -> Unit)? = null
+
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
     // producer-cancellation on one pane's TerminalSurfaceState (e.g. the
@@ -1719,9 +1809,14 @@ public class TmuxSessionViewModel @Inject constructor(
     // Each TerminalSurfaceState.attachExternalProducer returns a Job
     // rooted in this scope; cancelling viewModelScope (via onCleared)
     // also cancels this scope's SupervisorJob through the parent link.
+    // Issue #896: the bridgeExceptionHandler is part of the context so EVERY
+    // bridgeScope.launch {} cascade collector (and child scopes derived from
+    // bridgeScope.coroutineContext, e.g. the layout coalescer) inherits the
+    // safety net — covering the whole crash CLASS, not one site.
     private val bridgeScope = CoroutineScope(
         viewModelScope.coroutineContext +
-            SupervisorJob(viewModelScope.coroutineContext[Job]),
+            SupervisorJob(viewModelScope.coroutineContext[Job]) +
+            bridgeExceptionHandler,
     )
 
     // Reuse pane rows across reconciles so the attached TerminalSurfaceState
@@ -6202,7 +6297,14 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectEvent: TmuxDisconnectEvent,
     ) {
         passiveDisconnectGraceJob?.cancel()
-        val graceJob = viewModelScope.launch {
+        // Issue #896: this silent-reattach grace loop re-dials the transport and
+        // re-reads the (possibly now-gone) session right on the kill→EOF cascade,
+        // racing the scope teardown — exactly where an unguarded IO throw against
+        // the dead transport would otherwise crash. It is a viewModelScope.launch
+        // (not bridgeScope) so it doesn't inherit the scope-level net; attach the
+        // same handler explicitly so a teardown-race throw here is swallowed +
+        // recorded, never a process death.
+        val graceJob = viewModelScope.launch(bridgeExceptionHandler) {
             val recovered = target != null && silentlyReattachWithinPassiveGrace(
                 staleClient = client,
                 target = target,
@@ -6923,7 +7025,10 @@ public class TmuxSessionViewModel @Inject constructor(
             "delaysMs" to delays.joinToString(","),
             *diagnosticFields,
         )
-        autoReconnectJob = viewModelScope.launch {
+        // Issue #896: the auto-reconnect ladder also re-dials the transport on
+        // the death cascade; attach the safety-net handler so an unexpected
+        // throw mid-ladder degrades to a recorded non-fatal instead of crashing.
+        autoReconnectJob = viewModelScope.launch(bridgeExceptionHandler) {
             for ((index, delayMs) in delays.withIndex()) {
                 val generation = nextConnectGeneration()
                 latestConnectIntent = ConnectIntent(
@@ -14120,6 +14225,15 @@ internal const val ISSUE_548_NETWORK_TAG: String = "PsTmuxNetwork"
  * 23-character `Log.isLoggable` cap.
  */
 internal const val ISSUE_576_COALESCER_TAG: String = "PsTmuxCoalescer"
+
+/**
+ * Issue #896: logcat tag for the scope-level CoroutineExceptionHandler safety
+ * net on the SSH/tmux close/EOF cascade. A teardown-race throw that lands here
+ * is swallowed (process kept alive) + recorded as a non-fatal report; greppable
+ * to confirm the net fired instead of a process death. Within the 23-char
+ * `Log.isLoggable` cap.
+ */
+internal const val ISSUE_896_BRIDGE_SAFETY_NET_TAG: String = "PsTmuxBridgeSafety"
 
 /**
  * EPIC #792 Slice D (#822/V7a): logcat tag for the proactive mid-session

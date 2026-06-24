@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.core.agents.ToolArgsView
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 
 /**
  * Structured renderer for the EXPANDED tool-call argument block (#841).
@@ -74,7 +74,7 @@ private fun StructuredArgs(
             Text(
                 text = "input",
                 color = PocketShellColors.TextMuted,
-                fontSize = 10.sp,
+                fontSize = 11.sp,
                 modifier = Modifier.weight(1f),
             )
             // Copy still yields the full raw args so nothing is lost vs the blob.
@@ -111,7 +111,7 @@ private fun StructuredArgs(
 private fun CommandLine(command: String, modifier: Modifier = Modifier) {
     SelectionContainer(
         modifier = modifier
-            .background(color = PocketShellColors.TermBg, shape = RoundedCornerShape(4.dp))
+            .background(color = PocketShellColors.TermBg, shape = PocketShellShapes.small)
             .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
         Text(
@@ -139,7 +139,7 @@ private fun FieldRow(label: String, value: String, modifier: Modifier = Modifier
             Text(
                 text = value,
                 color = PocketShellColors.TermText,
-                fontSize = 12.sp,
+                fontSize = 13.sp,
                 fontFamily = FontFamily.Monospace,
             )
         }

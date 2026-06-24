@@ -72,6 +72,21 @@ jobs:
           chmod +x scripts/check-component-drift.sh
           scripts/check-component-drift.sh
 
+      # Issue #901: design-token (radius/font-size) ladder guardrail. Sibling of
+      # the #865 component-drift guard: this fast static grep PINS a per-file
+      # baseline of off-ladder `RoundedCornerShape(<N>.dp)` / `fontSize = <N>.sp`
+      # literals (the #461/Slice-D type+radius ladder: 8/14/20/28 radii,
+      # 11/13/14/16/20 sizes) and FAILS only when a file gains a NEW off-ladder
+      # literal (or a new file ships with any). The script existed but was never
+      # wired in, so the Conversation view silently drifted to hardcoded 4/6.dp
+      # radii and 10/12.sp text undetected. Cheap (< 1 s grep), no emulator —
+      # belongs in the Unit job. Re-baseline with
+      # `scripts/check-design-tokens.sh --update` after a screen migrates.
+      - name: Design-token ladder guard (issue #901)
+        run: |
+          chmod +x scripts/check-design-tokens.sh
+          scripts/check-design-tokens.sh
+
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
       # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite

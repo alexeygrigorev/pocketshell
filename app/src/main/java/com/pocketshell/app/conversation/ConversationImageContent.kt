@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -36,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.pocketshell.core.agents.ConversationImage
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 
 /**
  * Issue #842: load image bytes referenced by a [ConversationImage] for inline
@@ -155,7 +155,7 @@ private fun ImageOrFallback(
         modifier = modifier
             .clickable { showFull = !showFull }
             .let { if (showFull) it else it.heightIn(max = ConversationImageMaxHeight) }
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .testTag(CONVERSATION_IMAGE_TAG),
     )
 }
@@ -179,8 +179,8 @@ private fun ImagePlaceholder(reference: String, modifier: Modifier) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.TermBg, RoundedCornerShape(6.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+            .background(PocketShellColors.TermBg, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .padding(horizontal = 10.dp, vertical = 10.dp)
             .testTag(CONVERSATION_IMAGE_PLACEHOLDER_TAG),
         verticalAlignment = Alignment.CenterVertically,
@@ -203,8 +203,8 @@ private fun ImageFallback(reference: String, modifier: Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.TermBg, RoundedCornerShape(6.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+            .background(PocketShellColors.TermBg, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .padding(horizontal = 10.dp, vertical = 8.dp)
             .testTag(CONVERSATION_IMAGE_FALLBACK_TAG),
     ) {

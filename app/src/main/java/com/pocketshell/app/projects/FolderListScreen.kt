@@ -1373,9 +1373,9 @@ private fun CliVersionMismatchBanner(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .background(color.copy(alpha = 0.12f), PocketShellShapes.medium)
+            .border(1.dp, color.copy(alpha = 0.4f), PocketShellShapes.medium)
             .padding(horizontal = 14.dp, vertical = 10.dp)
             .testTag(FOLDER_LIST_CLI_VERSION_BANNER_TAG),
         verticalAlignment = Alignment.CenterVertically,
@@ -2311,9 +2311,9 @@ private fun ProfileChip(
             .widthIn(max = ProfileChipMaxWidth)
             .background(
                 PocketShellColors.SurfaceElev.copy(alpha = 0.9f),
-                RoundedCornerShape(6.dp),
+                PocketShellShapes.small,
             )
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
             .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
     ) {
         Text(

@@ -514,7 +514,6 @@ public class AgentConversationRepository internal constructor(
         recordedKind: AgentKind,
         candidates: List<AgentLogCandidate>,
     ): AgentDetection? {
-        if (candidates.isEmpty()) return null
         val nowMillis = System.currentTimeMillis()
         // Issue #828 (perf): the process scan is ONLY load-bearing for the
         // recorded-Codex path — it feeds the `/proc/<pid>/fd` owned-rollout
@@ -548,11 +547,21 @@ public class AgentConversationRepository internal constructor(
         // the rollout the pane's OWN process holds open (the #819 mechanism),
         // scoped here to Codex by the recorded kind rather than detected kind.
         val processOwnedSourcePaths =
-            if (recordedKind == AgentKind.Codex && candidates.size >= 2) {
+            if (recordedKind == AgentKind.Codex) {
                 resolveProcessOwnedCodexRollouts(session, pidsFromProcessRows(paneProcesses))
             } else {
                 emptySet()
             }
+        val selectableCandidates = if (recordedKind == AgentKind.Codex) {
+            candidates.withProcessOwnedCodexRollouts(
+                ownedSourcePaths = processOwnedSourcePaths,
+                normalizedCwd = normalizedCwd,
+                nowMillis = nowMillis,
+            )
+        } else {
+            candidates
+        }
+        if (selectableCandidates.isEmpty()) return null
         // Claude / OpenCode carry the session id IN their candidate path, so
         // the most-recent candidate of the recorded kind, scoped to this cwd, is
         // the right source — and we do NOT gate on a live process match: the
@@ -563,18 +572,53 @@ public class AgentConversationRepository internal constructor(
         // Codex has no session-id-in-path, so we DO use the process-confirmed
         // owned-rollout selection ([processOwnedSourcePaths] is consulted only
         // on the requireProcessMatch path) to bind to THIS pane's rollout rather
-        // than a busier same-cwd sibling. With a single Codex candidate the
-        // owned set is empty and the detector falls back to the most-recent
-        // confirmed candidate, so a live-but-single Codex still resolves.
+        // than a busier same-cwd sibling. With a single Codex candidate this
+        // still resolves without an owner signal; with multiple candidates, the
+        // detector requires the fd-owned path instead of guessing newest.
         val requireProcessMatch = recordedKind == AgentKind.Codex
+        val requireProcessOwnedSourcePath =
+            recordedKind == AgentKind.Codex && selectableCandidates.size >= 2
         return detector.detect(
             cwd = normalizedCwd,
             nowMillis = nowMillis,
-            candidates = candidates,
+            candidates = selectableCandidates,
             processLines = processLines,
             requireProcessMatch = requireProcessMatch,
             processOwnedSourcePaths = processOwnedSourcePaths,
+            requireProcessOwnedSourcePath = requireProcessOwnedSourcePath,
         )
+    }
+
+    /**
+     * Issue #819: a pane-owned Codex process can hold open a rollout that the
+     * normal `find -mmin -120` enumeration skipped because Codex has been idle
+     * for longer than the freshness window. The open fd is stronger identity
+     * evidence than mtime, so feed those paths into selection as live Codex
+     * candidates instead of forcing the selector to choose among only the
+     * mmin-enumerated siblings.
+     */
+    private fun List<AgentLogCandidate>.withProcessOwnedCodexRollouts(
+        ownedSourcePaths: Set<String>,
+        normalizedCwd: String,
+        nowMillis: Long,
+    ): List<AgentLogCandidate> {
+        if (ownedSourcePaths.isEmpty()) return this
+        val existingPaths = mapTo(mutableSetOf()) { it.path }
+        val added = ownedSourcePaths
+            .asSequence()
+            .filter { it !in existingPaths }
+            .map { path ->
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = path,
+                    modifiedAtMillis = nowMillis,
+                    sessionId = path.substringAfterLast('/').substringBeforeLast('.'),
+                    cwd = normalizedCwd,
+                )
+            }
+            .toList()
+        if (added.isEmpty()) return this
+        return this + added
     }
 
     /**

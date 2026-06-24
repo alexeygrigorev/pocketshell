@@ -91,6 +91,12 @@ public class AgentDetector(
      * doesn't keep the fd open, or a non-Linux remote), selection degrades
      * to the previous mtime-among-confirmed behaviour so detection still
      * lights up. Empty by default; only the per-pane callers populate it.
+     *
+     * When [requireProcessOwnedSourcePath] is `true`, the selector refuses
+     * to fall back to mtime if no process-owned candidate is present. Recorded
+     * Codex source resolution uses this for ambiguous same-cwd candidate sets:
+     * without the `/proc/<pid>/fd` identity signal, "newest rollout" is just a
+     * sibling guess.
      */
     public fun detect(
         cwd: String,
@@ -99,6 +105,7 @@ public class AgentDetector(
         processLines: List<String>,
         requireProcessMatch: Boolean = false,
         processOwnedSourcePaths: Set<String> = emptySet(),
+        requireProcessOwnedSourcePath: Boolean = false,
     ): AgentDetection? {
         val normalizedCwd = normalizeCwd(cwd)
         val expected = expectedPathHints(normalizedCwd)
@@ -116,12 +123,19 @@ public class AgentDetector(
             // whose source path is held open by the pane's OWN agent process.
             // This binds the transcript to the pane's actual session identity
             // rather than letting a busier same-cwd sibling win the mtime
-            // race. If no confirmed candidate is process-owned (signal
-            // absent/unsupported), fall back to the most-recent confirmed.
+            // race. Callers can require this owner signal when a most-recent
+            // fallback would be an unsafe sibling guess.
             val ownedCandidates = confirmedCandidates.filter { (candidate, _) ->
                 candidate.path in processOwnedSourcePaths
             }
-            (ownedCandidates.ifEmpty { confirmedCandidates })
+            val selectableCandidates = if (ownedCandidates.isNotEmpty()) {
+                ownedCandidates
+            } else if (requireProcessOwnedSourcePath) {
+                return null
+            } else {
+                confirmedCandidates
+            }
+            selectableCandidates
                 .maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
                 ?: return null
         } else {

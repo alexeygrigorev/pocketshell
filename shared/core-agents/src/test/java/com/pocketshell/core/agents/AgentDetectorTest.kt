@@ -688,6 +688,40 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun codexStrictOwnershipReturnsNullInsteadOfGuessingNewestRollout() {
+        // Issue #819: recorded-Codex resolution may have multiple same-cwd
+        // rollout candidates and a live codex process, but no fd-owned source
+        // path. In that ambiguous shape, "newest confirmed" is a sibling guess;
+        // callers that require ownership must get null instead.
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/ai-shipping-labs",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/alexey/.codex/sessions/2026/06/18/rollout-a.jsonl",
+                    modifiedAtMillis = 9_900,
+                    sessionId = "codex-newer",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/alexey/.codex/sessions/2026/06/18/rollout-b.jsonl",
+                    modifiedAtMillis = 9_000,
+                    sessionId = "codex-older",
+                    cwd = "/home/alexey/git/ai-shipping-labs",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:01 codex"),
+            requireProcessMatch = true,
+            processOwnedSourcePaths = emptySet(),
+            requireProcessOwnedSourcePath = true,
+        )
+
+        assertNull(detection)
+    }
+
+    @Test
     fun picksMostRecentAcrossMultipleEnginesWhenAllPathsMatch() {
         // When more than one engine has a recent matching candidate
         // (e.g. user briefly switched agents in the same pane), the

@@ -940,6 +940,73 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun recordedCodexSessionReturnsNullWhenOwnershipEvidenceIsAbsentAndCandidatesAreAmbiguous() = runTest {
+        // Issue #819 follow-up: with multiple same-cwd Codex rollouts and no
+        // fd-owned source path, choosing the newest rollout is only a sibling
+        // guess. The recorded-Codex path must decline instead of binding the
+        // Conversation tab to whichever rollout flushed last.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-newer.jsonl
+                codex|${now - 60}|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-older.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex --here",
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+            recordedKind = AgentKind.Codex,
+        )
+
+        assertEquals(
+            "without a process-owned rollout, ambiguous recorded-Codex source " +
+                "resolution must not guess the newest same-cwd rollout (#819)",
+            null,
+            detection,
+        )
+    }
+
+    @Test
+    fun recordedCodexSessionConsidersProcessOwnedRolloutOutsideMminEnumeration() = runTest {
+        // Issue #819 follow-up: Codex can keep a live rollout fd open after the
+        // JSONL mtime has aged beyond the `find -mmin -120` candidate window.
+        // The fd-owned path is the pane identity signal, so it must be added to
+        // the JVM candidate set even though detectionOutput does not include it.
+        val now = System.currentTimeMillis() / 1000
+        val ownedOldPath = "/home/testuser/.codex/sessions/2026/06/18/rollout-live-but-old.jsonl"
+        val enumeratedSibling = "/home/testuser/.codex/sessions/2026/06/18/rollout-enumerated-sibling.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|$now|/workspace/proj|$enumeratedSibling
+            """.trimIndent(),
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex --here",
+            procFdOutput = ownedOldPath,
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+            recordedKind = AgentKind.Codex,
+        )
+
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals(
+            "the process-owned rollout must be selectable even when the mmin " +
+                "candidate enumeration did not emit it (#819)",
+            ownedOldPath,
+            detection?.sourcePath,
+        )
+        assertEquals("rollout-live-but-old", detection?.sessionId)
+    }
+
+    @Test
     fun resolveRecordedSessionOpenReadsKindResolvesClaudeAndPrefetchesWindowInOneRoundTrip() = runTest {
         // Issue #828 (perf): the cold-open lever — the `@ps_agent_kind` read, the
         // candidate enumeration, AND the first transcript window are folded into

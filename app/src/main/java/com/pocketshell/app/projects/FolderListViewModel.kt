@@ -1546,7 +1546,9 @@ class FolderListViewModel internal constructor(
                 return@launch
             }
             if (bound != params) return@launch
-            val delta = source.reconcileTree(session, params.hostName)
+            val delta = withTimeoutOrNull(reconcileTimeoutMs + 1_000L) {
+                source.reconcileTree(session, params.hostName)
+            }
             if (bound != params) return@launch
             // Issue #885: the reconcile payload also carries the host CLI
             // version (it fires on every open + resume), so the passive check
@@ -1642,7 +1644,9 @@ class FolderListViewModel internal constructor(
                     // is the virtual test dispatcher, so a fast `getTree` resolves
                     // synchronously and the hydrate-before-reconcile ordering is
                     // preserved (the #837 durability contract).
-                    val treeResult = async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
+                    val treeResult = withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
+                        async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
+                    } ?: return@withTimeoutOrNull
                     if (bound != params) {
                         hostChanged = true
                         return@withTimeoutOrNull
@@ -1762,11 +1766,13 @@ class FolderListViewModel internal constructor(
         viewModelScope.launch {
             val session = warmLease?.session ?: awaitWarmSession() ?: return@launch
             if (bound != params) return@launch
-            source.upsertTree(
-                session = session,
-                host = params.hostName,
-                nodes = nodes.map { it.toTreeNode() },
-            )
+            withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
+                source.upsertTree(
+                    session = session,
+                    host = params.hostName,
+                    nodes = nodes.map { it.toTreeNode() },
+                )
+            }
         }
     }
 

@@ -17,12 +17,13 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.json.JSONArray
@@ -79,13 +80,13 @@ class FolderListViewModelTreeDurabilityTest {
         // ---- First app session: bind, collapse a folder, persist. ----
         val vm1 = newViewModel(gateway, daemon)
         bind(vm1)
-        runCurrent()
+        awaitReady(vm1)
         val alphaFolder = folderPath("alpha")
         assertTrue("alpha auto-expands on first ready", alphaFolder in expandedPaths(vm1))
 
         // User collapses alpha — this fire-and-forget upserts to the daemon.
         vm1.toggleProjectExpanded(alphaFolder)
-        runCurrent()
+        advanceUntilIdle()
         assertFalse("alpha collapses on tap", alphaFolder in expandedPaths(vm1))
         // The collapse was persisted host-side.
         assertTrue("collapse persisted to the daemon registry", daemon.hasHost(HOST.name))
@@ -94,7 +95,7 @@ class FolderListViewModelTreeDurabilityTest {
         // ---- "App restart": a brand-new VM, SAME daemon registry. ----
         val vm2 = newViewModel(gateway, daemon)
         bind(vm2)
-        runCurrent()
+        awaitReady(vm2)
 
         // The held order is restored (beta before alpha, as persisted) and the
         // collapsed folder STAYS collapsed across the process death — proven from
@@ -116,17 +117,17 @@ class FolderListViewModelTreeDurabilityTest {
         val vm = newViewModel(gateway, daemon)
 
         bind(vm)
-        runCurrent()
+        awaitReady(vm)
         val alphaFolder = folderPath("alpha")
         vm.toggleProjectExpanded(alphaFolder)
-        runCurrent()
+        advanceUntilIdle()
         assertFalse(alphaFolder in expandedPaths(vm))
 
         // A same-host RECONNECT is a re-bind with identical params (the VM is NOT
         // recreated — only a host CHANGE resets the held tree). The held order +
         // collapse must be preserved in place, with no Loading flash.
         bind(vm)
-        runCurrent()
+        awaitReady(vm)
         assertEquals(listOf("beta", "alpha"), readySessions(vm))
         assertFalse(
             "same-host reconnect must NOT re-open the collapsed folder",
@@ -152,7 +153,7 @@ class FolderListViewModelTreeDurabilityTest {
         val vm = newViewModel(gateway, daemon)
 
         bind(vm)
-        runCurrent()
+        awaitReady(vm)
         assertEquals(listOf("beta", "alpha"), readySessions(vm))
 
         // `alpha` is killed out-of-band: the daemon's live enumeration now omits
@@ -165,15 +166,68 @@ class FolderListViewModelTreeDurabilityTest {
         // Drive a resume past the freshen window.
         vm.forceTreeStaleForTest()
         vm.setProcessStartedForTest(false)
-        runCurrent()
+        advanceUntilIdle()
         vm.setProcessStartedForTest(true)
-        runCurrent()
+        awaitReady(vm)
 
         assertEquals(
             "the gone session is pruned via the delta path, no full reload",
             listOf("beta"),
             readySessions(vm),
         )
+    }
+
+    @Test
+    fun nonZeroTreeGetFallsBackToGatewayReadyWithoutLoadingHang() = runTest {
+        val daemon = FakeTreeDaemon()
+        val gateway = StubGateway(listOf(sessionRow("alpha")))
+        val vm = newViewModel(
+            gateway = gateway,
+            daemon = daemon,
+            treeGetResult = ExecResult("", "Error: No such command 'tree'.", 2),
+        )
+
+        bind(vm)
+        awaitReady(vm)
+
+        assertEquals(
+            "a missing/old tree CLI must not pin the cold-start screen behind the durable hydrate",
+            listOf("alpha"),
+            readySessions(vm),
+        )
+    }
+
+    @Test
+    fun wedgedResumeTreeReconcileFallsBackToFullGatewayProbe() = runTest {
+        val daemon = FakeTreeDaemon()
+        daemon.seed(
+            HOST.name,
+            listOf(
+                FakeTreeDaemon.Node("beta", 0, folderPath("beta"), false),
+                FakeTreeDaemon.Node("alpha", 1, folderPath("alpha"), false),
+            ),
+        )
+        val gateway = StubGateway(listOf(sessionRow("beta"), sessionRow("alpha")))
+        val vm = newViewModel(
+            gateway = gateway,
+            daemon = daemon,
+            treeReconcileWedges = true,
+            treeRemoteExecTimeoutMs = Long.MAX_VALUE,
+        ).apply {
+            reconcileTimeoutMs = 100L
+        }
+
+        bind(vm)
+        awaitReady(vm)
+        assertEquals(listOf("beta", "alpha"), readySessions(vm))
+
+        gateway.rows = listOf(sessionRow("beta"))
+        vm.forceTreeStaleForTest()
+        vm.setProcessStartedForTest(false)
+        advanceUntilIdle()
+        vm.setProcessStartedForTest(true)
+
+        awaitSessionOrder(vm, listOf("beta"))
     }
 
     // --- helpers ------------------------------------------------------------
@@ -196,6 +250,28 @@ class FolderListViewModelTreeDurabilityTest {
     private fun readySessions(vm: FolderListViewModel): List<String> =
         (vm.state.value as FolderListUiState.Ready).flatSessions.map { it.sessionName }
 
+    private suspend fun TestScope.awaitReady(vm: FolderListViewModel): FolderListUiState.Ready {
+        repeat(200) {
+            advanceUntilIdle()
+            val state = vm.state.value
+            if (state is FolderListUiState.Ready) return state
+            delay(10L)
+        }
+        throw AssertionError("expected Ready, was ${vm.state.value}")
+    }
+
+    private suspend fun TestScope.awaitSessionOrder(
+        vm: FolderListViewModel,
+        expected: List<String>,
+    ) {
+        repeat(200) {
+            advanceUntilIdle()
+            if (vm.state.value is FolderListUiState.Ready && readySessions(vm) == expected) return
+            delay(10L)
+        }
+        throw AssertionError("expected sessions $expected, was ${vm.state.value}")
+    }
+
     private fun folderPath(name: String): String =
         FolderListViewModel.canonicalisePath("/home/alexey/git/$name")
 
@@ -210,10 +286,17 @@ class FolderListViewModelTreeDurabilityTest {
     private fun TestScope.newViewModel(
         gateway: FolderListGateway,
         daemon: FakeTreeDaemon,
+        treeGetResult: ExecResult? = null,
+        treeReconcileWedges: Boolean = false,
+        treeRemoteExecTimeoutMs: Long = 12_000L,
     ): FolderListViewModel {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
-        val session = RoutingTreeSshSession(daemon)
+        val session = RoutingTreeSshSession(
+            daemon = daemon,
+            treeGetResult = treeGetResult,
+            treeReconcileWedges = treeReconcileWedges,
+        )
         val manager = SshLeaseManager(
             connector = SshLeaseConnector { Result.success(session) },
             scope = this,
@@ -227,7 +310,10 @@ class FolderListViewModelTreeDurabilityTest {
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
-            treeRemoteSource = TreeRemoteSource(),
+            treeRemoteSource = TreeRemoteSource().apply {
+                remoteExecTimeoutMs = treeRemoteExecTimeoutMs
+                remoteExecDispatcher = dispatcher
+            },
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
@@ -326,6 +412,8 @@ class FolderListViewModelTreeDurabilityTest {
     /** Serves `pocketshell tree <verb>` from the [FakeTreeDaemon]. */
     private class RoutingTreeSshSession(
         private val daemon: FakeTreeDaemon,
+        private val treeGetResult: ExecResult? = null,
+        private val treeReconcileWedges: Boolean = false,
     ) : SshSession {
         override val isConnected: Boolean = true
 
@@ -333,9 +421,12 @@ class FolderListViewModelTreeDurabilityTest {
             val request = extractRequestJson(command)
             val host = request.optString("host")
             val envelope = when {
-                command.contains("tree get") -> daemon.get(host)
+                command.contains("tree get") -> return treeGetResult ?: ExecResult(daemon.get(host).toString(), "", 0)
                 command.contains("tree upsert") -> daemon.upsert(host, request)
-                command.contains("tree reconcile") -> daemon.reconcile(host)
+                command.contains("tree reconcile") -> {
+                    if (treeReconcileWedges) delay(Long.MAX_VALUE)
+                    daemon.reconcile(host)
+                }
                 else -> return ExecResult("", "no route", 127)
             }
             return ExecResult(envelope.toString(), "", 0)

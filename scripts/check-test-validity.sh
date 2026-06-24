@@ -147,7 +147,6 @@ C1_BASELINE=(
 # follow-up (#849). Reported as KNOWN (advisory).
 # --------------------------------------------------------------------------
 FAKE1_BASELINE=(
-  "app/src/test/java/com/pocketshell/app/projects/FolderListViewModelTreeDurabilityTest.kt"           # issue #847 / #849
 )
 
 # --------------------------------------------------------------------------
@@ -156,7 +155,6 @@ FAKE1_BASELINE=(
 # #847 hotfix. Reported as KNOWN (advisory).
 # --------------------------------------------------------------------------
 AWAIT1_BASELINE=(
-  "app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt"                             # issue #847 (hydrateTreeOnColdStart)
 )
 
 in_list() {

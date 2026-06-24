@@ -63,6 +63,25 @@ class AgentSessionMemoryTest {
     }
 
     @Test
+    fun forgetSessionClearsEveryRememberedWindowForKilledSessionName() {
+        val memory = AgentSessionMemory()
+        memory.remember(7L, "work", "@2", claude(), wasOnConversation = true)
+        memory.remember(7L, "work", "@3", claude(), wasOnConversation = false)
+        memory.remember(7L, "deploy", "@2", claude(), wasOnConversation = true)
+        memory.remember(8L, "work", "@2", claude(), wasOnConversation = true)
+
+        memory.forgetSession(hostId = 7L, sessionName = "work")
+
+        assertNull(
+            "a same-name successor must not recall window memory from the killed session",
+            memory.recall(7L, "work", "@2"),
+        )
+        assertNull(memory.recall(7L, "work", "@3"))
+        assertEquals(claude(), memory.recall(7L, "deploy", "@2")?.detection)
+        assertEquals(claude(), memory.recall(8L, "work", "@2")?.detection)
+    }
+
+    @Test
     fun rememberOverwritesPriorVerdictForTheSameWindow() {
         val memory = AgentSessionMemory()
         memory.remember(7L, "work", "@2", claude(), wasOnConversation = true)

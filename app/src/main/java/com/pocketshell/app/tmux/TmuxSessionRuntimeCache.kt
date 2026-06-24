@@ -146,6 +146,22 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         runtimes.remove(key)?.runtime
     }
 
+    internal fun removeSession(hostId: Long, sessionName: String): List<CachedTmuxRuntime> =
+        synchronized(this) {
+            val trimmed = sessionName.trim()
+            if (trimmed.isEmpty()) return@synchronized emptyList()
+            val removed = mutableListOf<CachedTmuxRuntime>()
+            val iterator = runtimes.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.key.hostId == hostId && entry.key.sessionName == trimmed) {
+                    iterator.remove()
+                    removed += entry.value.runtime
+                }
+            }
+            removed
+        }
+
     internal fun removeHost(hostId: Long): List<CachedTmuxRuntime> = synchronized(this) {
         val removed = mutableListOf<CachedTmuxRuntime>()
         val iterator = runtimes.entries.iterator()

@@ -3,6 +3,10 @@ package com.pocketshell.app.tmux
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -62,7 +66,14 @@ data class ClosedWindow(
  * non-suspending from the emitting view model's scope.
  */
 @Singleton
-class SessionLifecycleSignals @Inject constructor() {
+class SessionLifecycleSignals @Inject constructor(
+    private val runtimeCache: TmuxSessionRuntimeCache?,
+    private val agentSessionMemory: AgentSessionMemory?,
+) {
+    constructor() : this(runtimeCache = null, agentSessionMemory = null)
+
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val _killedSessions = MutableSharedFlow<KilledSession>(
         replay = 0,
         extraBufferCapacity = 8,
@@ -88,6 +99,10 @@ class SessionLifecycleSignals @Inject constructor() {
     fun emitKilled(hostId: Long, sessionName: String) {
         val trimmed = sessionName.trim()
         if (trimmed.isEmpty()) return
+        agentSessionMemory?.forgetSession(hostId = hostId, sessionName = trimmed)
+        runtimeCache?.removeSession(hostId = hostId, sessionName = trimmed)?.forEach { runtime ->
+            cleanupScope.launch { runtime.closeCachedRuntime() }
+        }
         _killedSessions.tryEmit(KilledSession(hostId = hostId, sessionName = trimmed))
     }
 

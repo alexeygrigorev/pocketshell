@@ -302,6 +302,64 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    @Test
+    fun confirmedKillEvictsKilledSessionFromNameKeyedCaches() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val agentSessionMemory = AgentSessionMemory()
+        val signals = SessionLifecycleSignals(
+            runtimeCache = runtimeCache,
+            agentSessionMemory = agentSessionMemory,
+        )
+        val doomedRuntime = cachedRuntimeForTest(sessionName = "doomed", hostId = 7L)
+        val otherRuntime = cachedRuntimeForTest(sessionName = "other", hostId = 7L)
+        runtimeCache.put(doomedRuntime)
+        runtimeCache.put(otherRuntime)
+        agentSessionMemory.remember(
+            hostId = 7L,
+            sessionName = "doomed",
+            windowId = "@2",
+            detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/home/alex/.claude/projects/doomed.jsonl",
+                sessionId = "doomed-agent",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            wasOnConversation = true,
+        )
+        val gateway = RecordingStopGateway(killSucceeds = true)
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            agentSessionMemory = agentSessionMemory,
+            sessionLifecycleSignals = signals,
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "doomed",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        vm.killCurrentSession()
+        advanceUntilIdle()
+
+        assertFalse(
+            "confirmed Stop must evict the killed session's parked runtime",
+            runtimeCache.contains(doomedRuntime.key),
+        )
+        assertTrue(runtimeCache.contains(otherRuntime.key))
+        assertNull(
+            "same-name successor must not recall agent memory from the killed session",
+            agentSessionMemory.recall(7L, "doomed", "@2"),
+        )
+    }
+
     // ----- Issue #898: the in-session kebab "+ New session" now opens the SAME
     // rich SessionTypePickerSheet the host screen uses, and its Create routes
     // through the SAME verified gateway createSession path so the created

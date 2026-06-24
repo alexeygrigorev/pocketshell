@@ -100,6 +100,19 @@ public class AgentSessionMemory @Inject constructor() {
         statuses.remove(key)
     }
 
+    /**
+     * Drop every remembered window for a tmux session after a confirmed kill.
+     * A newly-created session can reuse the same name and even the same tmux
+     * window ids, so per-window forget is not enough at session teardown.
+     */
+    internal fun forgetSession(hostId: Long, sessionName: String) {
+        val trimmed = sessionName.trim()
+        if (trimmed.isEmpty()) return
+        statuses.keys.removeIf { key ->
+            key.hostId == hostId && key.sessionName == trimmed
+        }
+    }
+
     private fun keyOf(hostId: Long, sessionName: String, windowId: String): Key? {
         if (sessionName.isBlank() || windowId.isBlank()) return null
         return Key(hostId, sessionName, windowId)

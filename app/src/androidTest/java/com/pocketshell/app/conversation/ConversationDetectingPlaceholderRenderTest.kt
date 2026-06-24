@@ -27,6 +27,7 @@ import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_LOAD_FAILED_TAG
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_LOAD_RETRY_TAG
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
+import com.pocketshell.app.tmux.tmuxSessionPresumedAgent
 import com.pocketshell.app.tmux.tmuxSessionTabState
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
@@ -222,6 +223,98 @@ class ConversationDetectingPlaceholderRenderTest {
         compose.onNodeWithTag(TMUX_CONVERSATION_LOAD_RETRY_TAG).performClick()
         compose.waitForIdle()
         assertTrue("Retry must invoke the retry callback", retried)
+    }
+
+    /**
+     * Issue #894 (epic #821 "Slice C") — rendered-UI proof that a freshly-opened
+     * CONFIRMED-SHELL pane (recorded `@ps_agent_kind=shell`) on the Conversation
+     * open-time default shows the TERMINAL surface, NOT the "Loading
+     * conversation…" placeholder.
+     *
+     * This drives the SAME production `presumedAgent` expression the screen runs
+     * ([tmuxSessionPresumedAgent]) with the real `confirmedShell` verdict the
+     * Slice C wiring now supplies (true for a recorded shell). `presumedAgent`
+     * then gates `showConversationPlaceholder` exactly as `TmuxSessionScreen`
+     * does — so a confirmed shell collapses the placeholder branch and the
+     * terminal renders.
+     *
+     * Paired with [agentDefaultConversationStillShowsPlaceholder] (confirmedShell
+     * = false → the placeholder DOES show) this is the render-layer red→green for
+     * both class-coverage branches (shell vs agent).
+     */
+    @Test
+    fun confirmedShellDefaultConversationShowsTerminalNotPlaceholder() {
+        // A fresh shell pane that ALREADY landed on the Conversation default
+        // (detection still null) — the exact wrong-surface-flash state. The
+        // durable tree recorded this session as a shell.
+        val confirmedShell = true
+        val presumedAgent = tmuxSessionPresumedAgent(
+            hasLiveDetection = false,
+            stickyAgent = null,
+            confirmedShell = confirmedShell,
+        )
+        assertTrue(
+            "#894: a confirmed shell is NOT a presumed agent",
+            !presumedAgent,
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                PresumedAgentContent(
+                    row = AgentConversationUiState(
+                        detection = null,
+                        selectedTab = SessionTab.Conversation,
+                    ),
+                    presumedAgent = presumedAgent,
+                    onConversationTabTap = {},
+                )
+            }
+        }
+
+        // The user-visible acceptance (AC1): the terminal is shown, the
+        // "Loading conversation…" placeholder is NOT — no wrong-surface flash.
+        compose.onNodeWithTag(terminalTag).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONVERSATION_DETECTING_TAG).assertIsNotDisplayed()
+        compose.onNodeWithText("Loading conversation…").assertIsNotDisplayed()
+    }
+
+    /**
+     * Issue #894 (Slice C) class-coverage pair (agent branch): a presumed-agent /
+     * foreign pane (confirmedShell = false) on the Conversation default STILL
+     * shows the "Loading conversation…" placeholder — the #878 black-screen cure
+     * is intact. This is the no-regression counterpart that proves the test above
+     * asserts the SHELL gate, not pre-existing behaviour.
+     */
+    @Test
+    fun agentDefaultConversationStillShowsPlaceholder() {
+        val confirmedShell = false
+        val presumedAgent = tmuxSessionPresumedAgent(
+            hasLiveDetection = false,
+            stickyAgent = null,
+            confirmedShell = confirmedShell,
+        )
+        assertTrue(
+            "#894: a pane with no confirmed-shell verdict stays presumed-agent",
+            presumedAgent,
+        )
+
+        compose.setContent {
+            PocketShellTheme {
+                PresumedAgentContent(
+                    row = AgentConversationUiState(
+                        detection = null,
+                        selectedTab = SessionTab.Conversation,
+                    ),
+                    presumedAgent = presumedAgent,
+                    onConversationTabTap = {},
+                )
+            }
+        }
+
+        // AC2: the #878 cure renders the placeholder (not the black terminal).
+        compose.onNodeWithTag(TMUX_CONVERSATION_DETECTING_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Loading conversation…").assertIsDisplayed()
+        compose.onNodeWithTag(terminalTag).assertIsNotDisplayed()
     }
 
     /**

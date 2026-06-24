@@ -1612,6 +1612,45 @@ public class TmuxSessionViewModel @Inject constructor(
         _currentSessionRecordedKind.asStateFlow()
 
     /**
+     * Issue #894 (epic #821 "Slice C"): the durable per-session CONFIRMED-SHELL
+     * verdict — the set of tmux session ids whose recorded `@ps_agent_kind` read
+     * back as [SessionAgentKind.Shell]. This is the ONLY trustworthy
+     * shell-vs-agent signal at this layer: it comes from the durable host-side
+     * record (a session PocketShell launched as a plain shell, or one the user
+     * manually classified as Shell), NOT from the unreliable "no agent matched →
+     * assume shell" absence the detector returns.
+     *
+     * Why a separate set and not the conversation-open [sessionRecordedKindCache]:
+     * that cache stores [AgentKind] (Claude/Codex/OpenCode only — there is no
+     * `AgentKind.Shell`), so a recorded `shell` and a foreign/unknown session
+     * both land as a `null` entry there and are indistinguishable. The
+     * `@ps_agent_kind` read in [refreshCurrentSessionRecordedKind] resolves to
+     * [SessionAgentKind.Shell] and is the one place that CAN tell them apart.
+     *
+     * Keyed by [TmuxPaneState.sessionId] (the `$N` token, always present),
+     * matching the conversation-open cache key. Cleared with the other
+     * per-runtime detection caches so a different session never inherits a stale
+     * shell verdict.
+     */
+    private val confirmedShellSessionIds: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+
+    /**
+     * Issue #894: the set of CONFIRMED-SHELL pane ids, derived from
+     * [confirmedShellSessionIds] over the current pane rows. Consumed by the
+     * screen to source `confirmedShell` per visible pane (it collapses the
+     * presumed-agent surface for a pane the tree already knows is a shell) and
+     * by [seedPresumedAgentPlaceholder] to skip seeding the #878 "Loading
+     * conversation…" placeholder on a genuine shell pane. Republished whenever
+     * the pane set changes or a recorded-kind read resolves a shell/non-shell
+     * verdict.
+     */
+    private val _confirmedShellPaneIds: MutableStateFlow<Set<String>> =
+        MutableStateFlow(emptySet())
+    public val confirmedShellPaneIds: StateFlow<Set<String>> =
+        _confirmedShellPaneIds.asStateFlow()
+
+    /**
      * Issue #858: the active session's recorded NON-default profile label
      * (e.g. `"Claude (Z.AI)"`), read fresh from the host-side
      * `@ps_agent_profile` tmux user option alongside the kind. `null` for a
@@ -4248,6 +4287,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
+        // different session never inherits a stale shell verdict.
+        confirmedShellSessionIds.clear()
+        _confirmedShellPaneIds.value = emptySet()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -4351,6 +4394,12 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        // Issue #894 (Slice C): the parked runtime does not carry the durable
+        // confirmed-shell verdict set; clear it so the restored session never
+        // inherits a stale verdict. refreshCurrentSessionRecordedKind re-reads
+        // the `@ps_agent_kind` on the restored connection and re-derives it.
+        confirmedShellSessionIds.clear()
+        _confirmedShellPaneIds.value = emptySet()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -8001,6 +8050,10 @@ public class TmuxSessionViewModel @Inject constructor(
         filterAgentConversationsToPaneIds(nextById.keys)
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
+        // Issue #894 (Slice C): republish the per-pane confirmed-shell signal so
+        // a pane added/removed by this reconcile picks up (or drops) its
+        // session's durable shell verdict for the screen + seed gate.
+        refreshConfirmedShellPaneIds()
         rebuildUnifiedPanes()
         return newRows
     }
@@ -9215,6 +9268,67 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #894 (Slice C): true when [sessionId]'s durable recorded
+     * `@ps_agent_kind` is [SessionAgentKind.Shell] — a POSITIVELY confirmed
+     * shell. A blank session id, an absent/foreign session, or any agent kind
+     * returns false (presumed-agent stays available; the #878 cure is intact).
+     */
+    private fun isConfirmedShellSession(sessionId: String): Boolean {
+        val key = sessionId.trim()
+        if (key.isEmpty()) return false
+        return confirmedShellSessionIds.contains(key)
+    }
+
+    /**
+     * Issue #894 (Slice C): apply a durable recorded-kind verdict for a session.
+     * When [isShell] is true the session is marked CONFIRMED-SHELL and any
+     * auto-seeded #878 "Loading conversation…" placeholder still up on its panes
+     * is dropped IMMEDIATELY (a confirmed shell never lingers on the wrong
+     * surface — this also kills the first-open flash where the seed fired before
+     * the recorded-kind read landed). When [isShell] is false the session is
+     * un-marked (an agent / re-classified session must regain its agent surface).
+     * Republishes [confirmedShellPaneIds] either way.
+     */
+    private fun applyRecordedShellVerdict(sessionId: String, isShell: Boolean) {
+        val key = sessionId.trim()
+        if (key.isEmpty()) return
+        val changed = if (isShell) {
+            confirmedShellSessionIds.add(key)
+        } else {
+            confirmedShellSessionIds.remove(key)
+        }
+        if (isShell) {
+            // Drop any auto-seeded placeholder that raced ahead of this verdict.
+            val shellPaneIds = paneRows.values
+                .filter { it.sessionId.trim() == key }
+                .map { it.paneId }
+            for (paneId in shellPaneIds) {
+                if (isAutoSeededPlaceholderUp(paneId)) {
+                    conversationLoadWatchdogJobs.remove(paneId)?.cancel()
+                    paneAgentNullDetections.remove(paneId)
+                    clearAgentDetectionForPane(paneId)
+                }
+            }
+        }
+        if (changed || isShell) refreshConfirmedShellPaneIds()
+    }
+
+    /**
+     * Issue #894 (Slice C): recompute [confirmedShellPaneIds] from the current
+     * pane rows and the [confirmedShellSessionIds] verdict set. Called on pane
+     * reconcile and after a recorded-kind verdict is applied.
+     */
+    private fun refreshConfirmedShellPaneIds() {
+        val next = paneRows.values
+            .filter { confirmedShellSessionIds.contains(it.sessionId.trim()) }
+            .map { it.paneId }
+            .toSet()
+        if (_confirmedShellPaneIds.value != next) {
+            _confirmedShellPaneIds.value = next
+        }
+    }
+
+    /**
      * Issue #878: seed the #818 open-time default tab placeholder for a
      * FRESHLY-ADDED presumed-agent pane, BEFORE the detection SSH round-trip
      * lands. This closes the residual black-screen window: the #818
@@ -9251,6 +9365,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // Only the open-time Conversation default needs the placeholder; the
         // Terminal default's pre-detection view IS the raw Terminal.
         if (openTimeDefaultSessionTab() != SessionTab.Conversation) return
+        // Issue #894 (Slice C): a pane the durable tree already knows is a plain
+        // SHELL (recorded `@ps_agent_kind=shell`) must NOT get the #878
+        // "Loading conversation…" placeholder — that is the wrong-surface flash.
+        // The agent black-screen cure (#878) is preserved: a presumed-agent /
+        // foreign / not-yet-classified pane still seeds. Only a POSITIVELY
+        // confirmed shell is skipped.
+        if (isConfirmedShellSession(pane.sessionId)) return
         var seeded = false
         _agentConversations.update { conversations ->
             // current == null: never overwrite a remembered/explicit status
@@ -11275,6 +11396,31 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #894 (Slice C) test seam: apply a durable recorded-kind shell
+     * verdict for [sessionId] synchronously, mirroring what the
+     * `@ps_agent_kind` read in [refreshCurrentSessionRecordedKind] does once it
+     * resolves. Lets a JVM test set the confirmed-shell verdict deterministically
+     * (without a live SSH `show-options` round-trip) before/after seeding to
+     * prove the seed gate + the per-pane [confirmedShellPaneIds] signal.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun applyRecordedShellVerdictForTest(sessionId: String, isShell: Boolean) {
+        applyRecordedShellVerdict(sessionId = sessionId, isShell = isShell)
+    }
+
+    /**
+     * Issue #894 (Slice C) test seam: drive [seedPresumedAgentPlaceholder]
+     * directly for the row registered under [paneId]. Mirrors the pane-add call
+     * in [applyParsedPanes] so a test can assert the seed gate (a confirmed shell
+     * is NOT seeded; a presumed-agent pane IS) without a full reconcile.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun seedPresumedAgentPlaceholderForTest(paneId: String) {
+        val pane = paneRows[paneId] ?: return
+        seedPresumedAgentPlaceholder(pane)
+    }
+
+    /**
      * Issue #495 test seam: drive the live-detection landing path
      * ([markAgentTailLive]) so tests can assert that a same-agent refinement
      * preserves the user's selected tab (and remembers the window status)
@@ -12206,7 +12352,22 @@ public class TmuxSessionViewModel @Inject constructor(
                     ).stdout
                 }.getOrNull()
             }
-            _currentSessionRecordedKind.value = sessionAgentKindFromOption(raw)
+            val recordedKind = sessionAgentKindFromOption(raw)
+            _currentSessionRecordedKind.value = recordedKind
+            // Issue #894 (Slice C): feed the durable shell verdict into the
+            // per-pane confirmed-shell signal. The active session's panes share
+            // one `sessionId` (`$N`); mark/un-mark it so the seed skips a
+            // confirmed shell and the screen collapses its presumed-agent
+            // surface. A recorded SHELL also drops any auto-seeded placeholder
+            // that raced ahead of this read (the first-open flash). A null
+            // (foreign/unknown) verdict is NOT a confirmed shell — leave it
+            // presumed-agent so the #878 cure is intact.
+            activeSessionId()?.let { sessionId ->
+                applyRecordedShellVerdict(
+                    sessionId = sessionId,
+                    isShell = recordedKind == SessionAgentKind.Shell,
+                )
+            }
             // Issue #858: read the recorded profile over the SAME warm session
             // (D21 — no new connection) so the "What is this session?" sheet can
             // show the provider/profile. A blank/absent option (default /
@@ -12625,6 +12786,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
+        // different session never inherits a stale shell verdict.
+        confirmedShellSessionIds.clear()
+        _confirmedShellPaneIds.value = emptySet()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -12737,6 +12902,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
+        // different session never inherits a stale shell verdict.
+        confirmedShellSessionIds.clear()
+        _confirmedShellPaneIds.value = emptySet()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -12877,6 +13046,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
+        // different session never inherits a stale shell verdict.
+        confirmedShellSessionIds.clear()
+        _confirmedShellPaneIds.value = emptySet()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -13027,6 +13200,15 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun isActiveSessionPane(pane: TmuxPaneState): Boolean {
         return _panes.value.any { it.paneId == pane.paneId }
     }
+
+    /**
+     * Issue #894 (Slice C): the active session's tmux `sessionId` (`$N`), read
+     * off the current pane rows (all active panes share it). Null when no pane
+     * is attached yet. Used to key the durable confirmed-shell verdict so it
+     * matches the conversation-open cache's `sessionId` key.
+     */
+    private fun activeSessionId(): String? =
+        _panes.value.firstOrNull()?.sessionId?.trim()?.takeIf { it.isNotEmpty() }
 
     // ---- End Issue #626 helpers ----
 

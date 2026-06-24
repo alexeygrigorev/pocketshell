@@ -445,6 +445,13 @@ public fun TmuxSessionScreen(
     // this session?" and the picker opens in the unknown ("we don't know this
     // session — choose") mode.
     val currentSessionRecordedKind by viewModel.currentSessionRecordedKind.collectAsState()
+    // Issue #894 (epic #821 "Slice C"): the set of CONFIRMED-SHELL pane ids,
+    // sourced from the durable per-session recorded `@ps_agent_kind=shell`
+    // verdict (NOT the unreliable "no agent matched → assume shell" absence).
+    // The visible pane's membership wires `confirmedShell` below so a genuine
+    // shell pane collapses the presumed-agent surface (and never flashes the
+    // #878 "Loading conversation…" placeholder) from the start.
+    val confirmedShellPaneIds by viewModel.confirmedShellPaneIds.collectAsState()
     // Issue #858: the recorded non-default profile (e.g. z.ai Claude), shown in
     // the "What is this session?" sheet so a profiled session is distinguishable.
     val currentSessionRecordedProfile by viewModel.currentSessionRecordedProfile.collectAsState()
@@ -761,10 +768,16 @@ public fun TmuxSessionScreen(
     // Issue #716 (Slice A): default to presumed-agent during detection
     // uncertainty so the composer / Conversation tab / agent-aware chips never
     // vanish while detection is slow or null right after attach/switch/send.
-    // The agent surface collapses ONLY on a positively-confirmed shell verdict;
-    // Slice A has no trustworthy shell signal at this layer yet (today's tree
-    // returns Shell on mere absence of an agent match — the bug Slice C fixes),
-    // so `confirmedShell` is always false here and the surface stays available.
+    // The agent surface collapses ONLY on a positively-confirmed shell verdict.
+    //
+    // Issue #894 (Slice C): that confirmed-shell verdict is now WIRED — sourced
+    // from the durable per-session recorded `@ps_agent_kind=shell` record (a
+    // session PocketShell launched as a plain shell, or one the user manually
+    // classified as Shell) via [confirmedShellPaneIds]. This is the trustworthy
+    // signal Slice A lacked: it is NOT the old "no agent matched → assume shell"
+    // absence, so a foreign / not-yet-classified pane stays presumed-agent (the
+    // #878 black-screen cure is intact) while a genuine shell collapses the
+    // surface and never flashes the "Loading conversation…" placeholder.
     // See [tmuxSessionPresumedAgent].
     // Issue #797: gate on the SURFACE pane (visible pane), not the active-only
     // `currentPane`. The previous `currentPane != null` short-circuit forced
@@ -778,7 +791,9 @@ public fun TmuxSessionScreen(
         tmuxSessionPresumedAgent(
             hasLiveDetection = currentAgentConversation?.detection != null,
             stickyAgent = paletteAgent,
-            confirmedShell = false,
+            // Issue #894 (Slice C): the visible pane's durable confirmed-shell
+            // verdict — true only when the tree recorded `@ps_agent_kind=shell`.
+            confirmedShell = surfacePane.paneId in confirmedShellPaneIds,
         )
     // The agent kind to use when sending to a presumed-agent pane that has no
     // live detection/transcript yet: the sticky/last-known kind. Null when this
@@ -3065,17 +3080,19 @@ internal data class TmuxSessionTabState(
  *  - detection simply has not positively confirmed a shell yet.
  *
  * The agent surface is hidden ONLY on a positively-confirmed shell verdict
- * ([confirmedShell]). For Slice A there is no trustworthy confirmed-shell
- * signal at the screen layer yet — today's tree/gateway returns
- * `SessionAgentKind.Shell` on the mere *absence* of an agent match, which is
- * exactly the unreliable signal Slice C fixes. So Slice A always passes
- * `confirmedShell = false` and the surface stays available throughout the
- * detection window; the reliable confirmed-shell collapse arrives with Slice C.
+ * ([confirmedShell]). Issue #894 (Slice C) WIRES that verdict: the call site
+ * now passes a real `confirmedShell` from the durable per-session recorded
+ * `@ps_agent_kind=shell` record (via `TmuxSessionViewModel.confirmedShellPaneIds`),
+ * NOT the old "no agent matched → assume shell" absence. So a genuine shell
+ * pane collapses the surface (and never flashes the #878 "Loading
+ * conversation…" placeholder), while a foreign / not-yet-classified pane keeps
+ * the presumed-agent surface available throughout the detection window — the
+ * #878 black-screen cure stays intact.
  *
- * Net effect: the composer/agent surface is always available unless/until a
- * trustworthy shell verdict exists. A genuine shell session may show an empty
- * Conversation tab in the interim — an accepted trade-off (the maintainer's
- * explicit non-goal is a per-session toggle).
+ * Net effect: the composer/agent surface is available unless/until a trustworthy
+ * shell verdict exists. A foreign agent session may show an empty Conversation
+ * tab in the interim — an accepted trade-off (the maintainer's explicit non-goal
+ * is a per-session toggle).
  */
 internal fun tmuxSessionPresumedAgent(
     hasLiveDetection: Boolean,
@@ -3087,8 +3104,9 @@ internal fun tmuxSessionPresumedAgent(
     // the pane presumed-agent; but even with neither, absence of a positive
     // shell verdict means "not yet known to be shell" — which #716 treats as
     // presumed-agent so the composer/agent surface stays available during the
-    // slow-detection window. (Slice A always passes `confirmedShell = false`;
-    // Slice C supplies the real verdict from the maintained tree.)
+    // slow-detection window. (Slice C, issue #894, supplies the real verdict
+    // from the durable recorded `@ps_agent_kind=shell` record; Slice A passed a
+    // hard-wired `false`.)
     if (confirmedShell) return false
     return true
 }

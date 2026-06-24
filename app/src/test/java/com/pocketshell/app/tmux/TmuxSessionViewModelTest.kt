@@ -32,6 +32,7 @@ import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -7042,6 +7043,171 @@ class TmuxSessionViewModelTest {
             "#878: Codex pane stays on Conversation once detection lands",
             SessionTab.Conversation,
             live.selectedTab,
+        )
+    }
+
+    // ─── Issue #894 (epic #821 "Slice C"): a freshly-opened CONFIRMED SHELL ──
+    // pane (recorded `@ps_agent_kind=shell`) must NOT flash the #878 "Loading
+    // conversation…" placeholder when the open-time default is Conversation,
+    // while a presumed-agent / foreign pane STILL gets it (no #878 regression).
+    //
+    // G10 reproduce-first: on base (no Slice C gate) `seedPresumedAgentPlaceholder`
+    // seeds EVERY pane (it has no confirmed-shell gate) and `confirmedShell` is
+    // hard-wired false — so a confirmed-shell pane gets the auto-seeded
+    // Conversation placeholder (the wrong-surface flash). These tests assert the
+    // confirmed-shell pane has NO auto-seeded placeholder and is published in
+    // [confirmedShellPaneIds]; RED on base (the placeholder is present, the set
+    // is empty), GREEN with the verdict-driven gate.
+    //
+    // G2 class coverage: shell-vs-agent × default=Conversation-vs-Terminal.
+
+    @Test
+    fun confirmedShellPaneSeedGateSuppressesConversationPlaceholder() = runTest(scheduler) {
+        // AC1 + AC4 (shell branch, default = Conversation). A pane whose session
+        // the durable tree recorded as `@ps_agent_kind=shell` must NOT carry the
+        // auto-seeded "Loading conversation…" placeholder.
+        val vm = newVm()
+        // Default open-time tab is Conversation (the black-screen cure) — the
+        // exact state where the wrong-surface shell flash happens.
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        // On open, before the recorded-kind read lands, the pane got the #878
+        // auto-seed (the same optimistic cure an agent gets — we can't yet tell
+        // them apart). This is the pre-verdict state.
+        assertNotNull(
+            "#878: a fresh pane gets the optimistic placeholder before the recorded-kind read",
+            vm.agentConversations.value["%0"],
+        )
+
+        // The recorded `@ps_agent_kind` reads back SHELL (the durable tree
+        // verdict). Slice C drops the auto-seeded placeholder IMMEDIATELY (the
+        // confirmed shell never lingers on the wrong surface — the first-open
+        // flash is killed) and publishes the pane as confirmed-shell.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertNull(
+            "#894 (Slice C): a confirmed-shell pane has its auto-seeded" +
+                " Conversation placeholder dropped — no wrong-surface flash",
+            vm.agentConversations.value["%0"],
+        )
+        assertTrue(
+            "#894 (Slice C): the confirmed-shell verdict is published per-pane",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        // The load-bearing GATE: a fresh seed attempt for a CONFIRMED shell must
+        // be a no-op (on base, with no gate, this re-creates the placeholder —
+        // the RED state).
+        vm.seedPresumedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertNull(
+            "#894 (Slice C): the seed gate skips a confirmed shell — it never" +
+                " re-creates the Conversation placeholder",
+            vm.agentConversations.value["%0"],
+        )
+    }
+
+    @Test
+    fun presumedAgentPaneStillSeedsConversationPlaceholder() = runTest(scheduler) {
+        // AC2 + AC4 (agent / no-shell-verdict branch, default = Conversation).
+        // The #878 black-screen cure is UNCHANGED: a pane with NO confirmed-shell
+        // verdict (a presumed-agent / foreign / not-yet-classified pane) STILL
+        // gets the auto-seeded placeholder so it never shows the black Terminal.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        val placeholder = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#894: a presumed-agent pane (no shell verdict) STILL gets the #878 cure",
+            placeholder,
+        )
+        assertEquals(SessionTab.Conversation, placeholder!!.selectedTab)
+        assertNull(placeholder.detection)
+        assertTrue(placeholder.autoSeededPlaceholder)
+        assertFalse(
+            "#894: a presumed-agent pane is NOT published as confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        // A re-seed (e.g. a later reconcile) keeps the placeholder for a
+        // presumed agent — the cure is intact.
+        vm.seedPresumedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertNotNull(
+            "#894: re-seeding a presumed-agent pane keeps the placeholder",
+            vm.agentConversations.value["%0"],
+        )
+    }
+
+    @Test
+    fun confirmedShellPaneIdsReflectsRecordedVerdictNotAHardWiredConstant() = runTest(scheduler) {
+        // AC3: `confirmedShell` reflects the real per-pane shell-vs-agent truth
+        // from the recorded-kind record, not a hard-wired constant. Marking the
+        // session shell publishes the pane; re-classifying it (shell -> agent)
+        // un-publishes it so the agent surface returns.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        assertFalse(
+            "#894: a pane with no recorded verdict is NOT confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "#894: a recorded SHELL verdict publishes the pane as confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        // Re-classified to an agent (the recorded kind is no longer shell): the
+        // confirmed-shell flag clears, so the presumed-agent surface returns.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = false)
+        runCurrent()
+        assertFalse(
+            "#894: a non-shell (agent) verdict un-publishes the pane — not sticky",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+    }
+
+    @Test
+    fun terminalDefaultNeverSeedsPlaceholderRegardlessOfShellVerdict() = runTest(scheduler) {
+        // G2 class coverage (default = Terminal, both shell and agent): when the
+        // user opted into the Terminal default, NOTHING is ever auto-seeded — the
+        // raw Terminal IS the intended pre-detection view. The Slice C shell gate
+        // must not change that (it is an early-return BEFORE the Terminal check
+        // only matters for Conversation), and a presumed-agent pane likewise gets
+        // no placeholder on the Terminal default.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        assertNull(
+            "#894 (G2): Terminal default never seeds a placeholder (presumed agent)",
+            vm.agentConversations.value["%0"],
+        )
+
+        // Even a confirmed-shell verdict on the Terminal default seeds nothing.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        vm.seedPresumedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertNull(
+            "#894 (G2): Terminal default + confirmed shell still seeds nothing",
+            vm.agentConversations.value["%0"],
+        )
+        assertTrue(
+            "#894 (G2): the confirmed-shell verdict is still published on Terminal default",
+            "%0" in vm.confirmedShellPaneIds.value,
         )
     }
 

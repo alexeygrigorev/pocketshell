@@ -397,7 +397,9 @@ private fun StaticChipStripContent(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onProjectNavigationTap: (() -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
 ) {
+    leadingContent?.invoke()
     chips.forEach { chip ->
         CommandChip(
             label = chip,
@@ -574,6 +576,7 @@ internal fun BottomChipControls(
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
     // Issue #249: gate the command chips and optional composer launcher on whether
     // the SSH/tmux session is live. While disconnected or reconnecting a
     // chip tap would `writeInputToPane` into a dead bridge — the bytes
@@ -653,6 +656,7 @@ internal fun BottomChipControls(
                             chips = chips,
                             onChipTap = if (inputEnabled) onChipTap else { _ -> },
                             onProjectNavigationTap = onProjectNavigationTap,
+                            leadingContent = leadingContent,
                         )
                     }
                     // Primary cluster: high-frequency, pinned to the right of the

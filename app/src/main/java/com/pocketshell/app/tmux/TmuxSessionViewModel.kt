@@ -20,6 +20,7 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.PromptAttachmentStager
@@ -245,6 +246,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // constructors are unchanged; injectable so a test can stub the guess.
     private val agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
         com.pocketshell.app.agents.AgentKindRemoteSource(),
+    private val sessionCardsRemoteSource: SessionCardsRemoteSource = SessionCardsRemoteSource(),
 ) : ViewModel() {
 
     /**
@@ -557,6 +559,16 @@ public class TmuxSessionViewModel @Inject constructor(
 
     public val agentConversations: StateFlow<Map<String, AgentConversationUiState>> =
         _agentConversations.asStateFlow()
+
+    public data class SessionCardsUiState(
+        val sessionName: String? = null,
+        val loading: Boolean = false,
+        val feed: SessionCardsRemoteSource.Feed = SessionCardsRemoteSource.Feed.Empty,
+    )
+
+    private val _sessionCards: MutableStateFlow<SessionCardsUiState> =
+        MutableStateFlow(SessionCardsUiState())
+    public val sessionCards: StateFlow<SessionCardsUiState> = _sessionCards.asStateFlow()
 
     private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
         MutableStateFlow(ConnectionStatus.Idle)
@@ -12698,6 +12710,64 @@ public class TmuxSessionViewModel @Inject constructor(
             _currentSessionRecordedProfile.value =
                 rawProfile?.trim()?.takeIf { it.isNotEmpty() }
         }
+    }
+
+    public fun refreshActiveSessionCards(): Boolean {
+        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: run {
+            _sessionCards.value = SessionCardsUiState()
+            return false
+        }
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        _sessionCards.value = _sessionCards.value.copy(
+            sessionName = target,
+            loading = true,
+        )
+        bridgeScope.launch {
+            val feed = withContext(Dispatchers.IO) {
+                sessionCardsRemoteSource.getCards(session, target)
+            }
+            if (activeTarget?.sessionName?.trim() == target) {
+                _sessionCards.value = SessionCardsUiState(
+                    sessionName = target,
+                    loading = false,
+                    feed = feed,
+                )
+            }
+        }
+        return true
+    }
+
+    public fun toggleChecklistItem(
+        cardId: String,
+        itemId: String,
+        checked: Boolean,
+    ): Boolean {
+        val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        bridgeScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                sessionCardsRemoteSource.setChecklistItemChecked(
+                    session = session,
+                    tmuxSessionName = target,
+                    cardId = cardId,
+                    itemId = itemId,
+                    checked = checked,
+                )
+            }
+            if (ok && activeTarget?.sessionName?.trim() == target) {
+                val feed = withContext(Dispatchers.IO) {
+                    sessionCardsRemoteSource.getCards(session, target)
+                }
+                if (activeTarget?.sessionName?.trim() == target) {
+                    _sessionCards.value = SessionCardsUiState(
+                        sessionName = target,
+                        loading = false,
+                        feed = feed,
+                    )
+                }
+            }
+        }
+        return true
     }
 
     /**

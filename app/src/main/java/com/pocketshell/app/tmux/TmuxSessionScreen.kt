@@ -147,6 +147,10 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
+import com.pocketshell.app.cards.ChecklistCardsSheet
+import com.pocketshell.app.cards.ChecklistChip
+import com.pocketshell.app.cards.SessionCardsRemoteSource
+import com.pocketshell.app.cards.checklistChipState
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.snippets.snippetDispatchText
@@ -434,6 +438,20 @@ public fun TmuxSessionScreen(
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = status is ConnectionStatus.Connected
+    val sessionCardsState by viewModel.sessionCards.collectAsState()
+    val checklistCards = remember(sessionCardsState, sessionName) {
+        if (sessionCardsState.sessionName == sessionName) {
+            sessionCardsState.feed.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
+        } else {
+            emptyList()
+        }
+    }
+    val sessionChecklistChipState = remember(checklistCards) {
+        checklistChipState(checklistCards)
+    }
+    LaunchedEffect(sessionLive, sessionName) {
+        if (sessionLive) viewModel.refreshActiveSessionCards()
+    }
     // Issue #459: the per-screen restored-draft holder used to seed the
     // bespoke in-pane Conversation composer is gone. The Conversation
     // bottom now shares the unified [PromptComposerSheet], whose draft
@@ -668,6 +686,7 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+    var showChecklistSheet by remember { mutableStateOf(false) }
 
     // Issue #560: a share-into-session launch carries staged remote
     // attachment path(s). Seed them into the shared composer VM as #544
@@ -852,6 +871,7 @@ public fun TmuxSessionScreen(
         sessionDrawerOpen = showSessionSwitcher || showSessionDrawer,
         micSheetOpen = showMicSheet,
         snippetPickerOpen = showSnippetPicker,
+        checklistSheetOpen = showChecklistSheet,
         onDismissDialog = { dialogMode = null },
         onDismissSessionDrawer = {
             showSessionSwitcher = false
@@ -860,6 +880,7 @@ public fun TmuxSessionScreen(
         },
         onDismissMicSheet = { showMicSheet = false },
         onDismissSnippetPicker = { showSnippetPicker = false },
+        onDismissChecklistSheet = { showChecklistSheet = false },
         onBack = onBack,
     )
 
@@ -2096,6 +2117,17 @@ public fun TmuxSessionScreen(
                             showHotkeysPanel = true
                         }
                     },
+                    leadingChipContent = if (controlsInputEnabled) sessionChecklistChipState?.let { state ->
+                        {
+                            ChecklistChip(
+                                state = state,
+                                onClick = {
+                                    viewModel.refreshActiveSessionCards()
+                                    showChecklistSheet = true
+                                },
+                            )
+                        }
+                    } else null,
                     modifier = bottomControlsModifier,
                 )
             }
@@ -2572,6 +2604,20 @@ public fun TmuxSessionScreen(
                     showSnippetPicker = false
                 }
             },
+        )
+    }
+
+    if (showChecklistSheet) {
+        ChecklistCardsSheet(
+            cards = checklistCards,
+            onToggle = { cardId, itemId, checked ->
+                viewModel.toggleChecklistItem(
+                    cardId = cardId,
+                    itemId = itemId,
+                    checked = checked,
+                )
+            },
+            onDismiss = { showChecklistSheet = false },
         )
     }
 
@@ -6094,10 +6140,12 @@ internal fun TmuxSessionBackHandler(
     sessionDrawerOpen: Boolean,
     micSheetOpen: Boolean,
     snippetPickerOpen: Boolean,
+    checklistSheetOpen: Boolean = false,
     onDismissDialog: () -> Unit,
     onDismissSessionDrawer: () -> Unit,
     onDismissMicSheet: () -> Unit,
     onDismissSnippetPicker: () -> Unit,
+    onDismissChecklistSheet: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     BackHandler {
@@ -6106,6 +6154,7 @@ internal fun TmuxSessionBackHandler(
             sessionDrawerOpen -> onDismissSessionDrawer()
             micSheetOpen -> onDismissMicSheet()
             snippetPickerOpen -> onDismissSnippetPicker()
+            checklistSheetOpen -> onDismissChecklistSheet()
             else -> onBack()
         }
     }
@@ -6412,6 +6461,7 @@ internal fun TmuxSessionBottomControlsCallSite(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     onShowHotkeysTap: (() -> Unit)? = null,
+    leadingChipContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     // Issue #805 (regression of #744/#716): bottom-bar chrome follows the
@@ -6434,6 +6484,7 @@ internal fun TmuxSessionBottomControlsCallSite(
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
         onShowHotkeysTap = onShowHotkeysTap,
+        leadingChipContent = leadingChipContent,
         modifier = modifier,
     )
 }
@@ -6456,6 +6507,7 @@ internal fun TmuxTerminalBottomControls(
     // terminal. Null on surfaces with no pane to receive control bytes (e.g. the
     // Conversation tab).
     onShowHotkeysTap: (() -> Unit)? = null,
+    leadingChipContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val chromeMode = tmuxTerminalKeyboardChromeMode(
@@ -6543,6 +6595,7 @@ internal fun TmuxTerminalBottomControls(
                     onShowHotkeysTap = onShowHotkeysTap,
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                     addSnippetIcon = SnippetsChipIcon,
+                    leadingContent = leadingChipContent,
                     // Project navigation on tmux panes is a separate
                     // follow-up — see #123 notes on per-pane cwd /
                     // project-root wiring.

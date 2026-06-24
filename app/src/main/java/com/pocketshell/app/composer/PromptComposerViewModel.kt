@@ -254,6 +254,57 @@ public class PromptComposerViewModel @Inject constructor(
     private var attachmentJob: Job? = null
 
     /**
+     * Issue #891: the overall send-operation watchdog. The maintainer's
+     * on-device symptom — a prompt with a PNG attachment stuck on "Sending…"
+     * FOREVER, only recoverable by restarting the app — happens when the
+     * in-flight state ([UiState.sendInFlight]) is set but the resolution
+     * callbacks that clear it ([markSendDelivered] / [restoreFailedSend]) never
+     * fire. Each leg of the send is already individually bounded (the
+     * [ATTACHMENT_UPLOAD_TIMEOUT_MS] upload `withTimeout`, the #886 absolute
+     * per-command ceiling on the tmux channel, and the sheet's
+     * [SEND_TIMEOUT_MS] `withTimeoutOrNull` around the host `onSend`), but
+     * there was no bound on the WHOLE operation owned by the ViewModel itself:
+     * if the upload-await coroutine ([dispatchSendAfterUpload]) wedged, or the
+     * `sendRequests` channel emission landed with no live collector (sheet
+     * dismissed mid-send / recomposition gap), nothing ever cleared
+     * `sendInFlight` and the composer was stuck.
+     *
+     * This watchdog is the top-level escape hatch (hard-cut per D22 — it
+     * REPLACES "rely on a downstream callback always firing", not an added
+     * settings flag): the instant a send goes in-flight we arm a single
+     * watchdog; if `sendInFlight` is still true after [OVERALL_SEND_TIMEOUT_MS]
+     * we route to the retryable failed-send state ([restoreFailedSend]) with
+     * the CURRENT draft + staged attachments preserved, so the user gets a
+     * "Send failed — Retry" affordance and never has to restart the app. The
+     * timeout is generous enough to sit ABOVE the per-leg bounds so the normal
+     * upload/onSend failure paths surface first; the watchdog only fires when
+     * those paths failed to resolve at all.
+     */
+    private var sendWatchdogJob: Job? = null
+
+    /**
+     * Issue #891 test seam: the overall-send watchdog timeout. Defaults to the
+     * production [OVERALL_SEND_TIMEOUT_MS]. Unit tests that exercise the watchdog
+     * set this (via [setSendWatchdogTimeoutForTest]) to a small virtual-time
+     * value so the timeout fires deterministically; unit tests that DON'T care
+     * about the watchdog set it to `null` to disable arming entirely so
+     * `runTest`'s terminal `advanceUntilIdle` does not drain a pending 110s
+     * `delay` and spuriously flip their in-flight assertions. Production always
+     * uses the non-null default — the watchdog is never disabled on-device.
+     */
+    private var sendWatchdogTimeoutMs: Long? = OVERALL_SEND_TIMEOUT_MS
+
+    /**
+     * Issue #891 test seam. `timeoutMs = null` disables the watchdog for unit
+     * tests that are not about it (so they are unaffected); a small value drives
+     * the watchdog deterministically under virtual time.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setSendWatchdogTimeoutForTest(timeoutMs: Long?) {
+        sendWatchdogTimeoutMs = timeoutMs
+    }
+
+    /**
      * Issue #180: live snapshot of the failed / offline-queued
      * transcriptions. The composer sheet collects this to render the
      * "Transcription failed — retry" banner + expandable list. Always
@@ -722,6 +773,11 @@ public class PromptComposerViewModel @Inject constructor(
         // Flip into the in-flight state up front so the UI reflects "Sending…"
         // and the in-flight guard blocks a double-tap while we await the upload.
         _uiState.update { it.copy(sendInFlight = true, error = null) }
+        // Issue #891: arm the overall-send watchdog from the MOMENT we go
+        // in-flight — this is the with-attachment path the maintainer hit, where
+        // a wedged upload-await could otherwise leave "Sending…" stuck forever.
+        // emitSendRequest re-arms it (idempotent) once the upload resolves.
+        armSendWatchdog()
         val job = attachmentJob ?: return emitSendRequest(withEnter)
         viewModelScope.launch {
             // Await the upload coroutine itself; `attachFiles` resolves the UI
@@ -735,6 +791,10 @@ public class PromptComposerViewModel @Inject constructor(
                 // text-only send that would silently drop the attachment the user
                 // staged. Leave the draft + error so they can re-attach and retry.
                 DiagnosticEvents.record("action", "composer_send_wait_upload_no_attachment")
+                // Issue #891: the send resolved (to "no send") — disarm the
+                // overall-send watchdog so it cannot later fire a spurious
+                // "Send failed" on an already-settled composer.
+                disarmSendWatchdog()
                 _uiState.update { it.copy(sendInFlight = false) }
                 return@launch
             }
@@ -778,6 +838,11 @@ public class PromptComposerViewModel @Inject constructor(
         // itself + show the "Sending…" spinner for immediate feedback the moment
         // Send is tapped.
         _uiState.update { it.copy(sendInFlight = true, error = null) }
+        // Issue #891: arm the overall-send watchdog the instant we go in-flight
+        // so a host `onSend` that never resolves (wedged channel / dropped
+        // emission with no live collector) can never leave the composer stuck on
+        // "Sending…" forever.
+        armSendWatchdog()
         // Issue #254: a `Channel.trySend` buffers the item until a
         // collector consumes it, so a send dispatched while the sheet's
         // collector is mid-recreate (dismiss → re-open) is delivered to
@@ -805,6 +870,9 @@ public class PromptComposerViewModel @Inject constructor(
      * field never empties until the bytes are actually delivered.
      */
     public fun markSendDelivered() {
+        // Issue #891: the send resolved successfully — disarm the overall-send
+        // watchdog so it cannot fire a spurious "Send failed" afterwards.
+        disarmSendWatchdog()
         _uiState.update {
             it.copy(
                 sendInFlight = false,
@@ -842,6 +910,10 @@ public class PromptComposerViewModel @Inject constructor(
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
         if (request.text.isEmpty()) return
+        // Issue #891: the send resolved (to failure) — disarm the overall-send
+        // watchdog so the retryable failed state we are about to set is not
+        // immediately re-stamped by a late watchdog firing.
+        disarmSendWatchdog()
         // Issue #872: restore the CLEAN draft (no appended "Attached files:"
         // block) so the editable text is not polluted with raw remote paths and
         // the tiles are NOT double-appended on Retry. Fall back to the composed
@@ -881,6 +953,64 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #891: arm (or re-arm) the overall-send watchdog. Cancels any prior
+     * watchdog first so a re-arm (e.g. the upload-await path re-dispatching once
+     * the upload lands) keeps exactly one live timer. If `sendInFlight` is still
+     * true [OVERALL_SEND_TIMEOUT_MS] after this arm, [onSendWatchdogExpired]
+     * routes the composer to the retryable failed-send state so the user is
+     * never stuck on "Sending…" forever (the maintainer's restart-the-app bug).
+     */
+    private fun armSendWatchdog() {
+        sendWatchdogJob?.cancel()
+        val timeoutMs = sendWatchdogTimeoutMs ?: return
+        sendWatchdogJob = viewModelScope.launch {
+            delay(timeoutMs)
+            onSendWatchdogExpired()
+        }
+    }
+
+    /**
+     * Issue #891: cancel the overall-send watchdog because the send resolved
+     * (delivered, failed, no-send, or discarded). Idempotent.
+     */
+    private fun disarmSendWatchdog() {
+        sendWatchdogJob?.cancel()
+        sendWatchdogJob = null
+    }
+
+    /**
+     * Issue #891: the overall-send watchdog fired — the send has been in-flight
+     * past [OVERALL_SEND_TIMEOUT_MS] without resolving. This is the wedged-send
+     * escape: route to the retryable failed-send state, preserving the CURRENT
+     * draft + staged attachments so Retry re-sends without losing the message.
+     * A no-op if the composer already left the in-flight state (a benign race
+     * where the resolution callback won but the watchdog cancel had not yet
+     * been observed).
+     */
+    private fun onSendWatchdogExpired() {
+        sendWatchdogJob = null
+        val state = _uiState.value
+        if (!state.sendInFlight) return
+        DiagnosticEvents.record(
+            "action",
+            "composer_send_watchdog_timeout",
+            "attachmentCount" to state.attachments.size,
+        )
+        // Reconstruct a SendRequest from the live composer state so the existing
+        // #872 durable failed-send path restores the exact draft + attachments.
+        val composed = appendAttachmentPaths(state.draft, state.attachments.map { it.remotePath })
+        restoreFailedSend(
+            SendRequest(
+                text = composed,
+                withEnter = false,
+                cleanDraft = state.draft,
+                attachments = state.attachments,
+            ),
+            message = SEND_TIMEOUT_MESSAGE,
+        )
+    }
+
+    /**
      * Issue #746: explicitly throw the current draft away. Wired to the
      * Discard action the "Not sent" banner instructs the user to use — and
      * the only control that actually clears a stale unsent prompt
@@ -895,6 +1025,10 @@ public class PromptComposerViewModel @Inject constructor(
         // result back into the now-cleared composer (mirrors the send path).
         attachmentJob?.cancel()
         attachmentJob = null
+        // Issue #891: an explicit discard ends any in-flight send too — disarm
+        // the watchdog so it cannot resurrect a "Send failed" banner over the
+        // now-empty composer.
+        disarmSendWatchdog()
         savedStateHandle[KEY_DRAFT] = ""
         savedStateHandle[KEY_DRAFT_OWNER] = null
         // Issue #832 / #872: discard is the explicit "throw it away" control, so
@@ -2351,6 +2485,10 @@ public class PromptComposerViewModel @Inject constructor(
         recordingJob?.cancel()
         transcribeJob?.cancel()
         attachmentJob?.cancel()
+        // Issue #891: drop the overall-send watchdog so it never outlives the
+        // ViewModel (parity with the other jobs above; viewModelScope cancel
+        // already covers it, but be explicit).
+        sendWatchdogJob?.cancel()
         // Issue #882: the #880 recording-elapsed ticker is an infinite
         // `while { delay() }` loop that only breaks when recording leaves
         // [RecordingState.Recording]. Cancel it explicitly on clear so it
@@ -2809,6 +2947,36 @@ public class PromptComposerViewModel @Inject constructor(
          * treated as a failed send.
          */
         public const val SEND_TIMEOUT_MS: Long = 12_000L
+
+        /**
+         * Issue #891: the ViewModel-owned ceiling on the WHOLE send operation —
+         * the backstop that guarantees the composer can never sit on "Sending…"
+         * forever (the maintainer's restart-the-app bug, with a PNG attachment).
+         *
+         * Each leg of a send is already individually bounded: the
+         * [ATTACHMENT_UPLOAD_TIMEOUT_MS] (90s) upload `withTimeout`, the #886
+         * absolute per-command ceiling on the tmux control channel (30s), and
+         * the sheet's [SEND_TIMEOUT_MS] (12s) `withTimeoutOrNull` around the host
+         * `onSend`. But nothing bounded the operation END-TO-END: if the
+         * upload-await coroutine wedged, or the `sendRequests` emission landed
+         * with no live collector, `sendInFlight` never cleared. This ceiling sits
+         * deliberately ABOVE the worst-case sum of the per-leg bounds
+         * (upload 90s + onSend 12s) so the normal failure paths surface their own
+         * banner first; the watchdog only fires when NONE of them resolved the
+         * in-flight state at all, and then routes to the retryable failed-send
+         * state ([restoreFailedSend]) with the draft + attachment preserved.
+         */
+        public const val OVERALL_SEND_TIMEOUT_MS: Long = 110_000L
+
+        /**
+         * Issue #891: the "Send failed — Retry" banner shown when the overall
+         * send watchdog fires. Distinct copy from the #872 reconnect "Not sent"
+         * banner so the user understands the send timed out (not a clean
+         * disconnect), but the recovery is identical: the draft + attachment are
+         * preserved and tapping Send retries.
+         */
+        internal const val SEND_TIMEOUT_MESSAGE: String =
+            "Send failed — it took too long. Tap Send to retry, or discard the draft."
 
         /**
          * Issue #169 Part 2: [SavedStateHandle] key for the current

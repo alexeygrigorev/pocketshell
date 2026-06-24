@@ -13,8 +13,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -125,6 +127,7 @@ class PromptComposerDegradedSendE2eTest {
         vm: PromptComposerViewModel,
         visibleState: androidx.compose.runtime.MutableState<Boolean>,
         connectionLost: Boolean,
+        onAttachFiles: (() -> Unit)? = null,
     ) {
         compose.activityRule.scenario.onActivity { activity ->
             val dark = PocketShellColors.Background.toArgb()
@@ -162,6 +165,7 @@ class PromptComposerDegradedSendE2eTest {
                             onDraftChange = vm::onDraftChange,
                             onMicTap = {},
                             onSend = { withEnter -> vm.requestSend(withEnter) },
+                            onAttachFiles = onAttachFiles,
                         )
                     }
                 }
@@ -308,5 +312,113 @@ class PromptComposerDegradedSendE2eTest {
         compose.waitUntil(timeoutMillis = 5_000) { !visible.value }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertDoesNotExist()
         assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun wedgedSendWithAttachmentEscapesViaWatchdogKeepsTileAndRetryDispatchesAgain() {
+        // Issue #891: the maintainer hit a PNG-attachment send that reached the
+        // in-flight UI and then NEVER resolved through markSendDelivered() or
+        // restoreFailedSend(). This collector receives the first real dispatch,
+        // then parks forever without calling either resolution callback; the
+        // ViewModel's overall-send watchdog must be the only escape from
+        // "Sending...".
+        val vm = newViewModel()
+        vm.setSendWatchdogTimeoutForTest(1_500L)
+        val visible = mutableStateOf(true)
+        val draft = "please inspect this screenshot"
+        val attachPath = "~/.pocketshell/attachments/host-1/issue891-watchdog.png"
+        val dispatched = java.util.Collections.synchronizedList(
+            mutableListOf<PromptComposerViewModel.SendRequest>(),
+        )
+        val firstSendEntered = CompletableDeferred<Unit>()
+        val firstSendNeverResolves = CompletableDeferred<Unit>()
+        val firstCollector = collectorScope.launch {
+            vm.sendRequests.collect { request ->
+                dispatched += request
+                firstSendEntered.complete(Unit)
+                firstSendNeverResolves.await()
+            }
+        }
+        renderComposer(
+            vm,
+            visible,
+            connectionLost = false,
+            onAttachFiles = {
+                vm.attachFiles(count = 1) { Result.success(listOf(attachPath)) }
+            },
+        )
+
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            vm.uiState.value.attachments.size == 1
+        }
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachPath)).assertIsDisplayed()
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
+            .performTextInput(draft)
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsEnabled()
+            .performClick()
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            firstSendEntered.isCompleted && dispatched.size == 1 && vm.uiState.value.sendInFlight
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(COMPOSER_SEND_IN_FLIGHT_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsNotEnabled()
+        WalkthroughScreenshotArtifacts.capture("issue-891-01-wedged-send-with-attachment")
+
+        val first = synchronized(dispatched) { dispatched.single() }
+        assertEquals(1, first.attachments.size)
+        assertEquals(attachPath, first.attachments.single().remotePath)
+        assertTrue(first.text.startsWith(draft))
+        assertTrue(first.text.contains(attachPath))
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            !vm.uiState.value.sendInFlight &&
+                vm.uiState.value.error == PromptComposerViewModel.SEND_TIMEOUT_MESSAGE
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(COMPOSER_SEND_IN_FLIGHT_TAG)
+                .fetchSemanticsNodes().isEmpty()
+        }
+        assertEquals(draft, vm.uiState.value.draft)
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(attachPath, vm.uiState.value.attachments.single().remotePath)
+        assertTrue(visible.value)
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertTextContains(draft, substring = true)
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(attachPath)).assertIsDisplayed()
+        compose.onNodeWithText(
+            PromptComposerViewModel.SEND_TIMEOUT_MESSAGE,
+            substring = true,
+        ).assertIsDisplayed()
+        WalkthroughScreenshotArtifacts.capture("issue-891-02-watchdog-timeout-keeps-attachment")
+
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsEnabled()
+            .performClick()
+        firstCollector.cancel()
+        collectorScope.launch {
+            vm.sendRequests.collect { request ->
+                dispatched += request
+            }
+        }
+        compose.waitUntil(timeoutMillis = 5_000) { dispatched.size == 2 }
+        val second = synchronized(dispatched) { dispatched[1] }
+        assertEquals(1, second.attachments.size)
+        assertEquals(attachPath, second.attachments.single().remotePath)
+        assertTrue(second.text.startsWith(draft))
+        assertTrue(second.text.contains(attachPath))
+
+        compose.runOnUiThread { vm.discardDraft() }
     }
 }

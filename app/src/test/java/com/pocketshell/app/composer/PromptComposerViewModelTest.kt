@@ -226,6 +226,15 @@ class PromptComposerViewModelTest {
         // `advanceUntilIdle` (which would hang the suite). See
         // [tearDownViewModels].
         createdViewModels += vm
+        // Issue #891: the overall-send watchdog launches a real 110s `delay` on
+        // viewModelScope the instant a send goes in-flight. `runTest`'s terminal
+        // `advanceUntilIdle` would drain that delay and fire the watchdog after
+        // every send, spuriously flipping the in-flight assertions of tests that
+        // are NOT about the watchdog. Disable it here by default; the dedicated
+        // watchdog tests re-enable it explicitly via
+        // [PromptComposerViewModel.setSendWatchdogTimeoutForTest] so the
+        // load-bearing behaviour is still proven (never vacuously skipped).
+        vm.setSendWatchdogTimeoutForTest(null)
         return vm
     }
 
@@ -2205,6 +2214,8 @@ class PromptComposerViewModelTest {
         // `advanceUntilIdle` (which would hang the suite). See
         // [tearDownViewModels]. Mirrors [newVm].
         createdViewModels += vm
+        // Issue #891: disable the overall-send watchdog by default (see [newVm]).
+        vm.setSendWatchdogTimeoutForTest(null)
         return vm to queue
     }
 
@@ -3245,6 +3256,197 @@ class PromptComposerViewModelTest {
         assertTrue(sent[0].text.contains("late.png"))
         assertEquals("send this now", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
+    }
+
+    // -- Issue #891: overall-send watchdog (stuck "Sending…" escape) ---------
+
+    @Test
+    fun stuckSendWithAttachmentTimesOutToRetryableFailedStateAndKeepsContent() = runTest {
+        // Issue #891 (G10/D33 reproduce-first): the maintainer's EXACT on-device
+        // symptom — a prompt with a PNG attachment stuck on "Sending…" FOREVER,
+        // recoverable only by restarting the app. We reproduce a WEDGED send: the
+        // attachment uploads fine, the user taps Send, the host `onSend` (the
+        // tmux write + #869 ack-gate) never resolves — i.e. neither
+        // markSendDelivered nor restoreFailedSend is ever called by the sheet
+        // collector (a wedged channel, or the emission landing with no live
+        // collector). Before the fix, `sendInFlight` stays true forever (RED:
+        // infinite "Sending…", no retry, content NOT preserved as a failed
+        // state). With the overall-send watchdog it MUST flip to a retryable
+        // "Send failed" state with the draft + attachment preserved (GREEN).
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        // Enable the overall-send watchdog with the REAL production ceiling so
+        // this test proves the actual on-device bound (virtual time is free).
+        vm.setSendWatchdogTimeoutForTest(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS)
+        val sent = collectSendRequests(vm)
+
+        // Stage the attachment (upload completes), type the note. The upload's own
+        // delay is tiny here; step just far enough to settle it WITHOUT reaching
+        // the watchdog ceiling.
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/screenshot.png"))
+        }
+        runCurrent()
+        vm.onDraftChange("look at this")
+        assertEquals(1, vm.uiState.value.attachments.size)
+
+        // Tap Send. The request is emitted (the sheet would route it into the
+        // host onSend) and the composer goes in-flight = "Sending…".
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertEquals(1, sent.size)
+        assertTrue("expected the composer to be Sending…", vm.uiState.value.sendInFlight)
+        // Crucially: the host NEVER calls markSendDelivered / restoreFailedSend
+        // (the wedged-send scenario). Time passes past the per-leg sheet bound…
+        advanceTimeBy(PromptComposerViewModel.SEND_TIMEOUT_MS + 1_000L)
+        runCurrent()
+        // …yet the composer is STILL stuck: nothing is driving the resolution
+        // callbacks, so the per-leg bounds alone do NOT own the in-flight state.
+        // This is exactly the on-device hang the watchdog must escape.
+        assertTrue(
+            "the per-leg bounds do not own the in-flight state; still stuck pre-watchdog",
+            vm.uiState.value.sendInFlight,
+        )
+
+        // The overall-send watchdog is the escape: cross its ceiling.
+        advanceTimeBy(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS)
+        runCurrent()
+
+        // The in-flight state is GONE — no infinite "Sending…", no app restart.
+        assertFalse(
+            "send watchdog must clear the stuck in-flight state",
+            vm.uiState.value.sendInFlight,
+        )
+        // A retryable "Send failed" banner is shown.
+        assertEquals(
+            PromptComposerViewModel.SEND_TIMEOUT_MESSAGE,
+            vm.uiState.value.error,
+        )
+        // The staged text + attachment SURVIVE so Retry re-sends them (#872).
+        assertEquals("look at this", vm.uiState.value.draft)
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(
+            "~/.pocketshell/attachments/host-1/screenshot.png",
+            vm.uiState.value.attachments[0].remotePath,
+        )
+
+        // Retry actually re-dispatches the original text + attachment.
+        sent.clear()
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        assertEquals(1, sent.size)
+        assertTrue(sent[0].text.startsWith("look at this"))
+        assertTrue(sent[0].text.contains("screenshot.png"))
+        assertEquals(1, sent[0].attachments.size)
+    }
+
+    @Test
+    fun stuckSendDuringUploadAwaitEscapesViaWatchdog() = runTest {
+        // Issue #891 class coverage: the OTHER wedge site — tapping Send while an
+        // attachment upload is STILL in flight ([dispatchSendAfterUpload]). If the
+        // upload-await never resolves within the watchdog ceiling (a wedged
+        // SSH/SFTP transfer — the #886 channel-stall class), the composer is stuck
+        // on "Sending…". The overall-send watchdog must rescue this path too,
+        // preserving the typed draft so Retry works.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        // Watchdog ceiling set BELOW the upload timeout for this test so it is
+        // unambiguously the watchdog (not the upload bound) that rescues.
+        val watchdogMs = 5_000L
+        vm.setSendWatchdogTimeoutForTest(watchdogMs)
+        collectSendRequests(vm)
+        val uploadStarted = CompletableDeferred<Unit>()
+        // A wedged upload: the stage never resolves within the watchdog window.
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+
+        vm.attachFiles(count = 1) {
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        runCurrent()
+        uploadStarted.await()
+        vm.onDraftChange("send while uploading")
+        vm.requestSend(withEnter = true)
+        runCurrent()
+        // In-flight ("Sending…") while awaiting the (wedged) upload.
+        assertTrue(vm.uiState.value.sendInFlight)
+
+        // The watchdog ceiling elapses with no resolution — it is the escape.
+        advanceTimeBy(watchdogMs + 1_000L)
+        runCurrent()
+
+        assertFalse(
+            "watchdog must clear the stuck upload-await in-flight state",
+            vm.uiState.value.sendInFlight,
+        )
+        assertEquals(
+            PromptComposerViewModel.SEND_TIMEOUT_MESSAGE,
+            vm.uiState.value.error,
+        )
+        assertEquals("send while uploading", vm.uiState.value.draft)
+
+        // Clean up the still-suspended (cancellable) upload + await so `runTest`'s
+        // uncompleted-coroutine guard does not flag the deliberately-wedged stage.
+        vm.clearForTest()
+    }
+
+    @Test
+    fun deliveredSendBeforeTimeoutDoesNotFireSpuriousWatchdogFailure() = runTest {
+        // Issue #891 guard: a NORMAL send that the host confirms BEFORE the
+        // watchdog ceiling must NOT later be stamped with a spurious "Send
+        // failed" — the watchdog is disarmed on markSendDelivered.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.setSendWatchdogTimeoutForTest(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS)
+        val sent = collectSendRequests(vm)
+        vm.onDraftChange("hello there")
+
+        vm.requestSend(withEnter = false)
+        runCurrent()
+        assertEquals(1, sent.size)
+        assertTrue(vm.uiState.value.sendInFlight)
+
+        // Host confirms delivery promptly (well under the ceiling).
+        vm.markSendDelivered()
+        assertFalse(vm.uiState.value.sendInFlight)
+        assertEquals("", vm.uiState.value.draft)
+
+        // Let the watchdog ceiling elapse — it must NOT resurrect a failure.
+        advanceTimeBy(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS + 5_000L)
+        runCurrent()
+        assertFalse(vm.uiState.value.sendInFlight)
+        assertNull(vm.uiState.value.error)
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun failedSendBeforeTimeoutDisarmsWatchdogSoItDoesNotReStampAfterRetry() = runTest {
+        // Issue #891 guard: a send that fails (restoreFailedSend) before the
+        // ceiling disarms the watchdog, so a later in-progress retry/edit is not
+        // clobbered by the first send's stale watchdog firing.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.setSendWatchdogTimeoutForTest(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS)
+        collectSendRequests(vm)
+        vm.onDraftChange("first attempt")
+        vm.requestSend(withEnter = false)
+        runCurrent()
+        assertTrue(vm.uiState.value.sendInFlight)
+
+        // Host reports failure quickly (the #872 path).
+        vm.restoreFailedSend(
+            PromptComposerViewModel.SendRequest(
+                text = "first attempt",
+                withEnter = false,
+                cleanDraft = "first attempt",
+            ),
+        )
+        assertFalse(vm.uiState.value.sendInFlight)
+        val bannerAfterFailure = vm.uiState.value.error
+        assertNotNull(bannerAfterFailure)
+
+        // Past the first send's would-be ceiling: the disarmed watchdog must NOT
+        // overwrite the current banner with the timeout message.
+        advanceTimeBy(PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS + 5_000L)
+        runCurrent()
+        assertEquals(bannerAfterFailure, vm.uiState.value.error)
+        assertFalse(vm.uiState.value.sendInFlight)
     }
 
     @Test

@@ -305,6 +305,21 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun markInFlightTargetsExactItemWithoutClaimingOlderQueuedRows() {
+        val store = store()
+        val older = store.enqueue("sessA", "older", createdAtMs = 1L)
+        val current = store.enqueue("sessA", "current", createdAtMs = 2L)
+
+        val marked = store.markInFlight(current.id)!!
+
+        assertEquals(current.id, marked.id)
+        assertEquals(OutboundState.InFlight, marked.state)
+        assertEquals(OutboundState.Queued, store.item(older.id)!!.state)
+        assertEquals(older.id, store.claimNext("sessA")!!.id)
+        assertNull(store.claimNext("sessA"))
+    }
+
+    @Test
     fun markUploadingIsAPersistedTransitionAndUploadingIsNotClaimable() {
         val store = store()
         val item = store.enqueue("sessA", "uploading first")

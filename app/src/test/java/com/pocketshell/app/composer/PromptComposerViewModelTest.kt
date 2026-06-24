@@ -3152,11 +3152,12 @@ class PromptComposerViewModelTest {
         assertEquals("%7", item.paneId)
         assertEquals(OutboundRoute.AgentPayload, item.route)
         assertEquals("codex", item.agentKind)
+        assertEquals(OutboundState.InFlight, item.state)
         assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
 
         vm.discardOutboundItem(queueId)
-        assertNull(queue.item(queueId))
-        assertTrue(vm.outboundQueueItems.value.isEmpty())
+        assertNotNull(queue.item(queueId))
+        assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
     }
 
     @Test
@@ -3206,6 +3207,10 @@ class PromptComposerViewModelTest {
         assertEquals("host send failed", failed.lastError)
         assertEquals(1, failed.attemptCount)
         assertEquals(listOf(failed.id), vm.outboundQueueItems.value.map { it.id })
+
+        vm.discardOutboundItem(failed.id)
+        assertNull(queue.item(failed.id))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
     }
 
     @Test

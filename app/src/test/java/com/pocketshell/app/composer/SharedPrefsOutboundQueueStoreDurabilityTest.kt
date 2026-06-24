@@ -74,6 +74,21 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
     }
 
     @Test
+    fun targetedMarkInFlightSurvivesRestartWithoutClaimingOlderRows() {
+        val first = newStore()
+        val older = first.enqueue("sessA", "older", createdAtMs = 1L)
+        val current = first.enqueue("sessA", "current", createdAtMs = 2L)
+
+        first.markInFlight(current.id)
+
+        val afterRestart = newStore()
+        assertEquals(OutboundState.Queued, afterRestart.item(older.id)!!.state)
+        assertEquals(OutboundState.InFlight, afterRestart.item(current.id)!!.state)
+        assertEquals(older.id, afterRestart.claimNext("sessA")!!.id)
+        assertNull(afterRestart.claimNext("sessA"))
+    }
+
+    @Test
     fun sendOnceContractHoldsOnSharedPrefsImpl() {
         val store = newStore()
         val item = store.enqueue("sessA", "once")

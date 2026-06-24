@@ -922,8 +922,9 @@ public class PromptComposerViewModel @Inject constructor(
             route = sendTarget.route,
             agentKind = sendTarget.agentKind,
         )
+        val activeItem = outboundQueueStore.markInFlight(item.id) ?: item
         refreshOutboundQueueItemsFor(sessionKey)
-        return item
+        return activeItem
     }
 
     /**

@@ -138,6 +138,14 @@ public interface OutboundQueueStore {
     public fun claimNext(sessionKey: String): OutboundItem?
 
     /**
+     * Mark the item with [id] [OutboundState.InFlight] for a send attempt that
+     * already knows its durable id. Unlike [claimNext], this does not pick the
+     * oldest queued row; it transitions exactly the row that the caller just
+     * enqueued. No-op for unknown, delivered, or failed rows.
+     */
+    public fun markInFlight(id: String): OutboundItem?
+
+    /**
      * Mark the item with [id] [OutboundState.Uploading] (attachment upload in
      * progress). No-op if the id is unknown. Returns the updated item or
      * `null`. Only an item currently `Queued` or `InFlight` is moved; a
@@ -330,6 +338,16 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         claimed
     }
 
+    override fun markInFlight(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
+            return existing
+        }
+        val updated = existing.copy(state = OutboundState.InFlight)
+        items[updated.id] = updated
+        updated
+    }
+
     override fun markUploading(id: String): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
@@ -399,6 +417,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun itemsFor(sessionKey: String): List<OutboundItem> = emptyList()
     override fun item(id: String): OutboundItem? = null
     override fun claimNext(sessionKey: String): OutboundItem? = null
+    override fun markInFlight(id: String): OutboundItem? = null
     override fun markUploading(id: String): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
@@ -525,6 +544,18 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         val claimed = next.copy(state = OutboundState.InFlight)
         replaceAndStore(sessionKey, list, claimed)
         claimed
+    }
+
+    override fun markInFlight(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
+            return existing
+        }
+        val updated = existing.copy(state = OutboundState.InFlight)
+        replaceAndStore(sessionKey, list, updated)
+        updated
     }
 
     override fun markUploading(id: String): OutboundItem? = synchronized(lock) {

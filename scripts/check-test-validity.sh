@@ -125,7 +125,6 @@ fi
 A5_BASELINE=(
   "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSheetImeReachabilityTest.kt"   # issue #615
   "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeLayoutRegressionTest.kt"    # issue #682
-  "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSlashAutocompleteImeTest.kt"   # issue #767
 )
 
 # --------------------------------------------------------------------------

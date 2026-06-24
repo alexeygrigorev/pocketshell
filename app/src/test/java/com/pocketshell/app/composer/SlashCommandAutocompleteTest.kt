@@ -15,8 +15,9 @@ import org.junit.Test
  * Issue #767: unit tests for the `/`-autocomplete trigger detection, catalog
  * filtering, and the reusable insert path (also #770). These are the pure
  * decisions behind the dropdown — the on-screen layout / keyboard-up reachability
- * is the emulator's job (see PromptComposerSlashAutocompleteImeTest), but the
- * open/closed/filter/insert behaviour is fully testable on the JVM here.
+ * is pinned by the synthetic-inset
+ * PromptComposerSlashDropdownImeContainmentProofTest, but the open/closed/filter/
+ * insert behaviour is fully testable on the JVM here.
  */
 class SlashCommandAutocompleteTest {
 

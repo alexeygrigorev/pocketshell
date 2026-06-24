@@ -679,6 +679,14 @@ JOURNEY_CLASSES=(
   # session (the reconnect/restart durability AC). It does NOT self-skip on CI.
   # Lives under com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.ManualKindWriterDockerTest"
+  # Issue #852 (epic #848): one gated recorded-kind read-back journey replacing
+  # the deleted broad agent-kind journeys. It launches Claude, Codex, and
+  # OpenCode through the production SshFolderListGateway.createSession path
+  # against the deterministic agents fixture, waits for the fixture wrapper to
+  # write host-side `@ps_agent_kind`, then re-reads through the production
+  # listSessionsWithFolder path and asserts recordedKind + rendered agentKind
+  # agree. No new Docker service/port; no self-skip.
+  "com.pocketshell.app.projects.AgentRecordedKindReadBackDockerTest"
   # ADDED (#889 reopen, D31/D32 G10): the FALSE z.ai chip on a session
   # relaunched as a DEFAULT Claude. End-to-end against the `agents` fixture
   # (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222, no new Docker service/port): a

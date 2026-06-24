@@ -359,6 +359,12 @@ fake1_has_fault_signal() {
   printf '%s' "$body" | grep -Eiqw \
     'nonZero|non-zero|degrade|garbage|hang|withTimeout|assumeNever|assertThrows|awaitCancellation|suspendForever|throws' \
     && return 0
+  # Tmux fake fault knobs: these explicitly make the fake hang or throw for a
+  # command prefix, but the generic word-boundary scan above does not match
+  # names such as `suspendForeverOnCommandPrefix`.
+  grep -Eq \
+    '(suspendForeverOnCommandPrefix|closeAndThrowOnCommandPrefix)[[:space:]]*=' <<< "$body" \
+    && return 0
   # Non-zero exit injected for the verb under test, or an explicit never-returns.
   printf '%s' "$body" | grep -Eiq \
     'getResult\s*=\s*ExecResult\([^)]*,[^)]*,\s*[1-9]|exitCode\s*=\s*[1-9]|ExecResult\([^)]*,[^)]*,\s*(1[0-9]+|[2-9])[[:space:]]*\)|never[ _-]?returns|delay\(Long\.MAX'

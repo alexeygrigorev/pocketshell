@@ -115,6 +115,25 @@ class FolderListViewModelPayloadVersionTest {
     }
 
     @Test
+    fun noPromptAndNoLoadingHang_whenTreeGetReturnsGarbageAndOmitsCliVersion() = runTest {
+        val session = TreePayloadSession(
+            cliVersion = null,
+            treeGetResult = ExecResult("not json at all", "", 0),
+        )
+        val vm = newViewModel(session, expectedVersion = "0.4.12")
+        bind(vm)
+        advanceUntilIdle()
+
+        assertNull(vm.cliVersionMismatch.value)
+        val state = vm.state.value
+        assertTrue(
+            "garbage tree get with omitted cli_version must fall through to the live reconcile, not hang in Loading; was $state",
+            state is FolderListUiState.Ready,
+        )
+        assertEquals(listOf("alpha"), (state as FolderListUiState.Ready).flatSessions.map { it.sessionName })
+    }
+
+    @Test
     fun dismiss_clearsPrompt() = runTest {
         val session = TreePayloadSession(cliVersion = "0.4.9")
         val vm = newViewModel(session, expectedVersion = "0.4.12")
@@ -158,7 +177,9 @@ class FolderListViewModelPayloadVersionTest {
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
-            treeRemoteSource = TreeRemoteSource(),
+            treeRemoteSource = TreeRemoteSource().apply {
+                remoteExecDispatcher = dispatcher
+            },
             expectedPocketshellVersionProvider = { expectedVersion },
             attachLifecycle = false,
         ).also {
@@ -181,14 +202,17 @@ class FolderListViewModelPayloadVersionTest {
      * [cliVersion] (or omit it when `null`, modelling an old CLI). Everything
      * else is benign — the gateway probe runs through the StubGateway.
      */
-    private class TreePayloadSession(private val cliVersion: String?) : SshSession {
+    private class TreePayloadSession(
+        private val cliVersion: String?,
+        private val treeGetResult: ExecResult? = null,
+    ) : SshSession {
         override val isConnected: Boolean = true
 
         override suspend fun exec(command: String): ExecResult {
             val versionField = cliVersion?.let { ",\"cli_version\":\"$it\"" } ?: ""
             return when {
                 command.contains("tree get") ->
-                    ExecResult("{\"nodes\":[],\"version\":0$versionField}", "", 0)
+                    treeGetResult ?: ExecResult("{\"nodes\":[],\"version\":0$versionField}", "", 0)
                 command.contains("tree reconcile") ->
                     ExecResult("{\"alive\":[],\"gone\":[],\"added\":[]$versionField}", "", 0)
                 else -> ExecResult("", "", 0)

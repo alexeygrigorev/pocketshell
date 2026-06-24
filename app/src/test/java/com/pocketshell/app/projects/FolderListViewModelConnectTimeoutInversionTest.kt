@@ -196,6 +196,40 @@ class FolderListViewModelConnectTimeoutInversionTest {
     }
 
     /**
+     * Guard signal for FAKE1: this file's connector is not always-answering.
+     * A genuine lease-acquire failure must travel through the production-shaped
+     * gateway as [FolderListResult.ConnectFailed] and resolve Loading to the
+     * retryable [FolderListUiState.ConnectError] panel.
+     */
+    @Test
+    fun connectAcquireFailureSurfacesConnectErrorInsteadOfLoading() = runTest {
+        val failure = IllegalStateException("connect acquire throws synthetic fault")
+        val connector = FailingLeaseConnector(failure)
+        val manager = newManager(connector)
+        val gateway = LeaseAcquiringGateway(manager, HOST)
+        val vm = newViewModel(gateway, manager)
+        try {
+            bind(vm)
+            advanceUntilIdle()
+            runCurrent()
+
+            val state = vm.state.value
+            assertTrue(
+                "a real connect failure must resolve Loading to ConnectError; was $state",
+                state is FolderListUiState.ConnectError,
+            )
+            assertEquals(failure, (state as FolderListUiState.ConnectError).cause)
+            assertEquals(
+                "bind-time warm acquire fails once, then the gateway acquire surfaces the honest error",
+                2,
+                connector.connectCount,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    /**
      * Class coverage for the explicit bootstrap-Skip scenario: the warm
      * `warm-host-connect` lease has been RELEASED (so [FolderListViewModel] holds
      * no warm lease and its bind-time warm job is no longer in flight), and a
@@ -399,6 +433,18 @@ class FolderListViewModelConnectTimeoutInversionTest {
             // a fresh live session so the re-opened journey gets a connected
             // transport (mirrors a real reconnect).
             return Result.success(if (attempt == 1) session else FakeSshSession())
+        }
+    }
+
+    private class FailingLeaseConnector(
+        private val failure: Throwable,
+    ) : SshLeaseConnector {
+        private val count = AtomicInteger(0)
+        val connectCount: Int get() = count.get()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            count.incrementAndGet()
+            return Result.failure(failure)
         }
     }
 

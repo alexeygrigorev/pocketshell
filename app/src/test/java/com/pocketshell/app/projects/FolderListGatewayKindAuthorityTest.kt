@@ -138,6 +138,35 @@ class FolderListGatewayKindAuthorityTest {
         )
     }
 
+    @Test
+    fun foreignSessionWithNonZeroDaemonGuessDegradesToProbing() = runTest {
+        // The connect-RPC fault case for the foreign-session kind path: the
+        // daemon/CLI is present in the flow but returns a failure exit.
+        val listSessions = "foreign${SEP}1${SEP}2${SEP}1${SEP}${SEP}${SEP}/work/foreign"
+        val listPanes =
+            "foreign${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/foreign${SEP}/dev/pts/3${SEP}node${SEP}@0${SEP}333"
+        val session = FakeSshSession(
+            enumerationStdout = "$listSessions\n$MARKER\n$listPanes",
+            agentsKindStdout = "tool missing",
+            agentsKindExitCode = 127,
+        )
+        val gateway = gateway(session)
+
+        val result = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
+
+        val rows = (result as FolderListResult.Sessions).rows
+        assertEquals(
+            "a failed daemon guess must not classify the foreign session as an agent",
+            SessionAgentKind.Probing,
+            rows.first { it.sessionName == "foreign" }.agentKind,
+        )
+        assertTrue(
+            "the foreign session must still attempt exactly one `agents kind` daemon guess; " +
+                "execs=${session.execCommands}",
+            session.execCommands.count { it.contains("agents kind") } == 1,
+        )
+    }
+
     private fun gateway(session: SshSession): SshFolderListGateway =
         SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
@@ -150,6 +179,7 @@ class FolderListGatewayKindAuthorityTest {
     private class FakeSshSession(
         private val enumerationStdout: String,
         private val agentsKindStdout: String = """{"results":[]}""",
+        private val agentsKindExitCode: Int = 0,
     ) : SshSession {
         val execCommands: MutableList<String> = mutableListOf()
 
@@ -162,7 +192,7 @@ class FolderListGatewayKindAuthorityTest {
                 command.contains("list-sessions") ->
                     ExecResult(enumerationStdout, "", 0)
                 command.contains("agents kind") ->
-                    ExecResult(agentsKindStdout, "", 0)
+                    ExecResult(agentsKindStdout, "", agentsKindExitCode)
                 // Port scan + anything else: empty success.
                 else -> ExecResult("", "", 0)
             }

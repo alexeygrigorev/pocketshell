@@ -46,6 +46,8 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.terminal.ui.openUrlWithFallback
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
@@ -205,7 +207,7 @@ fun PortForwardPanelScreen(
             )
 
             state.error?.let { error ->
-                ErrorBanner(error)
+                Banner(text = error, role = BannerRole.Error)
             }
 
             SectionHeader(label = "Ports", count = displayedTunnels.size)
@@ -589,27 +591,6 @@ private fun TextButtonBox(label: String, onClick: () -> Unit) {
             fontWeight = FontWeight.SemiBold,
         )
     }
-}
-
-@Composable
-private fun ErrorBanner(error: String) {
-    Text(
-        text = error,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
-            )
-            .background(PocketShellColors.Red.copy(alpha = 0.12f), PocketShellShapes.small)
-            .border(1.dp, PocketShellColors.Red.copy(alpha = 0.55f), PocketShellShapes.small)
-            .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
-            ),
-        color = PocketShellColors.Text,
-        style = PocketShellType.bodyDense,
-    )
 }
 
 @Composable

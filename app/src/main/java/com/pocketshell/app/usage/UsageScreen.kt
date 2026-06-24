@@ -33,6 +33,8 @@ import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -337,7 +339,6 @@ fun UsageWarningBanner(
 ) {
     val state = provider.thresholdState(warnPercent = warnPercent)
     if (!state.warrantsWarning) return
-    val color = thresholdAccentColor(state)
     val percent = provider.mostConstrainedWindow?.percent
     val headline = buildString {
         append(provider.displayName)
@@ -349,36 +350,39 @@ fun UsageWarningBanner(
         append(" — ")
         append(thresholdBannerSuffix(state))
     }
-    Row(
+    Banner(
+        text = headline,
+        role = thresholdBannerRole(state),
         modifier = modifier
-            .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-            .clickable(role = Role.Button, onClick = onTap)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
             .testTag(usageBannerTagFor(provider.provider)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ProviderDot(kind = dotKindForThreshold(state))
-        Spacer(modifier = Modifier.width(10.dp))
-        Text(
-            text = headline,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-            modifier = Modifier.testTag(usageBannerDismissTagFor(provider.provider)),
-        )
-    }
+        maxLines = 2,
+        onClick = onTap,
+        leadingContent = { ProviderDot(kind = dotKindForThreshold(state)) },
+        trailingContent = {
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(usageBannerDismissTagFor(provider.provider)),
+            )
+        },
+    )
+}
+
+/**
+ * Maps the warning-warranting threshold states onto the shared [BannerRole]
+ * vocabulary (#902): the amber "approaching" state is a [BannerRole.Warning],
+ * the red critical / exceeded states are a [BannerRole.Error]. Only states for
+ * which `warrantsWarning` is true ever reach this banner, so the `Ok` state is
+ * folded onto `Warning` defensively and never rendered.
+ */
+internal fun thresholdBannerRole(state: UsageThresholdState): BannerRole = when (state) {
+    UsageThresholdState.Approaching -> BannerRole.Warning
+    UsageThresholdState.Critical -> BannerRole.Error
+    UsageThresholdState.Exceeded -> BannerRole.Error
+    UsageThresholdState.Ok -> BannerRole.Warning
 }
 
 @Composable

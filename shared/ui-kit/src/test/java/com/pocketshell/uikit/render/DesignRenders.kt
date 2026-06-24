@@ -600,6 +600,25 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Small status dot mirroring the app's `ProviderDot` used in the Usage
+     * warning banner — amber for [BannerRole.Warning], red for [BannerRole.Error]
+     * — so the [bannerSlots] render reproduces the real Usage banner's leading
+     * indicator without depending on the app module.
+     */
+    @Composable
+    private fun BannerDot(role: BannerRole) {
+        val color = when (role) {
+            BannerRole.Error -> PocketShellColors.Red
+            else -> PocketShellColors.Amber
+        }
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color = color, shape = RoundedCornerShape(4.dp)),
+        )
+    }
+
     /** Small muted caption used to label each loading variant in [loadingIndicators]. */
     @Composable
     private fun LoadingLabel(text: String) {
@@ -3015,6 +3034,84 @@ class DesignRenders {
                 text = "Sends here route to the agent, not the shell.",
                 role = BannerRole.AgentHint,
                 leadingIcon = Icons.Filled.Info,
+            )
+        }
+    }
+
+    /**
+     * Issue #902 (banner consolidation): the [Banner] slot variants the six
+     * migrated screens (usage / port-forward / env / file-explorer /
+     * watched-folders / repo-browser) now compose, so the consolidation is
+     * render-pinned. Top to bottom, each reproduces a real migrated call site:
+     *
+     *  - Error + trailing `Dismiss` — RepoBrowser `ActionErrorBanner` /
+     *    PortForward error band (a destructive-tinted dismiss for repo errors).
+     *  - Info + trailing `Dismiss` — Env / WatchedFolders feedback banners
+     *    (the former neutral-surface callouts now carry the shared Info tint).
+     *  - Info + leading spinner (no dismiss) — FileExplorer `TransferBanner`
+     *    in-progress state.
+     *  - Warning + leading dot + trailing `Dismiss`, clickable, 2-line — Usage
+     *    `UsageWarningBanner` (the threshold-tinted, tappable warning).
+     *  - Error + leading dot — the Usage critical/exceeded threshold tint.
+     */
+    @Test
+    fun bannerSlots() = render("banner-slots") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Banner(
+                text = "Couldn't clone repository — gh exited 1.",
+                role = BannerRole.Error,
+                trailingContent = {
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = {},
+                        variant = ButtonVariant.Destructive,
+                        compact = true,
+                    )
+                },
+            )
+            Banner(
+                text = "Variable saved to the host environment.",
+                role = BannerRole.Info,
+                trailingContent = {
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = {},
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                    )
+                },
+            )
+            Banner(
+                text = "Uploading report.txt…",
+                role = BannerRole.Info,
+                leadingContent = { LoadingIndicator.Spinner(size = SpinnerSize.Small) },
+            )
+            Banner(
+                text = "Claude usage: 85% — approaching your limit. Tap for details.",
+                role = BannerRole.Warning,
+                maxLines = 2,
+                onClick = {},
+                leadingContent = { BannerDot(role = BannerRole.Warning) },
+                trailingContent = {
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = {},
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                    )
+                },
+            )
+            Banner(
+                text = "Codex usage: 100% — limit reached.",
+                role = BannerRole.Error,
+                maxLines = 2,
+                onClick = {},
+                leadingContent = { BannerDot(role = BannerRole.Error) },
             )
         }
     }

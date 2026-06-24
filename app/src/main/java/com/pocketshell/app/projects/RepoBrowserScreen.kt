@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
@@ -332,30 +334,20 @@ private fun RepoBrowserContent(
 
 @Composable
 private fun ActionErrorBanner(message: String, onDismiss: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .background(PocketShellColors.Red.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.Red.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-            .testTag(REPO_BROWSER_ACTION_ERROR_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = message,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            modifier = Modifier.weight(1f),
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Destructive,
-            compact = true,
-            modifier = Modifier.testTag(REPO_BROWSER_ACTION_ERROR_DISMISS_TAG),
-        )
-    }
+    Banner(
+        text = message,
+        role = BannerRole.Error,
+        modifier = Modifier.testTag(REPO_BROWSER_ACTION_ERROR_TAG),
+        trailingContent = {
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Destructive,
+                compact = true,
+                modifier = Modifier.testTag(REPO_BROWSER_ACTION_ERROR_DISMISS_TAG),
+            )
+        },
+    )
 }
 
 @Composable

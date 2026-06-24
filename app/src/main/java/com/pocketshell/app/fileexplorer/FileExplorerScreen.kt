@@ -44,6 +44,8 @@ import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.SortField
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
@@ -502,66 +504,55 @@ private fun TransferBanner(
     transfer: FileTransferState,
     onDismiss: () -> Unit,
 ) {
-    if (transfer is FileTransferState.Idle) return
-    val (text, role, showSpinner, dismissible) = when (transfer) {
-        is FileTransferState.InProgress ->
-            BannerSpec(
-                text = (if (transfer.isUpload) "Uploading " else "Downloading ") + transfer.name + "…",
-                role = BannerRole.Progress,
-                showSpinner = true,
-                dismissible = false,
-            )
-        is FileTransferState.Success ->
-            BannerSpec(transfer.message, BannerRole.Success, showSpinner = false, dismissible = true)
-        is FileTransferState.Failure ->
-            BannerSpec(transfer.message, BannerRole.Error, showSpinner = false, dismissible = true)
+    val text: String
+    val role: BannerRole
+    val showSpinner: Boolean
+    val dismissible: Boolean
+    when (transfer) {
+        is FileTransferState.InProgress -> {
+            text = (if (transfer.isUpload) "Uploading " else "Downloading ") + transfer.name + "…"
+            role = BannerRole.Info
+            showSpinner = true
+            dismissible = false
+        }
+        is FileTransferState.Success -> {
+            text = transfer.message
+            role = BannerRole.Info
+            showSpinner = false
+            dismissible = true
+        }
+        is FileTransferState.Failure -> {
+            text = transfer.message
+            role = BannerRole.Error
+            showSpinner = false
+            dismissible = true
+        }
         FileTransferState.Idle -> return
     }
-    val accent = when (role) {
-        BannerRole.Progress -> PocketShellColors.Accent
-        BannerRole.Success -> PocketShellColors.Accent
-        BannerRole.Error -> PocketShellColors.TextSecondary
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = PocketShellDensity.rowPadH, vertical = PocketShellSpacing.sm)
-            .testTag(FILE_EXPLORER_TRANSFER_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-    ) {
-        if (showSpinner) {
-            LoadingIndicator.Spinner(size = SpinnerSize.Small)
-        }
-        Text(
-            text = text,
-            color = accent,
-            style = PocketShellType.bodyDense,
-            modifier = Modifier.weight(1f),
-        )
-        if (dismissible) {
-            PocketShellButton(
-                onClick = onDismiss,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(FILE_EXPLORER_TRANSFER_DISMISS_TAG),
-            ) {
-                Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
+    Banner(
+        text = text,
+        role = role,
+        modifier = Modifier.testTag(FILE_EXPLORER_TRANSFER_TAG),
+        leadingContent = if (showSpinner) {
+            { LoadingIndicator.Spinner(size = SpinnerSize.Small) }
+        } else {
+            null
+        },
+        trailingContent = if (dismissible) {
+            {
+                PocketShellButton(
+                    text = "Dismiss",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(FILE_EXPLORER_TRANSFER_DISMISS_TAG),
+                )
             }
-        }
-    }
+        } else {
+            null
+        },
+    )
 }
-
-private enum class BannerRole { Progress, Success, Error }
-
-private data class BannerSpec(
-    val text: String,
-    val role: BannerRole,
-    val showSpinner: Boolean,
-    val dismissible: Boolean,
-)
 
 @Composable
 private fun ReadyPanel(

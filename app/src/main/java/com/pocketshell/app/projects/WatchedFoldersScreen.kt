@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -507,36 +509,21 @@ private fun DiscoveryPanel(
 
 @Composable
 private fun FeedbackBanner(message: String, onDismiss: () -> Unit) {
-    Row(
+    Banner(
+        text = message,
+        role = BannerRole.Info,
         modifier = Modifier
-            .fillMaxWidth()
             .padding(horizontal = 12.dp)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(8.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(8.dp),
-            )
-            .padding(horizontal = 12.dp, vertical = 8.dp)
             .testTag(WATCHED_FOLDERS_FEEDBACK_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = message,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            modifier = Modifier.weight(1f),
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
-    }
+        trailingContent = {
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+    )
 }
 
 // Test tags for the connected E2E + unit tests.

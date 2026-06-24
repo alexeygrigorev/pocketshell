@@ -46,6 +46,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -197,27 +199,19 @@ private fun EnvAppBar(folderLabel: String, hostName: String, onBack: () -> Unit)
 
 @Composable
 private fun EnvBanner(message: String, onDismiss: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-            .testTag(ENV_BANNER_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = message,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            modifier = Modifier.weight(1f),
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
-    }
+    Banner(
+        text = message,
+        role = BannerRole.Info,
+        modifier = Modifier.testTag(ENV_BANNER_TAG),
+        trailingContent = {
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+    )
 }
 
 @Composable

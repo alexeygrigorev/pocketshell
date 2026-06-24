@@ -2,8 +2,10 @@ package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -14,7 +16,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -63,8 +67,13 @@ enum class BannerRole {
  *   foreground (text + icon + border) is the role colour, the fill is its
  *   12%-alpha tint (the same `rgba(..., 0.12)` recipe the chips/badges use).
  *
- * Decorative + label only (no `onClick`) — a banner states context; any action
- * lives in a row, button, or kebab beside it, not on the banner surface.
+ * States context; an *optional* action lives in the [trailingContent] slot (a
+ * compact `Dismiss` / `Retry` text button), a leading spinner/dot in
+ * [leadingContent], and the whole surface can be made tappable via [onClick].
+ * When [trailingContent] is present the message text takes the remaining width
+ * (weight) and ellipsises after [maxLines] so the action never gets pushed off
+ * the row (the #902 banner-consolidation contract). With none of those set the
+ * banner is the original decorative + label callout.
  */
 @Composable
 fun Banner(
@@ -72,6 +81,10 @@ fun Banner(
     role: BannerRole,
     modifier: Modifier = Modifier,
     leadingIcon: ImageVector? = null,
+    maxLines: Int = Int.MAX_VALUE,
+    onClick: (() -> Unit)? = null,
+    leadingContent: (@Composable () -> Unit)? = null,
+    trailingContent: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val semantic = LocalPocketShellSemantic.current
     val foreground: Color = when (role) {
@@ -82,17 +95,23 @@ fun Banner(
     }
     val fill: Color = foreground.copy(alpha = 0.12f)
 
+    val surface = modifier
+        .fillMaxWidth()
+        .background(color = fill, shape = PocketShellShapes.medium)
+        .border(width = 1.dp, color = foreground, shape = PocketShellShapes.medium)
+        .let { base ->
+            if (onClick != null) base.clickable(role = Role.Button, onClick = onClick) else base
+        }
+        .padding(PocketShellSpacing.md)
+
     Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(color = fill, shape = PocketShellShapes.medium)
-            .border(width = 1.dp, color = foreground, shape = PocketShellShapes.medium)
-            .padding(PocketShellSpacing.md),
+        modifier = surface,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
-        if (leadingIcon != null) {
-            Icon(
+        when {
+            leadingContent != null -> leadingContent()
+            leadingIcon != null -> Icon(
                 imageVector = leadingIcon,
                 contentDescription = null,
                 tint = foreground,
@@ -104,6 +123,12 @@ fun Banner(
             color = foreground,
             style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = if (trailingContent != null) Modifier.weight(1f) else Modifier,
         )
+        if (trailingContent != null) {
+            trailingContent()
+        }
     }
 }

@@ -1580,26 +1580,6 @@ public fun TmuxSessionScreen(
                 presumedAgent &&
                 visibleConversation?.detection == null &&
                 visibleConversation?.selectedTab == SessionTab.Conversation
-            // Issue #805 (regression of #744/#716): whether the user is parked on
-            // the Conversation TAB at all — true for BOTH the loaded transcript
-            // ([showConversation]) AND the detection-uncertainty "Loading
-            // conversation…" placeholder ([showConversationPlaceholder]). The
-            // bottom controls must use THIS, not the detection-gated
-            // [showConversation], to decide their chrome. On v0.4.7 the bottom bar
-            // keyed its Conversation chrome off `showConversation` alone, so during
-            // agent-engine detection (`detection == null`, placeholder shown) it
-            // wrongly rendered the THREE Terminal-tab chips (`Enter` /
-            // `show keyboard` / `hotkeys`) into the bottom row. That overflowed the
-            // primary cluster and pushed the composer launcher off the right edge —
-            // the "composer absent while the agent is being detected" symptom. The
-            // composer must stay reachable throughout the detection window (#744
-            // invariant), so the conversation chrome (which drops those Terminal
-            // chips so the launcher fits) is active for the whole Conversation tab,
-            // detected or not.
-            val onConversationTab = tmuxSessionBottomControlsShowsConversation(
-                showConversationTranscript = showConversation,
-                showConversationDetectingPlaceholder = showConversationPlaceholder,
-            )
             // Issue #605: hold the heavyweight terminal AndroidView re-attach
             // for exactly one frame on the Conversation → Terminal edge so the
             // leaving conversation pane's selection-toolbar/focus teardown
@@ -2034,16 +2014,10 @@ public fun TmuxSessionScreen(
                 // lives in the composer (or here). The terminal hotkeys are in
                 // the dedicated [TerminalHotkeysSheet] panel, opened from this
                 // surface's hotkeys launcher (`onShowHotkeysTap`).
-                TmuxTerminalBottomControls(
+                TmuxSessionBottomControlsCallSite(
                     isImeVisible = isImeVisible,
-                    // Issue #805: the bottom-bar chrome follows the Conversation
-                    // TAB, not the detection-gated transcript. During agent-engine
-                    // detection (`showConversation == false`, placeholder shown)
-                    // this keeps the Conversation chrome — dropping the Terminal
-                    // chips that would otherwise overflow the row and push the
-                    // composer launcher off-screen. Restores the #744 invariant:
-                    // the composer stays reachable while detection is uncertain.
-                    showConversation = onConversationTab,
+                    showConversationTranscript = showConversation,
+                    showConversationDetectingPlaceholder = showConversationPlaceholder,
                     sessionLive = controlsInputEnabled,
                     isAgentPane = isAgentPane,
                     onChipTap = { chip ->
@@ -6383,6 +6357,45 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
  * so re-opening the composer shows them again. The session/terminal bottom
  * area never surfaces an attachment chip/grid.
  */
+@Composable
+internal fun TmuxSessionBottomControlsCallSite(
+    isImeVisible: Boolean,
+    showConversationTranscript: Boolean,
+    showConversationDetectingPlaceholder: Boolean,
+    sessionLive: Boolean,
+    isAgentPane: Boolean,
+    onChipTap: (String) -> Unit,
+    onDictateTap: (() -> Unit)?,
+    onEnterTap: (() -> Unit)?,
+    onShowKeyboardTap: (() -> Unit)?,
+    onAddSnippetTap: (() -> Unit)?,
+    onShowHotkeysTap: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    // Issue #805 (regression of #744/#716): bottom-bar chrome follows the
+    // Conversation TAB, not only the detection-gated transcript. During
+    // agent-engine detection the transcript is absent but the placeholder is
+    // shown, so this must still drop the Terminal chips that can push the
+    // composer launcher off-screen.
+    val onConversationTab = tmuxSessionBottomControlsShowsConversation(
+        showConversationTranscript = showConversationTranscript,
+        showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
+    )
+    TmuxTerminalBottomControls(
+        isImeVisible = isImeVisible,
+        showConversation = onConversationTab,
+        sessionLive = sessionLive,
+        isAgentPane = isAgentPane,
+        onChipTap = onChipTap,
+        onDictateTap = onDictateTap,
+        onEnterTap = onEnterTap,
+        onShowKeyboardTap = onShowKeyboardTap,
+        onAddSnippetTap = onAddSnippetTap,
+        onShowHotkeysTap = onShowHotkeysTap,
+        modifier = modifier,
+    )
+}
+
 @Composable
 internal fun TmuxTerminalBottomControls(
     isImeVisible: Boolean,

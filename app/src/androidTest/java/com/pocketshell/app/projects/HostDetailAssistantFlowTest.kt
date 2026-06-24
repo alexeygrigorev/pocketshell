@@ -185,7 +185,7 @@ class HostDetailAssistantFlowTest {
                     keyPath = "/tmp/issue334",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onOpenWorkspaceSettings = {},

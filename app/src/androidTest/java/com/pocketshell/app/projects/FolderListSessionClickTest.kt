@@ -98,7 +98,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue618",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },
@@ -159,7 +159,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue171",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { name, start ->
+                    onOpenSession = { name, start, _, _ ->
                         clickedSession = name
                         clickedStart = start
                     },
@@ -223,7 +223,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue171",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { root -> cloneRoot = root },
                     onEditEnv = { _, _, _ -> },
@@ -339,7 +339,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue419",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },
@@ -447,7 +447,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue675",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },
@@ -548,7 +548,7 @@ class FolderListSessionClickTest {
                     keyPath = "/tmp/issue171",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },

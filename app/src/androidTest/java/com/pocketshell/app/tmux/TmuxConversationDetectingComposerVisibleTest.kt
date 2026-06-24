@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -77,12 +79,15 @@ class TmuxConversationDetectingComposerVisibleTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /**
-     * Renders the production bottom controls the way [TmuxSessionScreen] wires
-     * them on a presumed-agent Conversation tab, keyboard down, pinned to a
-     * fixed Pixel-7 width. [showConversation] is the only knob the screen's
-     * #805 fix changes for the detecting state.
+     * Renders the production bottom-control call site the way [TmuxSessionScreen]
+     * wires it on a presumed-agent Conversation tab, keyboard down, pinned to a
+     * fixed Pixel-7 width. The transcript/placeholder booleans are the raw screen
+     * inputs whose #805 derivation issue #808 exists to guard.
      */
-    private fun renderBottomControls(showConversation: Boolean) {
+    private fun renderBottomControls(
+        showConversationTranscript: Boolean,
+        showConversationDetectingPlaceholder: Boolean,
+    ) {
         compose.setContent {
             PocketShellTheme {
                 Box(
@@ -101,10 +106,11 @@ class TmuxConversationDetectingComposerVisibleTest {
                             .width(PIXEL_7_WIDTH_DP.dp)
                             .testTag(BAND_TAG),
                     ) {
-                        TmuxTerminalBottomControls(
+                        TmuxSessionBottomControlsCallSite(
                             // Keyboard down — the maintainer's exact reported state.
                             isImeVisible = false,
-                            showConversation = showConversation,
+                            showConversationTranscript = showConversationTranscript,
+                            showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
                             sessionLive = true,
                             // Presumed-agent during detection (#716).
                             isAgentPane = true,
@@ -153,19 +159,24 @@ class TmuxConversationDetectingComposerVisibleTest {
 
     @Test
     fun composerLauncherStaysOnScreenWhileDetectingAgentEngine() {
-        // The screen's #805 fix: the detecting-state conversation chrome is
-        // active, so the Terminal chips are dropped and the launcher fits.
-        val showConversation = tmuxSessionBottomControlsShowsConversation(
+        // The screen's #805 fix: the production call site maps the detecting
+        // placeholder to Conversation chrome, so the Terminal chips are dropped
+        // and the launcher fits. Reverting the call site to use only
+        // `showConversationTranscript` turns this test red.
+        renderBottomControls(
             showConversationTranscript = false,
             showConversationDetectingPlaceholder = true,
         )
-        renderBottomControls(showConversation = showConversation)
         // The fix DROPS the three Terminal-tab chips during detection — this is
         // the width-independent mechanism that stops the row overflowing and
         // pushing the launcher off-screen on a narrow (Pixel-7) device.
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
         compose.onNodeWithTag(HOTKEYS_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertExists()
+            .assertHasClickAction()
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
         assertLauncherWithinBand()
         // Visual evidence for the issue: the fixed detecting-state bottom band
         // with the composer launcher present (the affordance that was absent on
@@ -177,11 +188,10 @@ class TmuxConversationDetectingComposerVisibleTest {
     fun composerLauncherStaysOnScreenOnceTranscriptLoaded() {
         // The loaded-transcript Conversation state (already worked pre-#805):
         // assert the fix does not regress it.
-        val showConversation = tmuxSessionBottomControlsShowsConversation(
+        renderBottomControls(
             showConversationTranscript = true,
             showConversationDetectingPlaceholder = false,
         )
-        renderBottomControls(showConversation = showConversation)
         assertLauncherWithinBand()
     }
 
@@ -197,7 +207,10 @@ class TmuxConversationDetectingComposerVisibleTest {
         // (see [composerLauncherStaysOnScreenWhileDetectingAgentEngine], which
         // asserts these same chips are GONE). Proves the fix is not vacuous: the
         // chips it removes are genuinely present in the pre-fix chrome.
-        renderBottomControls(showConversation = false)
+        renderBottomControls(
+            showConversationTranscript = false,
+            showConversationDetectingPlaceholder = false,
+        )
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertExists()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertExists()
         compose.onNodeWithTag(HOTKEYS_CHIP_TAG).assertExists()

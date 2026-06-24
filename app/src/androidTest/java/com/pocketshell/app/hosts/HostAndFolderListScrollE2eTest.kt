@@ -236,7 +236,7 @@ class FolderListScrollE2eTest {
                     keyPath = "/tmp/issue274",
                     passphrase = null,
                     onBack = {},
-                    onOpenSession = { _, _ -> },
+                    onOpenSession = { _, _, _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },

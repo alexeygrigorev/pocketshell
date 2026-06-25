@@ -2046,6 +2046,70 @@ public class TmuxSessionViewModel @Inject constructor(
             bridgeExceptionHandler,
     )
 
+    // Issue #935 R1 (#928 D2): crash-containment for the bare
+    // `viewModelScope.launch {}` TEARDOWN/CLOSE/DETACH/RECOVERY sites.
+    //
+    // The #896 [bridgeExceptionHandler] net above is SCOPE-LOCAL — only
+    // `bridgeScope.launch {}` (and child scopes derived from its context, e.g.
+    // the layout coalescer) inherit it, plus two hand-retrofitted
+    // `viewModelScope.launch(bridgeExceptionHandler)` sites (the grace and
+    // auto-reconnect launches). But ~20 bare `viewModelScope.launch {}` sites do
+    // NOT inherit it. The teardown/close/detach/recovery ones
+    // (`closeCurrentConnectionAndJoin`, `closeCachedRuntime`, `detachCleanly`,
+    // recovery re-`connect()`) issue SSH/tmux IO against a transport the close is
+    // racing to tear down — the exact `SshException`/`TransportException`/
+    // `EOFException` family the captured June-8 crash specimens come from. Today
+    // those bodies are guarded by inner `runCatching`, so coverage is
+    // BY-CONVENTION: a single unguarded throw (a future edit, a `cancelAndJoin`
+    // rethrowing a non-cancellation completion cause, a path not yet wrapped)
+    // propagates to `viewModelScope` (NO handler) →
+    // `Thread.defaultUncaughtExceptionHandler` → PROCESS DEATH (the "always
+    // restarting / it zoomed out then started over" class).
+    //
+    // [launchContainedTeardown] makes the containment BY-CONSTRUCTION: it routes
+    // the teardown launch's context through the SAME [bridgeExceptionHandler], so
+    // an uncaught throw is contained + diagnostically logged (DiagnosticEvents +
+    // a non-fatal CrashReporter record — the swallowed throw stays VISIBLE)
+    // instead of killing the process.
+    //
+    // ANTI-MASKING (the #896/#895 invariant, mirrored from the KDoc at the
+    // `bridgeExceptionHandler` above): this does NOT and CANNOT eat a genuine
+    // transport DROP that must drive reconnect. A real `-CC` drop arrives as a
+    // normal `client.disconnected` EMISSION on a latched StateFlow →
+    // handlePassiveClientDisconnect → reduceConnection(TransportDropped), which
+    // surfaces the escapable Reconnecting/Reconnect band. A
+    // CoroutineExceptionHandler is only ever invoked for an UNCAUGHT THROW; it is
+    // never on the path of a normal flow emission, so the drop→band routing is
+    // preserved by construction. The handler's sole job is to stop a
+    // teardown-time throw from killing the process — not to suppress lifecycle
+    // signals.
+    private fun launchContainedTeardown(
+        block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit,
+    ): Job =
+        viewModelScope.launch(bridgeExceptionHandler) {
+            // Issue #935 R1 (#780 synthetic-injection model): when a test arms
+            // [teardownLaunchFailureForTest], throw at the body boundary so the
+            // reproduction deterministically exercises an UNCAUGHT throw escaping
+            // a bare teardown launch. Null (production) → no-op. This is the seam
+            // that proves the containment is wired: WITHOUT the handler the throw
+            // reaches the thread's uncaught handler (process death); WITH it the
+            // throw lands in [bridgeExceptionHandler] and is recorded non-fatal.
+            teardownLaunchFailureForTest?.let { throw it }
+            block()
+        }
+
+    /**
+     * Test-only synthetic-failure seam (issue #935 R1, #780 model). When set,
+     * every [launchContainedTeardown] body throws this at its boundary, so a
+     * unit test can prove a bare teardown/close/detach/recovery launch's uncaught
+     * throw is CONTAINED by the scope-level net (lands in
+     * [bridgeCoroutineFailureProbe]) instead of reaching the thread's
+     * uncaught-exception handler (= process death on device). Null in production.
+     */
+    @get:androidx.annotation.VisibleForTesting
+    @set:androidx.annotation.VisibleForTesting
+    internal var teardownLaunchFailureForTest: Throwable? = null
+
     // Reuse pane rows across reconciles so the attached TerminalSurfaceState
     // (and its emulator scrollback) survives layout-change events. Keyed by
     // pane ID; entries are removed when tmux drops the pane.
@@ -3074,7 +3138,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun launchBackgroundDetachTeardown() {
         if (backgroundDetachJob?.isActive == true) return
         val preserveConnectingTarget = pendingBackgroundDetachPreserveTarget
-        val detachJob = viewModelScope.launch {
+        // Issue #935 R1: contained — the background detach issues `detach-client`
+        // + lease release against a transport the close is racing to tear down.
+        val detachJob = launchContainedTeardown {
             // NonCancellable so a fresh lifecycle transition (e.g.
             // rapid foreground/background) cannot interrupt the detach
             // mid-write — the screen still needs the clean teardown to
@@ -3291,8 +3357,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
         connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
-        viewModelScope.launch {
-            if (client.disconnected.value) return@launch
+        // Issue #935 R1: contained — a within-grace reattach reseed runs
+        // `capture-pane` IO against a warm client that may be racing teardown.
+        launchContainedTeardown {
+            if (client.disconnected.value) return@launchContainedTeardown
             val guard = RuntimeRefreshGuard(
                 generation = connectGeneration,
                 target = target,
@@ -3368,8 +3436,10 @@ public class TmuxSessionViewModel @Inject constructor(
             "generation" to connectGeneration,
             "clientHash" to System.identityHashCode(client),
         )
-        viewModelScope.launch {
-            if (client.disconnected.value) return@launch
+        // Issue #935 R1: contained — the manual redraw reseeds via `capture-pane`
+        // IO against the warm client; a teardown race here must not crash.
+        launchContainedTeardown {
+            if (client.disconnected.value) return@launchContainedTeardown
             val guard = RuntimeRefreshGuard(
                 generation = connectGeneration,
                 target = target,
@@ -3519,7 +3589,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // header indicator never shows Reconnecting/Disconnected during the heal.
         connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
-        viewModelScope.launch {
+        // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
+        // over a fresh lease; a teardown-race throw must not crash the process.
+        launchContainedTeardown {
             // Re-open a fresh `-CC` control client over a freshly-acquired lease and
             // reseed — SILENTLY (the primitive never raises the Connecting overlay or a
             // band; on success it sets [ConnectionStatus.Live] and reseeds every visible
@@ -3554,14 +3626,16 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun replayPendingReattach() {
         val detachJob = backgroundDetachJob
-        viewModelScope.launch {
+        // Issue #935 R1: contained — replay joins the in-flight detach teardown
+        // and then re-connects; a throw on that lifecycle path must not crash.
+        launchContainedTeardown {
             // If the user backgrounds and immediately foregrounds the
             // app, the lifecycle detach may still be inside
             // closeCurrentConnectionAndJoin(). Waiting here prevents a
             // reattach from being consumed by connect()'s still-connected
             // early return before teardown clears activeTarget/clientRef.
             detachJob?.join()
-            val pending = pendingReattach ?: return@launch
+            val pending = pendingReattach ?: return@launchContainedTeardown
             val target = pending.target
             val currentIntent = latestConnectIntent
             if (
@@ -3580,7 +3654,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         "intendedTrigger=${currentIntent.trigger.logValue} " +
                         "detachedHostId=${target.hostId} intendedHostId=${currentIntent.target.hostId}",
                 )
-                return@launch
+                return@launchContainedTeardown
             }
             pendingReattach = null
             Log.i(
@@ -3723,7 +3797,10 @@ public class TmuxSessionViewModel @Inject constructor(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
         )
-        viewModelScope.launch {
+        // Issue #935 R1: contained — the manual detach runs the full
+        // close-cascade (`detach-client` + lease release + cache eviction) IO
+        // against a transport racing to tear down; a throw must not crash.
+        launchContainedTeardown {
             withContext(NonCancellable) {
                 closeCurrentConnectionAndJoin()
             }
@@ -4330,7 +4407,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=disconnected",
             )
-            viewModelScope.launch {
+            // Issue #935 R1: contained — closing a stale cached runtime issues
+            // `detach-client`/close IO against a dead transport.
+            launchContainedTeardown {
                 cached.closeCachedRuntime()
             }
             return null
@@ -4358,7 +4437,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 detail = "source=runtime_cache reason=health_probe_failed",
             )
             runCatching { cached.client.close() }
-            viewModelScope.launch {
+            // Issue #935 R1: contained — closing the unhealthy cached runtime +
+            // disconnecting its lease is teardown IO against a dead transport.
+            launchContainedTeardown {
                 cached.closeCachedRuntime()
                 cached.lease?.key?.let { key ->
                     runCatching { sshLeaseManager.disconnect(key) }
@@ -4598,7 +4679,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
-        viewModelScope.launch {
+        // Issue #935 R1: contained — async eviction of deactivated cached
+        // runtimes is teardown IO that may race the transport drop.
+        launchContainedTeardown {
             runtimes.forEach { runtime ->
                 runtime.closeCachedRuntime()
             }
@@ -5818,7 +5901,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // so the recovery's [connect] does not block joining itself.
             val recoverTarget = target
             connectJob = null
-            viewModelScope.launch {
+            // Issue #935 R1: contained — the post-EOF recovery re-dial is a
+            // top-level re-`connect()` on the close/recovery cascade; an uncaught
+            // throw while the prior connect unwinds must not crash the process.
+            launchContainedTeardown {
                 connect(
                     hostId = recoverTarget.hostId,
                     hostName = recoverTarget.hostName,
@@ -14009,8 +14095,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val previousClient = clientRef
         clientRef = null
         orphanDetachJob?.cancel()
+        // Issue #935 R1: contained — the orphan detach runs `detachCleanly()` IO
+        // against the LEAVING client (a transport mid-teardown during the switch).
         orphanDetachJob = previousClient?.let { client ->
-            viewModelScope.launch {
+            launchContainedTeardown {
                 withContext(NonCancellable) {
                     runCatching { client.detachCleanly() }
                 }

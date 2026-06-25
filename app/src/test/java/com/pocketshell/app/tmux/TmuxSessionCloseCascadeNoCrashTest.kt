@@ -27,6 +27,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -393,6 +394,178 @@ class TmuxSessionCloseCascadeNoCrashTest {
         advanceUntilIdle()
 
         assertCaughtBySafetyNetNotThread(caught)
+    }
+
+    // =====================================================================
+    // Issue #935 R1 (#928 D2) — the BARE `viewModelScope.launch {}` TEARDOWN
+    // sites. The cases above (a–f) drive the `bridgeScope` collector cascade
+    // (the #896 fix). But the #896 [bridgeExceptionHandler] net is SCOPE-LOCAL
+    // to `bridgeScope` — the ~11 bare `viewModelScope.launch {}` teardown /
+    // close / detach / recovery sites in the VM do NOT inherit it. A single
+    // unguarded throw escaping one of THOSE launches propagates to
+    // `viewModelScope` (NO handler) → the thread's uncaught-exception handler
+    // → PROCESS DEATH (the "constantly restarting" class, #928 D2).
+    //
+    // [TmuxSessionViewModel.teardownLaunchFailureForTest] is the #780 synthetic
+    // seam: when armed, every [launchContainedTeardown] body throws it at the
+    // body boundary, so we drive a REAL teardown entry point
+    // ([detachAndExit] / [onAppBackgrounded]) and prove the throw escaping that
+    // bare launch is CONTAINED by the scope-level net (lands in
+    // [bridgeCoroutineFailureProbe]) instead of reaching the thread handler.
+    //
+    // RED on base: revert the `launchContainedTeardown` wiring (route these
+    // sites back through bare `viewModelScope.launch {}`) and every case below
+    // trips `uncaughtOnThread` = process death. GREEN with the fix: the throw
+    // lands in the VM's scope-level handler; the thread handler is never hit.
+    // =====================================================================
+
+    /**
+     * Drive a teardown entry point with the synthetic seam armed so the bare
+     * teardown launch's body throws [theBoom]; advance the virtual clock so the
+     * launch runs; then assert the throw was netted by the scope-level handler
+     * and NEVER reached the thread's uncaught handler.
+     */
+    private fun TestScope.assertTeardownLaunchThrowIsContained(
+        vm: TmuxSessionViewModel,
+        caught: AtomicReference<Throwable?>,
+        drive: () -> Unit,
+    ) {
+        vm.teardownLaunchFailureForTest = theBoom
+        drive()
+        advanceUntilIdle()
+        assertCaughtBySafetyNetNotThread(caught)
+    }
+
+    // ------------------------------------------ teardown case (g): manual detach
+    @Test
+    fun manualDetachTeardownLaunchThrowDoesNotCrash() = runTest(scheduler) {
+        // `detachAndExit()` (the kebab "Detach" action) runs the full
+        // close-cascade (`detach-client` + lease release + cache eviction) in a
+        // bare teardown launch against a transport racing to tear down. An
+        // unguarded throw there is the on-device "Detach → app restarts" class.
+        val caught = AtomicReference<Throwable?>(null)
+        val vm = newVm()
+        vm.bridgeCoroutineFailureProbe = { caught.set(it) }
+        val client = FakeTmuxClient()
+        attach(vm, client, sessionName = "doomed")
+        runCurrent()
+
+        assertTeardownLaunchThrowIsContained(vm, caught) { vm.detachAndExit() }
+    }
+
+    // -------------------------------------- teardown case (h): background detach
+    @Test
+    fun backgroundDetachTeardownLaunchThrowDoesNotCrash() = runTest(scheduler) {
+        // `onAppBackgrounded()` → the clean background detach teardown
+        // (`launchBackgroundDetachTeardown`) issues `detach-client` + lease
+        // release while the app leaves the foreground. A throw on that bare
+        // lifecycle launch must be contained, not crash the process while the
+        // user is on the home screen.
+        val caught = AtomicReference<Throwable?>(null)
+        val vm = newVm()
+        vm.bridgeCoroutineFailureProbe = { caught.set(it) }
+        val client = FakeTmuxClient()
+        attach(vm, client, sessionName = "bg")
+        runCurrent()
+
+        assertTeardownLaunchThrowIsContained(vm, caught) { vm.onAppBackgrounded() }
+    }
+
+    // ----------------------- teardown case (i): manual detach on an AGENT pane
+    @Test
+    fun agentPaneManualDetachTeardownLaunchThrowDoesNotCrash() = runTest(scheduler) {
+        // Class coverage (G2): the higher-risk agent variant — an agent
+        // conversation is bound on the pane (extra agent tail/detection state on
+        // the same scope) when the bare teardown launch throws. The June-8 #896
+        // specimen was an agent tail read; this proves the teardown-launch net
+        // covers the agent pane too, not only a plain shell pane.
+        val caught = AtomicReference<Throwable?>(null)
+        val vm = newVm()
+        vm.bridgeCoroutineFailureProbe = { caught.set(it) }
+        val client = FakeTmuxClient()
+        attach(vm, client)
+        runCurrent()
+        vm.appendAgentEventsForTest(
+            paneId = "%1",
+            events = listOf(
+                com.pocketshell.core.agents.ConversationEvent.Message(
+                    id = "e1",
+                    agent = AgentKind.ClaudeCode,
+                    role = com.pocketshell.core.agents.ConversationRole.User,
+                    text = "hi",
+                ),
+            ),
+        )
+        runCurrent()
+
+        assertTeardownLaunchThrowIsContained(vm, caught) { vm.detachAndExit() }
+    }
+
+    // --------- teardown case (j): a NON-Ssh throw (broaden the contained class)
+    @Test
+    fun manualDetachTeardownLaunchNonSshThrowDoesNotCrash() = runTest(scheduler) {
+        // The teardown net must contain ANY unexpected throw, not just the
+        // captured `SshException` specimen — a future edit on the close cascade
+        // could raise an `IllegalStateException`, an `EOFException`, etc. This
+        // arms a non-Ssh boom and asserts it is contained by the same net (and
+        // observed verbatim), so the containment is by-class, not by-type.
+        val caught = AtomicReference<Throwable?>(null)
+        val vm = newVm()
+        vm.bridgeCoroutineFailureProbe = { caught.set(it) }
+        val client = FakeTmuxClient()
+        attach(vm, client, sessionName = "doomed")
+        runCurrent()
+
+        val nonSshBoom = IllegalStateException("teardown invariant violated")
+        vm.teardownLaunchFailureForTest = nonSshBoom
+        vm.detachAndExit()
+        advanceUntilIdle()
+        assertNull(
+            "PROCESS-DEATH: a non-Ssh teardown-launch throw reached the thread's " +
+                "uncaught-exception handler (= app crash on device, #935 R1). " +
+                "The VM scope-level net must contain ANY unexpected throw.",
+            uncaughtOnThread.get(),
+        )
+        assertEquals(
+            "the non-Ssh teardown throw must be observed verbatim by the net",
+            nonSshBoom,
+            caught.get(),
+        )
+    }
+
+    // -------------- teardown anti-masking: a CancellationException is re-thrown
+    @Test
+    fun teardownLaunchCancellationIsNotMaskedByTheNet() = runTest(scheduler) {
+        // The net must NOT eat a CancellationException — that is normal
+        // cooperative cancellation (a fresh lifecycle transition cancelling an
+        // in-flight teardown), and kotlinx.coroutines never routes it to a
+        // CoroutineExceptionHandler. If the net ever recorded a cancellation as
+        // a "swallowed teardown-race throw", it would both pollute diagnostics
+        // and risk masking a real cancel signal. This proves the
+        // [bridgeExceptionHandler]'s `if (throwable is CancellationException)
+        // throw throwable` guard holds for the teardown launches too: the net
+        // (bridgeCoroutineFailureProbe) NEVER fires for a cancellation, and the
+        // process is never crashed.
+        val caught = AtomicReference<Throwable?>(null)
+        val vm = newVm()
+        vm.bridgeCoroutineFailureProbe = { caught.set(it) }
+        val client = FakeTmuxClient()
+        attach(vm, client, sessionName = "doomed")
+        runCurrent()
+
+        vm.teardownLaunchFailureForTest =
+            kotlinx.coroutines.CancellationException("teardown superseded")
+        vm.detachAndExit()
+        advanceUntilIdle()
+        assertNull(
+            "a CancellationException is normal cancellation — the safety net must " +
+                "NOT record it as a swallowed teardown-race throw",
+            caught.get(),
+        )
+        assertNull(
+            "a CancellationException must never reach the thread uncaught handler",
+            uncaughtOnThread.get(),
+        )
     }
 
     // ------------------------------------------------- anti-#895-masking guard

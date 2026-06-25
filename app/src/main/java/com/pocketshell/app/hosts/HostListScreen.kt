@@ -59,6 +59,8 @@ import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.components.Banner
+import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.Kebab
@@ -942,62 +944,23 @@ internal fun launchApkDownload(
  */
 @Composable
 internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
-    Row(
+    Banner(
+        text = "New version available (${info.tagName})",
+        role = BannerRole.Info,
         modifier = Modifier
-            .fillMaxWidth()
             // Issue #418: the outer vertical padding was dropped — the
             // shared "notices" Column now owns inter-banner spacing, so
             // the banner no longer double-pads above/below itself.
-            .padding(horizontal = PocketShellSpacing.md)
-            .background(
-                color = PocketShellColors.AccentSoft,
-                shape = PocketShellShapes.medium,
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Accent,
-                shape = PocketShellShapes.medium,
-            )
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "New version available",
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = info.tagName,
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellTypography.labelSmall,
-            )
-        }
-
-        Spacer(modifier = Modifier.width(PocketShellSpacing.md))
-
-        // Pill-shaped "Update" button. Background uses the solid accent
-        // so the tap target reads as primary action on top of the
-        // accent-soft banner surface.
-        Box(
-            modifier = Modifier
-                .clickable(role = Role.Button, onClick = onUpdate)
-                .background(
-                    color = PocketShellColors.Accent,
-                    shape = PocketShellShapes.extraSmall,
-                )
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Text(
+            .padding(horizontal = PocketShellSpacing.md),
+        trailingContent = {
+            PocketShellButton(
                 text = "Update",
-                color = PocketShellColors.OnAccent,
-                style = PocketShellTypography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
+                onClick = onUpdate,
+                variant = ButtonVariant.Text,
+                compact = true,
             )
-        }
-    }
+        },
+    )
 }
 
 /**
@@ -1389,26 +1352,19 @@ internal const val RECHECK_SETUP_LABEL: String = "Re-check setup"
 
 @Composable
 internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = message,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellTypography.labelSmall,
-            modifier = Modifier.weight(1f),
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
-    }
+    Banner(
+        text = message,
+        role = BannerRole.Info,
+        modifier = Modifier.padding(horizontal = PocketShellSpacing.md),
+        trailingContent = {
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+    )
 }
 
 /**
@@ -1425,33 +1381,26 @@ internal fun UpdateCheckFailedBanner(
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Couldn't check for updates ($reason)",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellTypography.labelSmall,
-            modifier = Modifier.weight(1f),
-        )
-        PocketShellButton(
-            text = "Retry",
-            onClick = onRetry,
-            variant = ButtonVariant.Text,
-            compact = true,
-            modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_RETRY_TAG),
-        )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
-    }
+    Banner(
+        text = "Couldn't check for updates ($reason)",
+        role = BannerRole.Warning,
+        modifier = Modifier.padding(horizontal = PocketShellSpacing.md),
+        trailingContent = {
+            PocketShellButton(
+                text = "Retry",
+                onClick = onRetry,
+                variant = ButtonVariant.Text,
+                compact = true,
+                modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_RETRY_TAG),
+            )
+            PocketShellButton(
+                text = "Dismiss",
+                onClick = onDismiss,
+                variant = ButtonVariant.Text,
+                compact = true,
+            )
+        },
+    )
 }
 
 /**
@@ -1472,49 +1421,42 @@ internal fun AppUpdateWarningBanner(
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface)
-            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = when {
-                warning.releaseResolutionFailure != null ->
-                    "${warning.message} Couldn't prepare the update download (${warning.releaseResolutionFailure})."
-                warning.isResolvingRelease ->
-                    "${warning.message} Preparing the update download..."
-                else -> warning.message
-            },
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellTypography.labelSmall,
-            modifier = Modifier.weight(1f),
-        )
-        if (onUpdate != null) {
+    Banner(
+        text = when {
+            warning.releaseResolutionFailure != null ->
+                "${warning.message} Couldn't prepare the update download (${warning.releaseResolutionFailure})."
+            warning.isResolvingRelease ->
+                "${warning.message} Preparing the update download..."
+            else -> warning.message
+        },
+        role = BannerRole.Warning,
+        modifier = Modifier.padding(horizontal = PocketShellSpacing.md),
+        trailingContent = {
+            if (onUpdate != null) {
+                PocketShellButton(
+                    text = "Update",
+                    onClick = onUpdate,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
+                )
+            } else if (warning.releaseResolutionFailure != null) {
+                PocketShellButton(
+                    text = "Retry",
+                    onClick = onRetry,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
+                )
+            }
             PocketShellButton(
-                text = "Update",
-                onClick = onUpdate,
+                text = "Dismiss",
+                onClick = onDismiss,
                 variant = ButtonVariant.Text,
                 compact = true,
-                modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
             )
-        } else if (warning.releaseResolutionFailure != null) {
-            PocketShellButton(
-                text = "Retry",
-                onClick = onRetry,
-                variant = ButtonVariant.Text,
-                compact = true,
-                modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
-            )
-        }
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
-    }
+        },
+    )
 }
 
 @Composable

@@ -134,6 +134,13 @@ internal class RealSshSession(
                 scope.launch { runCatching { close() } }
             }
         },
+        // Issue #970: timing knobs are read from the test-override seam so the
+        // realistic-wifi stability gate (the durable #964 proof) can shorten the
+        // keepalive window deterministically — keeping the inbound-activity
+        // timestamp fresh across a long jittery-but-live hold. Production keeps
+        // the 30s / 3 defaults (the override is null unless a test set it).
+        intervalMs = KeepAliveTestOverride.intervalMs(),
+        countMax = KeepAliveTestOverride.countMax(),
         log = { msg -> KEEPALIVE_LOGGER.log(Level.FINE, "[$KEEPALIVE_LOG_TAG] $msg") },
     )
 

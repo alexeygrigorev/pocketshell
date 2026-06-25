@@ -516,6 +516,27 @@ JOURNEY_CLASSES=(
   # Angle-C fix. Uses ONLY the deterministic agents:2222 fixture tests.yml already brings
   # up (no toxiproxy, no workflow change) and does NOT self-skip on CI.
   "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
+  # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
+  # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
+  # reproduces the #964 budget mismatch on the plain deterministic agents:2222
+  # fixture (no toxiproxy, no new Docker service) using ONLY base-available seams:
+  # the `-CC` LivenessProbe is made to report DEAD for a BOUNDED window (a
+  # momentarily-slow control channel, NOT a permanent wedge) WHILE the agents:2222
+  # SSH transport stays genuinely LIVE, so the always-on keepalive keeps proving the
+  # link alive. On BASE (rc/0.4.18 WITHOUT #964) the probe force-redials the FINE
+  # link the instant it reaches its (shortened) budget — records
+  # liveness_probe_silent_drop, bumps TMUX_CONNECT_ATTEMPTS, raises the Reconnecting
+  # band — so the ZERO-reconnect assertions FAIL (RED). With #964 the probe DEFERS
+  # to the still-healthy keepalive and never redials (GREEN). It does NOT self-skip
+  # on CI (the deterministic method has no assumeNetworkFaultProofsEnabled gate); the
+  # opt-in realistic-jitter toxiproxy method in the same class DOES self-skip and is
+  # NOT run by this FQCN entry at PR time. The other (long-running, toxiproxy)
+  # method is gated by assumeNetworkFaultProofsEnabled so only the deterministic
+  # method asserts here.
+  #
+  # INTEGRATION NOTE: this gate is RED until #964 lands, so it MUST be integrated
+  # WITH or AFTER #964 — never before — or it reds the per-push journey job.
+  "$FQCN_PREFIX.RealisticWifiStabilityNoSpuriousReconnectE2eTest"
   # ADDED (#796 H3): the composer-open -> terminal-relayout collision regression
   # catcher. The maintainer's exact v0.4.6 Codex freeze: a bursting Codex pane +
   # OPENING the Prompt Composer (showMicSheet toggles in the body root group)

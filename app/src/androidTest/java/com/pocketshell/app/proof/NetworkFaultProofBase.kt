@@ -75,7 +75,12 @@ abstract class NetworkFaultProofBase {
 
     @After
     fun closeNetworkFaultActivity() {
-        launchedActivity?.close()
+        // Issue #970: a test whose journey already drove the activity to FINISHED
+        // (e.g. a sustained slow/reconnect window) leaves `ActivityScenario.close()`
+        // to call `moveToState` on a null current state -> a teardown NPE that would
+        // red an otherwise-PASSING body. The close is best-effort cleanup, never a
+        // load-bearing assertion, so swallow it (the body's asserts already ran).
+        runCatching { launchedActivity?.close() }
         launchedActivity = null
         if (networkFaultProofEnabled) {
             runCatching { toxiproxy().reset() }

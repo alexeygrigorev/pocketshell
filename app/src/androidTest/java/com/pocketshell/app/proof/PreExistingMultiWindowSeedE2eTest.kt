@@ -6,15 +6,15 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -34,6 +34,7 @@ import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -80,42 +81,36 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class PreExistingMultiWindowSeedE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    val compose = createAndroidComposeRule<MainActivity>()
+    private val grantPermissions = PreGrantPermissionsRule()
 
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(grantPermissions)
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private var seededKey: String? = null
+    private var seededHostRowTag: String? = null
 
     @After
     fun closeLaunchedActivity() {
-        launchedActivity?.close()
-        launchedActivity = null
-        runBlocking {
-            runCatching { cleanupSeededSessions(readFixtureKey()) }
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        seededKey?.let { key ->
+            runBlocking {
+                runCatching { cleanupSeededSessions(key) }
+            }
         }
     }
 
     @Test
     fun preExistingMultiWindowSurfacesPerWindowSwitcherEntriesAndSeedsEach() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
 
-        // Seed a fresh session with TWO windows, each with a distinct marker
-        // printed once and then left idle. The idle shells emit no further
-        // %output, so the only source of on-screen content is the attach-time
-        // capture-pane seed.
-        seedMultiWindowSession(key)
-
-        val hostRowTag = seedDockerHost(key, "Issue782 Multi-Window Entries")
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-
-        // Open the host tree. `createEmptyComposeRule()` + `ActivityScenario`
-        // is racy at launch (querying semantics before setContent throws), so
-        // probe defensively until the host row exists.
-        compose.waitUntil(timeoutMillis = 15_000) {
+        // Open the host tree. Under createAndroidComposeRule, MainActivity cold
+        // compose can briefly expose no registered hierarchy, so probe
+        // defensively until the pre-launch seeded host row exists.
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             runCatching {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                     .fetchSemanticsNodes()
@@ -190,7 +185,7 @@ class PreExistingMultiWindowSeedE2eTest {
 
     private fun waitForText(text: String, message: String) {
         val ok = runCatching {
-            compose.waitUntil(timeoutMillis = 20_000) {
+            compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
                 runCatching {
                     compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
                         .fetchSemanticsNodes()
@@ -209,7 +204,7 @@ class PreExistingMultiWindowSeedE2eTest {
     }
 
     private fun pressBack() {
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             activity.onBackPressedDispatcher.onBackPressed()
         }
         compose.waitForIdle()
@@ -222,6 +217,24 @@ class PreExistingMultiWindowSeedE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
+
+    private suspend fun seedBeforeLaunch() {
+        val key = readFixtureKey()
+        seededKey = key
+        try {
+            waitForSshFixtureReady(SshKey.Pem(key))
+
+            // Seed a fresh session with TWO windows, each with a distinct marker
+            // printed once and then left idle. The idle shells emit no further
+            // %output, so the only source of on-screen content is the attach-time
+            // capture-pane seed.
+            seedMultiWindowSession(key)
+            seededHostRowTag = seedDockerHost(key, "Issue782 Multi-Window Entries")
+        } catch (t: Throwable) {
+            runCatching { cleanupSeededSessions(key) }
+            throw t
+        }
+    }
 
     private suspend fun seedDockerHost(key: String, hostName: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -339,7 +352,7 @@ class PreExistingMultiWindowSeedE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -368,7 +381,7 @@ class PreExistingMultiWindowSeedE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -382,7 +395,7 @@ class PreExistingMultiWindowSeedE2eTest {
 
     private fun terminalGridSize(): GridSize {
         var grid: GridSize? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -400,7 +413,7 @@ class PreExistingMultiWindowSeedE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

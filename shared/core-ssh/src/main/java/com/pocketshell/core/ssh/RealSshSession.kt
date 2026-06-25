@@ -11,7 +11,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
@@ -499,35 +501,106 @@ internal class RealSshSession(
 
     /**
      * Stream-to-remote-file primitive shared by [uploadFile] and
-     * [uploadStream]. Uploads via an `exec` channel that runs
-     * `cat > <path>` on the remote and pipes bytes through stdin.
+     * [uploadStream]. Uploads ATOMICALLY (issue #930): the bytes stream via an
+     * `exec` channel running `cat > <temp-path>` on the remote, the transferred
+     * size is verified, and ONLY on a fully-successful transfer is the temp file
+     * renamed (`mv`) onto [remotePath]. Any mid-stream drop / timeout / short
+     * read therefore leaves the REAL attachment path untouched, never a 0-byte
+     * or partial corrupt artifact at the destination.
+     *
+     * The previous design ran `cat > <final-path>` directly, which truncated the
+     * destination to 0 bytes the instant the channel opened — so a disconnect
+     * mid-transfer left a 0-byte file at the real path (the #928 D7 device
+     * forensics: 9 zero-byte attachment files). That non-atomic path is gone.
      *
      * Why not SCP or SFTP? Both require an extra binary on the remote
      * (`scp` from `openssh-client`, `sftp-server` from
      * `openssh-sftp-server`). The Alpine-based Docker fixtures used
      * by the connected emulator tests ship the SSH server alone, and
      * minimal real-world servers often do too. The exec-channel +
-     * `cat` approach only needs a POSIX shell and `cat`, which are
-     * universally present.
+     * `cat` approach only needs a POSIX shell, `cat`, `wc`, `mv` and `rm`,
+     * which are universally present.
      *
-     * The remote `cat` reads stdin until EOF, then writes to
-     * [remotePath]. We close stdin (via `sendEOF`) to signal completion
-     * and then `join` the command, checking the exit status.
+     * Bounding (issue #930, folds in #928 D5 W-4): the blocking byte-copy +
+     * `join()` is wrapped in a [withTimeoutOrNull] ceiling so a wedged channel
+     * fails fast with a clear error instead of hanging indefinitely.
      *
-     * Stream + length are taken so the caller can pass either —
-     * length is informational only; `cat` does not need it.
+     * [length] is the declared content length. When known (>= 0) it is also
+     * verified against the bytes the remote actually received before the rename,
+     * so a truncated source (declares more than it emits) is rejected rather
+     * than renamed as a short/corrupt file.
      */
     private suspend fun uploadStreamInternal(
         input: InputStream,
-        @Suppress("UNUSED_PARAMETER") length: Long,
+        length: Long,
         name: String,
         remotePath: String,
     ) {
+        // Atomic temp sibling of the final path: `<final>.part-<rand>`. A
+        // dropped/timed-out transfer corrupts only THIS temp name, never the
+        // real attachment path. The random suffix avoids collisions between
+        // concurrent retries of the same attachment.
+        val tempRemotePath = remotePath + ".part-" + java.util.UUID.randomUUID().toString().take(8)
+        try {
+            val copied = streamToRemoteTemp(input, name, remotePath, tempRemotePath)
+
+            // Integrity check BEFORE the rename: the bytes that actually landed
+            // in the temp file must match what we copied, and — when the caller
+            // declared a length — must match that too. A mismatch means a
+            // truncated/short transfer; fail (and clean up) rather than promote
+            // a corrupt file to the real path.
+            verifyTempSizeOrThrow(
+                name = name,
+                remotePath = remotePath,
+                tempRemotePath = tempRemotePath,
+                copiedBytes = copied,
+                declaredLength = length,
+            )
+
+            // Promote to the real path ONLY now that the full, verified bytes
+            // are on disk. `mv` within the same directory/filesystem is atomic.
+            val mv = exec(
+                "mv -f ${shellSingleQuote(tempRemotePath)} ${shellSingleQuote(remotePath)}",
+            )
+            if (mv.exitCode != 0) {
+                throw SshException(
+                    "Could not finalise upload of $name to $remotePath " +
+                        "(rename failed, exit ${mv.exitCode}): ${mv.stderr.trim()}",
+                )
+            }
+        } catch (e: CancellationException) {
+            // The coroutine context is cancelled here, so we cannot suspend on
+            // it — detach the temp cleanup onto the session scope.
+            cleanupTempDetached(tempRemotePath)
+            throw e
+        } catch (t: Throwable) {
+            // ANY failure leaves the real path untouched; remove the temp file
+            // SYNCHRONOUSLY (the context is still active on this path) so a
+            // partial upload never accumulates as a stray artifact and the
+            // removal is observable by the time we return to the caller.
+            cleanupTempBestEffort(tempRemotePath)
+            if (t is SshException) throw t
+            throw SshException("Upload of $name to $remotePath failed: ${t.message}", t)
+        }
+    }
+
+    /**
+     * Stream [input] into the remote [tempRemotePath] via `cat > <temp>`,
+     * bounded by [UPLOAD_TRANSFER_TIMEOUT_MS]. Returns the number of bytes
+     * copied. Throws [SshException] on a transport failure, a non-zero remote
+     * exit, or a timeout — the caller cleans up the temp file.
+     */
+    private suspend fun streamToRemoteTemp(
+        input: InputStream,
+        name: String,
+        remotePath: String,
+        tempRemotePath: String,
+    ): Long {
         val coroutineJob = currentCoroutineContext()[Job]
         // Channel open + `cat >` exec are transport-mutating packets — serialise
         // through the dispatcher (issue #847). The byte copy below runs OUTSIDE
         // the dispatcher so a large upload never wedges the `-CC` write.
-        val quoted = shellSingleQuote(remotePath)
+        val quoted = shellSingleQuote(tempRemotePath)
         var command: Command? = null
         val sessionChannel = dispatcher.run {
             val channel = try {
@@ -559,36 +632,44 @@ internal class RealSshSession(
             }
         }
         try {
-            try {
-                command!!.outputStream.use { output ->
-                    copyToRemoteCancellable(input, output)
+            // Issue #930 (folds in #928 D5 W-4): bound the blocking transfer so a
+            // wedged channel fails fast instead of hanging. `withTimeoutOrNull`
+            // returning null == we blew the ceiling. The byte-copy + `join()` run
+            // inside `runInterruptible` so the timeout's cancellation becomes a
+            // real `Thread.interrupt()` — that unblocks a stuck blocking
+            // `read()`/`write()` on the wedged channel (a plain `withTimeout`
+            // alone can't preempt a thread parked in a JDK blocking call). We
+            // also force-close the channel so the remote `cat` tears down.
+            val copied = withTimeoutOrNull(UPLOAD_TRANSFER_TIMEOUT_MS) {
+                runInterruptible(Dispatchers.IO) {
+                    val n = command!!.outputStream.use { output ->
+                        copyToRemoteBlocking(input, output)
+                    }
+                    // `outputStream.close()` sends EOF on the channel. The remote
+                    // `cat` exits on EOF; `join()` waits for it so we can read
+                    // the exit code.
+                    command!!.join()
+                    n
                 }
-                // `outputStream.close()` sends EOF on the channel, but
-                // sshj also exposes `signal()` to nudge a stuck remote.
-                // The remote `cat` exits on EOF; `join()` waits for the
-                // command to finish so we can read the exit code.
-                command!!.join()
-                val exit = command!!.exitStatus ?: -1
-                if (exit != 0) {
-                    val stderr = runCatching {
-                        command!!.errorStream.readBytes().toString(Charsets.UTF_8)
-                    }.getOrDefault("")
-                    throw SshException(
-                        "Remote `cat` exited with status $exit while writing $remotePath: ${stderr.trim()}",
-                    )
-                }
-            } finally {
+            } ?: run {
+                runCatching { input.close() }
                 runCatching { dispatcher.run { runCatching { command?.close() } } }
+                runCatching { dispatcher.run { runCatching { sessionChannel.close() } } }
+                throw SshException(
+                    "Upload of $name to $remotePath timed out after " +
+                        "${UPLOAD_TRANSFER_TIMEOUT_MS}ms (stalled transfer)",
+                )
             }
-        } catch (e: SshException) {
-            throw e
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            throw SshException(
-                "Upload of $name to $remotePath failed: ${t.message}",
-                t,
-            )
+            val exit = command!!.exitStatus ?: -1
+            if (exit != 0) {
+                val stderr = runCatching {
+                    command!!.errorStream.readBytes().toString(Charsets.UTF_8)
+                }.getOrDefault("")
+                throw SshException(
+                    "Remote `cat` exited with status $exit while writing $tempRemotePath: ${stderr.trim()}",
+                )
+            }
+            return copied
         } finally {
             cancelHandle?.dispose()
             runCatching { dispatcher.run { runCatching { command?.close() } } }
@@ -596,22 +677,93 @@ internal class RealSshSession(
         }
     }
 
-    private suspend fun copyToRemoteCancellable(input: InputStream, output: OutputStream) {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        while (true) {
-            throwIfUploadCancelled()
-            val read = input.read(buffer)
-            if (read < 0) break
-            throwIfUploadCancelled()
-            output.write(buffer, 0, read)
+    /**
+     * Confirm the bytes that landed in [tempRemotePath] match what we copied (and
+     * the caller-declared [declaredLength], when known). A mismatch is a
+     * truncated/short transfer — throw so the temp file is cleaned up and never
+     * promoted to [remotePath].
+     */
+    private suspend fun verifyTempSizeOrThrow(
+        name: String,
+        remotePath: String,
+        tempRemotePath: String,
+        copiedBytes: Long,
+        declaredLength: Long,
+    ) {
+        val stat = exec(
+            "wc -c < ${shellSingleQuote(tempRemotePath)} 2>/dev/null || echo MISSING",
+        )
+        val out = stat.stdout.trim()
+        val actual = out.toLongOrNull()
+        if (actual == null) {
+            throw SshException(
+                "Upload integrity check failed for $name -> $remotePath: " +
+                    "could not stat temp file $tempRemotePath (got '$out')",
+            )
         }
-        output.flush()
+        if (actual != copiedBytes) {
+            throw SshException(
+                "Upload integrity check failed for $name -> $remotePath: " +
+                    "remote received $actual bytes but $copiedBytes were sent",
+            )
+        }
+        if (declaredLength >= 0 && actual != declaredLength) {
+            throw SshException(
+                "Upload integrity check failed for $name -> $remotePath: " +
+                    "declared $declaredLength bytes but $actual were transferred " +
+                    "(truncated/short source)",
+            )
+        }
     }
 
-    private suspend fun throwIfUploadCancelled() {
-        if (currentCoroutineContext()[Job]?.isActive == false) {
-            throw CancellationException("SSH upload cancelled")
+    /**
+     * Synchronously remove a partial upload temp file on a failure whose
+     * coroutine context is still active. Best-effort: never throws (a failed
+     * `rm` must not mask the original upload error). Bounded by a short timeout
+     * so a half-dead transport can't wedge the cleanup.
+     */
+    private suspend fun cleanupTempBestEffort(tempRemotePath: String) {
+        runCatching {
+            withTimeoutOrNull(UPLOAD_CLEANUP_TIMEOUT_MS) {
+                exec("rm -f ${shellSingleQuote(tempRemotePath)}")
+            }
         }
+    }
+
+    /**
+     * Detached temp cleanup for the caller-cancellation path, where the current
+     * coroutine context is already cancelled and cannot be suspended on. Runs on
+     * the session scope so the partial upload is still removed.
+     */
+    private fun cleanupTempDetached(tempRemotePath: String) {
+        runCatching {
+            scope.launch {
+                runCatching { exec("rm -f ${shellSingleQuote(tempRemotePath)}") }
+            }
+        }
+    }
+
+    /**
+     * Blocking byte-copy from [input] to [output]. Runs inside
+     * [runInterruptible] (issue #930), so the upload timeout cancels by
+     * interrupting this thread: each loop checks [Thread.interrupted] and the
+     * blocking `read`/`write` JDK calls themselves throw on interrupt, so a
+     * wedged transfer unblocks promptly instead of hanging. Returns the number
+     * of bytes copied.
+     */
+    private fun copyToRemoteBlocking(input: InputStream, output: OutputStream): Long {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0L
+        while (true) {
+            if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
+            val read = input.read(buffer)
+            if (read < 0) break
+            if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
+            output.write(buffer, 0, read)
+            total += read
+        }
+        output.flush()
+        return total
     }
 
     override fun close() {
@@ -954,6 +1106,21 @@ internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
  * Android-only dependency from this shared module.
  */
 internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
+
+/**
+ * Wall-clock ceiling for the blocking byte-copy + `join()` of a single
+ * attachment upload (issue #930, folds in #928 D5 W-4). A wedged channel must
+ * fail fast with a clear error rather than hang forever. 60s comfortably covers
+ * a multi-MB attachment over a slow mobile link while still bounding a stall.
+ */
+internal const val UPLOAD_TRANSFER_TIMEOUT_MS: Long = 60_000L
+
+/**
+ * Wall-clock ceiling for removing a partial upload's temp file after a failed
+ * transfer (issue #930). Short and bounded so a half-dead transport can't wedge
+ * the cleanup; a failed/timed-out `rm` is swallowed best-effort.
+ */
+internal const val UPLOAD_CLEANUP_TIMEOUT_MS: Long = 10_000L
 
 private val CLOSE_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".close")
 

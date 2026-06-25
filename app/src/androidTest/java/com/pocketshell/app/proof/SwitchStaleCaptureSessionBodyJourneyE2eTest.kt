@@ -8,14 +8,14 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -38,6 +38,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -90,13 +91,17 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class SwitchStaleCaptureSessionBodyJourneyE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    val compose = createAndroidComposeRule<MainActivity>()
+    private val grantPermissions = PreGrantPermissionsRule()
 
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(grantPermissions)
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private var seededKey: String? = null
+    private var seededHostRowTag: String? = null
     private val timings = mutableListOf<String>()
 
     private val pickerWaitMs: Long =
@@ -104,32 +109,24 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
 
     @After
     fun closeLaunchedActivity() {
-        launchedActivity?.close()
-        launchedActivity = null
-        runBlocking { runCatching { cleanupSeededSessions(readFixtureKey()) } }
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        seededKey?.let { key ->
+            runBlocking { runCatching { cleanupSeededSessions(key) } }
+        }
     }
 
     @Test
     fun switchToBWhileAStillStreamsShowsBInBodyAndHeaderNoStaleBoundary() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-
-        // Seed A (idle marker) + B (idle marker). A's continuous stream is
-        // STARTED AFTER attach (a sidecar trigger) so the picker enumeration
-        // sees a quiet session — a session producing constant output at
-        // picker-time stalls the in-emulator `list-sessions` enumeration (#470),
-        // which is setup noise, not the device-truth assertion we want to test.
-        seedStreamingAndTargetSessions(key)
-        val hostRowTag = seedDockerHost(key)
-        forceFlatHostDetailViewMode()
-
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val key = requireNotNull(seededKey) { "seed-before-launch key missing" }
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
 
         // Attach to A first.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForSessionInPicker(
@@ -311,6 +308,26 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
             .bufferedReader()
             .use { it.readText() }
 
+    private suspend fun seedBeforeLaunch() {
+        val key = readFixtureKey()
+        seededKey = key
+        try {
+            waitForSshFixtureReady(SshKey.Pem(key))
+
+            // Seed A (idle marker) + B (idle marker). A's continuous stream is
+            // STARTED AFTER attach (a sidecar trigger) so the picker enumeration
+            // sees a quiet session — a session producing constant output at
+            // picker-time stalls the in-emulator `list-sessions` enumeration (#470),
+            // which is setup noise, not the device-truth assertion we want to test.
+            seedStreamingAndTargetSessions(key)
+            seededHostRowTag = seedDockerHost(key)
+            forceFlatHostDetailViewMode()
+        } catch (t: Throwable) {
+            runCatching { cleanupSeededSessions(key) }
+            throw t
+        }
+    }
+
     private suspend fun seedDockerHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
@@ -436,10 +453,12 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
                     break
                 }
             }
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+                runCatching {
+                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }.getOrDefault(false)
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         }
@@ -478,7 +497,7 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -509,7 +528,7 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -527,7 +546,7 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

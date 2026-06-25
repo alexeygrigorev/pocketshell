@@ -6,15 +6,15 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -38,6 +38,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -102,32 +103,28 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class VoiceSendActivePaneStaysVisibleE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    val compose = createAndroidComposeRule<MainActivity>()
+    private val grantPermissions = PreGrantPermissionsRule()
 
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(grantPermissions)
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var seededKey: String? = null
+    private var seededHostRowTag: String? = null
     private val timings = mutableListOf<String>()
 
     @After
     fun tearDown() {
-        runCatching { launchedActivity?.close() }
-        launchedActivity = null
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         seededKey?.let { key -> runCatching { runBlocking { cleanupRemoteTmuxSession(key) } } }
     }
 
     @Test
     fun voiceSendComposerDismissResizeKeepsActivePaneVisible() = runBlocking {
-        val key = readFixtureKey()
-        seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
-        seedTmuxSession(key)
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         attachSeededTmuxSession(hostRowTag)
 
         // (1) Baseline: the static banner of the idle full-screen pane is on screen and
@@ -171,7 +168,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
         // the banner stays gone; the slice-2 active-pane heal re-captures the full
         // viewport.
         var triggered = false
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             triggered = viewModel(activity).triggerSameDimensionResizeHealForTest()
         }
         assertTrue("expected the same-dimension resize heal seam to find a live runtime", triggered)
@@ -232,7 +229,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
         val esc = "\u001B"
         val frame = "$esc[2J$esc[H$LIVE_LINE_MARKER live-after-reflow\r\n".toByteArray(Charsets.UTF_8)
         var fed = false
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             val emulator = view.mEmulator ?: return@onActivity
             emulator.append(frame, frame.size)
@@ -245,16 +242,20 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
     }
 
     private fun attachSeededTmuxSession(hostRowTag: String) {
-        compose.waitUntil(timeoutMillis = 15_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
-            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -264,7 +265,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -288,7 +289,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
         var status: TmuxSessionViewModel.ConnectionStatus =
             TmuxSessionViewModel.ConnectionStatus.Idle
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             status = viewModel(activity).connectionStatus.value
         }
         return status
@@ -314,7 +315,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -377,6 +378,19 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
+
+    private suspend fun seedBeforeLaunch() {
+        val key = readFixtureKey()
+        seededKey = key
+        try {
+            waitForSshFixtureReady(SshKey.Pem(key))
+            seedTmuxSession(key)
+            seededHostRowTag = seedDockerHost(key)
+        } catch (t: Throwable) {
+            runCatching { cleanupRemoteTmuxSession(key) }
+            throw t
+        }
+    }
 
     private suspend fun seedDockerHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -466,7 +480,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

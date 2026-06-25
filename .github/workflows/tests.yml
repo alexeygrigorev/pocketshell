@@ -162,6 +162,22 @@ jobs:
         working-directory: tools/pocketshell
         run: uv run pytest -v
 
+      # Issue #948: fail at PR time when the app `versionName`
+      # (app/build.gradle.kts) and the tools/pocketshell package `version`
+      # (pyproject.toml) drift. The app derives the EXPECTED host pocketshell
+      # CLI version from its own versionName, so a drift makes the in-app
+      # host-version banner nag the user (it happened 2026-06-25: app 0.4.16
+      # vs package 0.4.14). The existing check-pypi-version.sh only runs on
+      # tag push; this catches the drift at PR/push time. --self-test first
+      # proves the guard's own red->green logic, then the bare run checks the
+      # real tree. Cheap (~1s); kept in this cheap Python job, not the emulator
+      # job.
+      - name: "Version-coupling guard (issue #948)"
+        run: |
+          chmod +x scripts/check-version-coupling.sh
+          scripts/check-version-coupling.sh --self-test
+          scripts/check-version-coupling.sh
+
       - name: Smoke-test installed CLI
         working-directory: tools/pocketshell
         run: |

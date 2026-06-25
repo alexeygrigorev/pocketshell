@@ -374,6 +374,23 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#966/#967 — the DISCRIMINATING render-death-on-a-LIVE-transport journey): the
+  # maintainer dogfooded a connected Claude session that went BLACK with only stray
+  # FRAGMENTS (a lone cursor, a "3", a scattered status line) while the transport stayed
+  # CONNECTED. The v0.4.17 black-screen heal only engages on a FULLY-blank / ≤3-live-line
+  # pane, so a black-WITH-fragments pane reads "not blank" and the heal SKIPS it (the #966
+  # oracle gap). This journey attaches a full-viewport banner, injects the scattered-
+  # fragment / fully-blank / stale-after-burst render state on the LIVE emulator (the
+  # REMOTE tmux grid still holds the banner, so the transport is GUARANTEED LIVE — the
+  # discriminator), then asserts BOTH: transport stays Connected (no reconnect surface,
+  # client not disconnected) AND the widened divergence heal re-renders the full viewport
+  # from tmux's authoritative `capture-pane`. RED on base (the v0.4.17 oracle reads
+  # not-blank → the fragment pane is never healed); GREEN with the widened
+  # `visibleScreenDivergesFromCapture` oracle + the stale-render watchdog. Three tests
+  # class-cover fully-blank / scattered-fragment / stale-after-burst (D32 G2). Uses ONLY
+  # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does
+  # NOT self-skip on CI, so it belongs here.
+  "$FQCN_PREFIX.StaleRenderHealOnLiveTransportJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an

@@ -453,20 +453,13 @@ public fun EngineCommandOverlay(
  * overlay contributing a 0 dimension on a transient unbounded pass is correct —
  * it has nothing to paint there — and on the real bounded pass it still fills the
  * pane exactly as before.
+ *
+ * Issue #966/#967: the helper itself now lives in [layoutTerminalOverlayBounded]
+ * (in `TerminalOverlayMeasure.kt`) so EVERY terminal measure site can share the
+ * unbounded-safe guard, not just the four affordance overlays here.
  */
-private fun MeasureScope.layoutOverlayBounded(constraints: Constraints): MeasureResult {
-    val width = if (constraints.hasBoundedWidth) {
-        constraints.maxWidth
-    } else {
-        constraints.minWidth
-    }.coerceAtLeast(0)
-    val height = if (constraints.hasBoundedHeight) {
-        constraints.maxHeight
-    } else {
-        constraints.minHeight
-    }.coerceAtLeast(0)
-    return layout(width, height) {}
-}
+private fun MeasureScope.layoutOverlayBounded(constraints: Constraints): MeasureResult =
+    layoutTerminalOverlayBounded(constraints)
 
 internal data class SmartSelectionAffordanceSegment(
     val match: TerminalMatch,

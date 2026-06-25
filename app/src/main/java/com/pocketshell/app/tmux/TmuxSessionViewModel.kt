@@ -1606,6 +1606,23 @@ public class TmuxSessionViewModel @Inject constructor(
         connectedBlankWatchdogAutoArmEnabled = enabled
     }
 
+    // Issue #966/#967: the steady-state stale-render watchdog tick bound,
+    // injectable so a connected test can exhaust it quickly. Defaults to the
+    // production constant — production behavior unchanged.
+    private var staleRenderWatchdogMaxTicks: Int = STALE_RENDER_WATCHDOG_MAX_TICKS
+
+    internal fun setStaleRenderWatchdogMaxTicksForTest(maxTicks: Int) {
+        staleRenderWatchdogMaxTicks = maxTicks
+    }
+
+    // Issue #966/#967: when false, [armActivePaneStaleRenderWatchdog] is
+    // suppressed entirely. Always true in production; a test seam toggles it.
+    private var staleRenderWatchdogAutoArmEnabled: Boolean = true
+
+    internal fun setStaleRenderWatchdogAutoArmEnabledForTest(enabled: Boolean) {
+        staleRenderWatchdogAutoArmEnabled = enabled
+    }
+
     /**
      * Issue #640: pane IDs already seeded (via [seedPaneFromCapture]) during
      * the current attach. The cold-open reveal uses this to skip the redundant
@@ -5223,6 +5240,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     reseedActivePaneForReattach(blankReseedGuard)
                 }
             }
+            // Issue #966/#967: arm the steady-state stale-render watchdog for the
+            // runtime's lifetime. The blank watchdog only catches a pane that is
+            // black AT reveal; this net catches a pane that paints fine then LATER
+            // goes black-with-fragments (a drop-induced stale grid on a live
+            // transport — the #966 shape the blank oracle structurally misses).
+            armActivePaneStaleRenderWatchdog(blankReseedGuard)
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -5619,6 +5642,10 @@ public class TmuxSessionViewModel @Inject constructor(
             if (!activePaneSeeded) {
                 armConnectedBlankWatchdog(fastSwitchRevealGuard, surfaceErrorOnExhaustion = true)
             }
+            // Issue #966/#967: arm the steady-state stale-render watchdog on the
+            // fast-switch reveal path too, so a pane that later goes
+            // black-with-fragments on this runtime is healed against tmux's grid.
+            armActivePaneStaleRenderWatchdog(fastSwitchRevealGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
@@ -9506,6 +9533,79 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #966/#967 — the STEADY-STATE stale-render watchdog. The
+     * [armConnectedBlankWatchdog] above exits the instant a frame lands, so it
+     * cannot catch a pane that paints fine at attach and only LATER goes
+     * black-with-fragments (a drop-induced stale grid, a mis-sized resize, a
+     * partial reseed that stalled — the #966 shape). This watchdog runs for the
+     * lifetime of the runtime on a SLOW cadence and, each tick, captures the
+     * ACTIVE visible pane and re-seeds it ONLY when the local render is
+     * mostly-black/stale relative to tmux's authoritative grid
+     * ([healActivePaneIfStaleRender]).
+     *
+     * It is the residual-risk net the #967 spike called out: a render that dies
+     * SILENTLY (no exception, just a stale grid) neither reconnects (correct — the
+     * transport is alive) NOR is caught by the blank/partial-blank oracles. This
+     * watchdog is the missing oracle, gated by a `capture-pane` DIFF so it never
+     * over-fires on a legitimately sparse-but-correct pane.
+     *
+     * Cost: ONE `capture-pane` round-trip per [STALE_RENDER_WATCHDOG_TICK_MS], and
+     * only while the pane is NON-blank (the blank watchdog owns the blank case).
+     * The diff is computed from the captured text, so a healthy pane pays just the
+     * one cheap round-trip and never relayouts.
+     */
+    private fun armActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
+        if (!staleRenderWatchdogAutoArmEnabled) return
+        bridgeScope.launch {
+            var tick = 0
+            while (tick < staleRenderWatchdogMaxTicks) {
+                delay(STALE_RENDER_WATCHDOG_TICK_MS)
+                if (!isCurrentRuntime(refreshGuard)) return@launch
+                val client = clientRef ?: return@launch
+                if (client.disconnected.value) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                    // Paused mid-runtime (a transient reconnecting band): keep the
+                    // watchdog alive but skip the heal until Connected resumes.
+                    tick += 1
+                    continue
+                }
+                val activePane = activeVisiblePane()
+                if (activePane != null) {
+                    runCatching { healActivePaneIfStaleRender(client, activePane, refreshGuard) }
+                }
+                tick += 1
+            }
+        }
+    }
+
+    /**
+     * Issue #966/#967 (characterization test seam): run ONE stale-render heal pass
+     * over the active visible pane against the supplied guard. A passthrough — no
+     * production-only logic — so a connected test can drive the heal deterministically
+     * without waiting on the watchdog cadence.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun healActivePaneIfStaleRenderForTest(): Boolean {
+        val client = clientRef ?: return false
+        val activePane = activeVisiblePane() ?: return false
+        val target = activeTarget ?: return false
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+        return healActivePaneIfStaleRender(client, activePane, guard)
+    }
+
+    /**
+     * Issue #966/#967 (test seam): is the underlying tmux control client currently
+     * disconnected? The discriminating connected journey asserts this is FALSE while
+     * the render is stale — proving the transport is alive (a render bug, not a drop).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clientDisconnectedForTest(): Boolean = clientRef?.disconnected?.value ?: true
+
+    /**
      * Issue #886: the attach reveal never produced a frame within the bounded
      * blank-watchdog window — surface a retryable error so the user is NEVER
      * left on an infinite "Attaching…" spinner. The control channel is up (green
@@ -9653,6 +9753,91 @@ public class TmuxSessionViewModel @Inject constructor(
         } finally {
             panesSeedInFlightThisAttach.remove(pane.paneId)
         }
+    }
+
+    /**
+     * Issue #966/#967 — the STALE-RENDER heal. The v0.4.17 black-screen heal only
+     * engages on a FULLY-blank or ≤3-live-line pane, so the maintainer's #966 pane
+     * — a connected Claude window rendering only a lone cursor + a couple of
+     * scattered status fragments while tmux's grid holds the full TUI — reads
+     * "not blank" and is SKIPPED, leaving a black-with-fragments pane on a LIVE
+     * transport (the keepalive keeps succeeding; the render is just stale).
+     *
+     * This heal captures the active pane ONCE, diffs the authoritative capture
+     * against what the local emulator actually rendered
+     * ([TerminalSurfaceState.visibleScreenDivergesFromCapture]), and re-seeds the
+     * pane ONLY when the render is mostly-black/stale relative to tmux. The diff
+     * is what keeps a legitimately sparse-but-correct pane from over-firing: when
+     * the render already matches tmux, the capture is applied as a no-op (the
+     * existing full clear+repaint is idempotent — re-painting the SAME
+     * authoritative content), but we skip even that to avoid a needless relayout.
+     *
+     * Returns true when a stale render was detected and re-seeded. The single
+     * `capture-pane` round-trip is paid ONLY on the watchdog cadence (the caller
+     * gates frequency), never per frame, so steady-state rendering is untouched.
+     */
+    private suspend fun healActivePaneIfStaleRender(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
+    ): Boolean {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        if (client.disconnected.value) return false
+        // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
+        // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
+        // decision: it only fires when tmux's grid HAS substantial content while
+        // the rendered VISIBLE viewport shows almost none of it — which is a stale
+        // render regardless of whether the residue is zero glyphs (fully black),
+        // a few scattered fragments (#966), or a post-burst clear. The heal is
+        // idempotent (a full clear+repaint of tmux's authoritative grid), so even
+        // if the blank watchdog also fires it just re-paints identical content.
+        val combined = runCatching {
+            withContext(seedIoDispatcher) {
+                client.captureWithCursor(
+                    pane.paneId,
+                    scrollbackLines = SEED_SCROLLBACK_LINES,
+                    timeoutMs = seedCaptureTimeoutMs,
+                )
+            }
+        }.getOrNull()
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        val captureResponse = combined?.capture
+        if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+            return false
+        }
+        val captureText = captureResponse.output.joinToString(separator = "\n")
+        // The discriminating check: tmux carries a real frame but the local render
+        // shows almost none of it → stale render on a live transport. If the
+        // render already matches tmux, this is false and we never touch the grid.
+        if (!pane.terminalState.visibleScreenDivergesFromCapture(captureText)) return false
+        val cursor = parseTmuxPaneCursor(combined.cursorReply)
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-stale-render-heal pane=${pane.paneId} window=${pane.windowId} " +
+                "session=${activeTarget?.sessionName} status=${_connectionStatus.value} " +
+                "rendered=${pane.terminalState.renderedNonBlankCharCount()} " +
+                "captureChars=${captureText.count { !it.isWhitespace() }}",
+        )
+        DiagnosticEvents.record(
+            "terminal",
+            "stale_render_heal",
+            "paneId" to pane.paneId,
+            "windowId" to pane.windowId,
+            "session" to activeTarget?.sessionName,
+            "renderedChars" to pane.terminalState.renderedNonBlankCharCount(),
+            "captureChars" to captureText.count { !it.isWhitespace() },
+            "reconnect" to false,
+        )
+        try {
+            pane.terminalState.appendRemoteOutput(
+                captureResponse.output.toTerminalViewportBytes(cursor),
+            )
+        } catch (cause: Throwable) {
+            if (cause is CancellationException) throw cause
+            reportTerminalSurfaceFailure(pane.paneId, cause)
+            return false
+        }
+        return true
     }
 
     private suspend fun seedPaneFromCaptureOnce(
@@ -15407,6 +15592,24 @@ internal const val CONNECTED_BLANK_WATCHDOG_TICK_MS: Long = 500L
  * over once the channel actually drops.
  */
 internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
+
+/**
+ * Issue #966/#967: the steady-state stale-render watchdog re-checks the active
+ * visible pane this often. SLOW relative to the blank watchdog (which spins fast
+ * to clear a black reveal): a steady-state stale render is a rarer, residual
+ * failure mode, and each tick costs one `capture-pane` round-trip, so a calm
+ * cadence keeps the cost negligible while still healing a black-with-fragments
+ * pane within a few seconds.
+ */
+internal const val STALE_RENDER_WATCHDOG_TICK_MS: Long = 4_000L
+
+/**
+ * Issue #966/#967: upper bound on stale-render watchdog ticks for the runtime's
+ * lifetime. At [STALE_RENDER_WATCHDOG_TICK_MS] this covers a long dogfood
+ * session; a superseded runtime (switch / reconnect) re-arms a fresh watchdog,
+ * so this bound is a safety ceiling, not a hard session limit.
+ */
+internal const val STALE_RENDER_WATCHDOG_MAX_TICKS: Int = 10_000
 
 /**
  * Issue #941 (black-screen B1): after a send's submit Enter, wait this long for

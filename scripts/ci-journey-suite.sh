@@ -1575,6 +1575,53 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# v0.4.17 RELEASE-BLOCKER: the terminal affordance-overlay UNBOUNDED-height
+# measure crash (CI run 28184338389, reproduced 4/4). The draw-only overlays
+# (SmartSelectionAffordanceOverlay / FilePathOverlay / AgentPaneAffordanceOverlay
+# / EngineCommandOverlay) laid out at the raw `constraints.maxHeight` — fine
+# under a normal bounded measure, but the overlay sits inside the terminal pane,
+# itself inside the `TmuxTerminalPager` (Pager), whose lookahead/measure pass
+# runs with an UNBOUNDED (`Int.MAX_VALUE`) max height. That overflowed `layout()`
+# → `IllegalStateException: Size(1070 x 2147483647) is out of range`, which tore
+# down the whole back-to-picker / multi-session-switch journey. This proof
+# composes EACH of the four PRODUCTION overlays under EXACTLY that crash
+# constraint (`Constraints(maxWidth=1070, maxHeight=Infinity)`) and HARD-asserts
+# every one lays out at a FINITE height (class coverage, no self-skip). RED on
+# the un-fixed overlays (the activity dies with the out-of-range crash); GREEN
+# after the `layoutOverlayBounded` clamp. Uses NO Docker fixture (in-process
+# Compose UI test). It lives under com.pocketshell.core.terminal.selection.
+CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS="com.pocketshell.core.terminal.selection.TerminalOverlayUnboundedMeasureCrashTest"
+OVERLAY_UNBOUNDED_STATUS="PASS"
+
+run_core_terminal_overlay_unbounded() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS" \
+    --stacktrace
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  OVERLAY_UNBOUNDED_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping overlay-unbounded-measure proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL OVERLAY-UNBOUNDED-MEASURE PROOF: $CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS (attempt 1)"
+  echo "=========================================================="
+  overlay_unbounded_start=$SECONDS
+  if run_core_terminal_overlay_unbounded; then
+    echo "OVERLAY_UNBOUNDED_PASS: passed on attempt 1 (elapsed $((SECONDS - overlay_unbounded_start))s)"
+  else
+    echo ">>> OVERLAY-UNBOUNDED-MEASURE PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_overlay_unbounded; then
+      echo "OVERLAY_UNBOUNDED_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "OVERLAY_UNBOUNDED_FAILED: overlay-unbounded-measure proof failed twice"
+      OVERLAY_UNBOUNDED_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -1587,13 +1634,13 @@ SUITE_ELAPSED=$((SECONDS - SUITE_START))
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
       && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
-      && "$REATTACH_REPAINT_STATUS" == "PASS" ]]; then
+      && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
         && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
-        && "$REATTACH_REPAINT_STATUS" != "FAIL" ]]; then
+        && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -1639,6 +1686,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
   echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
+  echo
+  echo "Core-terminal v0.4.17 overlay-unbounded-measure crash proof (\`shared:core-terminal\`): **$OVERLAY_UNBOUNDED_STATUS**"
+  echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -1681,7 +1731,8 @@ echo "=========================================================="
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
   if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
-        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
+        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" \
+        || "$REATTACH_REPAINT_STATUS" == "FAIL" || "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -1698,6 +1749,12 @@ echo "=========================================================="
     fi
     if [[ "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\` (#871 agent-pane link-affordance off-main proof)"
+    fi
+    if [[ "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\` (#879 reattach-repaint proof)"
+    fi
+    if [[ "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\` (v0.4.17 overlay-unbounded-measure crash proof)"
     fi
   fi
 } > "$SUMMARY"

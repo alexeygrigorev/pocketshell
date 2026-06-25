@@ -126,6 +126,31 @@ services:
       - "2238:22"
     healthcheck: *ssh-healthcheck
 
+  # Issue #839: agents fixture whose host `pocketshell` is the REAL Python
+  # package (genuine `tree.py` daemon code), so `tree get|upsert|reconcile`
+  # actually PERSIST to a host-side JSON registry under
+  # `$XDG_STATE_HOME/pocketshell/tree/registry.json` (atomic temp-file +
+  # os.replace, 0600). That host-side state SURVIVES an Android app kill +
+  # relaunch — the #837 durable-tree property. The connected journey
+  # (FolderListDurableTreeDaemonDockerTest) collapses a folder + holds an order,
+  # KILLS + RELAUNCHES the app (a fresh FolderListViewModel + a NEW
+  # TreeRemoteSource binding the same host over a NEW SSH session), and asserts
+  # the cold-start hydrate reads the held order/collapse back INSTANTLY, then a
+  # reconcile diffs the registry against the LIVE `tmuxctl list` and returns
+  # gone/added deltas. Bound on host port 2239 (distinct from `agents`/2222,
+  # `tmux`/2224, `flaky-agent`/2226, bootstrap/2230-2236, `agents-old-cli`/2238,
+  # `real-agent`/2240, agents-pool/2243-2245). NOT started by the default
+  # workflow; the connected test that uses it is gated accordingly (Assume).
+  agents-daemon:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents-daemon
+    image: pocketshell-test:agents-daemon
+    container_name: pocketshell-test-agents-daemon
+    ports:
+      - "2239:22"
+    healthcheck: *ssh-healthcheck
+
   # Issue #632 (slice 2): the 7 bootstrap setup-detection fixtures bind disjoint
   # host ports 2230-2236, so they can be sharded across multiple emulators and
   # brought up concurrently under DISTINCT compose projects

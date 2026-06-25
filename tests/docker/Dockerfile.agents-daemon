@@ -1,0 +1,84 @@
+# Daemon-backed agents fixture for the durable-tree journey (issue #839).
+#
+# The standard `agents` fixture (Dockerfile.agents) ships a FAKE shell-script
+# `pocketshell` that has no `tree` subcommand — so the durable per-host project
+# tree (#837, epic #821 workstream C) could never be exercised end-to-end on a
+# real device + real daemon. This fixture installs the REAL Python `pocketshell`
+# package from the in-repo source so `pocketshell tree get|upsert|reconcile`
+# runs the GENUINE daemon code (tools/pocketshell/src/pocketshell/tree.py): a
+# host-keyed JSON registry under `$XDG_STATE_HOME/pocketshell/tree/registry.json`
+# (atomic temp-file + os.replace, 0600). That registry is HOST-SIDE state, so it
+# SURVIVES an Android app kill + relaunch — which is exactly the #839 proof: the
+# emulator collapses a folder + holds an order, the app is killed + relaunched,
+# and the cold-start hydrate reads the persisted tree back INSTANTLY.
+#
+# `pocketshell tree reconcile` diffs the registry against `tmuxctl list`, so this
+# image carries a `tmuxctl` (tests/docker/agent-bin-daemon/tmuxctl) whose `list`
+# reflects the LIVE tmux server (not the static canned table the standard fixture
+# uses) — the only way a session the test KILLED shows up as a reconcile `gone`
+# delta and a session it CREATED shows up as `added`.
+#
+# Bound on host port 2239 (distinct from `agents`/2222, `tmux`/2224,
+# `flaky-agent`/2226, bootstrap/2230-2236, `agents-old-cli`/2238,
+# `real-agent`/2240, agents-pool/2243-2245). NOT started by the default workflow;
+# the connected journey that uses it is gated with Assume otherwise.
+#
+# Build context is the REPO ROOT (see docker-compose.yml) so it can COPY both
+# tests/docker/* and tools/pocketshell/*.
+FROM alpine:latest
+
+# python3 + py3-click satisfy the `pocketshell` CLI's only eager dependency
+# (click>=8.2.0; alpine ships 8.3.x). pyyaml / google-auth / tmuxctl are LAZY /
+# subprocess-only (see tools/pocketshell/pyproject.toml comments), so the package
+# installs with --no-deps and the tree CLI path needs none of them. The real
+# `tmuxctl list` is provided by our shell shim below.
+RUN apk add --no-cache \
+        openssh-server openssh-client tmux procps bash sqlite git \
+        python3 py3-click py3-pip \
+    && ssh-keygen -A \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY tests/docker/sshd_config /etc/ssh/sshd_config
+COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
+COPY tests/docker/test_key /root/test_key
+# The shared fake agent CLIs (claude/codex/opencode/quse/agent-log-explorer)
+# so a session launch in the journey still resolves a runnable agent. The REAL
+# `pocketshell` (installed below) and the daemon-aware `tmuxctl` (copied after)
+# deliberately OVERRIDE the fakes from this dir.
+COPY tests/docker/agent-bin/ /usr/local/bin/
+COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
+COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+
+# Install the REAL pocketshell package (genuine tree.py daemon code). --no-deps
+# keeps the build offline (only py3-click, installed via apk above, is needed for
+# the `tree` CLI path). --break-system-packages because alpine marks the system
+# python as externally-managed; this is a throwaway test image.
+COPY tools/pocketshell/ /opt/pocketshell-src/
+RUN pip install --no-deps --break-system-packages /opt/pocketshell-src \
+    && pocketshell --version
+
+# The daemon-aware tmuxctl: a real `list` over the LIVE tmux server (for the
+# reconcile delta) + create-detached. Copied AFTER agent-bin/ so it overrides the
+# static-list fake tmuxctl.
+COPY tests/docker/agent-bin-daemon/tmuxctl /usr/local/bin/tmuxctl
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
+    && chmod +x /usr/local/bin/claude \
+        /usr/local/bin/codex \
+        /usr/local/bin/opencode \
+        /usr/local/bin/quse \
+        /usr/local/bin/agent-log-explorer \
+        /usr/local/bin/tmux \
+        /usr/local/bin/tmuxctl \
+        /usr/local/bin/pocketshell-tui-smoke \
+        /usr/local/bin/pocketshell-fake-agent \
+        /usr/local/bin/pocketshell-agent-entrypoint \
+    && rm -f /usr/local/bin/pocketshell \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/pocketshell-agent-entrypoint"]

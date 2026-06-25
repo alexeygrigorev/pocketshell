@@ -792,6 +792,24 @@ JOURNEY_CLASSES=(
   # cache seed (first state is Loading); GREEN after. Lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
+  # ADDED (#839, epic #821 workstream C — the #837 durable-tree daemon journey):
+  # the END-TO-END durable-tree proof on a REAL device + REAL daemon. #837 was
+  # approved on a JVM FakeTreeDaemon proxy; this drives the PRODUCTION
+  # FolderListViewModel + a REAL TreeRemoteSource against the `agents-daemon`
+  # fixture (port 2239) whose `pocketshell` is the genuine Python package, so
+  # `tree get|upsert|reconcile` PERSIST a host-side JSON registry that survives an
+  # app kill + relaunch. The journey collapses a folder + holds an order, KILLS +
+  # RELAUNCHES the app (a fresh VM + a NEW TreeRemoteSource), asserts the
+  # cold-start hydrate renders the held order/collapse INSTANTLY (folder stays
+  # collapsed), then a resume reconcile prunes a gone session as a DELTA against
+  # the LIVE `tmuxctl list` and a refresh picks up an added one. RED on a broken
+  # durable path (the test's pre-condition guard fails if the daemon doesn't
+  # persist); GREEN with the real daemon. The emulator-journey workflow now brings
+  # up the 2239 fixture (+ a real-tree persist sanity check), so this does NOT
+  # self-skip on CI. The always-runnable JVM backstop is
+  # FolderListViewModelTreeDurabilityTest (per-push Unit job). It lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.FolderListDurableTreeDaemonDockerTest"
   # ADDED (#869): the composer-Send ACK-GATE on-device submit JOURNEY — the
   # load-bearing real-agent proof the #869 reviewer required (BLOCKED-G4). The
   # maintainer's symptom: "most of the time when I click Send it's not really

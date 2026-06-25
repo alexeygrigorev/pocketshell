@@ -579,6 +579,45 @@ jobs:
             testuser@127.0.0.1 \
             'pocketshell tree get </dev/null; rc=$?; if [ "$rc" -eq 0 ]; then echo "old-cli fixture unexpectedly accepted tree get (rc=0)" >&2; exit 1; fi; tmux -V >/dev/null && echo "old-cli mismatch confirmed: tree get rc=$rc, host still live"'
 
+      # Issue #839 (epic #821 workstream C): bring up the DAEMON fixture on host
+      # port 2239 so the durable-tree journey (FolderListDurableTreeDaemonDockerTest)
+      # actually RUNS on CI. Its `pocketshell` is the REAL Python package (genuine
+      # `tree.py` daemon code), so `tree get|upsert|reconcile` PERSIST a host-side
+      # JSON registry that survives an app kill + relaunch — the #837 durable
+      # property. Without this fixture started the journey self-skipped on CI and
+      # the durable-tree assertion had ZERO per-push protection (D32/G4/F3). Mirrors
+      # the agents-old-cli (#849) precedent directly above.
+      - name: Start Docker fixture (agents-daemon, issue #839)
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-daemon
+
+      - name: Wait for the agents-daemon fixture to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents-daemon /tmp/agents-daemon-health.log 60
+          cat /tmp/agents-daemon-health.log
+
+      # Confirm the 2239 fixture really IS the REAL daemon: `pocketshell tree`
+      # round-trips a persist (upsert then get over a fresh exec returns the
+      # collapsed node) AND reconcile diffs against the LIVE tmux server. A broken
+      # fixture fails the job loudly here instead of letting the journey pass
+      # vacuously / self-skip. Mirrors the agents-old-cli mismatch sanity check.
+      - name: Verify agents-daemon real `pocketshell tree` persists (issue #839)
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2239 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=3 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'set -e;
+             printf "%s" "{\"host\":\"ci\",\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
+             got="$(printf "%s" "{\"host\":\"ci\"}" | pocketshell tree get)";
+             echo "$got" | grep -q "\"session\": \"s\"" || { echo "agents-daemon tree did NOT persist: $got" >&2; exit 1; };
+             echo "$got" | grep -q "\"collapsed\": true" || { echo "agents-daemon tree dropped the collapse: $got" >&2; exit 1; };
+             echo "agents-daemon real-tree persist confirmed: $got"'
+
       # Issue #760: the journey job intermittently failed with
       # "WARNING | Failed to load snapshot 'default_boot'" followed by
       # "adb … exit code 1" — a STALE/CORRUPT quickboot snapshot the runner
@@ -818,6 +857,9 @@ jobs:
           # Issue #849: also capture the old-CLI (2238) fixture diagnostics.
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
           docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true
+          # Issue #839: also capture the daemon (2239) fixture diagnostics.
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-daemon > artifacts/docker/agents-daemon.log 2>/dev/null || true
+          docker inspect pocketshell-test-agents-daemon > artifacts/docker/agents-daemon-inspect.json 2>/dev/null || true
 
       - name: Publish journey suite summary
         if: always()

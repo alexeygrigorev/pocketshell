@@ -389,3 +389,139 @@ def test_cli_check_unknown_item_errors(tmp_path: Path) -> None:
     )
     assert res.exit_code != 0
     assert "unknown item" in res.output
+
+
+# ----- note card type (#859 Slice B — registry is genuinely generic) ----
+
+
+def test_note_card_type_is_registered() -> None:
+    """AC: the host registers a REAL `note` CardType (not just the stub test)."""
+    handler = cards_mod.get_card_type("note")
+    assert handler is not None
+    assert handler.name == "note"
+
+
+def test_build_upsert_read_note(tmp_path: Path) -> None:
+    """AC: note `body={text}`, `state={read:false, read_at:None}` round-trips."""
+    paths = _paths(tmp_path)
+    card = cards_mod.build_card(
+        card_type="note",
+        card_id="note",
+        title="Heads up",
+        build_kwargs={"text": "deploy finished"},
+    )
+    cards_mod.upsert_card("demo", card, paths=paths)
+    got = cards_mod.read_cards("demo", paths=paths)
+    assert len(got) == 1
+    assert got[0]["type"] == "note"
+    assert got[0]["title"] == "Heads up"
+    assert got[0]["body"] == {"text": "deploy finished"}
+    assert got[0]["state"] == {"read": False, "read_at": None}
+
+
+def test_note_apply_interaction_marks_read_and_unread(tmp_path: Path) -> None:
+    """AC: mark-as-read interaction sets read + read_at; unread clears read_at."""
+    paths = _paths(tmp_path)
+    card = cards_mod.build_card(
+        card_type="note", card_id="note", title=None,
+        build_kwargs={"text": "hi"},
+    )
+    cards_mod.upsert_card("demo", card, paths=paths)
+
+    read = cards_mod.apply_interaction("demo", "note", {"read": True}, paths=paths)
+    assert read["state"]["read"] is True
+    assert read["state"]["read_at"]  # a timestamp, not None
+
+    unread = cards_mod.apply_interaction("demo", "note", {"read": False}, paths=paths)
+    assert unread["state"]["read"] is False
+    assert unread["state"]["read_at"] is None
+
+
+def test_note_and_checklist_coexist_in_one_session(tmp_path: Path) -> None:
+    """The store is type-agnostic: a note + a checklist live side by side."""
+    paths = _paths(tmp_path)
+    checklist = cards_mod.build_card(
+        card_type="checklist", card_id="checklist", title="Deploy",
+        build_kwargs={"items": [{"id": "build-0", "text": "build"}]},
+    )
+    note = cards_mod.build_card(
+        card_type="note", card_id="note", title=None,
+        build_kwargs={"text": "fyi"},
+    )
+    cards_mod.upsert_card("demo", checklist, paths=paths)
+    cards_mod.upsert_card("demo", note, paths=paths)
+    got = cards_mod.read_cards("demo", paths=paths)
+    assert {c["type"] for c in got} == {"checklist", "note"}
+
+
+def test_cli_note_set_get_read_status_flow(tmp_path: Path) -> None:
+    """AC: push note (stdin) → get --json → read → status reflects read."""
+    runner = CliRunner()
+    env = _env(tmp_path)
+
+    res = runner.invoke(
+        cli,
+        ["push", "note", "--title", "Heads up", "--session", "demo"],
+        input="deploy finished\n",
+        env=env,
+    )
+    assert res.exit_code == 0, res.output
+    assert "note 'note'" in res.output
+
+    res = runner.invoke(cli, ["push", "get", "--json", "--session", "demo"], env=env)
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.output)
+    card = payload["cards"][0]
+    assert card["type"] == "note"
+    assert card["title"] == "Heads up"
+    assert card["body"]["text"] == "deploy finished"
+    assert card["state"]["read"] is False
+
+    # Human marks it read (this is what the app's "mark read" calls).
+    res = runner.invoke(
+        cli, ["push", "read", "--id", "note", "--session", "demo"], env=env
+    )
+    assert res.exit_code == 0, res.output
+    assert "note: read" in res.output
+
+    # Agent reads the acknowledgement via status.
+    res = runner.invoke(cli, ["push", "status", "--json", "--session", "demo"], env=env)
+    assert res.exit_code == 0, res.output
+    status = json.loads(res.output)
+    assert status["status"][0]["state"]["read"] is True
+
+    res = runner.invoke(cli, ["push", "status", "--session", "demo"], env=env)
+    assert res.exit_code == 0, res.output
+    assert "note: read" in res.output
+
+
+def test_cli_note_text_via_flag(tmp_path: Path) -> None:
+    runner = CliRunner()
+    env = _env(tmp_path)
+    res = runner.invoke(
+        cli, ["push", "note", "--text", "found a flaky test", "--session", "demo"],
+        env=env,
+    )
+    assert res.exit_code == 0, res.output
+    got = cards_mod.read_cards("demo", paths=_paths(tmp_path))
+    assert got[0]["body"]["text"] == "found a flaky test"
+
+
+def test_cli_note_empty_errors(tmp_path: Path) -> None:
+    runner = CliRunner()
+    env = _env(tmp_path)
+    res = runner.invoke(
+        cli, ["push", "note", "--session", "demo"], input="", env=env
+    )
+    assert res.exit_code != 0
+    assert "empty note" in res.output
+
+
+def test_cli_read_unknown_card_errors(tmp_path: Path) -> None:
+    runner = CliRunner()
+    env = _env(tmp_path)
+    res = runner.invoke(
+        cli, ["push", "read", "--id", "ghost", "--session", "demo"], env=env
+    )
+    assert res.exit_code != 0
+    assert "no card" in res.output

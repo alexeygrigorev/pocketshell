@@ -570,6 +570,19 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
+  # ADDED (#859 Slice B): the typed-card RENDERER REGISTRY proof. The session
+  # feed is now a generic typed-card list dispatched through
+  # SessionCardRenderers (no `when (type)` in the feed). This connected Compose
+  # test renders a HETEROGENEOUS feed (checklist + the new `note` type + a
+  # genuinely unknown type) through the registry and asserts: the checklist
+  # still renders + ticks (no regression), the `note` card renders + marks-read
+  # via the registry (new type, zero feed code change), and an unknown type
+  # degrades to the graceful "unsupported card" row. It is a PURE Compose test —
+  # NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO 2222/2226 port — so it
+  # needs no tests.yml service change, and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi())). Lives under
+  # com.pocketshell.app.cards.
+  "com.pocketshell.app.cards.SessionCardFeedRegistryTest"
   # ADDED (#750, 3rd occurrence — D31 durable-fix gate): the tmux non-Connected
   # SINGLE-INDICATOR regression guard. The maintainer's "two loading indicators
   # on the reconnect/reattach screen" symptom has now shipped THREE times because

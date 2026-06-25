@@ -291,6 +291,12 @@ JOURNEY_CLASSES=(
   # regression cannot silently return. It lives under com.pocketshell.app.composer,
   # not the proof prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDiscardE2eTest"
+  # ADDED (#585): Telegram-style hold-and-pull-up on the composer mic must start
+  # recording and lock it hands-free in one gesture, with the real
+  # ModalBottomSheet still mounted so the mic detector competes with the sheet
+  # drag detector. This was repeatedly emulator-green but device-broken, so the
+  # focused journey is gate-wired per D31/G9; it uses no Docker fixture.
+  "com.pocketshell.app.composer.PromptComposerMicSwipeLockJourneyTest"
   # ADDED (#832 — durable per-session composer draft store): a draft authored in
   # session A and lost on a FAILED attachment-send (despite the "Your draft was
   # kept" banner) must survive. The ComposerDraftStore persists the per-session

@@ -180,4 +180,46 @@ class TransportKeepAliveTest {
             worstCaseMs,
         )
     }
+
+    /**
+     * Issue #964 — the ride-through budget the app-level `LivenessProbe` defers to
+     * MUST equal the keepalive's own worst-case window and MUST stay STRICTLY
+     * LONGER than the probe's raw ~48s detection budget. If the keepalive's
+     * ride-through were ever shorter than (or equal to) the probe's budget, the
+     * probe's deferral guard would expire BEFORE the keepalive finished proving the
+     * link alive — re-opening the exact spurious-reconnect-on-slow-wifi bug #964
+     * fixed. This pins the single coherent liveness budget so the two mechanisms
+     * can never re-diverge.
+     *
+     * (The probe's raw budget — 4 × (7s + 5s) = 48s — lives in `core-connection`,
+     * which `core-ssh` does not depend on, so it is referenced here as the
+     * documented constant; the matching guard on the probe side asserts the
+     * deferral behaviour itself.)
+     */
+    @Test
+    fun `issue 964 ride-through budget is the keepalive worst-case and exceeds the probe budget`() {
+        assertEquals(
+            "the ride-through budget the probe defers to must be derived from the " +
+                "keepalive's own interval x countMax (one coherent number, not a " +
+                "second hard-coded one)",
+            TransportKeepAlive.DEFAULT_INTERVAL_MS * TransportKeepAlive.DEFAULT_COUNT_MAX,
+            TransportKeepAlive.RIDE_THROUGH_BUDGET_MS,
+        )
+        assertEquals(
+            "the documented ride-through window is 90s",
+            90_000L,
+            TransportKeepAlive.RIDE_THROUGH_BUDGET_MS,
+        )
+        // The probe's raw worst-case budget (core-connection LivenessProbe:
+        // 4 × (7s + 5s) = 48s). The keepalive ride-through MUST strictly exceed it
+        // so the probe's deferral never expires before the keepalive proves the
+        // link alive (the #964 coordination guarantee).
+        val probeRawBudgetMs = 48_000L
+        assertTrue(
+            "the keepalive ride-through (${TransportKeepAlive.RIDE_THROUGH_BUDGET_MS}ms) must " +
+                "stay STRICTLY longer than the probe's raw detection budget (${probeRawBudgetMs}ms) " +
+                "so the probe defers to the keepalive on a slow-but-live link (#964)",
+            TransportKeepAlive.RIDE_THROUGH_BUDGET_MS > probeRawBudgetMs,
+        )
+    }
 }

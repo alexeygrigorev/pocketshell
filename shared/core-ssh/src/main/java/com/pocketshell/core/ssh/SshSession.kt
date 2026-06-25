@@ -225,6 +225,32 @@ public interface SshSession : AutoCloseable {
     public suspend fun sendKeepAlive(): Boolean =
         throw NotImplementedError("sendKeepAlive is only implemented by RealSshSession")
 
+    /**
+     * Issue #964 — the single coherent liveness budget. True iff the always-on
+     * transport keepalive (`TransportKeepAlive`, #945) has observed INBOUND
+     * transport activity (a keepalive reply, or any other server bytes) within its
+     * ride-through window (`TransportKeepAlive.RIDE_THROUGH_BUDGET_MS`, ~90s) —
+     * i.e. the transport is PROVABLY still alive RIGHT NOW.
+     *
+     * The app-level `com.pocketshell.core.connection.LivenessProbe` (#927) reads
+     * this to DEFER its own redial while the keepalive is still successfully riding
+     * through. The two mechanisms used to run on MISMATCHED budgets — the probe
+     * declared the channel dead at ~48s while the keepalive was designed to ride
+     * through to ~90s — so on a slow-but-live link the probe force-redialed BEFORE
+     * the keepalive could prove the link alive, a spurious reconnect on a fine
+     * link (the v0.4.17 coordination bug). Deferring to this single
+     * transport-liveness oracle makes the keepalive the death authority for
+     * transport liveness, so the probe never redials a link the keepalive is still
+     * proving alive. The ride-through budget lives entirely in the transport layer
+     * (`TransportKeepAlive`) so there is ONE coherent number, not two competing
+     * ones.
+     *
+     * Default body returns `false` (no keepalive signal available) so the many
+     * per-test [SshSession] fakes need not override it; only [RealSshSession]
+     * answers off the keepalive's real activity timestamp.
+     */
+    public fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean = false
+
     /** Disconnect and free all resources. Idempotent. */
     override fun close()
 

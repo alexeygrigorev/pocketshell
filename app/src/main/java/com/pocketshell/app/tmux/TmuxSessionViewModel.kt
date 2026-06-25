@@ -964,10 +964,14 @@ public class TmuxSessionViewModel @Inject constructor(
 
                 override fun onProbeFailed(consecutiveFailures: Int) =
                     onLivenessProbeDeclaredDrop(consecutiveFailures)
+
+                override fun transportProvenAliveRecently(): Boolean =
+                    isTransportKeepAliveProvenAliveRecently()
             },
             intervalMs = LivenessProbeTestOverride.intervalMs(),
             perProbeTimeoutMs = LivenessProbeTestOverride.perProbeTimeoutMs(),
             failureThreshold = LivenessProbeTestOverride.failureThreshold(),
+            maxKeepAliveDeferrals = LivenessProbeTestOverride.maxKeepAliveDeferrals(),
             log = { line -> Log.i(LIVENESS_PROBE_TAG, line) },
         )
         livenessProbe = probe
@@ -1016,6 +1020,43 @@ public class TmuxSessionViewModel @Inject constructor(
         val client = clientRef ?: return false
         return runCatching { client.probeLiveness() }.getOrDefault(false)
     }
+
+    /**
+     * Issue #964 — the keepalive-coordination guard the [LivenessProbe] consults
+     * before declaring a drop. Reports whether the always-on transport keepalive
+     * ([com.pocketshell.core.ssh.TransportKeepAlive], #945) has seen inbound
+     * transport activity within its ride-through window — i.e. the LINK is provably
+     * alive even though the tmux control-channel probe is momentarily failing. When
+     * true the probe DEFERS rather than force-redialing, so a slow-but-live link is
+     * ridden through by the single keepalive budget instead of two competing ones.
+     *
+     * Reads the live [sessionRef] (the transport the warm lease holds). No session
+     * → no keepalive signal → false, so the probe keeps its own authority exactly
+     * as before whenever there is no live transport to defer to.
+     */
+    private fun isTransportKeepAliveProvenAliveRecently(): Boolean {
+        // Test seam: a connected/unit proof can pin the keepalive "alive" state
+        // (a live-but-slow link) without driving the real 90s ride-through window.
+        forceTransportProvenAliveForTest?.let { return it }
+        val session = sessionRef ?: return false
+        return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
+            .getOrDefault(false)
+    }
+
+    /**
+     * Issue #964 test seam: pin the keepalive-alive verdict the probe defers to.
+     * `true` reproduces a LIVE-but-slow link (transport keepalive still riding
+     * through) so the probe must NOT redial; `false` reproduces a genuinely dead
+     * transport (keepalive gave up) so the probe is free to declare. `null`
+     * (production default) reads the real [sessionRef] keepalive signal.
+     * `@Volatile` so the probe-loop coroutine sees the flip from the test thread.
+     */
+    @Volatile
+    internal var forceTransportProvenAliveForTest: Boolean? = null
+
+    /** Issue #964 test seam: drive the keepalive-coordination guard synchronously. */
+    internal fun isTransportKeepAliveProvenAliveRecentlyForTest(): Boolean =
+        isTransportKeepAliveProvenAliveRecently()
 
     /**
      * EPIC #792 Slice D test seam: arm the synthetic silent-drop. While true,
@@ -15636,6 +15677,9 @@ internal object LivenessProbeTestOverride {
     @Volatile
     private var failureThresholdOverride: Int? = null
 
+    @Volatile
+    private var maxKeepAliveDeferralsOverride: Int? = null
+
     /**
      * Whether a freshly-constructed VM auto-starts its probe loop. Production +
      * the connected emulator proof keep this TRUE (the loop runs on the real Main
@@ -15651,7 +15695,12 @@ internal object LivenessProbeTestOverride {
         autoStartEnabled = enabled
     }
 
-    fun setForTest(intervalMs: Long?, perProbeTimeoutMs: Long?, failureThreshold: Int?) {
+    fun setForTest(
+        intervalMs: Long?,
+        perProbeTimeoutMs: Long?,
+        failureThreshold: Int?,
+        maxKeepAliveDeferrals: Int? = null,
+    ) {
         require(intervalMs == null || intervalMs > 0) { "intervalMs must be > 0" }
         require(perProbeTimeoutMs == null || perProbeTimeoutMs > 0) {
             "perProbeTimeoutMs must be > 0"
@@ -15659,13 +15708,17 @@ internal object LivenessProbeTestOverride {
         require(failureThreshold == null || failureThreshold >= 1) {
             "failureThreshold must be >= 1"
         }
+        require(maxKeepAliveDeferrals == null || maxKeepAliveDeferrals >= 1) {
+            "maxKeepAliveDeferrals must be >= 1"
+        }
         intervalMsOverride = intervalMs
         perProbeTimeoutMsOverride = perProbeTimeoutMs
         failureThresholdOverride = failureThreshold
+        maxKeepAliveDeferralsOverride = maxKeepAliveDeferrals
     }
 
     fun clear() {
-        setForTest(null, null, null)
+        setForTest(null, null, null, null)
         autoStartEnabled = true
     }
 
@@ -15676,6 +15729,9 @@ internal object LivenessProbeTestOverride {
 
     fun failureThreshold(): Int =
         failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
+
+    fun maxKeepAliveDeferrals(): Int =
+        maxKeepAliveDeferralsOverride ?: LivenessProbe.DEFAULT_MAX_KEEPALIVE_DEFERRALS
 }
 
 /**

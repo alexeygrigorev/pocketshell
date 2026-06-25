@@ -683,7 +683,13 @@ JOURNEY_CLASSES=(
   # drives ONLY the deterministic agents:2222 fixture (DEFAULT_HOST/PORT/USER ->
   # 10.0.2.2:2222) that tests.yml already brings up, and does NOT self-skip on CI
   # (no assumeFalse(isRunningOnCi()) on the load-bearing assertions — process.md
-  # F3 / D31). It lives under the com.pocketshell.app.proof prefix.
+  # F3 / D31). It lives under the com.pocketshell.app.proof prefix. Issue #964/#822
+  # adds a second @Test in this same class — the slow-but-live wifi journey threaded
+  # against wedged-`-CC` recovery: a slow-but-live `-CC` blip that recovers while the
+  # transport keepalive proves the link alive (forceTransportProvenAliveForTest) must
+  # NOT spuriously redial (#964); but a SUSTAINED wedged `-CC` on a still-healthy
+  # keepalive must STILL recover (#822 not suppressed by the deferral). Both methods
+  # run per-PR.
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"
   # Issue #833 (Slice C resilience follow-up): a CLEAN sustained outage (clean
   # FIN/connection-refused for the outage window, then the link returns) is the

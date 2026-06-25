@@ -2662,6 +2662,69 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun issue964KeepAliveCoordinationGuardReflectsTheLiveSessionKeepalive() = runTest(scheduler) {
+        // Issue #964 — the VM wiring of the keepalive-coordination guard the
+        // LivenessProbe defers to. The probe's ProbeIo.transportProvenAliveRecently
+        // is wired to the live SshSession's keepalive-liveness signal, so on a
+        // slow-but-live link (control probe failing, keepalive still proving the
+        // transport alive) the probe DEFERS and does NOT force a redial.
+        val vm = newVm()
+
+        // No live session yet → no keepalive signal → the probe keeps its own
+        // authority (guard reports NOT-alive), exactly as before.
+        assertFalse(
+            "with no live session there is no keepalive signal to defer to",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // Attach a live session whose transport keepalive is still riding through
+        // (a slow-but-live link): the guard must report ALIVE so the probe defers.
+        val session = FakeSshSession().apply { transportProvenAlive = true }
+        val liveClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = liveClient,
+            session = session,
+        )
+        runCurrent()
+        assertTrue(
+            "while the transport keepalive proves the link alive the guard must report " +
+                "ALIVE so the probe defers (no spurious redial on a slow-but-live link)",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // The transport genuinely dies — the keepalive stops proving liveness, so
+        // the guard reports NOT-alive and the probe regains authority (no infinite
+        // deferral / hang on a real death).
+        session.transportProvenAlive = false
+        assertFalse(
+            "once the keepalive stops proving liveness the guard must report NOT-alive " +
+                "so the probe can declare the real drop (#964 — deferral is not a hang)",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // The explicit test seam pins the verdict independently of the session.
+        vm.forceTransportProvenAliveForTest = true
+        assertTrue(
+            "the #964 test seam pins the keepalive-alive verdict",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+        vm.forceTransportProvenAliveForTest = null
+        assertFalse(
+            "clearing the seam falls back to the (now dead) session signal",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        vm.clearForTest()
+    }
+
+    @Test
     fun briefPassiveEofSilentlyReattachesWithoutDisconnectBandOrConnectAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
@@ -15055,6 +15118,15 @@ class TmuxSessionViewModelTest {
 
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
+
+        // Issue #964: lets a test report the transport keepalive as still proving
+        // the link alive (a slow-but-live link). Default mirrors the production
+        // SshSession default (false) so unrelated tests are unaffected.
+        @Volatile
+        var transportProvenAlive: Boolean = false
+
+        override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean =
+            transportProvenAlive && isConnected
 
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
             execCommands += command

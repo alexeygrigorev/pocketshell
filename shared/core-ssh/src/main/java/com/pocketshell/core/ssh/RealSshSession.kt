@@ -131,6 +131,24 @@ internal class RealSshSession(
     override val isConnected: Boolean
         get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
 
+    /**
+     * Issue #964 — the transport-liveness oracle the app-level `LivenessProbe`
+     * defers to. True while the keepalive ([TransportKeepAlive]) has seen INBOUND
+     * activity (its reply bumps [lastInboundActivityNanos]) within its
+     * [TransportKeepAlive.RIDE_THROUGH_BUDGET_MS] window — i.e. the link is
+     * provably alive at the transport layer, so the probe must not force a redial.
+     * Once the transport is genuinely dead the keepalive stops bumping the
+     * timestamp, this ages out past the ride-through window and returns `false`,
+     * and the keepalive's own ride-through budget closes the dead transport — one
+     * coherent liveness budget, not two competing ones.
+     */
+    override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean {
+        if (!isConnected) return false
+        val sinceActivityNanos = System.nanoTime() - lastInboundActivityNanos
+        val rideThroughNanos = TransportKeepAlive.RIDE_THROUGH_BUDGET_MS * 1_000_000L
+        return sinceActivityNanos in 0 until rideThroughNanos
+    }
+
     override suspend fun sendKeepAlive(): Boolean {
         // Route the global request through the single-writer dispatcher so it is
         // FIFO-serialized against every other transport op (the #847-safe path).

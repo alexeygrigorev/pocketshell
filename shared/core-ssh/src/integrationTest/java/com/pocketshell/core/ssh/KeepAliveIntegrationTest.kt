@@ -176,6 +176,43 @@ class KeepAliveIntegrationTest {
     }
 
     @Test
+    fun keepAliveLivenessReachesTheProbeDeferralGuardOnTheRealTransport() = runTest {
+        // Issue #964 — the real-path proof that the transport keepalive's liveness
+        // reaches the app-level LivenessProbe's deferral guard. On a LIVE link a
+        // successful keepalive bumps the session's inbound-activity timestamp, so
+        // SshSession.isTransportProvenAliveWithinKeepAliveWindow() (the exact
+        // signal the probe defers to) reports ALIVE — meaning the probe will NOT
+        // force a redial on a slow-but-live link. Once the transport is closed the
+        // guard reports DEAD, so the probe regains its authority and a genuine
+        // death is still detected.
+        connectDirect().use { session ->
+            assertTrue("session should be connected", session.isConnected)
+            // A real keepalive round-trip against the live OpenSSH server proves the
+            // peer alive and bumps lastInboundActivityNanos.
+            assertTrue(
+                "a real keepalive must succeed against the live server",
+                session.sendKeepAlive(),
+            )
+            assertTrue(
+                "after a successful keepalive the transport-liveness guard the probe " +
+                    "defers to must report ALIVE (so the probe does NOT redial a " +
+                    "slow-but-live link, #964)",
+                session.isTransportProvenAliveWithinKeepAliveWindow(),
+            )
+
+            // A genuinely dead transport: once closed, the guard reports DEAD so the
+            // probe regains authority (no infinite deferral).
+            session.close()
+            assertFalse(
+                "on a closed/dead transport the liveness guard must report DEAD so the " +
+                    "probe is free to declare the drop (#964 — deferral is not an " +
+                    "infinite hang)",
+                session.isTransportProvenAliveWithinKeepAliveWindow(),
+            )
+        }
+    }
+
+    @Test
     fun transientGapShorterThanBudgetIsRiddenThrough() {
         // RIDE-THROUGH (the Terminus behaviour, the red->green core): pause the
         // link for a window SHORTER than the keepalive budget, then resume. The

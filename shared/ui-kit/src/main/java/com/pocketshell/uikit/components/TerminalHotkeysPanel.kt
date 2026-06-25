@@ -104,40 +104,13 @@ fun TerminalHotkeysPanel(
             .semantics { contentDescription = "Terminal hotkeys" },
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = "Terminal hotkeys",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.2).sp,
-                color = PocketShellColors.Text,
-            )
-            Box(
-                modifier = Modifier
-                    .height(32.dp)
-                    .background(
-                        PocketShellColors.SurfaceElev,
-                        androidx.compose.foundation.shape.CircleShape,
-                    )
-                    .padding(horizontal = 9.dp)
-                    .clickable(role = Role.Button, onClick = onClose)
-                    .testTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG)
-                    .semantics { contentDescription = "Close terminal hotkeys" },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "×",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 20.sp,
-                )
-            }
-        }
+        SheetHeader(
+            title = "Terminal hotkeys",
+            onClose = onClose,
+            closeContentDescription = "Close terminal hotkeys",
+            closeTestTag = TERMINAL_HOTKEYS_PANEL_CLOSE_TAG,
+            modifier = Modifier.padding(top = 6.dp),
+        )
 
         sections.forEach { section ->
             HotkeySectionGrid(

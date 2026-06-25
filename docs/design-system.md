@@ -307,9 +307,15 @@ text entry, passphrase/API-key entry, and blocking errors.
 Standard sheet pattern:
 
 - `ModalBottomSheet`, `Surface` container, 20dp top corners.
-- Title row, optional search/filter, dense `LazyColumn`, fixed action row only
+- [`SheetHeader`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/components/SheetHeader.kt)
+  title row, optional search/filter, dense `LazyColumn`, fixed action row only
   when needed.
 - Rows use `ListRow`, `Badge`, `StatusDot`, and `Kebab` where possible.
+
+`SheetHeader` is the canonical bottom-sheet title surface: `titleMedium`
+SemiBold title, optional muted dense subtitle, optional trailing slot, and an
+optional close affordance. The sheet body keeps owning its height, scrolling,
+and horizontal padding; the header owns only the title/subtitle/action grammar.
 
 Standard dialog pattern:
 

@@ -56,6 +56,7 @@ import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -467,11 +468,7 @@ private fun CopyFromFolderSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = "Copy keys from another folder",
-                color = PocketShellColors.Text,
-                style = MaterialTheme.typography.titleMedium,
-            )
+            SheetHeader(title = "Copy keys from another folder")
 
             val source = selectedSource
             if (source == null) {

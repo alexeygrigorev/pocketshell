@@ -38,6 +38,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -143,16 +144,10 @@ internal fun SessionTypePickerContent(
                 .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
-            Text(
-                text = title,
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "in $folderLabel",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyMono,
+            SheetHeader(
+                title = title,
+                subtitle = "in $folderLabel",
+                subtitleStyle = PocketShellType.bodyMono,
             )
 
             // Start folder — pre-filled, editable. Keep this inside the

@@ -32,6 +32,7 @@ import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
@@ -152,8 +153,10 @@ private fun PromptContent(
     onSkip: () -> Unit,
 ) {
     SheetColumn {
-        SheetTitle(text = "Host setup needed")
-        SheetSubtitle(text = "$hostName · ${bootstrapPromptText(state)}")
+        SheetHeader(
+            title = "Host setup needed",
+            subtitle = "$hostName · ${bootstrapPromptText(state)}",
+        )
         SetupActions(
             state = state,
             onInstallTool = onInstallTool,
@@ -322,8 +325,10 @@ private fun SetupInfoRow(title: String, detail: String) {
 @Composable
 private fun InstallingContent(hostName: String) {
     SheetColumn {
-        SheetTitle(text = "Setting up host…")
-        SheetSubtitle(text = "$hostName · running installer and systemd commands. This can take a few seconds on a fresh host.")
+        SheetHeader(
+            title = "Setting up host…",
+            subtitle = "$hostName · running installer and systemd commands. This can take a few seconds on a fresh host.",
+        )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         ListRow(
             title = "working…",
@@ -349,8 +354,10 @@ private fun SuccessContent(
     onContinue: () -> Unit,
 ) {
     SheetColumn {
-        SheetTitle(text = "Host ready")
-        SheetSubtitle(text = hostBootstrapSuccessSubtitle(hostName))
+        SheetHeader(
+            title = "Host ready",
+            subtitle = hostBootstrapSuccessSubtitle(hostName),
+        )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         // Issue #885 (hard cut, D22): after a successful install/update the
         // sheet just acknowledges "Host ready" and offers a single Continue —
@@ -376,8 +383,10 @@ internal fun hostBootstrapSuccessSubtitle(hostName: String): String =
 @Composable
 private fun FailedContent(hostName: String, message: String, onClose: () -> Unit) {
     SheetColumn {
-        SheetTitle(text = "Install failed")
-        SheetSubtitle(text = "$hostName · the package manager reported an error.")
+        SheetHeader(
+            title = "Install failed",
+            subtitle = "$hostName · the package manager reported an error.",
+        )
         Spacer(modifier = Modifier.height(PocketShellSpacing.md))
         Box(
             modifier = Modifier
@@ -538,24 +547,4 @@ private fun SheetColumn(content: @Composable () -> Unit) {
     ) {
         content()
     }
-}
-
-@Composable
-private fun SheetTitle(text: String) {
-    Text(
-        text = text,
-        color = PocketShellColors.Text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
-    )
-}
-
-@Composable
-private fun SheetSubtitle(text: String) {
-    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
-    Text(
-        text = text,
-        color = PocketShellColors.TextSecondary,
-        style = PocketShellType.bodyDense,
-    )
 }

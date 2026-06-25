@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -268,22 +269,12 @@ private fun CommentSheet(
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(testTag),
         ) {
-            Text(
-                text = title,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
+            SheetHeader(
+                title = title,
+                subtitle = subtitle.takeIf { it.isNotEmpty() },
+                subtitleMaxLines = 2,
+                subtitleStyle = PocketShellType.bodyMono,
             )
-            if (subtitle.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = subtitle,
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.bodyMono,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
             Box(
                 modifier = Modifier
@@ -382,12 +373,7 @@ private fun PendingTraySheet(
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_TRAY_SHEET_TAG),
         ) {
-            Text(
-                text = "Review (${reviewState.pendingCount})",
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
+            SheetHeader(title = "Review (${reviewState.pendingCount})")
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 
             if (!reviewState.hasPending) {
@@ -487,18 +473,10 @@ internal fun ReviewSubmittedSheet(
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG),
         ) {
-            Text(
-                text = "Review saved",
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "Sent $count ${if (count == 1) "comment" else "comments"} to $host. " +
+            SheetHeader(
+                title = "Review saved",
+                subtitle = "Sent $count ${if (count == 1) "comment" else "comments"} to $host. " +
                     "It's in the reviews inbox and you can route it into this session.",
-                style = PocketShellType.bodyDense,
-                color = PocketShellColors.TextSecondary,
             )
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 
@@ -598,18 +576,10 @@ internal fun AnnotationSavedSheet(
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG),
         ) {
-            Text(
-                text = "Annotated image saved",
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "Sent the marked-up image to $host. " +
+            SheetHeader(
+                title = "Annotated image saved",
+                subtitle = "Sent the marked-up image to $host. " +
                     "It's in the annotations inbox (with a YAML sidecar).",
-                style = PocketShellType.bodyDense,
-                color = PocketShellColors.TextSecondary,
             )
             Spacer(modifier = Modifier.height(PocketShellSpacing.md))
 

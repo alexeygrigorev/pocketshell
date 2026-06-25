@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
@@ -29,6 +31,7 @@ import org.junit.After
 import org.junit.Assume
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -157,6 +160,22 @@ class AgentConversationReconnectDockerTest {
             key,
             buildString {
                 appendLine("set -eu")
+                // Issue #819 (A2): the fixture pre-seeds the JSONL only for the
+                // old `/workspace`-encoded project dir. On the home-dir-rebased
+                // cwd we create the encoded project dir + seed a minimal Claude
+                // transcript ourselves so per-pane detection has a candidate to
+                // bind, then refresh its mtime into the recency window.
+                appendLine("mkdir -p ${shellQuote(claudeProjectDir(CLAUDE_PATH))}")
+                appendLine("if [ ! -s ${shellQuote(CLAUDE_PATH)} ]; then")
+                appendLine(
+                    "  printf '%s\\n' " +
+                        shellQuote(
+                            "{\"uuid\":\"claude-user-1\",\"timestamp\":\"2026-05-22T10:00:00Z\"," +
+                                "\"message\":{\"role\":\"user\",\"content\":\"inspect the failing tests\"}}",
+                        ) +
+                        " > ${shellQuote(CLAUDE_PATH)}",
+                )
+                appendLine("fi")
                 appendLine("touch ${shellQuote(CLAUDE_PATH)}")
                 // The detector derives Claude's encoded project dir from the
                 // pane cwd, so the pane must actually sit in REMOTE_CWD.
@@ -177,6 +196,17 @@ class AgentConversationReconnectDockerTest {
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
                         "-c ${shellQuote(REMOTE_CWD)} ${shellQuote(wrapperPath)}",
                 )
+                // Record the agent kind on the session (the #825 launch wrapper
+                // does this for PocketShell-launched sessions), so post-#826
+                // detection resolves via the deterministic RECORDED-identity path
+                // (readRecordedAgentKind → recorded source) rather than the
+                // cgroup/proc daemon kind-guess. Without it this fixture's
+                // claude-named sleep process is NOT in a pocketshell agent cgroup
+                // scope (`/proc/<pid>/cgroup` is `0::/`), so the daemon returns
+                // `unknown` and detection NEVER lands — the test would time out at
+                // the `waitForAgentForWindow` precondition before any A2 assertion
+                // runs. Mirrors the sibling `agentOpensOnDefaultView…` setup.
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind claude")
                 appendLine("sleep 1")
                 appendLine("tmux list-panes -t ${shellQuote(sessionName)} -F '#{pane_id} #{pane_tty} #{pane_current_command}'")
             },
@@ -255,6 +285,29 @@ class AgentConversationReconnectDockerTest {
             stamp("force_reconnect_via_transport_drop_then_auto_reconnect")
             killControlClientSshConnection(key, sessionName)
 
+            // Drive the FOREGROUND proactive reconnect with a real
+            // validated-network handoff (the production path a phone takes on a
+            // wifi→cell switch), mirroring the working `SshReconnectE2eTest`.
+            // Under instrumentation the app's process-foreground signal is
+            // false, so the bare EOF now goes through the post-#926
+            // passive-disconnect GRACE path and is SUPPRESSED (single-grace-
+            // owner) — the auto-reconnect is gated off until a foreground
+            // signal arrives, which is why the kill alone left the VM parked on
+            // `Connected` with `disconnected=true` (observed in logcat:
+            // `PsConnEffectDriver tmux.disconnected=true SUPPRESSED`). The
+            // network handoff is the genuine foreground reconnect trigger and
+            // makes the fresh re-attach (new pane ids, empty conversation map)
+            // fire deterministically.
+            vm.onNetworkChanged(
+                TerminalNetworkChange(
+                    previous = TerminalNetworkSnapshot.Validated("wifi"),
+                    current = TerminalNetworkSnapshot.Validated("cell"),
+                    previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                    reason = "validated-default-network-changed",
+                    sequence = 1L,
+                ),
+            )
+
             // The VM observes the dead socket and enters Reconnecting, then a
             // fresh connect attempt fires. Bound it loudly so a drop that is
             // never observed is a clear failure, not a hang.
@@ -297,34 +350,54 @@ class AgentConversationReconnectDockerTest {
 
             // CORE ASSERTION: the moment panes land, the remembered agent
             // status is restored — the Conversation tab is available and the
-            // user is back on Conversation — WITHOUT waiting for live
-            // re-detection. Bound it: the restore is seeded synchronously in
-            // applyParsedPanes, so it must hold within a short grace window.
+            // user is back on Conversation — WITHOUT bouncing to Terminal. The
+            // restore is seeded synchronously in applyParsedPanes.
+            //
+            // Issue #819 (Slice A2): the reattach seed is a detection-LESS
+            // RESOLVING placeholder (rememberedAgentPlaceholder = true,
+            // detection == null), NOT the remembered detection rendered Live —
+            // so it never re-shows a stale/sibling source before live
+            // re-detection re-anchors the route-true one. Because this fixture
+            // records `@ps_agent_kind claude`, live re-detection resolves via the
+            // deterministic single-round-trip recorded-Claude path and can bind
+            // the route-true source FAST — sometimes before the 5s checkpoint —
+            // so the resolving-placeholder phase may be brief. The load-bearing
+            // A2 property is the same either way: the restored Conversation
+            // source is ALWAYS the route-true source, NEVER a stale/sibling one.
+            // So we observe the row right at reattach and accept EITHER (a) the
+            // resolving placeholder (detection-less, route-true source not yet
+            // shown) OR (b) the already-bound route-true Claude source — but
+            // NEVER any OTHER source. Poll fast to catch the transient.
+            var sawResolvingPlaceholder = false
             waitForCondition(
-                "agent status restored immediately on reattach from memory",
+                "agent status restored on Conversation after reattach (A2 re-anchor)",
                 timeoutMs = IMMEDIATE_RESTORE_TIMEOUT_MS,
                 describe = {
                     "agent status NOT restored on reattach (pane=$reattachedPaneId, " +
                         "window=$windowId); conversations=${vm.agentConversations.value.keys}, " +
-                        "agentForWindow=${vm.agentForWindow(windowId)}"
+                        "row=${vm.agentConversations.value[reattachedPaneId]}"
                 },
             ) {
-                val restored = vm.agentConversations.value[reattachedPaneId]
-                restored != null &&
-                    vm.agentForWindow(windowId) == AgentKind.ClaudeCode &&
-                    restored.selectedTab == SessionTab.Conversation
+                val row = vm.agentConversations.value[reattachedPaneId]
+                if (row?.rememberedAgentPlaceholder == true && row.detection == null) {
+                    sawResolvingPlaceholder = true
+                }
+                // The restore landed once the row exists on Conversation and is
+                // EITHER the A2 resolving placeholder OR has bound the route-true
+                // Claude source (the fast recorded path).
+                row != null &&
+                    row.selectedTab == SessionTab.Conversation &&
+                    (
+                        (row.rememberedAgentPlaceholder && row.detection == null) ||
+                            (row.detection?.agent == AgentKind.ClaudeCode && row.detection?.sourcePath == CLAUDE_PATH)
+                    )
             }
             val restored = vm.agentConversations.value[reattachedPaneId]
             assertNotNull(
-                "agent status must be restored immediately on reattach " +
+                "agent status must be restored on reattach " +
                     "(pane=$reattachedPaneId, window=$windowId); " +
                     "conversations=${vm.agentConversations.value.keys}",
                 restored,
-            )
-            assertEquals(
-                "Conversation tab must be available immediately on reattach",
-                AgentKind.ClaudeCode,
-                vm.agentForWindow(windowId),
             )
             assertEquals(
                 "user who was in Conversation must stay on Conversation after reconnect " +
@@ -332,10 +405,42 @@ class AgentConversationReconnectDockerTest {
                 SessionTab.Conversation,
                 restored!!.selectedTab,
             )
-            stamp("immediate_restore_ok selectedTab=${restored.selectedTab}")
+            // The load-bearing A2 assertion: the restored row NEVER shows a
+            // stale/sibling source. Whichever phase we observed:
+            //  - resolving placeholder: detection is null (no source shown yet);
+            //  - bound: the source is the ROUTE-TRUE Claude JSONL, not another.
+            // The OLD blind-restore (the #819 bug) would have carried whatever
+            // `remembered.detection.sourcePath` was, rendered Live immediately.
+            if (restored.detection == null) {
+                assertTrue(
+                    "#819 (A2): a detection-less restored row must be the remembered-agent " +
+                        "resolving placeholder (held until live re-detection re-anchors), " +
+                        "not a torn-down/blank row",
+                    restored.rememberedAgentPlaceholder,
+                )
+            } else {
+                assertEquals(
+                    "#819 (A2): the restored row's bound source must be the ROUTE-TRUE " +
+                        "Claude session, never a stale/sibling rollout",
+                    CLAUDE_PATH,
+                    restored.detection!!.sourcePath,
+                )
+            }
+            stamp(
+                "immediate_restore_ok selectedTab=${restored.selectedTab} " +
+                    "sawResolvingPlaceholder=$sawResolvingPlaceholder " +
+                    "detection=${restored.detection?.sourcePath}",
+            )
 
-            // Live re-detection confirms; assert it does not bounce the user.
+            // Live re-detection confirms; assert it re-anchors the route-true
+            // source (agentForWindow becomes ClaudeCode) and does not bounce the
+            // user off Conversation.
             waitForAgentForWindow(vm, windowId, "post-reattach live re-detection")
+            assertEquals(
+                "#819 (A2): live re-detection binds the route-true Claude source",
+                AgentKind.ClaudeCode,
+                vm.agentForWindow(windowId),
+            )
             assertEquals(
                 "live re-detection must keep the user on Conversation",
                 SessionTab.Conversation,
@@ -1234,10 +1339,23 @@ class AgentConversationReconnectDockerTest {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
+    /** Parent directory of a Claude JSONL transcript path. */
+    private fun claudeProjectDir(jsonlPath: String): String =
+        jsonlPath.substringBeforeLast('/')
+
     private companion object {
+        // Issue #819 (A2): rebased off `/workspace/pocketshell` onto the
+        // WRITABLE home dir. The `agents` fixture does NOT provision
+        // `/workspace`, and `testuser` cannot create it, so the old setup
+        // failed at `mkdir -p /workspace/pocketshell` (Permission denied)
+        // BEFORE any A2 assertion ran — a pre-existing fixture gap the sibling
+        // `conversationTapIsHonouredBeforeDetectionLands` test already avoids by
+        // using the home dir. The Claude project-dir encoding follows the cwd
+        // (`encodeClaudeCwd`: `/`→`-`), so `/home/testuser/pocketshell` maps to
+        // `.claude/projects/-home-testuser-pocketshell/`.
+        const val REMOTE_CWD: String = "/home/testuser/pocketshell"
         const val CLAUDE_PATH: String =
-            "/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl"
-        const val REMOTE_CWD: String = "/workspace/pocketshell"
+            "/home/testuser/.claude/projects/-home-testuser-pocketshell/pocketshell-claude.jsonl"
 
         /**
          * Ceiling for the VM to observe the server-side transport drop and

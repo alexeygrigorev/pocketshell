@@ -551,6 +551,54 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `captureWithCursor with a short seed timeout fires BELOW the full command ceiling on a wedged channel`() =
+        runBlocking {
+            // Issue #926: the attach/switch/reattach seed passes a SHORT ceiling
+            // (timeoutMs ≈ 2.5 s in production) so a wedged-but-alive `-CC`
+            // channel makes the seed fall through to the blank watchdog FAST,
+            // instead of parking the full per-command `commandTimeoutMs` (10 s in
+            // production) — the #895 freeze. Here the full ceiling is a generous
+            // 30 s and the seed ceiling is 250 ms; the wedged capture (no response
+            // ever fed) must surface a best-effort failure within the SHORT bound,
+            // proving the seed timeout is honoured and clamps below the command
+            // ceiling.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // No response is ever fed, so the capture block never completes;
+                // the seed ceiling (250 ms) — NOT the 30 s command ceiling — must
+                // fire. Bounding the await at 5 s proves it fired well below 30 s.
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching {
+                    withTimeout(5_000) {
+                        client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = 250L)
+                    }
+                }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+                assertTrue(
+                    "the wedged seed must surface a TmuxClientException from the short " +
+                        "ceiling, not hang to the 30 s command ceiling (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                assertTrue(
+                    "the seed must time out within ~the short ceiling, NEVER the full " +
+                        "command ceiling (elapsed ${elapsedMs}ms)",
+                    elapsedMs < 5_000L,
+                )
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
     fun `sendChainedCommands writes one chained line and drains both blocks in order`() = runBlocking {
         // Issue #692: the folder-list discovery probe fetches list-sessions +
         // list-panes in ONE control-mode round-trip. tmux -CC answers a

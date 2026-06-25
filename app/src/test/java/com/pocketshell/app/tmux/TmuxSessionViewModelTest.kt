@@ -187,6 +187,15 @@ class TmuxSessionViewModelTest {
             // dispatcher to a separate off-Main one to exercise the hop.)
             it.setReconcileDispatcherForTest(testMainDispatcher)
             it.setReconcileApplyDispatcherForTest(testMainDispatcher)
+            // Issue #926: pin the SEED-IO dispatcher (the off-Main hop for the
+            // attach/switch/reattach `capture-pane`/`list-panes` round-trips) to
+            // the shared virtual-clock Main so the IO runs inline on the test
+            // scheduler — `advanceUntilIdle` then drains it deterministically.
+            // The production default is `Dispatchers.IO` (a real off-Main thread,
+            // so the seed never parks the UI thread); the dedicated #926
+            // off-Main regression test ([Issue926SeedIoOffMainTest]) pins it to a
+            // DISTINCT real dispatcher to assert the hop actually leaves Main.
+            it.setSeedIoDispatcherForTest(testMainDispatcher)
             // Issue #877: pin the port-detection decode/scan dispatcher to the
             // shared virtual-clock Main so `withContext(portDetectionDispatcher)`
             // runs the scan inline on the test scheduler (no real background

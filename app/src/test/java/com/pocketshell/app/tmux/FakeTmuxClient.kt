@@ -230,8 +230,71 @@ internal class FakeTmuxClient(
         return commands.map { handleCommand(it, bestEffort = false) }
     }
 
-    override suspend fun sendCommand(cmd: String): CommandResponse =
-        handleCommand(cmd, bestEffort = false)
+    /**
+     * Issue #926: the thread name on which the most recent SEED round-trip
+     * actually ran. The seed IO ([TmuxSessionViewModel.seedPaneFromCaptureOnce]
+     * → [captureWithCursor]) and the attach/switch `list-panes`
+     * ([handleCommand]) must run OFF the Main (UI) thread; a test pins Main and
+     * the seed-IO dispatcher to two DISTINCT single-thread dispatchers and
+     * asserts these record the IO thread, never the Main thread.
+     */
+    @Volatile
+    var lastCaptureThreadName: String? = null
+
+    @Volatile
+    var lastListPanesThreadName: String? = null
+
+    /**
+     * Issue #926: the [timeoutMs] the VM passed on the most recent seed capture
+     * — proves the SHORT seed ceiling (≈2.5 s) is threaded through instead of
+     * the full 10 s per-command timeout.
+     */
+    @Volatile
+    var lastCaptureTimeoutMs: Long? = null
+
+    /**
+     * Issue #926: when set, [captureWithCursor] PARKS on this gate (a
+     * wedged-but-alive `-CC` control channel). A test releases it to model the
+     * channel recovering, or leaves it parked and bounds the seed by the VM's
+     * short ceiling via the production fall-through. The park happens on the
+     * seed-IO dispatcher thread (off Main), so it never blocks the test's Main
+     * looper.
+     */
+    @Volatile
+    var captureWithCursorGate: CompletableDeferred<Unit>? = null
+
+    override suspend fun captureWithCursor(
+        paneId: String,
+        scrollbackLines: Int,
+        timeoutMs: Long?,
+    ): com.pocketshell.core.tmux.CaptureWithCursor {
+        lastCaptureThreadName = Thread.currentThread().name
+        lastCaptureTimeoutMs = timeoutMs
+        captureWithCursorGate?.await()
+        // Reuse the canned-response plumbing in handleCommand so existing
+        // capturePaneResponses / cursorQueryResponses fixtures keep working.
+        val capture = handleCommand(
+            "capture-pane -p -e -S -$scrollbackLines -t $paneId",
+            bestEffort = true,
+        )
+        val cursor = runCatching {
+            handleCommand(
+                "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'",
+                bestEffort = true,
+            )
+        }.getOrNull()
+            ?.takeUnless { it.isError }
+            ?.output
+            ?.firstOrNull()
+        return com.pocketshell.core.tmux.CaptureWithCursor(capture = capture, cursorReply = cursor)
+    }
+
+    override suspend fun sendCommand(cmd: String): CommandResponse {
+        if (cmd.startsWith("list-panes")) {
+            lastListPanesThreadName = Thread.currentThread().name
+        }
+        return handleCommand(cmd, bestEffort = false)
+    }
 
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         handleCommand(cmd, bestEffort = true)

@@ -68,7 +68,15 @@ class TmuxSessionOpenFailedReconnectTest {
         runtimeCache = TmuxSessionRuntimeCache(),
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
-    )
+    ).also {
+        // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
+        // attach/reattach `capture-pane`/`list-panes` IO) to the rule's test
+        // Main (an UnconfinedTestDispatcher) so the round-trips run inline on the
+        // test clock instead of a real `Dispatchers.IO` thread that `runTest`
+        // cannot drain. Production defaults to `Dispatchers.IO` (off the UI
+        // thread, so the seed never freezes it).
+        it.setSeedIoDispatcherForTest(Dispatchers.Main)
+    }
 
     @Test
     fun reconnectRecoversFromOpenFailedByEvictingPoisonedTransport() = runTest {

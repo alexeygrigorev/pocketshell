@@ -42,7 +42,14 @@ class TmuxSessionViewModelVoiceTest {
     private fun newVm(): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = ActiveTmuxClients(),
-    )
+    ).also {
+        // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
+        // attach/switch/reattach `capture-pane`/`list-panes` IO) to the rule's
+        // test Main so any seed round-trip runs inline on the test clock instead
+        // of a real `Dispatchers.IO` thread `runTest` cannot drain. Production
+        // defaults to `Dispatchers.IO` (off the UI thread).
+        it.setSeedIoDispatcherForTest(Dispatchers.Main)
+    }
 
     @After
     fun tearDown() {

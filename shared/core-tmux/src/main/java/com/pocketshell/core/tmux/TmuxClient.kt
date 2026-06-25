@@ -151,6 +151,16 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun captureWithCursor(
         paneId: String,
         scrollbackLines: Int,
+        // Issue #926: optional SHORT ceiling for the attach/switch/reattach seed
+        // capture. When non-null, the implementation bounds the capture+cursor
+        // round-trip by THIS value instead of the full per-command
+        // `commandTimeoutMs` (10 s), so a wedged-but-alive control channel makes
+        // the seed FALL THROUGH to the blank watchdog in ~2-3 s rather than
+        // parking the caller for the full 10 s timeout. `null` preserves the
+        // original full-ceiling behaviour for non-seed callers. The default
+        // best-effort implementation has no per-call timeout to bound, so it
+        // ignores this hint (the real client honours it).
+        timeoutMs: Long? = null,
     ): CaptureWithCursor {
         val capture = sendBestEffortCommand("capture-pane -p -e -S -$scrollbackLines -t $paneId")
         val cursor = runCatching {
@@ -890,9 +900,20 @@ internal class RealTmuxClient(
     override suspend fun captureWithCursor(
         paneId: String,
         scrollbackLines: Int,
+        timeoutMs: Long?,
     ): CaptureWithCursor {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
+        // Issue #926: bound the attach/switch/reattach SEED capture by the
+        // caller's short ceiling (≈2-3 s) instead of the full per-command
+        // `commandTimeoutMs` (10 s). On a wedged-but-alive `-CC` channel the seed
+        // then surfaces a best-effort failure fast and the caller falls through
+        // to the blank watchdog on the still-live transport, rather than parking
+        // the (now off-Main, but still time-bounded) seed for the full 10 s. A
+        // null caller-supplied timeout (every non-seed caller) keeps the full
+        // ceiling. Clamp to `commandTimeoutMs` so a caller can only SHORTEN, never
+        // lengthen, the bound.
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
         val chained =
             "capture-pane -p -e -S -$scrollbackLines -t $paneId ; " +
                 "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'"
@@ -907,19 +928,19 @@ internal class RealTmuxClient(
         // suspension point, so bound ONLY the acquire with `withTimeoutOrNull` and
         // surface a best-effort failure (the caller falls back to opening the seed
         // gate without a snapshot, exactly as for a capture timeout).
-        val acquired = withTimeoutOrNull(commandTimeoutMs) {
+        val acquired = withTimeoutOrNull(effectiveTimeoutMs) {
             sendMutex.lock()
             true
         }
         if (acquired != true) {
             Log.w(
                 ISSUE_244_DIAG_TAG,
-                "tmux captureWithCursor acquire wedged >${commandTimeoutMs}ms; " +
+                "tmux captureWithCursor acquire wedged >${effectiveTimeoutMs}ms; " +
                     "surfacing a best-effort failure so the seed gate opens. " +
                     "paneId=$paneId",
             )
             throw TmuxClientException(
-                "tmux capture-pane (combined) acquire wedged after ${commandTimeoutMs}ms",
+                "tmux capture-pane (combined) acquire wedged after ${effectiveTimeoutMs}ms",
             )
         }
         return try {
@@ -951,7 +972,7 @@ internal class RealTmuxClient(
             var writeCompleted = false
 
             try {
-                val capture = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
+                val capture = commandTimeoutGate.run(effectiveTimeoutMs) { checkpoint ->
                     writeResult.await()
                     writeCompleted = true
                     checkpoint.writeCompleted()
@@ -963,12 +984,12 @@ internal class RealTmuxClient(
                     cleanupCaptureWithCursorPending(capturePending, cursorPending)
                     writeJob.cancel()
                     throw TmuxClientException(
-                        "tmux capture-pane (combined) timed out after ${commandTimeoutMs}ms",
+                        "tmux capture-pane (combined) timed out after ${effectiveTimeoutMs}ms",
                     )
                 }
                 // The cursor block is best-effort: a slow/absent reply degrades
                 // to no explicit cursor restore rather than failing the seed.
-                val cursorReply = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
+                val cursorReply = commandTimeoutGate.run(effectiveTimeoutMs) { checkpoint ->
                     checkpoint.writeCompleted()
                     cursorPending.deferred.await()
                 }

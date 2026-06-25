@@ -844,6 +844,21 @@ JOURNEY_CLASSES=(
   # cache seed (first state is Loading); GREEN after. Lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
+  # ADDED (#965): the SCALE ANR proof — the folder list at the maintainer's
+  # reported scale (71 projects / 12 sessions, mixed agent kinds) must NOT block
+  # the Main thread loading the folder list. Drives the production
+  # FolderListViewModel.bind() against a tree cache seeded at 71/12 with the
+  # process-wide StrictMode policy active on Main, and HARD-asserts ZERO
+  # Main-thread `disk_read` violations — the synchronous tree-cache read + JSON
+  # parse on Main inside hydrateFromClientCache was the dominant cold-start ANR
+  # cause. RED on base (the read trips disk_read at scale); GREEN with the
+  # off-Main read. Pure on-device (no Docker/SSH fixture — the cache read is on
+  # the bind() path before any network), deterministic on the CI swiftshader AVD,
+  # does NOT self-skip on CI. The JVM fast-first backstop (the off-Main projection
+  # split + frame budget) is HostTreeModelProjectionOffMainTest (per-push Unit
+  # job). It lives under com.pocketshell.app.projects, so it carries its FQCN
+  # directly.
+  "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"
   # ADDED (#839, epic #821 workstream C — the #837 durable-tree daemon journey):
   # the END-TO-END durable-tree proof on a REAL device + REAL daemon. #837 was
   # approved on a JVM FakeTreeDaemon proxy; this drives the PRODUCTION

@@ -144,6 +144,7 @@ class FolderListViewModelProfilesTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = testDispatcher as CoroutineDispatcher
+            it.treeDispatcher = testDispatcher as CoroutineDispatcher
             it.setProcessStartedForTest(true)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }

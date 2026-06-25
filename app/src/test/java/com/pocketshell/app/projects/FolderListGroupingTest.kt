@@ -1049,6 +1049,7 @@ class FolderListGroupingTest {
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             // Issue #430: the gateway poll loop is now gated on the
             // whole-process foreground signal. Robolectric's
             // ProcessLifecycleOwner is not STARTED under runTest, so open

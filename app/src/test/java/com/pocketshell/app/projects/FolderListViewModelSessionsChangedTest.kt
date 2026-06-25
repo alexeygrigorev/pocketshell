@@ -251,6 +251,7 @@ class FolderListViewModelSessionsChangedTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setProcessStartedForTest(processStarted)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }

@@ -242,6 +242,7 @@ class FolderListViewModelHostUpgradeTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setHostPocketshellUpgradeForTest(
                 HostPocketshellUpgrade().apply { execDispatcher = dispatcher },
             )

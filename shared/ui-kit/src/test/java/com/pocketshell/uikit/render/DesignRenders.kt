@@ -69,6 +69,7 @@ import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.Crumb
@@ -200,6 +201,27 @@ class DesignRenders {
                 Badge(label = "7 active", role = BadgeRole.Active, mono = false)
             },
         )
+    }
+
+    /** Bottom-sheet title row with subtitle, trailing action, and close affordance. */
+    @Test
+    fun sheetHeader() = render("sheet-header") {
+        Surface(color = PocketShellColors.Surface) {
+            SheetHeader(
+                title = "Snippets",
+                subtitle = "12 saved commands",
+                onClose = {},
+                trailing = {
+                    Text(
+                        text = "Manage",
+                        color = PocketShellColors.Accent,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.Medium,
+                    )
+                },
+                modifier = Modifier.padding(20.dp),
+            )
+        }
     }
 
     /**

@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -138,25 +139,19 @@ internal fun SessionKindPickerContent(
                 .padding(top = PocketShellSpacing.lg, bottom = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
         ) {
-            Text(
-                text = if (isUnknown) {
+            SheetHeader(
+                title = if (isUnknown) {
                     "We don't know what this session is"
                 } else {
                     "Change session kind"
                 },
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(SESSION_KIND_PICKER_TITLE_TAG),
-            )
-            Text(
-                text = if (isUnknown) {
+                subtitle = if (isUnknown) {
                     "Choose what \"$sessionName\" is running. We'll remember it."
                 } else {
                     "Set what \"$sessionName\" is running."
                 },
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyMono,
+                subtitleStyle = PocketShellType.bodyMono,
+                titleTestTag = SESSION_KIND_PICKER_TITLE_TAG,
             )
 
             // Issue #858: surface the recorded NON-default profile/provider so

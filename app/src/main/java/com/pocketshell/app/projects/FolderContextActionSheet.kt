@@ -30,6 +30,7 @@ import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -90,16 +91,10 @@ internal fun FolderContextActionContent(
             .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
-        Text(
-            text = folderLabel,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = folderPath,
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyMono,
+        SheetHeader(
+            title = folderLabel,
+            subtitle = folderPath,
+            subtitleStyle = PocketShellType.bodyMono,
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.xs))
         FolderContextRow("+ New session here", FOLDER_CONTEXT_NEW_SESSION_TAG, onNewSession)

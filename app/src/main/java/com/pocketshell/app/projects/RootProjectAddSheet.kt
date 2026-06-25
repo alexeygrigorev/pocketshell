@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -125,19 +126,11 @@ internal fun RootProjectAddSheetContent(
             .testTag(ROOT_PROJECT_ADD_CONTENT_TAG),
         verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
     ) {
-        Text(
-            text = root.label,
-            color = PocketShellColors.Text,
-            style = PocketShellType.bodyDense,
-            fontWeight = FontWeight.SemiBold,
+        SheetHeader(
+            title = root.label,
+            subtitle = root.displayPath,
+            subtitleStyle = PocketShellType.bodyMono,
         )
-        root.displayPath?.let { path ->
-            Text(
-                text = path,
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyMono,
-            )
-        }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },

@@ -57,6 +57,7 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
@@ -744,12 +745,7 @@ private fun CreateIssueSheet(
                 .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),
         ) {
-            Text(
-                text = "New GitHub issue",
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-            )
+            SheetHeader(title = "New GitHub issue")
 
             if (success != null) {
                 CreateIssueSuccess(url = success.url, onOpenUrl = onOpenUrl, onClose = onDismiss)

@@ -56,6 +56,7 @@ import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.uikit.components.SheetHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -230,21 +231,12 @@ internal fun SnippetPickerContent(
             .padding(horizontal = PocketShellSpacing.lg)
             .padding(bottom = PocketShellSpacing.lg),
     ) {
-        // Header: title + close X.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = "Snippets",
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        SheetHeader(
+            title = "Snippets",
+            onClose = onClose,
+            closeContentDescription = "Close snippets",
+            modifier = Modifier.padding(bottom = 12.dp),
+            trailing = {
                 Text(
                     text = "Manage",
                     color = PocketShellColors.Accent,
@@ -254,21 +246,8 @@ internal fun SnippetPickerContent(
                         .clickable(onClick = onManageTap)
                         .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
                 )
-                Box(
-                    modifier = Modifier
-                        .size(PocketShellDensity.tapTargetMin)
-                        .clickable(onClick = onClose),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "×",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.bodyDense,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-        }
+            },
+        )
 
         // Search field. Mirrors the composer text area's surface-elev fill
         // for visual consistency.

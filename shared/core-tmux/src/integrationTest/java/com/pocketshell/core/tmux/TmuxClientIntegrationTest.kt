@@ -183,15 +183,19 @@ class TmuxClientIntegrationTest {
                     }
                     it.connect()
                     withTimeout(10_000) {
-                        while (
-                            opening.none { e -> e is ControlEvent.WindowAdd } ||
-                            opening.none { e -> e is ControlEvent.SessionsChanged }
-                        ) {
+                        while (true) {
+                            val snapshot = synchronized(opening) { opening.toList() }
+                            if (
+                                snapshot.any { e -> e is ControlEvent.WindowAdd } &&
+                                snapshot.any { e -> e is ControlEvent.SessionsChanged }
+                            ) {
+                                break
+                            }
                             delay(50)
                         }
                     }
                     collector.cancel()
-                    val events = opening.toList()
+                    val events = synchronized(opening) { opening.toList() }
                     assertTrue(
                         "expected a WindowAdd in tmux's opening events: $events",
                         events.any { e -> e is ControlEvent.WindowAdd },

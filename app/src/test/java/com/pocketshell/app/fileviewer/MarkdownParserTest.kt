@@ -104,6 +104,51 @@ class MarkdownParserTest {
         assertEquals("line one line two", (para.spans.single() as InlineSpan.Text).text)
     }
 
+    @Test
+    fun `pipe tables parse as table blocks instead of raw paragraph text`() {
+        val blocks = MarkdownParser.parse(
+            """
+            | mode | fits / avgms | p99ms | recall |
+            |---|---:|---:|---:|
+            | LSH | yes / 1.2 | 2.4 | 0.91 |
+            | HNSW | yes / 0.8 | 1.6 | 0.97 |
+            """.trimIndent(),
+        )
+
+        val table = blocks.single() as MarkdownBlock.Table
+        assertEquals(listOf("mode", "fits / avgms", "p99ms", "recall"), table.header.map(::cellText))
+        assertEquals(
+            listOf(TableAlignment.Start, TableAlignment.End, TableAlignment.End, TableAlignment.End),
+            table.alignments,
+        )
+        assertEquals(listOf("LSH", "yes / 1.2", "2.4", "0.91"), table.rows[0].map(::cellText))
+        assertEquals(listOf("HNSW", "yes / 0.8", "1.6", "0.97"), table.rows[1].map(::cellText))
+    }
+
+    @Test
+    fun `mismatched delimiter count stays paragraph plus thematic break`() {
+        val blocks = MarkdownParser.parse("text | text\n---")
+
+        val para = blocks[0] as MarkdownBlock.Paragraph
+        assertEquals("text | text", (para.spans.single() as InlineSpan.Text).text)
+        assertTrue(blocks[1] === MarkdownBlock.HorizontalRule)
+    }
+
+    @Test
+    fun `table body rows do not expand beyond delimiter columns`() {
+        val blocks = MarkdownParser.parse(
+            """
+            | left | right |
+            |---|---:|
+            | a | b | extra |
+            """.trimIndent(),
+        )
+
+        val table = blocks.single() as MarkdownBlock.Table
+        assertEquals(listOf("left", "right"), table.header.map(::cellText))
+        assertEquals(listOf("a", "b"), table.rows.single().map(::cellText))
+    }
+
     /**
      * Regression for the backreference-regex StackOverflow (issue #696 review):
      * a long divider line of repeated `-`/`*`/`_` must NOT overflow the stack.
@@ -160,4 +205,13 @@ class MarkdownParserTest {
         assertFalse("URL tail must not leak as text", plain.trim().startsWith(")"))
         assertTrue(plain.contains("here"))
     }
+
+    private fun cellText(spans: List<InlineSpan>): String =
+        spans.joinToString("") { span ->
+            when (span) {
+                is InlineSpan.Text -> span.text
+                is InlineSpan.Code -> span.text
+                is InlineSpan.Link -> span.label.ifEmpty { span.url }
+            }
+        }
 }

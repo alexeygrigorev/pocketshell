@@ -55,7 +55,20 @@ internal sealed interface MarkdownBlock {
 
     /** A thematic break (`---`, `***`, `___`). */
     data object HorizontalRule : MarkdownBlock
+
+    /**
+     * A GitHub-flavored pipe table. [header] is the header row, [rows] are the
+     * body rows, and [alignments] comes from the delimiter row.
+     */
+    data class Table(
+        val header: List<List<InlineSpan>>,
+        val alignments: List<TableAlignment>,
+        val rows: List<List<List<InlineSpan>>>,
+    ) : MarkdownBlock
 }
+
+/** Column alignment parsed from a GFM table delimiter cell. */
+internal enum class TableAlignment { Start, Center, End }
 
 /** An inline-level Markdown run. */
 internal sealed interface InlineSpan {

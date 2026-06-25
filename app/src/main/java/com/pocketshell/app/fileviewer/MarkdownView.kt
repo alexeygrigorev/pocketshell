@@ -4,12 +4,16 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -26,6 +30,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -67,6 +72,7 @@ internal fun MarkdownView(
                 is MarkdownBlock.ListBlock -> ListBlock(block)
                 is MarkdownBlock.BlockQuote -> BlockQuoteBlock(block)
                 MarkdownBlock.HorizontalRule -> HorizontalRuleBlock()
+                is MarkdownBlock.Table -> TableBlock(block)
             }
         }
     }
@@ -183,6 +189,74 @@ private fun HorizontalRuleBlock() {
     )
 }
 
+@Composable
+private fun TableBlock(block: MarkdownBlock.Table) {
+    if (block.alignments.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .horizontalScroll(rememberScrollState())
+            .background(
+                color = PocketShellColors.Surface,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = RoundedCornerShape(8.dp),
+            ),
+    ) {
+        TableRow(
+            cells = block.header,
+            alignments = block.alignments,
+            header = true,
+        )
+        block.rows.forEach { row ->
+            TableRow(
+                cells = row,
+                alignments = block.alignments,
+                header = false,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TableRow(
+    cells: List<List<InlineSpan>>,
+    alignments: List<TableAlignment>,
+    header: Boolean,
+) {
+    val rowBackground = if (header) {
+        PocketShellColors.SurfaceElev
+    } else {
+        androidx.compose.ui.graphics.Color.Transparent
+    }
+    Row(
+        horizontalArrangement = Arrangement.Start,
+        modifier = Modifier.background(rowBackground),
+    ) {
+        alignments.forEachIndexed { index, alignment ->
+            LinkableText(
+                text = annotated(cells.getOrNull(index).orEmpty()),
+                fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+                textAlign = alignment.toTextAlign(),
+                modifier = Modifier
+                    .widthIn(min = 92.dp, max = 184.dp)
+                    .border(0.5.dp, PocketShellColors.BorderSoft)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+private fun TableAlignment.toTextAlign(): TextAlign = when (this) {
+    TableAlignment.Start -> TextAlign.Start
+    TableAlignment.Center -> TextAlign.Center
+    TableAlignment.End -> TextAlign.End
+}
+
 /**
  * A [Text]/[ClickableText] that opens any `md_url`-annotated link in the
  * browser when tapped. When the annotated string carries no link annotation a
@@ -194,6 +268,8 @@ private fun LinkableText(
     modifier: Modifier = Modifier,
     color: androidx.compose.ui.graphics.Color = PocketShellColors.Text,
     italic: Boolean = false,
+    fontWeight: FontWeight = FontWeight.Normal,
+    textAlign: TextAlign = TextAlign.Start,
 ) {
     val context = LocalContext.current
     val hasLink = remember(text) {
@@ -203,6 +279,8 @@ private fun LinkableText(
         color = color,
         fontSize = 14.sp,
         fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+        fontWeight = fontWeight,
+        textAlign = textAlign,
     )
     if (hasLink) {
         ClickableText(

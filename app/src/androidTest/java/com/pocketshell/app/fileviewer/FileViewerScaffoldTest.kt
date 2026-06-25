@@ -219,6 +219,36 @@ class FileViewerScaffoldTest {
     }
 
     @Test
+    fun markdownFileRenderedShowsPipeTableAsCellsNotRawPipes() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/RUST_VECTOR_REPORT.md",
+                        content = """
+                            ## 100K x 128d
+
+                            | mode | fits / avgms | p99ms | recall |
+                            |---|---:|---:|---:|
+                            | LSH | yes / 1.2 | 2.4 | 0.91 |
+                            | HNSW | yes / 0.8 | 1.6 | 0.97 |
+                        """.trimIndent(),
+                        sizeBytes = 160,
+                    ),
+                    readingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_MARKDOWN_TAG)
+        compose.onNodeWithText("mode").assertIsDisplayed()
+        compose.onNodeWithText("LSH").assertIsDisplayed()
+        compose.onNodeWithText("|---|---:|---:|---:|").assertDoesNotExist()
+    }
+
+    @Test
     fun markdownFileRawShowsSourceNotRendered() {
         compose.setContent {
             PocketShellTheme {

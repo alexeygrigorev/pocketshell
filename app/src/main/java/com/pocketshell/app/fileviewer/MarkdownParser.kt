@@ -115,6 +115,35 @@ internal object MarkdownParser {
                 continue
             }
 
+            // GFM pipe table: header row followed by a delimiter row.
+            if (line.contains('|') && i + 1 < lines.size && isTableDelimiterRow(lines[i + 1])) {
+                val alignments = parseTableAlignments(lines[i + 1])
+                val header = splitTableRow(line)
+                val columnCount = header.size
+                if (columnCount == 0 || alignments.size != columnCount) {
+                    // Not a GFM table: keep paragraph/HR parsing semantics.
+                    // Example: `text | text` followed by `---` is prose plus
+                    // a thematic break, not a two-column table.
+                    blocks += MarkdownBlock.Paragraph(parseInline(line.trim()))
+                    i++
+                    continue
+                }
+                i += 2
+                val rows = mutableListOf<List<String>>()
+                while (i < lines.size && lines[i].isNotBlank() && lines[i].contains('|')) {
+                    rows += splitTableRow(lines[i])
+                    i++
+                }
+                blocks += MarkdownBlock.Table(
+                    header = header.map(::parseInline),
+                    alignments = alignments,
+                    rows = rows.map { row ->
+                        row.normalizeTableRow(columnCount).map(::parseInline)
+                    },
+                )
+                continue
+            }
+
             // Block quote (consume consecutive `>` lines).
             if (BLOCKQUOTE.matchEntire(line) != null) {
                 val quoted = StringBuilder()
@@ -169,6 +198,7 @@ internal object MarkdownParser {
                     FENCE.matchEntire(next) != null ||
                     isThematicBreak(next) ||
                     ATX.matchEntire(next) != null ||
+                    (next.contains('|') && i + 1 < lines.size && isTableDelimiterRow(lines[i + 1])) ||
                     BLOCKQUOTE.matchEntire(next) != null ||
                     UL_ITEM.matchEntire(next) != null ||
                     OL_ITEM.matchEntire(next) != null
@@ -332,4 +362,56 @@ internal object MarkdownParser {
         }
         return null
     }
+
+    private val TableDelimiterCell = Regex("^\\s*:?-+:?\\s*$")
+
+    internal fun isTableDelimiterRow(line: String): Boolean {
+        if (!line.contains('-')) return false
+        val cells = splitTableRow(line)
+        return cells.isNotEmpty() && cells.all { TableDelimiterCell.matches(it) }
+    }
+
+    internal fun splitTableRow(line: String): List<String> {
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var i = 0
+        while (i < line.length) {
+            val ch = line[i]
+            if (ch == '\\' && i + 1 < line.length && line[i + 1] == '|') {
+                current.append('|')
+                i += 2
+                continue
+            }
+            if (ch == '|') {
+                cells += current.toString().trim()
+                current.clear()
+                i++
+                continue
+            }
+            current.append(ch)
+            i++
+        }
+        cells += current.toString().trim()
+        if (cells.isNotEmpty() && cells.first().isEmpty()) cells.removeAt(0)
+        if (cells.isNotEmpty() && cells.last().isEmpty()) cells.removeAt(cells.lastIndex)
+        return cells
+    }
+
+    internal fun parseTableAlignments(delimiterRow: String): List<TableAlignment> =
+        splitTableRow(delimiterRow).map { cell ->
+            val token = cell.trim()
+            val left = token.startsWith(":")
+            val right = token.endsWith(":")
+            when {
+                left && right -> TableAlignment.Center
+                right -> TableAlignment.End
+                else -> TableAlignment.Start
+            }
+        }
+
+    private fun List<String>.padToColumns(columns: Int): List<String> =
+        if (size >= columns) this else this + List(columns - size) { "" }
+
+    private fun List<String>.normalizeTableRow(columns: Int): List<String> =
+        if (size >= columns) take(columns) else padToColumns(columns)
 }

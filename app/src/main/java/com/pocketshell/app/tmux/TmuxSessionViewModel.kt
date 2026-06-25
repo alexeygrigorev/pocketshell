@@ -11064,9 +11064,41 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
-        DiagnosticEvents.record("action", "tmux_attachment_stage_start", "count" to uris.size)
+        // Issue #968: BIND THE UPLOAD TO ITS ORIGINATING SESSION AT TAP TIME.
+        //
+        // The attach path used to resolve its destination at upload-COMPLETION
+        // time — it read `activeTarget` / `sessionRef` *after* the (possibly
+        // slow) await, so a switch A->B mid-upload landed the bytes in B's
+        // `.pocketshell/attachments/host-<hostId>-B/` scope (the warm `-CC`
+        // SSH session is shared across every tmux session on the host — D21 —
+        // so only the SCOPE DIR + the composer the paths merge into encode the
+        // session, and both were read late). That is the maintainer's reported
+        // data-MISROUTE: an attachment surprise-landing in the wrong agent
+        // session.
+        //
+        // The send path already snapshots its target at INITIATION
+        // (`sendTargetSnapshotProvider`); this is the un-snapshotted twin. The
+        // fix snapshots the origin target HERE, at the first synchronous line
+        // of the call (before any await / grace heal / switch can rebind
+        // `activeTarget`), derives the scope dir from that snapshot, and — at
+        // completion — refuses to deliver to a session that is no longer the
+        // origin. An upload started in A always lands in A; if the user
+        // switched away (the origin is no longer the active target) we surface
+        // a clear error rather than silently misrouting to whatever is active
+        // now (hard-cut per D22: no "deliver to current" fallback).
+        val originTarget = activeTarget
+        DiagnosticEvents.record(
+            "action",
+            "tmux_attachment_stage_start",
+            "count" to uris.size,
+            "originSession" to (originTarget?.sessionName ?: ""),
+        )
         val context = applicationContext
             ?: return Result.failure(IllegalStateException("Attachment staging unavailable."))
+        val scopeKey = when (originTarget) {
+            null -> "tmux-session"
+            else -> "host-${originTarget.hostId}-${originTarget.sessionName}"
+        }
         // Issue #451: the system file picker backgrounds the app while the
         // user selects a file. Attach now behaves like Send: on a
         // not-currently-live session it lazily connects-then-uploads instead
@@ -11080,10 +11112,29 @@ public class TmuxSessionViewModel @Inject constructor(
         // draft is preserved if the (re)connect never lands within the bound.
         val session = awaitLiveSessionForAttachment()
             ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
-        val target = activeTarget
-        val scopeKey = when (target) {
-            null -> "tmux-session"
-            else -> "host-${target.hostId}-${target.sessionName}"
+        // Issue #968: the await may have spanned a session switch (the file
+        // picker backgrounds the app; the maintainer navigated A->B while the
+        // upload looked stuck). If the active target is no longer the origin we
+        // tapped in, the live `session` now belongs to a DIFFERENT tmux session
+        // — uploading here would write the bytes into the wrong scope and merge
+        // the paths into the wrong composer. Bind-to-origin: do NOT proceed.
+        // Surface a clear error so the user re-attaches in the origin (the
+        // upload is never silently misrouted to the now-active session).
+        if (!isAttachmentOriginStillActive(originTarget)) {
+            DiagnosticEvents.record(
+                "action",
+                "tmux_attachment_stage_origin_changed",
+                "requestedCount" to uris.size,
+                "scope" to scopeKey,
+                "originSession" to (originTarget?.sessionName ?: ""),
+                "activeSession" to (activeTarget?.sessionName ?: ""),
+            )
+            return Result.failure(
+                IllegalStateException(
+                    "Switched sessions before the upload finished — attachment not applied. " +
+                        "Re-attach in the original session.",
+                ),
+            )
         }
         val result = PromptAttachmentStager(
             resolver = context.contentResolver,
@@ -11111,6 +11162,51 @@ public class TmuxSessionViewModel @Inject constructor(
             },
         )
         return result
+    }
+
+    /**
+     * Issue #968: is the [originTarget] snapshotted when the user tapped attach
+     * still the active session at upload-completion time?
+     *
+     * The warm `-CC` SSH session is shared across every tmux session on a host
+     * (D21), so the session-identity discriminator is the tmux **session name**
+     * (plus host), NOT the SSH lease key (which is per-host). If the user
+     * switched tmux sessions (A->B) during the upload await, the active target
+     * is now B and delivering the bytes here would misroute them into B's scope
+     * + composer. This returns `false` in exactly that case so the caller
+     * surfaces an error instead of misrouting.
+     *
+     * A null origin (no target was active at tap) and a null active target both
+     * resolve against the `"tmux-session"` fallback scope, so a null==null pair
+     * is treated as "still the origin" (no switch occurred).
+     */
+    private fun isAttachmentOriginStillActive(originTarget: ConnectionTarget?): Boolean {
+        val active = activeTarget
+        if (originTarget == null) return active == null
+        if (active == null) return false
+        return active.hostId == originTarget.hostId &&
+            active.sessionName == originTarget.sessionName
+    }
+
+    /**
+     * Issue #968 (deterministic test seam): would the attach delivery be bound
+     * to [originSessionName] on [originHostId] as its origin, given the current
+     * active target? Mirrors the [isAttachmentOriginStillActive] gate the upload
+     * consults at completion. On the OLD (base) code there was no origin gate —
+     * the upload always resolved `activeTarget` at completion, so a switch
+     * A->B misrouted the bytes into B. A JVM unit test snapshots A's target,
+     * switches to B, and asserts this returns `false` (origin no longer active
+     * -> error, no misroute) — the red->green discriminator for the fix.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun attachmentOriginStillActiveForTest(
+        originHostId: Long?,
+        originSessionName: String?,
+    ): Boolean {
+        val active = activeTarget
+        if (originHostId == null || originSessionName == null) return active == null
+        if (active == null) return false
+        return active.hostId == originHostId && active.sessionName == originSessionName
     }
 
     public suspend fun uploadQueuedAttachmentSidecars(

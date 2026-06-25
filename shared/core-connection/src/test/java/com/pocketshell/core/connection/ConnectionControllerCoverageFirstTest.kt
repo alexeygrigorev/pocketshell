@@ -116,6 +116,58 @@ class ConnectionControllerCoverageFirstTest {
     }
 
     @Test
+    fun `a transient drop while attaching heals silently and returns Live for the same target`() {
+        val transport = FakeTransportPort()
+        val controller = controller(transport = transport)
+        transport.setWarm(host, true)
+        controller.submit(ConnectionEvent.Enter(host, a))
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+
+        controller.submit(ConnectionEvent.TransportDropped("control channel closed before first seed"))
+
+        assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
+        assertEquals(a, controller.state.value.targetIdOrNull())
+        assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
+
+        controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Live(host, a), controller.state.value)
+        assertEquals(RevealDecision.Reveal(a, inputEnabled = true), controller.revealGate.value)
+    }
+
+    @Test
+    fun `repeated drops during silent recovery keep the original target and stale events cannot switch it`() {
+        val transport = FakeTransportPort()
+        val controller = controller(transport = transport, maxReconnectAttempts = 3)
+            .bringLive(transport, a)
+
+        controller.submit(ConnectionEvent.TransportDropped("drop 1"))
+        assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
+
+        controller.submit(ConnectionEvent.TransportDropped("drop 2"))
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
+        assertEquals(a, controller.state.value.targetIdOrNull())
+
+        controller.submit(ConnectionEvent.SeedLanded(b, "%1"))
+        controller.submit(ConnectionEvent.TargetGone(b))
+        assertEquals(
+            "late events for B must not corrupt or switch the recovery target",
+            ConnectionState.Reconnecting(host, a, attempt = 1),
+            controller.state.value,
+        )
+
+        controller.submit(ConnectionEvent.TransportDropped("drop 3"))
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2), controller.state.value)
+        assertEquals(a, controller.state.value.targetIdOrNull())
+
+        controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(
+            "transport recovery must return to Live on the original target",
+            ConnectionState.Live(host, a),
+            controller.state.value,
+        )
+    }
+
+    @Test
     fun `the honest error appears only after the silent retry budget truly exhausts`() {
         val transport = FakeTransportPort()
         val controller = controller(transport = transport, maxReconnectAttempts = 2)

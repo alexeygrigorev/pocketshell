@@ -25,10 +25,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,6 +64,21 @@ class ConnectionEffectDriverTest {
 
     private class TestClock(var now: Long = 0L) : Clock {
         override fun nowMs(): Long = now
+    }
+
+    private val driverScopeJobs = mutableListOf<Job>()
+
+    @After
+    fun tearDownDriverScopes() = runBlocking {
+        val jobs = driverScopeJobs.toList()
+        driverScopeJobs.clear()
+        jobs.forEach { it.cancelAndJoin() }
+    }
+
+    private fun TestScope.driverScope(): CoroutineScope {
+        val job = Job(backgroundScope.coroutineContext[Job])
+        driverScopeJobs += job
+        return CoroutineScope(job + UnconfinedTestDispatcher(testScheduler))
     }
 
     private val host = HostKey("alice@example.com:22/7")
@@ -128,7 +147,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesEnterColdConnectThroughControllerState() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = false)
 
         // Cold enter: not warm -> Connecting; lease live -> Attaching; seed -> Live.
@@ -145,7 +164,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesSameHostSwitch() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 
         // Warm enter goes straight to Attaching -> Live, then a same-host switch.
@@ -165,7 +184,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesBackgroundThenWithinGraceForegroundReattach() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         val h = Harness(scope, clock, warm = true)
 
@@ -185,7 +204,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesBackgroundThenBeyondGraceForegroundReconnect() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         // Beyond grace: warm-snapshot false (lease no longer warm) forces Reconnecting.
         val h = Harness(scope, clock, warm = false)
@@ -215,7 +234,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun firesBackgroundedEffectExactlyOnBackgroundedEntry() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         var detachTriggers = 0
         val tmuxPort = InertTmuxPort()
@@ -254,7 +273,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun doesNotFireBackgroundedEffectOnNonBackgroundTransitions() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         var detachTriggers = 0
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
@@ -289,7 +308,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun firesForegroundReattachEffectOnWithinGraceForegroundEdge() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         var reseedTriggers = 0
         val tmuxPort = InertTmuxPort()
@@ -325,7 +344,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun doesNotFireForegroundReattachEffectOnTransportDropHeal() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         var reseedTriggers = 0
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
@@ -354,7 +373,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun beyondGraceForegroundDoesNotFireForegroundReattachEffect() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         var reseedTriggers = 0
         val tmuxPort = InertTmuxPort()
@@ -398,7 +417,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun firesForegroundReconnectEffectOnBeyondGraceForegroundEdge() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         var reconnectArmTriggers = 0
         var reseedTriggers = 0
@@ -439,7 +458,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun doesNotFireForegroundReconnectEffectOnWithinGraceForegroundEdge() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val clock = TestClock()
         var reconnectArmTriggers = 0
         val tmuxPort = InertTmuxPort()
@@ -470,7 +489,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun doesNotFireForegroundReconnectEffectOnReconnectLadderDrop() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         var reconnectArmTriggers = 0
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
@@ -518,7 +537,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun suppressesTransportDropSubmissionWhenGateIsTrue() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -563,7 +582,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun submitsTransportDropWhenGateIsFalse_theDefaultOldPathContract() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -600,7 +619,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun typedControlChannelDropFiresEffectAfterControllerSubmit() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -641,8 +660,61 @@ class ConnectionEffectDriverTest {
     }
 
     @Test
+    fun typedControlChannelDropFromAttachingFiresExactlyOneRecoveryEffectForSameTarget() = runTest {
+        val scope = driverScope()
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val typedDrops = MutableSharedFlow<FakeTmuxClient>(extraBufferCapacity = 16)
+        val effects = mutableListOf<Pair<FakeTmuxClient, ConnectionState>>()
+        var projections = 0
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            controlChannelDrops = typedDrops,
+            onControllerTransition = { projections += 1 },
+            controlChannelDroppedEffect = { client ->
+                effects += Pair(client as FakeTmuxClient, controller.state.value)
+            },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        assertEquals(listOf("Idle", "Attaching"), stateNamesOf(driver))
+
+        val client = FakeTmuxClient()
+        typedDrops.emit(client)
+
+        assertEquals(
+            "an accepted current-client drop from Attaching walks only to silent Reattaching",
+            listOf("Idle", "Attaching", "Reattaching"),
+            stateNamesOf(driver),
+        )
+        assertEquals(
+            "typed current-client drop must run exactly one passive recovery effect",
+            listOf(client to ConnectionState.Reattaching(host, sessionA)),
+            effects,
+        )
+        assertEquals(
+            "typed current-client drop must trigger exactly one status re-projection",
+            1,
+            projections,
+        )
+
+        transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
+        assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
+        assertEquals(
+            "healing lease Up returns to Live for the same target without re-firing recovery",
+            listOf(client to ConnectionState.Reattaching(host, sessionA)),
+            effects,
+        )
+        scope.cancel()
+    }
+
+    @Test
     fun typedControlChannelDropRejectedAsStaleDoesNotMoveControllerOrFireEffect() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -685,7 +757,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun submitsLeaseDownAsTransportDrop_walkingTheControllerReconnectLadder() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -726,8 +798,58 @@ class ConnectionEffectDriverTest {
     }
 
     @Test
+    fun leaseDownFromAttachingSubmitsExactlyOneDropAndRecoversLiveForSameTarget() = runTest {
+        val scope = driverScope()
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        var projections = 0
+        val typedRecoveryEffects = mutableListOf<FakeTmuxClient>()
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            onControllerTransition = { projections += 1 },
+            controlChannelDroppedEffect = { client -> typedRecoveryEffects += client as FakeTmuxClient },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        assertEquals(listOf("Idle", "Attaching"), stateNamesOf(driver))
+
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+
+        assertEquals(
+            "lease Down from Attaching must submit one silent drop into Reattaching",
+            listOf("Idle", "Attaching", "Reattaching"),
+            stateNamesOf(driver),
+        )
+        assertEquals(ConnectionState.Reattaching(host, sessionA), controller.state.value)
+        assertEquals(
+            "one lease Down must cause exactly one controller re-projection",
+            1,
+            projections,
+        )
+        assertTrue(
+            "lease Down is not a typed current-client drop and must not fire passive client recovery",
+            typedRecoveryEffects.isEmpty(),
+        )
+
+        transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
+
+        assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
+        assertEquals(
+            "the Down and the healing Up each re-project once; no duplicate Down effect",
+            2,
+            projections,
+        )
+        assertTrue(typedRecoveryEffects.isEmpty())
+        scope.cancel()
+    }
+
+    @Test
     fun suppressesLeaseDownSubmissionWhenGateIsTrue_singleGraceOwner() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -767,7 +889,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun ignoresLeaseDownForUnrelatedHost() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
@@ -799,7 +921,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun gateTrueStillNeverSuppressesTheLeaseUpTransportLiveFeed() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val tmuxPort = InertTmuxPort()
         // Cold (not warm) so the cold enter parks at Connecting and a real lease
         // Up edge is what promotes it — proving the Up feed is not gated.
@@ -832,7 +954,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesTransportDropHealThroughReattaching() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 
         h.controller.submit(ConnectionEvent.Enter(host, sessionA))
@@ -845,7 +967,7 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun observesTransportDropOracleAndLeaseEdgesFromPortFlows() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 
         // The driver must SEE both port flows, independent of controller state.
@@ -881,7 +1003,7 @@ class ConnectionEffectDriverTest {
         // method; driving a full lifecycle through them with the driver collecting
         // proves the inert contract: no ensureLease/attach/selectWindow/seed/detach/
         // evictStale is ever called by the driver.
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 
         h.controller.submit(ConnectionEvent.Enter(host, sessionA))
@@ -953,7 +1075,7 @@ class ConnectionEffectDriverTest {
      */
     @Test
     fun submitsTransportLive_fromRealLeaseUpEdge_overRealAdapters() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val leaseManager = realLeaseManager()
         val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
         transportPort.warmSnapshot = { false } // cold open → Connecting (so Up promotes it)
@@ -996,7 +1118,7 @@ class ConnectionEffectDriverTest {
      */
     @Test
     fun observesRealLeaseUpEdgeFromRealTransportPort() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val leaseManager = realLeaseManager()
         val transportPort = SshLeaseTransportPort(leaseManager, leaseKeyFor = { leaseTarget() })
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
@@ -1029,7 +1151,7 @@ class ConnectionEffectDriverTest {
      */
     @Test
     fun observesRealTmuxDisconnectOracleAndClientSwapOverRealPort() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val scope = driverScope()
         val transportPort = SshLeaseTransportPort(realLeaseManager(), leaseKeyFor = { leaseTarget() })
         val tmuxPort = CurrentClientTmuxPort(activePaneIdFor = { it.value }, scrollbackLines = 100)
         val manager = ConnectionManager(transport = transportPort)

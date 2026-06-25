@@ -1,6 +1,7 @@
 package com.pocketshell.app.sessions
 
 import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshExecTimeoutException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -9,6 +10,7 @@ import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
@@ -109,21 +111,35 @@ object LeaseSessionExec {
         leaseManager: SshLeaseManager,
         target: LeaseSessionTarget,
         block: suspend (SshSession) -> T,
+    ): Result<T> = withSession(leaseManager, target, BLOCK_TIMEOUT_MS, block)
+
+    /**
+     * Overload that lets the caller (and tests) override the wall-clock ceiling
+     * on [block] (#935 S4-2). Production callers use the default
+     * [BLOCK_TIMEOUT_MS]; tests inject a short value so the wedged-block bound
+     * can be exercised without a real multi-second wait.
+     */
+    suspend fun <T> withSession(
+        leaseManager: SshLeaseManager,
+        target: LeaseSessionTarget,
+        blockTimeoutMs: Long,
+        block: suspend (SshSession) -> T,
     ): Result<T> {
         val leaseTarget = target.toSshLeaseTarget()
-        val firstAttempt = runAttempt(leaseManager, leaseTarget, block)
+        val firstAttempt = runAttempt(leaseManager, leaseTarget, blockTimeoutMs, block)
         val firstError = firstAttempt.exceptionOrNull()
         if (firstError == null || !isStaleChannelSymptom(firstError)) {
             return firstAttempt
         }
         // The eviction inside runAttempt already discarded the poisoned
         // transport, so this second acquire dials a FRESH connection.
-        return runAttempt(leaseManager, leaseTarget, block)
+        return runAttempt(leaseManager, leaseTarget, blockTimeoutMs, block)
     }
 
     private suspend fun <T> runAttempt(
         leaseManager: SshLeaseManager,
         leaseTarget: SshLeaseTarget,
+        blockTimeoutMs: Long,
         block: suspend (SshSession) -> T,
     ): Result<T> {
         val lease = try {
@@ -135,13 +151,39 @@ object LeaseSessionExec {
         }
         var poisonedTransport = false
         return try {
-            Result.success(block(lease.session))
+            // #935 S4-2: the lease bounded only the ACQUIRE — `block` (the exec /
+            // upload / download work on the warm transport) ran with NO ceiling.
+            // A half-open / wedged transport hung the borrow indefinitely while a
+            // ref kept the lease warm (the 60s idle-TTL could never close a
+            // still-referenced corpse). Bound the block itself: on expiry the
+            // wedged transport is a corpse, so treat it as a stale-channel symptom
+            // — evict it (below) + surface a clear, retryable error — exactly like
+            // a dead-channel exception. `withTimeoutOrNull` cancels the block; the
+            // session-level read bound (`RealSshSession.exec` #935 S4-2) is what
+            // actually unparks the in-flight blocking JDK read, but this outer
+            // bound also covers a block that does several ops or a non-exec
+            // (upload/download) hang and keeps the lease from being pinned open.
+            //
+            // `block` itself may legitimately return `null`, so we wrap its
+            // result in a one-element holder: a `null` from `withTimeoutOrNull`
+            // means the TIMEOUT fired, never a null block result. The block's own
+            // exceptions propagate OUT of `withTimeoutOrNull` to the `catch`
+            // below (we do NOT `runCatching` inside, which would swallow the
+            // timeout's own CancellationException and defeat the bound).
+            val holder = withTimeoutOrNull(blockTimeoutMs) { Holder(block(lease.session)) }
+            if (holder == null) {
+                poisonedTransport = true
+                Result.failure(LeaseSessionBlockTimeoutException(blockTimeoutMs))
+            } else {
+                Result.success(holder.value)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            // A dead-transport / channel-open / "not connected" failure must
-            // EVICT the pooled lease, not just release it, so the retry / next
-            // action opens a fresh transport instead of re-grabbing the corpse.
+            // A dead-transport / channel-open / "not connected" /
+            // wedged-read-timeout failure must EVICT the pooled lease, not just
+            // release it, so the retry / next action opens a fresh transport
+            // instead of re-grabbing the corpse.
             poisonedTransport = isStaleChannelSymptom(t)
             Result.failure(t)
         } finally {
@@ -161,9 +203,30 @@ object LeaseSessionExec {
      * [com.pocketshell.app.tmux.TmuxSessionViewModel] stale-channel detection.
      */
     internal fun isStaleChannelSymptom(cause: Throwable?): Boolean =
-        isChannelOpenFailure(cause) ||
+        isWedgedReadTimeout(cause) ||
+            isChannelOpenFailure(cause) ||
             isTransportDisconnected(cause) ||
             isSessionNotConnected(cause)
+
+    /**
+     * A wedged-read / wedged-block timeout (#935 S4-2) is a stale-channel
+     * symptom: the transport stopped making progress, so the borrow must heal +
+     * retry on a FRESH lease rather than re-grab the corpse. Covers both the
+     * session-level [SshExecTimeoutException] (the `exec` read blew its ceiling)
+     * and the lease-level [LeaseSessionBlockTimeoutException] (the whole block
+     * blew its ceiling).
+     */
+    private fun isWedgedReadTimeout(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            if (current is SshExecTimeoutException || current is LeaseSessionBlockTimeoutException) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
 
     private fun isSessionNotConnected(cause: Throwable?): Boolean =
         anyInChain(cause) { message ->
@@ -213,4 +276,34 @@ object LeaseSessionExec {
         }
         return false
     }
+
+    /**
+     * Wall-clock ceiling for the borrowed-session [block] (#935 S4-2). The lease
+     * previously bounded only the acquire; a wedged transport could hang the
+     * borrow indefinitely while a ref kept the lease warm. 45s is generous for
+     * the heaviest in-scope block (a file-viewer save = `mkdir` + a multi-MB
+     * `uploadStream`) yet bounds an indefinite hang. It sits ABOVE the
+     * session-level [com.pocketshell.core.ssh.RealSshSession] exec read bound
+     * (30s) so a single wedged exec surfaces its own clear
+     * [SshExecTimeoutException] FIRST; this outer bound is the net for a block
+     * that strings several ops or wedges on a non-exec (upload/download) hang.
+     */
+    internal const val BLOCK_TIMEOUT_MS: Long = 45_000L
+
+    /**
+     * One-element holder so a `null` from `withTimeoutOrNull` unambiguously means
+     * the timeout fired (vs a [block] that legitimately returned `null`).
+     */
+    private class Holder<T>(val value: T)
 }
+
+/**
+ * Thrown (wrapped in `Result.failure`) by [LeaseSessionExec.withSession] when
+ * the borrowed-session block does not complete within
+ * [LeaseSessionExec.BLOCK_TIMEOUT_MS] (#935 S4-2). The wedged transport is
+ * evicted so the next borrow re-dials a fresh connection; the action surfaces a
+ * clear, retryable error instead of hanging forever.
+ */
+class LeaseSessionBlockTimeoutException(
+    val timeoutMs: Long,
+) : Exception("SSH lease-session block wedged >${timeoutMs}ms (no progress)")

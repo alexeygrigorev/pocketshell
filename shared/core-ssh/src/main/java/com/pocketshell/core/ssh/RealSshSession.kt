@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -38,6 +39,12 @@ import java.util.logging.Logger
  */
 internal class RealSshSession(
     private val client: SSHClient,
+    /**
+     * Wall-clock ceiling for the Phase-2 exec read (#935 S4-2). Defaults to the
+     * production [EXEC_READ_TIMEOUT_MS]; tests inject a short value so the
+     * wedged-read bound can be exercised without a real 30s wait.
+     */
+    private val execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS,
 ) : SshSession {
 
     /**
@@ -107,22 +114,85 @@ internal class RealSshSession(
             }
             // Phase 2 — read stdout/stderr to EOF OUTSIDE the dispatcher so a
             // slow command never wedges the `-CC` write or other execs.
-            withContext(Dispatchers.IO) {
-                val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
-                val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
-                liveCommand.join()
-                // sshj returns null exitStatus when the server didn't send one
-                // (e.g. signal-killed). Map to -1 so the caller can still tell
-                // it wasn't a clean 0.
-                val exitCode = liveCommand.exitStatus ?: -1
-                ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+            //
+            // #935 S4-2: the blocking `readBytes()`/`join()` were UNBOUNDED — on
+            // a half-open / wedged transport (no FIN/RST) the JDK read parks
+            // forever, hanging the calling coroutine (and any caller that didn't
+            // wrap us in its own timeout — six gateways did not).
+            //
+            // The bound is a REAL wall-clock watchdog ([WallClockCeiling]), NOT a
+            // coroutine `withTimeout`/`withTimeoutOrNull` (issue #940 / the #937
+            // regression). `withTimeout` reads the delay source from the CALLER's
+            // coroutine context — under `runTest`'s virtual, auto-advancing clock
+            // (every `:shared:core-ssh:integrationTest`) the ceiling fires
+            // INSTANTLY in virtual time and interrupts a HEALTHY live sshj read,
+            // aborting it as `InterruptedException` (the 13/21 integration-suite
+            // break). The wall-clock watchdog interrupts the worker thread only
+            // after [execReadTimeoutMs] of REAL elapsed time, identically in
+            // production and under any test scheduler, so a healthy read is never
+            // cut short while a genuinely-wedged read is still reclaimed. The body
+            // runs inside `runInterruptible(Dispatchers.IO)` so the watchdog's
+            // `Thread.interrupt()` actually unparks the blocking JDK read.
+            //
+            // On a real timeout the watchdog interrupt makes the read throw; that
+            // is mapped to a clear, RETRYABLE [SshExecTimeoutException], and we
+            // then CLOSE the session (lease pool self-heals — a now-disconnected
+            // session is discarded + re-dialed on next acquire). This is the SAME
+            // close-on-timeout intent the three bespoke gateway wraps
+            // (`FolderListGateway.execBounded`, `TreeRemoteSource`,
+            // `AgentKindRemoteSource`) implement per-caller — pulled down to the
+            // `exec` boundary so EVERY caller inherits it (D22 hard-cut), now with
+            // the wall-clock mechanism #940 established for the dispatcher.
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    WallClockCeiling.runUnderWallClockCeiling(
+                        timeoutMs = execReadTimeoutMs,
+                        onTimeout = { cause -> SshExecTimeoutException(command, execReadTimeoutMs, cause) },
+                    ) {
+                        val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
+                        val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
+                        liveCommand.join()
+                        // sshj returns null exitStatus when the server didn't send
+                        // one (e.g. signal-killed). Map to -1 so the caller can
+                        // still tell it wasn't a clean 0.
+                        val exitCode = liveCommand.exitStatus ?: -1
+                        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+                    }
+                }
+            } catch (timeout: SshExecTimeoutException) {
+                EXEC_LOGGER.warning(
+                    "exec read wedged >${execReadTimeoutMs}ms (real wall-clock); closing wedged " +
+                        "session + surfacing retryable SshExecTimeoutException. cmd=${command.takeLast(48)}",
+                )
+                // CLOSE the session to tear down the transport so the lease pool
+                // discards the corpse (the watchdog already interrupted+unparked
+                // the read; this also frees the channel deterministically).
+                // NonCancellable so a cancelled/timed-out coroutine still closes.
+                withContext(NonCancellable) {
+                    runCatching { close() }
+                }
+                throw timeout
             }
         } finally {
             cancelHandle?.dispose()
             // Phase 3 — close the channel, serialised through the dispatcher
             // (channel close writes SSH_MSG_CHANNEL_CLOSE on the transport).
-            runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
-            runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+            //
+            // Run under `NonCancellable`: when the caller cancels the exec (or
+            // our own read-timeout bound unwinds), the coroutine is in the
+            // cancelled state, so a plain `dispatcher.run` here would hit
+            // `mutex.withLock`/`withContext` (cancellation points) and throw
+            // `CancellationException` BEFORE running the close block — leaving the
+            // channel teardown to race the async `scope.launch` cancel handler.
+            // Wrapping in `NonCancellable` makes the channel close run
+            // deterministically inside `exec` before it returns/throws, so the
+            // SSH_MSG_CHANNEL_CLOSE is flushed and no orphaned channel leaks (the
+            // `scope.launch` handler stays as belt-and-braces for the
+            // can't-suspend-at-all path).
+            withContext(NonCancellable) {
+                runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
+                runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+            }
         }
     }
 
@@ -1106,6 +1176,28 @@ internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
  * Android-only dependency from this shared module.
  */
 internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
+
+/**
+ * Wall-clock ceiling for the Phase-2 stdout/stderr read (`readBytes()` +
+ * `join()`) of a single [RealSshSession.exec] (#935 S4-2). A half-open / wedged
+ * transport leaves the blocking JDK read parked forever; this is the boundary
+ * bound that turns "the action silently never returns" into a fast, clear,
+ * RETRYABLE [SshExecTimeoutException]. On expiry the session is closed so the
+ * lease pool discards the corpse and re-dials on the next acquire.
+ *
+ * 30s is generous relative to a normal control exec (tens of ms — env edit,
+ * profile list, start-dir autocomplete, manual-kind write, watched-folder
+ * discovery, the file-viewer `mkdir`/`pwd`/`cat`) yet bounds an indefinite
+ * hang. It sits ABOVE the three bespoke per-caller wraps
+ * ([com.pocketshell.app.projects.SshFolderListGateway]'s `EXEC_READ_TIMEOUT_MS`
+ * = 3.5s, `TreeRemoteSource`, `AgentKindRemoteSource`) so those tighter,
+ * latency-sensitive enumeration bounds still fire FIRST on their hot paths and
+ * this boundary bound is the safety net for every other caller that has no wrap
+ * of its own.
+ */
+internal const val EXEC_READ_TIMEOUT_MS: Long = 30_000L
+
+private val EXEC_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".exec")
 
 /**
  * Wall-clock ceiling for the blocking byte-copy + `join()` of a single

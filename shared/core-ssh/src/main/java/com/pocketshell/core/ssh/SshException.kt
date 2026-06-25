@@ -42,3 +42,24 @@ public class SshFileTooLargeException(
         "(${if (sizeBytes >= 0) "$sizeBytes bytes" else "size unknown"}, limit $maxBytes bytes)",
     cause,
 )
+
+/**
+ * Thrown by [SshSession.exec] when the command's stdout/stderr read does not
+ * reach EOF within the per-exec wall-clock ceiling (#935 S4-2). A half-open /
+ * wedged transport leaves the blocking `readBytes()` parked forever; this
+ * timeout is the boundary bound that turns "the action silently never returns"
+ * into a fast, clear, RETRYABLE failure. The session is closed on the way out
+ * so the lease pool discards the corpse and re-dials on the next acquire.
+ *
+ * A subclass of [SshException] so existing catch-all `catch (e: SshException)`
+ * sites keep working; lease-exec retry logic catches it specifically to treat a
+ * wedged read as a stale-channel symptom worth healing on a fresh transport.
+ */
+public class SshExecTimeoutException(
+    public val command: String,
+    public val timeoutMs: Long,
+    cause: Throwable? = null,
+) : SshException(
+    "exec read wedged >${timeoutMs}ms (no EOF): ${command.takeLast(64)}",
+    cause,
+)

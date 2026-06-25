@@ -1681,6 +1681,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var autoReconnectJob: Job? = null
+    // Issue #938 (S2-3): `appActive` is written on Main (onStart/onStop) but
+    // read off-Main from the port-detection dispatcher (e.g. [scanDecoded],
+    // [confirmAndSurfaceDetectedPort]). @Volatile guarantees cross-thread
+    // visibility so an off-Main read sees the latest background/foreground
+    // flip instead of a stale cached value.
+    @Volatile
     private var appActive: Boolean = true
     private var screenStartedForCleared: Boolean = true
     private var eventsJob: Job? = null

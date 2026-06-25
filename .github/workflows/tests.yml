@@ -641,6 +641,54 @@ jobs:
           echo "first summary timeout-only: $first_timeout"
           echo "first summary genuine failure: $first_failure"
 
+      # Preserve the first cold-boot attempt before a retry can overwrite the
+      # shared artifacts/ci-journey summary or Gradle connected-test outputs.
+      - name: Preserve first journey attempt diagnostics
+        if: always() && steps.journey.outcome == 'failure'
+        run: |
+          snapshot="artifacts/ci-journey-attempt-1"
+          rm -rf "$snapshot"
+          mkdir -p "$snapshot"
+
+          {
+            echo "# First emulator journey attempt diagnostics"
+            echo
+            echo "- first attempt outcome: \`${{ steps.journey.outcome }}\`"
+            echo "- first attempt conclusion: \`${{ steps.journey.conclusion }}\`"
+            echo "- first summary timeout-only: \`${{ steps.journey_summary.outputs.first_timeout }}\`"
+            echo "- first summary genuine failure: \`${{ steps.journey_summary.outputs.first_failure }}\`"
+            if [[ -f artifacts/ci-journey/summary.md ]]; then
+              echo "- suite summary: \`ci-journey/summary.md\`"
+            else
+              echo "- suite summary: missing after first attempt"
+            fi
+          } > "$snapshot/attempt-metadata.md"
+
+          if [[ -d artifacts/ci-journey ]]; then
+            mkdir -p "$snapshot/ci-journey"
+            cp -a artifacts/ci-journey/. "$snapshot/ci-journey/"
+          else
+            echo "artifacts/ci-journey was missing after the first attempt." > "$snapshot/ci-journey-missing.txt"
+          fi
+          if [[ ! -f "$snapshot/ci-journey/summary.md" ]]; then
+            echo "artifacts/ci-journey/summary.md was missing after the first attempt." > "$snapshot/summary-missing.txt"
+          fi
+
+          shopt -s globstar nullglob
+          copied_android_outputs=0
+          for path in **/build/reports/androidTests \
+                      **/build/outputs/androidTest-results \
+                      **/build/outputs/connected_android_test_additional_output; do
+            [[ -e "$path" ]] || continue
+            dest="$snapshot/android-test-outputs/$path"
+            mkdir -p "$(dirname "$dest")"
+            cp -a "$path" "$dest"
+            copied_android_outputs=1
+          done
+          if [[ "$copied_android_outputs" -eq 0 ]]; then
+            echo "No Android connected-test output directories existed after the first attempt." > "$snapshot/android-test-outputs-missing.txt"
+          fi
+
       # Infra-retry-once: runs if the first bringup failed with a boot/adb abort
       # or a genuine test failure. It is deliberately skipped for a pure
       # suite-budget timeout because the first cold boot already consumed the
@@ -794,6 +842,7 @@ jobs:
             **/build/outputs/androidTest-results/
             **/build/outputs/connected_android_test_additional_output/
             artifacts/ci-journey/
+            artifacts/ci-journey-attempt-1/
           if-no-files-found: ignore
 
       - name: Upload Docker logs

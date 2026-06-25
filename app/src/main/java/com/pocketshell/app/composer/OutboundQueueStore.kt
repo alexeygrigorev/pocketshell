@@ -160,12 +160,16 @@ public interface OutboundQueueStore {
     public fun markInFlight(id: String): OutboundItem?
 
     /**
-     * Mark the item with [id] [OutboundState.Uploading] (attachment upload in
-     * progress). No-op if the id is unknown. Returns the updated item or
-     * `null`. Only an item currently `Queued` or `InFlight` is moved; a
-     * `Delivered`/`Failed` id is left as-is so a late ack cannot resurrect it.
+     * Atomically claim [id] for attachment upload by moving a `Queued`/`Failed`
+     * row to [OutboundState.Uploading]. Returns `null` if the id is unknown or
+     * already owned by another upload/send attempt. [lastAttemptAtMs] stamps
+     * upload ownership so stale recovery does not requeue a fresh upload whose
+     * row carries an older delivery failure timestamp.
      */
-    public fun markUploading(id: String): OutboundItem?
+    public fun markUploading(
+        id: String,
+        lastAttemptAtMs: Long = System.currentTimeMillis(),
+    ): OutboundItem?
 
     /**
      * Replace [id]'s attachment refs after a queued attachment upload has
@@ -407,12 +411,13 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         updated
     }
 
-    override fun markUploading(id: String): OutboundItem? = synchronized(lock) {
+    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
-        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
-            return existing
-        }
-        val updated = existing.copy(state = OutboundState.Uploading)
+        if (!existing.state.isExactClaimable) return null
+        val updated = existing.copy(
+            state = OutboundState.Uploading,
+            lastAttemptAtMs = lastAttemptAtMs,
+        )
         items[updated.id] = updated
         updated
     }
@@ -458,7 +463,7 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
         synchronized(lock) {
             val updated = items.values
-                .filter { it.sessionKey == sessionKey && it.isStaleInFlight(cutoffMs) }
+                .filter { it.sessionKey == sessionKey && it.isStaleRecoverableAttempt(cutoffMs) }
                 .sortedBy { it.createdAtMs }
                 .map { it.copy(state = OutboundState.Queued) }
             updated.forEach { items[it.id] = it }
@@ -504,7 +509,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun claimNext(sessionKey: String): OutboundItem? = null
     override fun claim(id: String): OutboundItem? = null
     override fun markInFlight(id: String): OutboundItem? = null
-    override fun markUploading(id: String): OutboundItem? = null
+    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
@@ -656,14 +661,15 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         updated
     }
 
-    override fun markUploading(id: String): OutboundItem? = synchronized(lock) {
+    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
-        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
-            return existing
-        }
-        val updated = existing.copy(state = OutboundState.Uploading)
+        if (!existing.state.isExactClaimable) return null
+        val updated = existing.copy(
+            state = OutboundState.Uploading,
+            lastAttemptAtMs = lastAttemptAtMs,
+        )
         replaceAndStore(sessionKey, list, updated)
         updated
     }
@@ -717,7 +723,7 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         synchronized(lock) {
             val list = loadSession(sessionKey)
             val updatedById = list
-                .filter { it.isStaleInFlight(cutoffMs) }
+                .filter { it.isStaleRecoverableAttempt(cutoffMs) }
                 .associate { it.id to it.copy(state = OutboundState.Queued) }
             if (updatedById.isEmpty()) return emptyList()
             val updatedList = list.map { updatedById[it.id] ?: it }
@@ -762,8 +768,9 @@ private fun OutboundItem.claimedForAttempt(): OutboundItem =
         )
     }
 
-private fun OutboundItem.isStaleInFlight(cutoffMs: Long): Boolean =
-    state == OutboundState.InFlight && (lastAttemptAtMs ?: createdAtMs) <= cutoffMs
+private fun OutboundItem.isStaleRecoverableAttempt(cutoffMs: Long): Boolean =
+    (state == OutboundState.InFlight || state == OutboundState.Uploading) &&
+        (lastAttemptAtMs ?: createdAtMs) <= cutoffMs
 
 /** Issue #900: prefs key for the item-blob slot of [sessionKey]. */
 internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"

@@ -40,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
+import java.util.UUID
 
 /**
  * Backs [PromptComposerSheet]: the voice + text composer for agent
@@ -113,6 +114,7 @@ public class PromptComposerViewModel @Inject constructor(
     // direct unit/connected constructors stay source-compatible; production
     // Hilt wiring provides the SharedPreferences-backed store.
     private val outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
+    private val outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
@@ -268,6 +270,9 @@ public class PromptComposerViewModel @Inject constructor(
     private var pendingSendWithEnter: Boolean = false
     private var pendingSendTarget: SendTargetSnapshot = SendTargetSnapshot()
     private var attachmentJob: Job? = null
+    private var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
+        null
+    private var outboundSidecarDispatchInFlight: Boolean = false
 
     /**
      * Issue #891: the overall send-operation watchdog. The maintainer's
@@ -318,6 +323,17 @@ public class PromptComposerViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setSendWatchdogTimeoutForTest(timeoutMs: Long?) {
         sendWatchdogTimeoutMs = timeoutMs
+    }
+
+    /**
+     * Issue #900: upload hook for durable outbound attachment sidecars. The host
+     * owns the live SSH/session upload primitive; the ViewModel owns when queued
+     * local bytes must be uploaded before a row is claimed for delivery.
+     */
+    public fun setOutboundAttachmentSidecarUploader(
+        uploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)?,
+    ) {
+        outboundAttachmentUploader = uploader
     }
 
     /**
@@ -850,6 +866,7 @@ public class PromptComposerViewModel @Inject constructor(
         sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
     ) {
         if (_uiState.value.sendInFlight) return
+        if (outboundSidecarDispatchInFlight) return
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
         // Issue #544: compose the outgoing prompt = the user's clean draft
@@ -860,12 +877,6 @@ public class PromptComposerViewModel @Inject constructor(
         // Send when there is either typed text or at least one attachment.
         // (A pure-attachment send still has a non-empty composed `text`.)
         if (text.isEmpty()) return
-        val outboundItem = enqueueOutboundSend(
-            cleanDraft = draft,
-            attachments = attachments,
-            withEnter = withEnter,
-            sendTarget = sendTarget,
-        )
         DiagnosticEvents.record(
             "action",
             "composer_send",
@@ -885,6 +896,23 @@ public class PromptComposerViewModel @Inject constructor(
         // emission with no live collector) can never leave the composer stuck on
         // "Sending…" forever.
         armSendWatchdog()
+        if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
+            viewModelScope.launch {
+                enqueueAndDispatchSidecarBackedSend(
+                    cleanDraft = draft,
+                    attachments = attachments,
+                    withEnter = withEnter,
+                    sendTarget = sendTarget,
+                )
+            }
+            return
+        }
+        val outboundItem = enqueueOutboundSend(
+            cleanDraft = draft,
+            attachments = attachments,
+            withEnter = withEnter,
+            sendTarget = sendTarget,
+        )
         // Issue #254: a `Channel.trySend` buffers the item until a
         // collector consumes it, so a send dispatched while the sheet's
         // collector is mid-recreate (dismiss → re-open) is delivered to
@@ -903,6 +931,57 @@ public class PromptComposerViewModel @Inject constructor(
         if (_sendRequests.trySend(request).isFailure) {
             restoreFailedSend(request)
         }
+    }
+
+    private fun hasLocalAttachmentsForSidecars(attachments: List<StagedAttachment>): Boolean =
+        outboundQueueStore !== DisabledOutboundQueueStore &&
+            outboundAttachmentSidecarStore != null &&
+            outboundAttachmentUploader != null &&
+            attachments.any { it.previewUri != null }
+
+    private suspend fun enqueueAndDispatchSidecarBackedSend(
+        cleanDraft: String,
+        attachments: List<StagedAttachment>,
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot,
+    ) {
+        val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() }
+        val sidecarStore = outboundAttachmentSidecarStore ?: return
+        if (sessionKey == null) return
+        val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
+            attachment.previewUri?.let { index to it }
+        }
+        val itemId = UUID.randomUUID().toString()
+        val sidecars = sidecarStore.stage(
+            outboundItemId = itemId,
+            uris = localAttachments.map { it.second },
+            attachmentIndices = localAttachments.map { it.first },
+        )
+        if (sidecars.size != localAttachments.size) {
+            disarmSendWatchdog()
+            _uiState.update {
+                it.copy(
+                    sendInFlight = false,
+                    error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
+                )
+            }
+            return
+        }
+        val item = OutboundItem(
+            id = itemId,
+            sessionKey = sessionKey,
+            cleanText = cleanDraft,
+            attachments = attachments.toSidecarAwareDurableRefs(sidecars),
+            withEnter = withEnter,
+            state = OutboundState.Queued,
+            createdAtMs = clock(),
+            paneId = sendTarget.paneId,
+            route = sendTarget.route,
+            agentKind = sendTarget.agentKind,
+        )
+        outboundQueueStore.enqueueExisting(item)
+        refreshOutboundQueueItemsFor(sessionKey)
+        dispatchPreparedOutboundItem(itemId)
     }
 
     private fun enqueueOutboundSend(
@@ -1253,6 +1332,9 @@ public class PromptComposerViewModel @Inject constructor(
         val item = outboundQueueStore.item(id) ?: return
         if (item.state != OutboundState.Queued && item.state != OutboundState.Failed) return
         outboundQueueStore.remove(id)
+        outboundAttachmentSidecarStore?.let { store ->
+            viewModelScope.launch { store.removeOutboundItem(id) }
+        }
         refreshOutboundQueueItems()
     }
 
@@ -1303,6 +1385,100 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun dispatchOutboundItem(id: String): Boolean {
         if (_uiState.value.sendInFlight) return false
+        val sidecarStore = outboundAttachmentSidecarStore
+        if (sidecarStore != null) {
+            if (outboundSidecarDispatchInFlight) return false
+            outboundSidecarDispatchInFlight = true
+            viewModelScope.launch {
+                try {
+                    val sidecars = sidecarStore.refsFor(id)
+                    if (sidecars.isNotEmpty()) {
+                        dispatchPreparedOutboundItem(id)
+                    } else {
+                        claimAndEmitOutboundItem(id)
+                    }
+                } finally {
+                    outboundSidecarDispatchInFlight = false
+                }
+            }
+            return true
+        }
+        return claimAndEmitOutboundItem(id)
+    }
+
+    private suspend fun dispatchPreparedOutboundItem(id: String): Boolean {
+        if (!uploadSidecarsForOutboundItem(id)) return false
+        return claimAndEmitOutboundItem(id)
+    }
+
+    private suspend fun uploadSidecarsForOutboundItem(id: String): Boolean {
+        val sidecarStore = outboundAttachmentSidecarStore ?: return true
+        val sidecars = sidecarStore.refsFor(id)
+        if (sidecars.isEmpty()) return true
+        val item = outboundQueueStore.item(id) ?: return false
+        val uploader = outboundAttachmentUploader
+        if (uploader == null) {
+            outboundQueueStore.markFailed(id, lastError = "Attachment upload unavailable")
+            refreshOutboundQueueItemsFor(item.sessionKey)
+            disarmSendWatchdog()
+            _uiState.update {
+                it.copy(
+                    sendInFlight = false,
+                    error = "Attachment upload failed: reconnect, then send again or discard the draft.",
+                )
+            }
+            return false
+        }
+        val uploading = outboundQueueStore.markUploading(id, lastAttemptAtMs = clock())
+            ?: return false
+        refreshOutboundQueueItemsFor(uploading.sessionKey)
+        val result = try {
+            withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { uploader(sidecars) }
+        } catch (timeout: TimeoutCancellationException) {
+            Result.failure(timeout)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+        val uploadedPaths = result.getOrElse { error ->
+            outboundQueueStore.markFailed(id, lastError = attachmentErrorMessage(error))
+            refreshOutboundQueueItemsFor(uploading.sessionKey)
+            disarmSendWatchdog()
+            _uiState.update {
+                it.copy(
+                    sendInFlight = false,
+                    error = attachmentErrorMessage(error),
+                )
+            }
+            return false
+        }.filter { it.isNotBlank() }
+        if (uploadedPaths.size != sidecars.size) {
+            val message = "Attachment upload failed: uploaded ${uploadedPaths.size} of ${sidecars.size} files."
+            outboundQueueStore.markFailed(id, lastError = message)
+            refreshOutboundQueueItemsFor(uploading.sessionKey)
+            disarmSendWatchdog()
+            _uiState.update { it.copy(sendInFlight = false, error = message) }
+            return false
+        }
+        val uploadedSidecarRefs = sidecars.mapIndexed { index, ref ->
+            DurableAttachmentRef(
+                remotePath = uploadedPaths[index],
+                displayName = ref.displayName,
+                mimeType = ref.mimeType,
+            )
+        }
+        val updatedRefs = item.attachments.withUploadedSidecars(sidecars, uploadedSidecarRefs)
+        val uploaded = outboundQueueStore.markAttachmentsUploaded(id, updatedRefs)
+        if (uploaded?.state != OutboundState.Queued) {
+            refreshOutboundQueueItemsFor(item.sessionKey)
+            return false
+        }
+        refreshOutboundQueueItemsFor(item.sessionKey)
+        return true
+    }
+
+    private fun claimAndEmitOutboundItem(id: String): Boolean {
         val active = outboundQueueStore.claim(id) ?: return false
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
@@ -1337,6 +1513,9 @@ public class PromptComposerViewModel @Inject constructor(
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
         outboundQueueStore.markDelivered(id)
+        outboundAttachmentSidecarStore?.let { store ->
+            viewModelScope.launch { store.removeOutboundItem(id) }
+        }
         request.sendTarget.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
@@ -2789,6 +2968,73 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private fun List<StagedAttachment>.toDurableRefs(): List<DurableAttachmentRef> =
         map { DurableAttachmentRef(it.remotePath, it.displayName, it.mimeType) }
+
+    /**
+     * Issue #900: sidecar-backed sends must be able to replace the provisional
+     * remote upload refs after process death. Persist the sidecar/original file
+     * label for local-preview attachments so retry can match the durable row
+     * back to its staged bytes even when the provisional remote path carried a
+     * timestamped upload filename.
+     */
+    private fun List<StagedAttachment>.toSidecarAwareDurableRefs(
+        sidecars: List<LocalAttachmentSidecarRef>,
+    ): List<DurableAttachmentRef> {
+        val sidecarsByAttachmentIndex = sidecars
+            .mapNotNull { ref -> ref.attachmentIndex?.let { index -> index to ref } }
+            .toMap()
+        val unindexedSidecars = ArrayDeque(sidecars.filter { it.attachmentIndex == null })
+        return mapIndexed { index, attachment ->
+            val sidecar = sidecarsByAttachmentIndex[index]
+                ?: if (attachment.previewUri != null) unindexedSidecars.removeFirstOrNull() else null
+            DurableAttachmentRef(
+                remotePath = attachment.remotePath,
+                displayName = sidecar?.displayName ?: attachment.displayName,
+                mimeType = sidecar?.mimeType ?: attachment.mimeType,
+            )
+        }
+    }
+
+    private fun List<DurableAttachmentRef>.withUploadedSidecars(
+        sidecars: List<LocalAttachmentSidecarRef>,
+        uploadedRefs: List<DurableAttachmentRef>,
+    ): List<DurableAttachmentRef> {
+        if (isEmpty()) return uploadedRefs
+        if (sidecars.all { it.attachmentIndex != null }) {
+            val replacements = sidecars.zip(uploadedRefs)
+                .mapNotNull { (sidecar, uploaded) -> sidecar.attachmentIndex?.let { index -> index to uploaded } }
+                .toMap()
+            if (replacements.size == sidecars.size) {
+                return mapIndexed { index, existing ->
+                    replacements[index]?.copy(mimeType = replacements[index]?.mimeType ?: existing.mimeType) ?: existing
+                }
+            }
+        }
+        val remaining = ArrayDeque(sidecars.zip(uploadedRefs))
+        val updated = map { existing ->
+            val next = remaining.firstOrNull()
+            if (next != null && existing.matchesSidecar(next.first)) {
+                remaining.removeFirst()
+                next.second.copy(mimeType = next.second.mimeType ?: existing.mimeType)
+            } else {
+                existing
+            }
+        }
+        return if (remaining.isEmpty()) updated else uploadedRefs
+    }
+
+    private fun DurableAttachmentRef.matchesSidecar(sidecar: LocalAttachmentSidecarRef): Boolean {
+        if (displayName == sidecar.displayName) return true
+        val remoteName = attachmentDisplayName(remotePath)
+        return remoteName == sidecar.displayName ||
+            displayName.isTimestampedAttachmentNameFor(sidecar.displayName) ||
+            remoteName.isTimestampedAttachmentNameFor(sidecar.displayName)
+    }
+
+    private fun String.isTimestampedAttachmentNameFor(sidecarDisplayName: String): Boolean {
+        if (sidecarDisplayName.isBlank()) return false
+        val pattern = Regex("""\d{8}-\d{6}-\d{2}-${Regex.escape(sidecarDisplayName)}""")
+        return pattern.matches(this)
+    }
 
     /**
      * Issue #872: rehydrate durable refs into live tiles. The local preview Uri

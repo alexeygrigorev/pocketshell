@@ -105,13 +105,33 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
             lastAttemptAtMs = 10L,
             attemptCount = 1,
         )
+        val staleUpload = OutboundItem(
+            id = "durable-stale-upload",
+            sessionKey = "sessA-requeue",
+            cleanText = "upload was interrupted",
+            state = OutboundState.Uploading,
+            createdAtMs = 3L,
+            lastAttemptAtMs = null,
+            attemptCount = 0,
+        )
+        val freshUpload = OutboundItem(
+            id = "durable-fresh-upload",
+            sessionKey = "sessA-requeue",
+            cleanText = "upload still active",
+            state = OutboundState.Uploading,
+            createdAtMs = 50L,
+            lastAttemptAtMs = null,
+            attemptCount = 0,
+        )
         first.enqueueExisting(stale)
         first.enqueueExisting(fresh)
         first.enqueueExisting(otherSession)
+        first.enqueueExisting(staleUpload)
+        first.enqueueExisting(freshUpload)
 
         val afterRestart = newStore()
         val requeued = afterRestart.requeueStaleInFlight("sessA-requeue", cutoffMs = 10L)
-        assertEquals(listOf(stale.id), requeued.map { it.id })
+        assertEquals(listOf(stale.id, staleUpload.id), requeued.map { it.id })
 
         val afterRecoveryRestart = newStore()
         val recovered = afterRecoveryRestart.item(stale.id)!!
@@ -119,6 +139,9 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
         assertEquals(1, recovered.attemptCount)
         assertEquals(10L, recovered.lastAttemptAtMs)
         assertEquals("previous timeout", recovered.lastError)
+        assertEquals(OutboundState.Queued, afterRecoveryRestart.item(staleUpload.id)!!.state)
+        assertEquals(0, afterRecoveryRestart.item(staleUpload.id)!!.attemptCount)
+        assertEquals(OutboundState.Uploading, afterRecoveryRestart.item(freshUpload.id)!!.state)
         assertEquals(OutboundState.InFlight, afterRecoveryRestart.item(fresh.id)!!.state)
         assertEquals(OutboundState.InFlight, afterRecoveryRestart.item(otherSession.id)!!.state)
 
@@ -126,7 +149,35 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
         assertEquals(stale.id, claimed.id)
         assertEquals(OutboundState.InFlight, claimed.state)
         assertEquals(2, claimed.attemptCount)
+        val claimedUpload = afterRecoveryRestart.claimNext("sessA-requeue")!!
+        assertEquals(staleUpload.id, claimedUpload.id)
+        assertEquals(OutboundState.InFlight, claimedUpload.state)
+        assertEquals(1, claimedUpload.attemptCount)
         assertNull(afterRecoveryRestart.claimNext("sessA-requeue"))
+    }
+
+    @Test
+    fun freshUploadingRetryUsesUploadTimestampForStaleRecoveryAfterRestart() {
+        val first = newStore()
+        val item = first.enqueue(
+            sessionKey = "sess-upload-retry",
+            cleanText = "retry upload",
+            createdAtMs = 1L,
+        )
+        first.claimNext("sess-upload-retry")
+        first.markFailed(item.id, "old failure", lastAttemptAtMs = 10L)
+        first.markUploading(item.id, lastAttemptAtMs = 200L)
+
+        val afterRestart = newStore()
+        assertEquals(OutboundState.Uploading, afterRestart.item(item.id)!!.state)
+        assertEquals(200L, afterRestart.item(item.id)!!.lastAttemptAtMs)
+
+        assertTrue(afterRestart.requeueStaleInFlight("sess-upload-retry", cutoffMs = 100L).isEmpty())
+        assertEquals(OutboundState.Uploading, afterRestart.item(item.id)!!.state)
+
+        val requeued = afterRestart.requeueStaleInFlight("sess-upload-retry", cutoffMs = 200L)
+        assertEquals(listOf(item.id), requeued.map { it.id })
+        assertEquals(OutboundState.Queued, afterRestart.item(item.id)!!.state)
     }
 
     @Test

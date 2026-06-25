@@ -1,6 +1,9 @@
 package com.pocketshell.app.composer
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
+import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
@@ -17,6 +20,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -35,6 +39,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Unit tests for [PromptComposerViewModel]'s recording FSM. Hits all
@@ -208,6 +213,7 @@ class PromptComposerViewModelTest {
             UnavailableSpeechRecognitionProvider,
         composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
         outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
+        outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -219,6 +225,7 @@ class PromptComposerViewModelTest {
             speechRecognitionProvider = speechRecognitionProvider,
             composerDraftStore = composerDraftStore,
             outboundQueueStore = outboundQueueStore,
+            outboundAttachmentSidecarStore = outboundAttachmentSidecarStore,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
@@ -3071,6 +3078,51 @@ class PromptComposerViewModelTest {
         return collected
     }
 
+    private fun newSidecarStore(context: Context = ApplicationProvider.getApplicationContext()): OutboundAttachmentSidecarStore {
+        context.getSharedPreferences(OutboundAttachmentSidecarStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+        File(context.filesDir, OutboundAttachmentSidecarStore.DIRECTORY_NAME).deleteRecursively()
+        var nextId = 0
+        return OutboundAttachmentSidecarStore(context).also { store ->
+            store.idGenerator = { "sidecar-${++nextId}" }
+            store.clock = { nextId.toLong() }
+        }
+    }
+
+    private fun localAttachmentFile(name: String, content: String): File {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        return File(context.cacheDir, name).apply {
+            parentFile?.mkdirs()
+            writeText(content)
+        }
+    }
+
+    private suspend fun waitForSidecarsCleared(
+        store: OutboundAttachmentSidecarStore,
+        outboundItemId: String,
+    ) {
+        repeat(100) {
+            if (store.refsFor(outboundItemId).isEmpty()) return
+            Thread.sleep(10)
+        }
+        assertTrue(store.refsFor(outboundItemId).isEmpty())
+    }
+
+    private fun kotlinx.coroutines.test.TestScope.waitForSendCount(
+        sent: List<PromptComposerViewModel.SendRequest>,
+        count: Int,
+    ) {
+        repeat(100) {
+            runCurrent()
+            if (sent.size >= count) return
+            Thread.sleep(10)
+        }
+        runCurrent()
+        assertEquals(count, sent.size)
+    }
+
     @Test
     fun requestSendInIdleDispatchesDraftAndKeepsItInFlightUntilDelivered() = runTest {
         // Issue #745: tapping Send dispatches the draft AND flips the composer
@@ -3158,6 +3210,334 @@ class PromptComposerViewModelTest {
         vm.discardOutboundItem(queueId)
         assertNotNull(queue.item(queueId))
         assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
+    fun requestSendWithLocalAttachmentStagesSidecarUploadsBeforeClaimAndDispatchesUploadedRefs() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val uploadedSidecarBytes = mutableListOf<String>()
+        val uploadFinished = CompletableDeferred<Unit>()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            uploadedSidecarBytes += refs.map { File(it.localPath).readText() }
+            uploadFinished.complete(Unit)
+            Result.success(refs.map { "~/.pocketshell/attachments/reuploaded/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        val local = localAttachmentFile("sidecar-report.txt", "local bytes")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("review")
+        vm.attachFiles(
+            count = 1,
+            previews = listOf(PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain")),
+        ) {
+            Result.success(listOf("~/.pocketshell/attachments/old/20260601-120000-01-sidecar-report.txt"))
+        }
+        advanceUntilIdle()
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        uploadFinished.await()
+        waitForSendCount(sent, 1)
+
+        val request = sent.single()
+        val queueId = requireNotNull(request.outboundQueueItemId)
+        assertEquals(listOf("local bytes"), uploadedSidecarBytes)
+        assertEquals(
+            appendAttachmentPaths("review", listOf("~/.pocketshell/attachments/reuploaded/sidecar-report.txt")),
+            request.text,
+        )
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = "~/.pocketshell/attachments/reuploaded/sidecar-report.txt",
+                    displayName = "sidecar-report.txt",
+                    mimeType = "text/plain",
+                ),
+            ),
+            request.attachments,
+        )
+        val inFlight = requireNotNull(queue.item(queueId))
+        assertEquals(OutboundState.InFlight, inFlight.state)
+        assertEquals(
+            listOf(DurableAttachmentRef("~/.pocketshell/attachments/reuploaded/sidecar-report.txt", "sidecar-report.txt", "text/plain")),
+            inFlight.attachments,
+        )
+        assertEquals(listOf(queueId), sidecars.refsFor(queueId).map { it.outboundItemId })
+    }
+
+    @Test
+    fun retryNextOutboundItemUploadsPersistedSidecarsBeforeClaimingQueuedRow() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val item = OutboundItem(
+            id = "queued-local",
+            sessionKey = "1/session-a",
+            cleanText = "send queued",
+            attachments = listOf(
+                DurableAttachmentRef(
+                    "~/.pocketshell/attachments/old/20260601-120000-01-queued.txt",
+                    "20260601-120000-01-queued.txt",
+                    "text/plain",
+                ),
+            ),
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(item)
+        sidecars.stage(
+            outboundItemId = item.id,
+            uris = listOf(Uri.fromFile(localAttachmentFile("queued.txt", "queued bytes"))),
+        )
+        val statesAtUpload = mutableListOf<OutboundState>()
+        val uploadFinished = CompletableDeferred<Unit>()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            statesAtUpload += requireNotNull(queue.item(item.id)).state
+            uploadFinished.complete(Unit)
+            Result.success(refs.map { "~/.pocketshell/attachments/flushed/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        val retried = vm.retryNextOutboundItem()
+        uploadFinished.await()
+        waitForSendCount(sent, 1)
+
+        assertEquals(item.id, retried)
+        assertEquals(listOf(OutboundState.Uploading), statesAtUpload)
+        val request = sent.single()
+        assertEquals(item.id, request.outboundQueueItemId)
+        assertEquals(
+            appendAttachmentPaths("send queued", listOf("~/.pocketshell/attachments/flushed/queued.txt")),
+            request.text,
+        )
+        val active = requireNotNull(queue.item(item.id))
+        assertEquals(OutboundState.InFlight, active.state)
+        assertEquals(1, active.attemptCount)
+        assertEquals(
+            listOf(DurableAttachmentRef("~/.pocketshell/attachments/flushed/queued.txt", "queued.txt", "text/plain")),
+            active.attachments,
+        )
+    }
+
+    @Test
+    fun retryNextOutboundItemReplacesOnlyIndexedSidecarAttachmentWhenRemoteNameCollides() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val remoteRef = DurableAttachmentRef(
+            remotePath = "~/.pocketshell/attachments/current/conflict.txt",
+            displayName = "conflict.txt",
+            mimeType = "text/plain",
+        )
+        val item = OutboundItem(
+            id = "queued-mixed-local",
+            sessionKey = "1/session-a",
+            cleanText = "send mixed",
+            attachments = listOf(
+                remoteRef,
+                DurableAttachmentRef(
+                    "~/.pocketshell/attachments/old/20260601-120000-02-conflict.txt",
+                    "20260601-120000-02-conflict.txt",
+                    "text/plain",
+                ),
+            ),
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(item)
+        sidecars.stage(
+            outboundItemId = item.id,
+            uris = listOf(Uri.fromFile(localAttachmentFile("conflict.txt", "queued bytes"))),
+            attachmentIndices = listOf(1),
+        )
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            assertEquals(listOf(1), refs.map { it.attachmentIndex })
+            Result.success(listOf("~/.pocketshell/attachments/flushed/conflict.txt"))
+        }
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        assertEquals(item.id, vm.retryNextOutboundItem())
+        waitForSendCount(sent, 1)
+
+        assertEquals(
+            appendAttachmentPaths(
+                "send mixed",
+                listOf(
+                    "~/.pocketshell/attachments/current/conflict.txt",
+                    "~/.pocketshell/attachments/flushed/conflict.txt",
+                ),
+            ),
+            sent.single().text,
+        )
+        assertEquals(
+            listOf(
+                remoteRef,
+                DurableAttachmentRef("~/.pocketshell/attachments/flushed/conflict.txt", "conflict.txt", "text/plain"),
+            ),
+            queue.item(item.id)!!.attachments,
+        )
+    }
+
+    @Test
+    fun concurrentSidecarRetriesOnlyOneUploadAndSendOwnsTheQueuedRow() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val item = OutboundItem(
+            id = "race-local",
+            sessionKey = "1/session-a",
+            cleanText = "send once",
+            attachments = listOf(DurableAttachmentRef("stale-local", "race.txt", "text/plain")),
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(item)
+        sidecars.stage(
+            outboundItemId = item.id,
+            uris = listOf(Uri.fromFile(localAttachmentFile("race.txt", "race bytes"))),
+        )
+        var uploadCount = 0
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            uploadCount++
+            assertEquals(OutboundState.Uploading, queue.item(item.id)!!.state)
+            vm.retryOutboundItem(item.id)
+            Result.success(refs.map { "~/.pocketshell/attachments/race/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        assertEquals(item.id, vm.retryNextOutboundItem())
+        waitForSendCount(sent, 1)
+        assertEquals(1, uploadCount)
+
+        val request = sent.single()
+        assertEquals(item.id, request.outboundQueueItemId)
+        assertEquals(1, queue.item(item.id)!!.attemptCount)
+        assertEquals(OutboundState.InFlight, queue.item(item.id)!!.state)
+    }
+
+    @Test
+    fun sidecarUploadBlocksSecondQueuedSidecarRowUntilFirstSendResolves() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val first = OutboundItem(
+            id = "sidecar-first",
+            sessionKey = "1/session-a",
+            cleanText = "first",
+            attachments = listOf(DurableAttachmentRef("stale-first", "first.txt", "text/plain")),
+            createdAtMs = 1L,
+        )
+        val second = OutboundItem(
+            id = "sidecar-second",
+            sessionKey = "1/session-a",
+            cleanText = "second",
+            attachments = listOf(DurableAttachmentRef("stale-second", "second.txt", "text/plain")),
+            createdAtMs = 2L,
+        )
+        queue.enqueueExisting(first)
+        queue.enqueueExisting(second)
+        sidecars.stage(first.id, listOf(Uri.fromFile(localAttachmentFile("first.txt", "first bytes"))))
+        sidecars.stage(second.id, listOf(Uri.fromFile(localAttachmentFile("second.txt", "second bytes"))))
+        val uploadIds = mutableListOf<String>()
+        var reentrantRetry: String? = "not-called"
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            uploadIds += refs.single().outboundItemId
+            if (refs.single().outboundItemId == first.id) {
+                reentrantRetry = vm.retryNextOutboundItem()
+            }
+            Result.success(refs.map { "~/.pocketshell/attachments/serial/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        assertEquals(first.id, vm.retryNextOutboundItem())
+        waitForSendCount(sent, 1)
+
+        assertNull(reentrantRetry)
+        assertEquals(listOf(first.id), uploadIds)
+        assertEquals(first.id, sent.single().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(first.id)!!.state)
+        assertEquals(OutboundState.Queued, queue.item(second.id)!!.state)
+
+        vm.markSendDelivered(sent.single())
+        advanceUntilIdle()
+        waitForSidecarsCleared(sidecars, first.id)
+        assertEquals(second.id, vm.retryNextOutboundItem())
+        waitForSendCount(sent, 2)
+
+        assertEquals(listOf(first.id, second.id), uploadIds)
+        assertEquals(second.id, sent.last().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(second.id)!!.state)
+    }
+
+    @Test
+    fun deliveredAndDeletedOutboundItemsCleanUpSidecars() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val delivered = OutboundItem(
+            id = "delivered-local",
+            sessionKey = "1/session-a",
+            cleanText = "done",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+        )
+        val deleted = OutboundItem(
+            id = "deleted-local",
+            sessionKey = "1/session-a",
+            cleanText = "delete",
+            state = OutboundState.Queued,
+            createdAtMs = 2L,
+        )
+        queue.enqueueExisting(delivered)
+        queue.enqueueExisting(deleted)
+        sidecars.stage(delivered.id, listOf(Uri.fromFile(localAttachmentFile("delivered.txt", "done"))))
+        sidecars.stage(deleted.id, listOf(Uri.fromFile(localAttachmentFile("deleted.txt", "delete"))))
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.markSendDelivered(
+            PromptComposerViewModel.SendRequest(
+                text = "done",
+                withEnter = true,
+                sendTarget = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a"),
+                outboundQueueItemId = delivered.id,
+            ),
+        )
+        advanceUntilIdle()
+
+        waitForSidecarsCleared(sidecars, delivered.id)
+
+        vm.discardOutboundItem(deleted.id)
+        advanceUntilIdle()
+
+        waitForSidecarsCleared(sidecars, deleted.id)
     }
 
     @Test

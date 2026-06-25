@@ -259,6 +259,23 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse
 
     /**
+     * Issue #927: milliseconds since the control-mode reader last parsed ANY
+     * control event (`%begin` / `%end` / `%error` / `%output`) — the
+     * "busy ≠ dead" discriminator the [probeLiveness] tolerance leans on.
+     *
+     * A genuinely dead / half-open link delivers ZERO bytes, so this value grows
+     * without bound. A flaky-but-ALIVE link that is mid-`%output`-burst keeps
+     * advancing it on every parsed block even while a `refresh-client` reply is
+     * parked behind the control-mode FIFO. [probeLiveness] therefore treats
+     * recent reader activity as positive liveness evidence so a probe parked
+     * behind a legitimate output burst is NOT mis-counted as a dead-channel miss.
+     *
+     * The default returns [Long.MAX_VALUE] (no activity known) for doubles that
+     * do not model a reader; the production client tracks the real timestamp.
+     */
+    public fun millisSinceLastReaderActivity(): Long = Long.MAX_VALUE
+
+    /**
      * EPIC #792 Slice D (#822/V7a): a lightweight, NON-fatal liveness ping for
      * the proactive mid-session drop probe (`LivenessProbe`).
      *
@@ -270,23 +287,51 @@ public interface TmuxClient : AutoCloseable {
      * generous per-probe timeout and an N-consecutive-failure criterion, so a
      * single slow reply never declares a drop.
      *
-     * Returns `true` if the command round-tripped (the channel is alive), `false`
-     * if it timed out best-effort, errored, or the client is closed/disconnected.
-     * Never throws for a transport failure — a dead channel is a `false`, not an
-     * exception, so the probe loop treats it as one failure tick.
+     * Issue #927 — busy-vs-dead distinction: BEFORE counting a missed
+     * `refresh-client` round-trip as a failure, the channel is checked for recent
+     * reader activity ([millisSinceLastReaderActivity] within
+     * [readerActivityLivenessWindowMs]). On a flaky-but-alive link a heavy
+     * `%output` burst can park the `refresh-client` reply behind the control-mode
+     * FIFO for longer than the probe's budget — but the reader is still parsing
+     * `%output` blocks, which is unambiguous proof the channel is alive. So if the
+     * reader showed activity within the window, the probe reports ALIVE even when
+     * the `refresh-client` reply itself did not arrive. A genuinely dead half-open
+     * link parses NOTHING, so this guard never masks a real drop.
+     *
+     * Returns `true` if the command round-tripped OR the reader showed recent
+     * activity (the channel is alive), `false` if it timed out best-effort with no
+     * reader activity, errored, or the client is closed/disconnected. Never throws
+     * for a transport failure — a dead channel is a `false`, not an exception, so
+     * the probe loop treats it as one failure tick.
      *
      * The default implementation sends `refresh-client` (a no-op idempotent
      * control command with a small reply, already on tmux's best-effort
-     * allow-list) and returns whether a non-error response came back.
+     * allow-list) and returns whether a non-error response came back, falling back
+     * to the recent-reader-activity evidence when the reply did not arrive.
      */
     public suspend fun probeLiveness(): Boolean =
         if (disconnected.value) {
             false
         } else {
-            runCatching { sendBestEffortCommand("refresh-client") }
+            val answered = runCatching { sendBestEffortCommand("refresh-client") }
                 .map { !it.isError }
                 .getOrDefault(false)
+            // Busy ≠ dead (#927): a parked/failed reply over a channel that is
+            // STILL delivering `%output` (or any control block) is alive, not a
+            // miss. A dead half-open link parses nothing, so this stays false.
+            answered || millisSinceLastReaderActivity() <= readerActivityLivenessWindowMs
         }
+
+    /**
+     * Issue #927: how recent reader activity must be to count as positive
+     * liveness evidence inside [probeLiveness]. A `%output` block parsed within
+     * this window means the channel is demonstrably alive even if a
+     * `refresh-client` reply is parked behind the FIFO. Kept short relative to the
+     * dead-peer detection budget so it only absorbs an active burst, never a
+     * genuinely silent half-open link.
+     */
+    public val readerActivityLivenessWindowMs: Long
+        get() = DEFAULT_READER_ACTIVITY_LIVENESS_WINDOW_MS
 
     /**
      * Issue #215: server-clean teardown of the tmux `-CC` control client.
@@ -325,6 +370,18 @@ public interface TmuxClient : AutoCloseable {
      *   block app shutdown.
      */
     public suspend fun detachCleanly(timeoutMs: Long = 1_000L)
+
+    public companion object {
+        /**
+         * Issue #927: default window for [readerActivityLivenessWindowMs]. A
+         * reader event parsed within ~3s of the probe is treated as positive
+         * liveness evidence even when the `refresh-client` reply is parked behind
+         * a `%output` burst. Short relative to the ~52s dead-peer budget so it
+         * only ever absorbs an actively-streaming-but-slow channel, never a
+         * silent half-open link (which parses zero bytes).
+         */
+        public const val DEFAULT_READER_ACTIVITY_LIVENESS_WINDOW_MS: Long = 3_000L
+    }
 }
 
 /**
@@ -808,6 +865,19 @@ internal class RealTmuxClient(
 
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         sendCommandInternal(cmd, timeoutMode = CommandTimeoutMode.BestEffortDrain)
+
+    /**
+     * Issue #927: real "busy ≠ dead" discriminator for the liveness probe.
+     * [lastReaderActivityNanos] advances on EVERY parsed control block
+     * (`%begin`/`%end`/`%error`/`%output`); a dead half-open link parses nothing
+     * so this grows without bound, while a flaky-but-alive link mid-`%output`-burst
+     * keeps it fresh. [probeLiveness] uses this so a `refresh-client` reply parked
+     * behind a legitimate output burst is not mis-counted as a dead-channel miss.
+     */
+    override fun millisSinceLastReaderActivity(): Long {
+        val deltaNanos = System.nanoTime() - lastReaderActivityNanos
+        return if (deltaNanos <= 0L) 0L else deltaNanos / 1_000_000L
+    }
 
     /**
      * Issue #640: capture a pane + its cursor in a single single-flight wire

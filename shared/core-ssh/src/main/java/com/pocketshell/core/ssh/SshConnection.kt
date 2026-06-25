@@ -189,6 +189,21 @@ public object SshConnection {
         return DefaultConfig()
     }
 
+    /**
+     * Issue #927: clear the connect-phase socket read timeout (`SO_TIMEOUT`) on a
+     * now-live client so the long-lived `-CC` control channel is not governed by a
+     * connect-phase read deadline. sshj's `SSHClient.timeout` maps straight to
+     * `Socket.setSoTimeout`; `0` means an infinite read timeout (block until bytes
+     * arrive), which is the correct posture for an idle-but-alive control channel.
+     * Dead-peer detection is the foreground single-writer `LivenessProbe`'s job,
+     * not a socket read deadline. Visible for the `KeepAliveConfigTest` sibling so
+     * the scoping is asserted without opening a real socket.
+     */
+    @JvmStatic
+    internal fun clearLiveChannelReadTimeout(client: SSHClient) {
+        client.timeout = 0
+    }
+
     private fun ensureBouncyCastleProvider() {
         synchronized(Security::class.java) {
             val provider = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME)
@@ -287,6 +302,18 @@ public object SshConnection {
             timeoutMs: Int,
         ) {
             client.connectTimeout = timeoutMs
+            // Issue #927: scope the socket read timeout (`SO_TIMEOUT`) to the
+            // connect + auth phase ONLY. `SSHClient.timeout` maps to
+            // `Socket.setSoTimeout`, i.e. the BLOCKING-READ timeout the sshj
+            // `Reader` thread arms on every `InputStream.read`. Keeping it at the
+            // connect timeout (30s) is fine during the bounded handshake, but on
+            // the long-lived `-CC` control channel it re-arms a 30s read deadline
+            // on an idle-but-alive link. (sshj's Reader loops on
+            // `SocketTimeoutException` rather than dying, so this did not by
+            // itself tear the transport — but a connect-phase read deadline has no
+            // business governing the live channel, where dead-peer detection is
+            // the foreground `LivenessProbe`'s job.) Set it for connect/auth here,
+            // then clear it post-auth in [clearLiveChannelReadTimeout].
             client.timeout = timeoutMs
 
             // Issue #847: NO keepalive interval is set — the background
@@ -307,6 +334,12 @@ public object SshConnection {
         ) {
             val keyProvider = loadKeyProvider(client, key, passphrase)
             client.authPublickey(user, keyProvider)
+            // Issue #927: auth is the last bounded connect-phase read. Now that
+            // the transport is live and will carry the long-lived `-CC` channel,
+            // clear the connect-phase socket read timeout so a normal idle gap on
+            // an alive link never arms a `SocketTimeoutException` on the live
+            // reader. Dead-peer detection is the foreground `LivenessProbe`'s job.
+            clearLiveChannelReadTimeout(client)
         }
 
         override fun toSession(client: SSHClient): SshSession = RealSshSession(client)

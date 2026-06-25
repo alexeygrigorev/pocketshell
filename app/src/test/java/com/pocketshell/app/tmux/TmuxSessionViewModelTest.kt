@@ -8384,6 +8384,154 @@ class TmuxSessionViewModelTest {
     }
 
     /**
+     * Issue #942 (black-screen B2, reopen-class D31): a remembered Conversation
+     * row collapsed to the raw black Terminal after 2× consecutive
+     * successful-but-EMPTY (`Resolved(null)`) detections on a wedged-but-alive
+     * channel — the capture/grep raced behind a busy agent (#470/#835) and read
+     * "no agent" while the agent was very much alive and still streaming output.
+     * #897 protected only the `Unavailable` (probe-threw) branch; the empty-grep
+     * `Resolved(null)` branch still counted toward [AGENT_EXIT_CONFIRMATIONS] and
+     * tore the row down. The maintainer's 2026-06-24 Claude `faq-assistant` black
+     * capture.
+     *
+     * RED (no fix): each empty null on the streaming channel counts toward exit;
+     * the second confirms and the remembered Conversation row is cleared.
+     * GREEN (fix): the still-streaming channel (recent `%output`) marks the empty
+     * detection as wedged-but-alive, it does NOT count toward exit confirmation,
+     * and the remembered Conversation row is preserved across both nulls.
+     *
+     * Class-cover: Claude, Codex AND OpenCode kinds.
+     */
+    @Test
+    fun emptyDetectionOnWedgedButAliveChannelDoesNotCollapseRememberedConversation() = runTest(scheduler) {
+        val detections = listOf(
+            newClaudeDetection(),
+            newCodexDetection(),
+            newOpenCodeDetection(),
+        )
+
+        detections.forEachIndexed { index, detection ->
+            val windowId = "@$index"
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = windowId, sessionName = "wedged-$index")
+            vm.startAgentConversationForTest("%0", detection)
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            // Reattach: the pane comes back as a remembered-agent resolving
+            // placeholder (the #495/#819 A2 seed) — the exact remembered
+            // Conversation state the maintainer had open when it went black.
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7",
+                        windowId,
+                        "$0",
+                        "shell",
+                        paneIndex = 0,
+                        sessionName = "wedged-$index",
+                    ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                "#819 (A2): the remembered ${detection.agent} placeholder is up before the empty detections",
+                vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
+            )
+
+            // The `-CC` channel is WEDGED-but-ALIVE: it is still streaming
+            // `%output` for this pane (a busy agent), so the grep raced an empty
+            // read. Inject 2× empty `Resolved(null)` while output keeps arriving.
+            repeat(AGENT_EXIT_CONFIRMATIONS) {
+                vm.recordPaneOutputActivityForTest("%7")
+                assertTrue(
+                    "#942: a freshly-streaming channel reads wedged-but-alive",
+                    vm.isChannelWedgedButAliveForTest("%7"),
+                )
+                val downgraded = vm.handleNullAgentDetectionForTest("%7")
+                runCurrent()
+                assertFalse(
+                    "#942: an empty grep on a streaming (wedged-but-alive) ${detection.agent} channel must NOT confirm agent exit",
+                    downgraded,
+                )
+                assertTrue(
+                    "#942: the remembered ${detection.agent} Conversation row survives the empty detection (no black Terminal)",
+                    vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
+                )
+            }
+
+            vm.clearForTest()
+        }
+    }
+
+    /**
+     * Issue #942: the wedged-channel guard must NOT over-protect — a GENUINE
+     * agent exit stops emitting output, so its empty `Resolved(null)` arrives on
+     * a now-IDLE channel and must still tear the Conversation row down after
+     * [AGENT_EXIT_CONFIRMATIONS] consecutive nulls. Class-cover Claude/Codex/
+     * OpenCode so a kind-specific over-protection regression is caught.
+     */
+    @Test
+    fun emptyDetectionOnIdleChannelStillTearsDownAGenuinelyExitedAgent() = runTest(scheduler) {
+        val detections = listOf(
+            newClaudeDetection(),
+            newCodexDetection(),
+            newOpenCodeDetection(),
+        )
+
+        detections.forEachIndexed { index, detection ->
+            val windowId = "@$index"
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = windowId, sessionName = "exited-$index")
+            vm.startAgentConversationForTest("%0", detection)
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7",
+                        windowId,
+                        "$0",
+                        "shell",
+                        paneIndex = 0,
+                        sessionName = "exited-$index",
+                    ),
+                ),
+            )
+            runCurrent()
+
+            // The agent exited: the channel went IDLE (no `%output`). The empty
+            // grep is now a TRUE "no agent" verdict, not a wedged race.
+            vm.clearPaneOutputActivityForTest("%7")
+            assertFalse(
+                "#942: an idle channel must not read wedged-but-alive",
+                vm.isChannelWedgedButAliveForTest("%7"),
+            )
+
+            val firstNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertFalse(
+                "#554: the first clean null defers (confirmation window) for ${detection.agent}",
+                firstNull,
+            )
+
+            val secondNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertTrue(
+                "#942: a real ${detection.agent} exit on an idle channel still tears the row down (no over-protection)",
+                secondNull,
+            )
+            assertNull(
+                "#942: the genuinely-exited ${detection.agent} Conversation row is gone",
+                vm.agentConversations.value["%7"],
+            )
+            assertNull(vm.agentForWindow(windowId))
+            vm.clearForTest()
+        }
+    }
+
+    /**
      * Issue #554: the deferral is a confirmation window, not a permanent
      * pin. A genuinely-exited agent (null detection persisting past
      * [AGENT_EXIT_CONFIRMATIONS]) still reconciles away so a stale

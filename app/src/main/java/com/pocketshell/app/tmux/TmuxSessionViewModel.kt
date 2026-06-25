@@ -1895,6 +1895,17 @@ public class TmuxSessionViewModel @Inject constructor(
     // [AGENT_EXIT_CONFIRMATIONS] consecutive nulls do we treat the agent as
     // genuinely exited and reconcile it away.
     private val paneAgentNullDetections: MutableMap<String, Int> = ConcurrentHashMap()
+    // Issue #942 (black-screen B2): the wall-clock (elapsedRealtime) of the last
+    // `%output` chunk observed for a pane. A remembered/seeded agent whose grep
+    // detection comes back EMPTY but whose `-CC` channel is still actively
+    // streaming output is WEDGED-but-alive (the #470/#835 capture-behind-a-busy-
+    // agent symptom), not exited — the empty grep raced the busy channel. Such a
+    // `Resolved(null)` must NOT be counted toward [AGENT_EXIT_CONFIRMATIONS] (which
+    // tears the Conversation row down to the raw black Terminal). #897 protected
+    // the `Unavailable` (probe-threw) branch; this protects the still-streaming
+    // `Resolved(null)` branch. A genuinely-exited agent stops emitting output, so
+    // its empty grep arrives with NO recent activity and tears down correctly.
+    private val paneLastOutputAtMs: MutableMap<String, Long> = ConcurrentHashMap()
     // Issue #793: per-pane conversation-load watchdog. Flips a never-completing
     // "Loading conversation…" state to Failed so the tab can't spin forever.
     private val conversationLoadWatchdogJobs: MutableMap<String, Job> = ConcurrentHashMap()
@@ -4497,6 +4508,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -4604,6 +4616,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -8333,6 +8346,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
             paneAgentNullDetections.remove(paneId)
+            paneLastOutputAtMs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
@@ -8420,6 +8434,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun recordVisiblePaneOutput(event: ControlEvent.Output) {
+        // Issue #942: stamp the pane's last live-output wall-clock so an empty
+        // grep detection can tell a still-streaming (wedged-but-alive) channel
+        // apart from a genuinely-exited agent (no output) before it counts the
+        // empty detection toward agent-exit confirmation.
+        paneLastOutputAtMs[event.paneId] = SystemClock.elapsedRealtime()
         logFirstPaneOutput(event)
     }
 
@@ -10080,6 +10099,22 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun handleNullAgentDetection(pane: TmuxPaneState, guard: RuntimeRefreshGuard): Boolean {
         val paneId = pane.paneId
+        // Issue #942 (black-screen B2, reopen-class): an empty grep
+        // (`Resolved(null)`) on a channel that is STILL actively streaming
+        // output is a WEDGED-but-alive channel (the capture/grep raced behind a
+        // busy agent — the #470/#835 symptom), not an agent that exited. Counting
+        // it toward [AGENT_EXIT_CONFIRMATIONS] is how a remembered Conversation
+        // collapsed to the raw black Terminal after 2× empty detections (#874 D4,
+        // verified live on v0.4.16). #897 protected the `Unavailable` branch; this
+        // guards the still-streaming `Resolved(null)` branch. We only protect a
+        // pane that actually has agent UI to lose — a genuine shell pane (no
+        // remembered/seeded agent, no live detection) is unaffected — and a
+        // genuinely-exited agent stops emitting output, so its empty grep arrives
+        // with NO recent activity and tears down correctly (no over-protection).
+        if (isChannelWedgedButAlive(paneId) && hasProtectableAgentUi(paneId)) {
+            scheduleAgentDetectionRecheck(pane, guard)
+            return false
+        }
         if (shouldDeferAgentDowngrade(paneId)) {
             val nulls = (paneAgentNullDetections[paneId] ?: 0) + 1
             paneAgentNullDetections[paneId] = nulls
@@ -10196,6 +10231,40 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun isAutoSeededPlaceholderUp(paneId: String): Boolean {
         val row = _agentConversations.value[paneId] ?: return false
         return row.autoSeededPlaceholder && row.detection == null
+    }
+
+    /**
+     * Issue #942 (black-screen B2): true when [paneId]'s `-CC` channel produced
+     * a `%output` chunk within the last [CHANNEL_WEDGED_RECENT_OUTPUT_MS] — i.e.
+     * the channel is still actively STREAMING. An empty grep detection
+     * (`Resolved(null)`) on such a channel is the wedged-but-alive
+     * capture-behind-a-busy-agent race (#470/#835), NOT an agent exit, so it must
+     * not be counted toward [AGENT_EXIT_CONFIRMATIONS]. A genuinely-exited agent
+     * stops emitting output, so its empty grep lands with no recent activity and
+     * this returns false (the row tears down correctly — no over-protection).
+     * False when the pane has never emitted output (no entry) or its last output
+     * is older than the window.
+     */
+    private fun isChannelWedgedButAlive(paneId: String): Boolean {
+        val lastOutputAtMs = paneLastOutputAtMs[paneId] ?: return false
+        return SystemClock.elapsedRealtime() - lastOutputAtMs < CHANNEL_WEDGED_RECENT_OUTPUT_MS
+    }
+
+    /**
+     * Issue #942: true when [paneId] currently has agent Conversation UI that an
+     * empty/transient detection could TEAR DOWN to the raw black Terminal — a
+     * live detection, a remembered-agent resolving placeholder (#819 A2), an
+     * auto-seeded detecting placeholder (#878), or a remembered window status the
+     * #495 reattach seed protects (#554). The wedged-channel guard only fires for
+     * such panes; a genuine shell pane (none of these) has nothing to protect, so
+     * its null detection proceeds through the normal path unchanged.
+     */
+    private fun hasProtectableAgentUi(paneId: String): Boolean {
+        val row = _agentConversations.value[paneId]
+        if (row != null && (row.detection != null || row.rememberedAgentPlaceholder || row.autoSeededPlaceholder)) {
+            return true
+        }
+        return shouldDeferAgentDowngrade(paneId)
     }
 
     /**
@@ -11916,6 +11985,40 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #942 test seam: drive the production `%output` activity recorder for
+     * [paneId] (the path the per-pane output collector calls on every live
+     * `%output` chunk), stamping the pane as a STILL-STREAMING (wedged-but-alive)
+     * channel. Lets a JVM test put a remembered/seeded agent's channel into the
+     * wedged-but-alive state synthetically — without standing up a real `-CC`
+     * stream — before injecting the empty `Resolved(null)` detection that #942
+     * must not count toward agent-exit confirmation.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun recordPaneOutputActivityForTest(paneId: String) {
+        recordVisiblePaneOutput(ControlEvent.Output(paneId, ByteArray(1)))
+    }
+
+    /**
+     * Issue #942 test seam: clear [paneId]'s recorded `%output` activity so the
+     * channel reads as IDLE (a genuinely-exited agent stops emitting output).
+     * Lets a JVM test prove the genuine-exit case still tears the row down — the
+     * wedged-channel guard must NOT over-protect a channel that went quiet.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearPaneOutputActivityForTest(paneId: String) {
+        paneLastOutputAtMs.remove(paneId)
+    }
+
+    /**
+     * Issue #942 test seam: true when [paneId]'s channel currently reads as
+     * wedged-but-alive (recent `%output`). Lets a JVM test assert the signal
+     * itself flips with activity vs idleness, independent of the routing.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isChannelWedgedButAliveForTest(paneId: String): Boolean =
+        isChannelWedgedButAlive(paneId)
+
+    /**
      * Issue #897 test seam: drive the degraded/unavailable detection branch
      * directly. Unlike [handleNullAgentDetectionForTest], this path represents
      * an untrustworthy probe and must never confirm agent exit.
@@ -13516,6 +13619,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -13632,6 +13736,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -13776,6 +13881,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -15338,6 +15444,20 @@ internal const val AGENT_EXIT_CONFIRMATIONS: Int = 2
 
 /** Delay before the issue #554 agent-exit confirmation re-detection. */
 internal const val AGENT_EXIT_RECHECK_DELAY_MS: Long = 1_200L
+
+/**
+ * Issue #942 (black-screen B2): how recently a pane must have produced `%output`
+ * for its channel to be treated as WEDGED-but-alive (still streaming) when an
+ * empty grep detection (`Resolved(null)`) lands. Within this window an empty
+ * detection is the capture-behind-a-busy-agent race (#470/#835), not an agent
+ * exit, so it is NOT counted toward [AGENT_EXIT_CONFIRMATIONS]. Sized to comfortably
+ * span a busy agent's brief inter-chunk gaps plus the detection round-trip, while
+ * staying short enough that a genuinely-exited agent (which stops emitting output)
+ * clears the window before its empty grep arrives, so a real exit still tears the
+ * Conversation row down. Two consecutive recheck cycles
+ * ([AGENT_EXIT_RECHECK_DELAY_MS]) fit inside it.
+ */
+internal const val CHANNEL_WEDGED_RECENT_OUTPUT_MS: Long = 3_000L
 
 /**
  * Issue #793: how long the Conversation tab spins on "Loading conversation…"

@@ -1299,6 +1299,25 @@ internal fun SheetContent(
                     // The non-transcribing discard action is intentionally in
                     // the recording panel itself, not this row, so it cannot be
                     // confused with either stop+transcribe choice.
+                    //
+                    // Issue #585: a DETERMINISTIC hands-free lock affordance.
+                    // The Telegram-style swipe-up-to-lock gesture (below) is the
+                    // one-gesture path, but it competes with the
+                    // ModalBottomSheet's drag-to-dismiss and that velocity-driven
+                    // arbitration repeatedly failed on the maintainer's real
+                    // device while passing every emulator round (this issue's 5
+                    // reopens). A single-tap Lock button cannot be stolen by the
+                    // sheet drag — it is the device-independent way to "release
+                    // the finger and keep recording". It shows only BEFORE the
+                    // recording is locked (once locked, the recording panel shows
+                    // the persistent lock indicator instead).
+                    if (!state.recordingLocked) {
+                        LockRecordingButton(
+                            onClick = onLockRecording,
+                            modifier = Modifier.testTag(COMPOSER_LOCK_RECORDING_TAG),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
                     ToFieldButton(
                         onClick = onMicTap,
                         modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
@@ -1558,6 +1577,21 @@ private fun RecordingSurface(
             )
             DiscardRecordingButton(onClick = onCancel)
         }
+        // Issue #585: until the recording is locked, surface a one-line hint so
+        // the user knows the hands-free path exists and how to reach it — "tap
+        // Lock" is the deterministic affordance, "swipe up" the gesture. The
+        // hint disappears the moment the lock indicator appears, so a locked
+        // recording reads clean. The missing feedback was itself a reason the
+        // gesture felt broken ("I don't think it's recording / locking").
+        if (!locked && liveTranscript.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Tap Lock or swipe up to keep recording hands-free",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                modifier = Modifier.testTag(COMPOSER_LOCK_HINT_TAG),
+            )
+        }
         if (!liveTranscript.isNullOrBlank()) {
             Spacer(modifier = Modifier.height(8.dp))
             LiveTranscriptTwoLine(
@@ -1741,6 +1775,56 @@ private fun DiscardRecordingButton(
         Text(
             text = "Discard",
             color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
+ * Issue #585: the deterministic hands-free LOCK affordance shown while
+ * Recording but not yet locked. A single tap calls [onLockRecording] so the
+ * user can release the finger and keep dictating — exactly the maintainer's
+ * Telegram-style "swipe up to lock" intent, but via a tap that the
+ * ModalBottomSheet drag-to-dismiss can NEVER steal (the velocity-driven
+ * arbitration that broke the swipe gesture on real hardware across this
+ * issue's reopens). Rendered as a compact accent-bordered pill with the lock
+ * glyph so it reads as "lock this recording on". A 48dp min touch target keeps
+ * it comfortably tappable next to the Insert/Send pills.
+ */
+@Composable
+private fun LockRecordingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(22.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Accent,
+                shape = RoundedCornerShape(22.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Lock recording to continue hands-free" }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Lock,
+            contentDescription = null,
+            tint = PocketShellColors.Accent,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            text = "Lock",
+            color = PocketShellColors.Accent,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -3309,6 +3393,20 @@ internal fun composerSendTooltipTestTag(label: String): String =
  * `Recording`, where it stops the mic and drops the buffer before Whisper.
  */
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
+
+/**
+ * Issue #585: test tag for the deterministic hands-free Lock control. It only
+ * appears while `Recording` and NOT yet locked; a single tap locks the
+ * recording so the finger can be released without stopping capture (the
+ * sheet-drag-proof alternative to the swipe-up-to-lock gesture).
+ */
+internal const val COMPOSER_LOCK_RECORDING_TAG = "prompt-composer-lock-recording"
+
+/**
+ * Issue #585: test tag for the recording hands-free hint shown while
+ * `Recording` and not yet locked. Disappears once locked.
+ */
+internal const val COMPOSER_LOCK_HINT_TAG = "prompt-composer-lock-hint"
 
 /**
  * Issue #174/#453: test tag for the transcribing cancel control. Kept

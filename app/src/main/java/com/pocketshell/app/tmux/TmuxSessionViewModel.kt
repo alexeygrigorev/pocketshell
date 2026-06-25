@@ -298,6 +298,26 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #926: the dispatcher the attach/switch/reattach SEED + `list-panes`
+     * BLOCKING control-channel round-trips run on. Defaults to [Dispatchers.IO]
+     * so the `capture-pane` / `list-panes` IO NEVER parks the UI (`Main`) thread
+     * — the freeze the maintainer hit on a wedged-but-alive `-CC` channel
+     * (#895). The IO round-trip happens here off-Main; only the resulting
+     * `_panes` / pane-emulator (`appendRemoteOutput`) / reveal mutation hops
+     * BACK to Main (the Codex `%layout-change` coalescer already proves this
+     * split is safe). NOT a constructor parameter, for the same Hilt-graph
+     * reason as [reconcileDispatcher]; a unit test pins it to a DISTINCT,
+     * separately-identifiable dispatcher via [setSeedIoDispatcherForTest] so the
+     * "ran off Main" property is directly observable.
+     */
+    private var seedIoDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setSeedIoDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        seedIoDispatcher = dispatcher
+    }
+
+    /**
      * Issue #877: the dispatcher the per-`%output` new-port detector
      * ([startPortDetectionForPane] → [PortDetector.scan]) runs its decode +
      * regex scan on. Defaults to a single-threaded view of [Dispatchers.Default]
@@ -351,6 +371,25 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setConversationLoadTimeoutForTest(timeoutMs: Long) {
         conversationLoadTimeoutMs = timeoutMs
+    }
+
+    /**
+     * Issue #926: the SHORT ceiling (ms) applied to each attach/switch/reattach
+     * SEED `capture-pane` round-trip ([seedPaneFromCaptureOnce] →
+     * [TmuxClient.captureWithCursor]). Far below the full per-command
+     * `commandTimeoutMs` (10 s) so a wedged-but-alive control channel makes the
+     * seed surface a best-effort failure FAST and fall through to the blank
+     * watchdog on the still-live transport, instead of the (now off-Main, but
+     * still bounded) seed parking for the full 10 s. NOT a constructor parameter,
+     * for the same Hilt-graph reason as the other timeout seams; a unit test
+     * shrinks it via [setSeedCaptureTimeoutForTest] to assert the fall-through
+     * deterministically.
+     */
+    private var seedCaptureTimeoutMs: Long = SEED_CAPTURE_TIMEOUT_MS
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setSeedCaptureTimeoutForTest(timeoutMs: Long) {
+        seedCaptureTimeoutMs = timeoutMs
     }
 
     /**
@@ -1642,6 +1681,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var autoReconnectJob: Job? = null
+    // Issue #938 (S2-3): `appActive` is written on Main (onStart/onStop) but
+    // read off-Main from the port-detection dispatcher (e.g. [scanDecoded],
+    // [confirmAndSurfaceDetectedPort]). @Volatile guarantees cross-thread
+    // visibility so an off-Main read sees the latest background/foreground
+    // flip instead of a stale cached value.
+    @Volatile
     private var appActive: Boolean = true
     private var screenStartedForCleared: Boolean = true
     private var eventsJob: Job? = null
@@ -3927,8 +3972,17 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #640: single-flight combined capture+cursor exchange (see
             // [TmuxClient.captureWithCursor]) shared with the cold-open seed
             // path so both pay one wire round-trip and restore the #259 cursor.
+            // Issue #926: the round-trip runs OFF Main on [seedIoDispatcher] with
+            // the short seed ceiling — the prewarm seed must never park the UI
+            // thread on a wedged channel either.
             val combined = runCatching {
-                client.captureWithCursor(pane.paneId, scrollbackLines = SEED_SCROLLBACK_LINES)
+                withContext(seedIoDispatcher) {
+                    client.captureWithCursor(
+                        pane.paneId,
+                        scrollbackLines = SEED_SCROLLBACK_LINES,
+                        timeoutMs = seedCaptureTimeoutMs,
+                    )
+                }
             }.getOrNull() ?: return
             val capture = combined.capture
             if (capture.isError || capture.output.isEmpty()) return
@@ -8019,23 +8073,25 @@ public class TmuxSessionViewModel @Inject constructor(
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
             return PaneReconcileResult.NoClient
         }
-        // Issue #576 (Slice A of #792): the `list-panes` round-trip runs on
-        // WHATEVER dispatcher the caller is on. For the Codex `%layout-change`
-        // storm — the ANR — that caller is the [LayoutChangeCoalescer]'s drain
-        // loop, whose scope is dispatched on [reconcileDispatcher]
-        // (`Dispatchers.Default` in production); so a coalesced reconcile's
-        // `list-panes`/`capture-pane` round-trips already run OFF the Main event
-        // collector, and the collector's non-blocking `offer` never
-        // head-of-line-blocks behind the burst backlog. The direct callers
-        // (attach / cached-runtime refresh) run on Main and keep `list-panes` on
-        // Main inline, preserving their existing suspension-point semantics — we
-        // do NOT add an inner `withContext(reconcileDispatcher)` hop here, which
-        // would (a) be redundant for the off-main storm path and (b) re-dispatch
-        // the on-Main direct callers and break their ordering. Off-main-ness is
-        // a property of the COALESCER SCOPE, not of this round-trip.
+        // Issue #576 (Slice A of #792) / Issue #926: the `list-panes` round-trip
+        // is a BLOCKING control-channel exchange. For the Codex `%layout-change`
+        // storm — the original ANR — the caller is the [LayoutChangeCoalescer]'s
+        // drain loop on [reconcileDispatcher] (`Dispatchers.Default`), already
+        // off the Main event collector. The DIRECT callers (attach / switch /
+        // cached-runtime refresh) used to run this `sendCommand` INLINE on Main —
+        // that is the #895 freeze: an attach/switch `list-panes` against a
+        // wedged-but-alive `-CC` channel parked the UI thread up to the 10 s
+        // `commandTimeoutMs`. Issue #926 moves the round-trip itself OFF Main
+        // onto [seedIoDispatcher] (`Dispatchers.IO`) for EVERY caller; the
+        // resulting `_panes`/reveal mutation still hops back to Main via
+        // [applyOnMain] below, so the single-threaded pane-state invariant and
+        // the switch-ordering ([applyOnMain] last-write serialisation) are
+        // preserved — the IO no longer competes with the UI thread.
         val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
-            client.sendCommand(buildListPanesCommand(target))
+            withContext(seedIoDispatcher) {
+                client.sendCommand(buildListPanesCommand(target))
+            }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             return PaneReconcileResult.Failed(t)
@@ -9317,8 +9373,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // round-trips into one wire exchange. The cursor restore (#259) is
         // preserved, not dropped.
         val captureStartedAtMs = SystemClock.elapsedRealtime()
+        // Issue #926: run the BLOCKING `capture-pane`+cursor round-trip OFF the
+        // Main (UI) thread on [seedIoDispatcher], bounded by the SHORT seed
+        // ceiling ([seedCaptureTimeoutMs]) rather than the full 10 s
+        // `commandTimeoutMs`. On a wedged-but-alive `-CC` channel this is the
+        // single most important freeze fix: the seed can no longer park the UI
+        // thread (it parks an IO thread, briefly) and falls through to the blank
+        // watchdog on the still-live transport. The pane-emulator mutation
+        // ([appendRemoteOutput]) + reveal signals stay on the caller's (Main)
+        // thread below, so the single-threaded pane-state invariant is preserved.
         val combined = runCatching {
-            client.captureWithCursor(pane.paneId, scrollbackLines = SEED_SCROLLBACK_LINES)
+            withContext(seedIoDispatcher) {
+                client.captureWithCursor(
+                    pane.paneId,
+                    scrollbackLines = SEED_SCROLLBACK_LINES,
+                    timeoutMs = seedCaptureTimeoutMs,
+                )
+            }
         }.getOrNull()
         val captureDurationMs = SystemClock.elapsedRealtime() - captureStartedAtMs
         val captureResponse = combined?.capture
@@ -14687,6 +14758,19 @@ internal data class TmuxPaneCursor(val column: Int, val row: Int)
  * paint slower (per the #640 diagnosis), so it stays at the prior value.
  */
 internal const val SEED_SCROLLBACK_LINES: Int = 200
+
+/**
+ * Issue #926: the SHORT ceiling (ms) for each attach/switch/reattach seed
+ * `capture-pane` round-trip. The full per-command tmux ceiling is 10 s
+ * (`DEFAULT_COMMAND_TIMEOUT_MS`); a seed against a wedged-but-alive `-CC`
+ * channel parked there would be the user-visible freeze (#895). Bounding the
+ * seed to ≈2.5 s means a degraded link surfaces a fast best-effort failure and
+ * the caller falls through to the blank watchdog on the still-live transport
+ * (the watchdog keeps re-seeding under a calm overlay) instead of a long stall.
+ * Chosen ~2.5 s: long enough that a momentarily-busy healthy channel still
+ * lands the snapshot, short enough that a wedge never reads as a freeze.
+ */
+internal const val SEED_CAPTURE_TIMEOUT_MS: Long = 2_500L
 
 /**
  * Issue #662: how long the post-reveal black-pane safety net waits before

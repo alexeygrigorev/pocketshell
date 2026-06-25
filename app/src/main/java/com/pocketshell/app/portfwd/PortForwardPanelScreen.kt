@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.MaterialTheme
@@ -233,11 +233,15 @@ fun PortForwardPanelScreen(
                             modifier = Modifier.weight(1f),
                         )
                     } else {
+                        val rowKeys = tunnelRowKeys(displayedTunnels)
                         LazyColumn(
                             modifier = Modifier.weight(1f),
                             contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
                         ) {
-                            items(displayedTunnels, key = { it.remotePort }) { tunnel ->
+                            itemsIndexed(
+                                displayedTunnels,
+                                key = { index, _ -> rowKeys[index] },
+                            ) { _, tunnel ->
                                 // Discovery (auto-forward off) state:
                                 // tapping a discovered-port row — or its
                                 // Start button — initiates a forward for
@@ -254,11 +258,15 @@ fun PortForwardPanelScreen(
                 }
 
                 else -> {
+                    val rowKeys = tunnelRowKeys(displayedTunnels)
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
                     ) {
-                        items(displayedTunnels, key = { it.remotePort }) { tunnel ->
+                        itemsIndexed(
+                            displayedTunnels,
+                            key = { index, _ -> rowKeys[index] },
+                        ) { _, tunnel ->
                             PortForwardRow(
                                 tunnel = tunnel,
                                 onToggle = { viewModel.togglePort(tunnel.remotePort) },
@@ -272,6 +280,33 @@ fun PortForwardPanelScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Stable, **guaranteed-unique** LazyColumn keys for the port-forward rows.
+ *
+ * Issue #931: the table previously keyed each row on `it.remotePort`. The
+ * discovery / forwarding lists can legitimately contain two rows that share a
+ * remote port (e.g. the same remote `22` discovered on two interfaces, or a
+ * forwarded row co-existing with its still-AVAILABLE discovery twin), and
+ * `LazyColumn` requires every item key to be unique — a collision throws
+ * `IllegalArgumentException: Key "22" already used`, crashing the whole app
+ * (the "always restarting" class, #928 D2/D7).
+ *
+ * We build a key per row from its `(remotePort, localPort, status)` identity and
+ * disambiguate any genuine duplicate by appending an occurrence counter, so the
+ * keys are both stable across recompositions (no index-only churn that would
+ * break item animation/state) AND collision-free no matter what the data model
+ * produces.
+ */
+internal fun tunnelRowKeys(tunnels: List<TunnelInfo>): List<String> {
+    val seen = HashMap<String, Int>()
+    return tunnels.map { tunnel ->
+        val base = "${tunnel.remotePort}:${tunnel.localPort}:${tunnel.status}"
+        val occurrence = seen.getOrDefault(base, 0)
+        seen[base] = occurrence + 1
+        if (occurrence == 0) base else "$base#$occurrence"
     }
 }
 

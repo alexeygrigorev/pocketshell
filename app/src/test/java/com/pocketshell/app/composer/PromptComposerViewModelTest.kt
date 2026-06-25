@@ -5740,4 +5740,273 @@ class PromptComposerViewModelTest {
         val edge = barEnvelopeHeightDp(0)
         assertTrue("Centre bar ($centre) should be taller than edge ($edge)", centre > edge)
     }
+
+    // -- Issue #929: attachment send must not WEDGE subsequent sends --------
+    //
+    // Reproduce-first (D33/G10). The maintainer's on-device symptom: a plain
+    // send works, but the moment an attachment send fails (drop mid-upload,
+    // timeout, uploader unavailable, or an internal early-return), the send
+    // pipeline is WEDGED — `sendInFlight` stays `true` so EVERY subsequent
+    // plain send is silently dropped until the app is restarted, escapable
+    // only by the slow ~110s #891 watchdog.
+    //
+    // #928 D5 located the strand sites: `enqueueAndDispatchSidecarBackedSend`
+    // / `dispatchPreparedOutboundItem` / `uploadSidecarsForOutboundItem` /
+    // `claimAndEmitOutboundItem` have `return false` early-outs that leave
+    // `sendInFlight = true` with only the watchdog to clear it.
+    //
+    // These drive the PRODUCTION dispatch path (real OutboundQueueStore + real
+    // OutboundAttachmentSidecarStore + real sidecar-backed dispatch) and assert
+    // that AFTER any attachment-send outcome a subsequent PLAIN send still
+    // reaches the session WITHOUT relying on the watchdog. The watchdog is left
+    // DISABLED by [newVm], so a green proves the explicit prompt-clear fix, not
+    // the safety net.
+
+    /**
+     * The sidecar store does real `Dispatchers.IO` file work + the dispatch is
+     * launched on viewModelScope, so `advanceUntilIdle` alone cannot observe the
+     * settled outcome. Drive the virtual clock AND yield to the real IO threads
+     * until [predicate] holds (or the bound elapses).
+     */
+    private fun kotlinx.coroutines.test.TestScope.settleUntil(
+        predicate: () -> Boolean,
+    ) {
+        repeat(200) {
+            advanceUntilIdle()
+            if (predicate()) return
+            runCurrent()
+            if (predicate()) return
+            Thread.sleep(5)
+        }
+        advanceUntilIdle()
+    }
+
+    /**
+     * Stage one local attachment and tap Send for [target] — drives the real
+     * sidecar-backed dispatch. Returns once the attachment send has resolved
+     * (either dispatched a request, or failed and settled `sendInFlight`).
+     */
+    private fun kotlinx.coroutines.test.TestScope.attachAndSendForWedge(
+        vm: PromptComposerViewModel,
+        sent: List<PromptComposerViewModel.SendRequest>,
+        target: PromptComposerViewModel.SendTargetSnapshot,
+        draft: String,
+        fileName: String,
+    ) {
+        val local = localAttachmentFile(fileName, "local bytes for $fileName")
+        vm.onComposerTargetChanged(target.sessionKey)
+        vm.onDraftChange(draft)
+        vm.attachFiles(
+            count = 1,
+            previews = listOf(
+                PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain"),
+            ),
+        ) {
+            Result.success(listOf("~/.pocketshell/attachments/old/$fileName"))
+        }
+        settleUntil { vm.uiState.value.attachments.isNotEmpty() }
+        val before = sent.size
+        vm.requestSend(withEnter = true, sendTarget = target)
+        // Resolve = either a request reached the session, or the send failed and
+        // sendInFlight settled back to false.
+        settleUntil { sent.size > before || !vm.uiState.value.sendInFlight }
+    }
+
+    /**
+     * After an attachment send has resolved, assert the pipeline is NOT wedged:
+     * `sendInFlight` is clear and a subsequent PLAIN send reaches the session.
+     */
+    private fun kotlinx.coroutines.test.TestScope.assertSubsequentPlainSendWorks(
+        vm: PromptComposerViewModel,
+        sent: MutableList<PromptComposerViewModel.SendRequest>,
+        target: PromptComposerViewModel.SendTargetSnapshot,
+    ) {
+        assertFalse(
+            "send pipeline WEDGED: sendInFlight still true after the attachment " +
+                "send resolved — a subsequent plain send can never dispatch (issue #929)",
+            vm.uiState.value.sendInFlight,
+        )
+        // The maintainer's "I cannot send ANYTHING" repro: clear the (failed)
+        // tile and send a PLAIN text message. A failed attachment send keeps the
+        // tile on screen (#872); the user removes it and tries to send text. That
+        // plain send must reach the session — the pipeline must not be wedged.
+        vm.uiState.value.attachments.toList().forEach { vm.removeAttachment(it.remotePath) }
+        val before = sent.size
+        vm.onDraftChange("plain follow-up after attachment")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        settleUntil { sent.size > before }
+        assertEquals(
+            "the subsequent PLAIN send did not reach the session — pipeline wedged (issue #929)",
+            before + 1,
+            sent.size,
+        )
+        assertEquals("plain follow-up after attachment", sent.last().text)
+        assertTrue(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun attachmentDropMidUploadDoesNotWedgeSubsequentPlainSend_shellPane() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            Result.failure(RuntimeException("transport dropped mid-upload"))
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            route = OutboundRoute.RawBytes,
+        )
+
+        attachAndSendForWedge(vm, sent, target, "look at this", "drop.txt")
+        assertSubsequentPlainSendWorks(vm, sent, target)
+    }
+
+    @Test
+    fun attachmentDropMidUploadDoesNotWedgeSubsequentPlainSend_agentPane() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            Result.failure(RuntimeException("transport dropped mid-upload"))
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-agent",
+            paneId = "%4",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        attachAndSendForWedge(vm, sent, target, "review for the agent", "agent-drop.txt")
+        assertSubsequentPlainSendWorks(vm, sent, target)
+    }
+
+    @Test
+    fun attachmentUploadTimeoutDoesNotWedgeSubsequentPlainSend() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            // Hang forever; production wraps this in
+            // withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) so the virtual clock
+            // drives the timeout deterministically under runTest.
+            awaitCancellation()
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            route = OutboundRoute.RawBytes,
+        )
+
+        attachAndSendForWedge(vm, sent, target, "this will time out", "timeout.txt")
+        advanceUntilIdle()
+        assertSubsequentPlainSendWorks(vm, sent, target)
+    }
+
+    @Test
+    fun attachmentSendClaimRaceEarlyReturnDoesNotWedgeSubsequentPlainSend() = runTest {
+        // Drives a SECOND strand site: after the upload succeeds,
+        // `claimAndEmitOutboundItem` early-returns `false` when `claim` loses
+        // the race (returns null), leaving sendInFlight stranded. A store whose
+        // `claim` always returns null forces that exact path.
+        val queue = object : InMemoryOutboundQueueStore() {
+            override fun claim(id: String): OutboundItem? = null
+        }
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            Result.success(it.map { ref -> "~/.pocketshell/attachments/uploaded/${ref.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            route = OutboundRoute.RawBytes,
+        )
+
+        attachAndSendForWedge(vm, sent, target, "claim race", "claim.txt")
+        assertSubsequentPlainSendWorks(vm, sent, target)
+    }
+
+    @Test
+    fun attachmentSendInternalEarlyReturnDoesNotWedgeSubsequentPlainSend() = runTest {
+        // Drives the W-3 strand: `uploadSidecarsForOutboundItem` early-returns
+        // `false` when markUploading returns null, leaving sendInFlight
+        // stranded. A store whose markUploading always returns null forces that
+        // exact path even though the uploader itself would have succeeded.
+        val queue = object : InMemoryOutboundQueueStore() {
+            override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
+        }
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            Result.success(it.map { ref -> "~/.pocketshell/attachments/uploaded/${ref.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            route = OutboundRoute.RawBytes,
+        )
+
+        attachAndSendForWedge(vm, sent, target, "internal strand", "strand.txt")
+        assertSubsequentPlainSendWorks(vm, sent, target)
+    }
+
+    @Test
+    fun successfulAttachmentSendThenPlainSendBothReachSession() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            Result.success(it.map { ref -> "~/.pocketshell/attachments/uploaded/${ref.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            route = OutboundRoute.RawBytes,
+        )
+
+        attachAndSendForWedge(vm, sent, target, "with attachment", "ok.txt")
+
+        // The attachment send dispatched (carries the uploaded path).
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().text.contains("uploaded/ok.txt"))
+        assertEquals(1, sent.single().attachments.size)
+        // The host confirms delivery — clears in-flight as usual.
+        vm.markSendDelivered(sent.single())
+        advanceUntilIdle()
+        assertFalse(vm.uiState.value.sendInFlight)
+
+        // Subsequent plain send works.
+        val before = sent.size
+        vm.onDraftChange("plain after success")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        settleUntil { sent.size > before }
+        assertEquals(before + 1, sent.size)
+        assertEquals("plain after success", sent.last().text)
+    }
 }

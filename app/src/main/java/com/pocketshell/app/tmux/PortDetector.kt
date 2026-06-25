@@ -40,8 +40,19 @@ import com.pocketshell.core.terminal.selection.detectLocalhostPortReferences
  * decoded text per detector so a match that straddles a chunk boundary
  * is still found on the next chunk.
  *
- * All state is single-threaded by contract: the view model drives [scan]
- * from one coroutine on its bridge scope.
+ * Threading (issue #938): this detector is shared across two dispatchers.
+ * [scan] runs off-Main on the view model's port-detection dispatcher (issue
+ * #877: the UTF-8 decode + 7-regex pass is moved off Main so it can never
+ * stall the UI), while [confirmed] / [confirmFailed] / [dismissed] /
+ * [forwarded] are driven from the Main thread (the overlay accept/dismiss
+ * callbacks and the confirm coroutine). The shared [handled] /
+ * [pendingConfirm] sets are therefore mutated from BOTH threads. Every read
+ * and write of those two sets is guarded by [lock], so no
+ * `ConcurrentModificationException` can occur and updates are visible across
+ * threads. The expensive decode + regex work in [scan] stays OUTSIDE the
+ * lock; only the short de-dup bookkeeping is serialized, preserving the #877
+ * off-Main scan-cost benefit. [tail] is only ever touched inside [scan] (one
+ * dispatcher) so it needs no extra guard.
  */
 internal class PortDetector(
     /**
@@ -60,13 +71,22 @@ internal class PortDetector(
      */
     data class Candidate(val port: Int)
 
+    // Guards every read/write of [handled] and [pendingConfirm]. Both sets
+    // are mutated from two dispatchers (issue #938: [scan] off-Main, the
+    // confirm/accept/dismiss callbacks on Main), so all access to them is
+    // serialized through this lock to avoid a ConcurrentModificationException
+    // and to make updates visible across threads.
+    private val lock = Any()
+
     // Terminal de-dup set: ports we will never offer again this session,
     // for any reason (confirmed+offered, dismissed, or forwarded).
+    // Access only under [lock].
     private val handled: MutableSet<Int> = alreadyForwarded.toMutableSet()
 
     // Ports a regex hit produced that are mid-confirm. Kept separate from
     // [handled] so a confirm that comes back "not listening" can release
     // the port to be re-offered if the agent later actually binds it.
+    // Access only under [lock].
     private val pendingConfirm: MutableSet<Int> = mutableSetOf()
 
     // Rolling tail of recently decoded output so a port string split
@@ -113,11 +133,17 @@ internal class PortDetector(
             if (reference.endExclusive == text.length) continue
             found += reference.localhostUrl.remotePort
         }
+        // The decode + regex work above is intentionally OUTSIDE the lock
+        // (issue #877: keep the expensive off-Main scan off the critical
+        // section). Only the short de-dup bookkeeping over the shared sets is
+        // serialized here (issue #938).
         val candidates = mutableListOf<Candidate>()
-        for (port in found) {
-            if (port in handled || port in pendingConfirm) continue
-            pendingConfirm += port
-            candidates += Candidate(port)
+        synchronized(lock) {
+            for (port in found) {
+                if (port in handled || port in pendingConfirm) continue
+                pendingConfirm += port
+                candidates += Candidate(port)
+            }
         }
         return candidates
     }
@@ -129,11 +155,11 @@ internal class PortDetector(
      * the first confirm for the port). Returns false if the port was
      * already resolved by another path in the meantime.
      */
-    fun confirmed(port: Int): Boolean {
+    fun confirmed(port: Int): Boolean = synchronized(lock) {
         pendingConfirm.remove(port)
-        if (port in handled) return false
+        if (port in handled) return@synchronized false
         handled += port
-        return true
+        true
     }
 
     /**
@@ -142,7 +168,9 @@ internal class PortDetector(
      * a *later* real bind of the same port can still be offered.
      */
     fun confirmFailed(port: Int) {
-        pendingConfirm.remove(port)
+        synchronized(lock) {
+            pendingConfirm.remove(port)
+        }
     }
 
     /**
@@ -150,8 +178,10 @@ internal class PortDetector(
      * Permanently suppress re-prompting this port for the session.
      */
     fun dismissed(port: Int) {
-        pendingConfirm.remove(port)
-        handled += port
+        synchronized(lock) {
+            pendingConfirm.remove(port)
+            handled += port
+        }
     }
 
     /**
@@ -159,8 +189,10 @@ internal class PortDetector(
      * Permanently suppress re-prompting this port for the session.
      */
     fun forwarded(port: Int) {
-        pendingConfirm.remove(port)
-        handled += port
+        synchronized(lock) {
+            pendingConfirm.remove(port)
+            handled += port
+        }
     }
 
     companion object {

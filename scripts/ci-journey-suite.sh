@@ -625,6 +625,25 @@ JOURNEY_CLASSES=(
   # the inline-image render + the path-text FALLBACK on a failed fetch stay
   # durably guarded. It lives under com.pocketshell.app.conversation.
   "com.pocketshell.app.conversation.ConversationImageContentRenderTest"
+  # ADDED (#931 — D33/G10 reproduce-first): the port-forward panel LazyColumn
+  # duplicate-key crash guard. The maintainer's captured crash
+  # (IllegalArgumentException: Key "22" already used) was a real Compose
+  # duplicate-key crash because the table keyed each row on `it.remotePort`, and
+  # the forwarding list can hold two rows sharing a remote port. This class
+  # renders a REAL Compose composition: it HARD-asserts the OLD `it.remotePort`
+  # keying crashes on the duplicate-22 list (the red reproduction) and that the
+  # production `tunnelRowKeys` renders the same list (plus duplicate-local-port,
+  # fully-identical-rows, and empty-list cases) with NO crash. It is a PURE
+  # Compose composition test — NO Docker fixture, NO SSH/tmux, NO port — so it
+  # needs no tests.yml service change, and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi())). Per G9/G10 it must run per-push so
+  # the crash class cannot silently regress. It lives under
+  # com.pocketshell.app.portfwd. The RED reproduction (the OLD `it.remotePort`
+  # keying crashing) lives in PortForwardDuplicateKeyCrashTest; the GREEN render
+  # proofs of the production keying live in PortForwardDuplicateKeyRenderTest —
+  # split so the intentional crash cannot poison the GREEN tests' compose rule.
+  "com.pocketshell.app.portfwd.PortForwardDuplicateKeyCrashTest"
+  "com.pocketshell.app.portfwd.PortForwardDuplicateKeyRenderTest"
   # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
   # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
   # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the
@@ -839,6 +858,31 @@ JOURNEY_CLASSES=(
   # SSH / tmux / port — runs on the already-booted AVD), no self-skip. Carries
   # its fully-qualified name directly (not under the proof prefix).
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"
+
+  # ===========================================================================
+  # Issue #933 (#928 D9 — detection net). Kept in its OWN block to minimize
+  # merge friction with the sibling #931 edits to this file.
+  #
+  # The recurring meta-problem: the maintainer hits freezes/crashes/ANRs that CI
+  # did NOT catch, because the per-PR journeys carry no freeze/ANR/crash
+  # DETECTOR. This is the safety net. One on-device end-to-end class exercises
+  # all three D9 detectors with a RED (symptom present) and a GREEN (symptom
+  # absent) case each:
+  #   * P1 StrictMode — a real MAIN-THREAD DISK READ (the #926/#928-D1 freeze
+  #     class that `detectNetwork()` misses) trips the process-wide policy
+  #     App.onCreate installs and records a `strictmode.violation`; the same read
+  #     off the main thread records none.
+  #   * P2 responsiveness probe — a synthetically-BLOCKED main thread
+  #     (Thread.sleep(2000) on Main, the freeze signature) is detected as a
+  #     heartbeat gap beyond the frame budget; a responsive main thread passes.
+  #   * P3 zero-crash gate — a crash persisted to the REAL CrashReportStore FAILS
+  #     the gate; a clean store passes.
+  # It uses NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO port — a pure
+  # on-device detector exercise, deterministic on the CI swiftshader AVD — so it
+  # needs no tests.yml service change, and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi()) on the load-bearing assertions —
+  # process.md F3 / D33). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"
 )
 
 echo "=========================================================="

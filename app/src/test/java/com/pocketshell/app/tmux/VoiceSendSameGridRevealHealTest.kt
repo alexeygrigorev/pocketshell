@@ -314,7 +314,14 @@ class VoiceSendSameGridRevealHealTest {
         runtimeCache = TmuxSessionRuntimeCache(),
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
-    ).also { createdVms.add(it) }
+    ).also {
+        // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
+        // attach/reattach `capture-pane`/`list-panes` IO) to the shared
+        // virtual-clock scheduler so the round-trips run inline on the test
+        // clock. Production defaults to `Dispatchers.IO` (off the UI thread).
+        it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
+        createdVms.add(it)
+    }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {
         val live = AlwaysConnectedSession(id = "live")

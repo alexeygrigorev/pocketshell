@@ -86,7 +86,15 @@ class SendWaitWarmLeaseTrustTest {
         runtimeCache = TmuxSessionRuntimeCache(),
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
-    )
+    ).also {
+        // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
+        // attach/switch/reattach `capture-pane`/`list-panes` IO) to the shared
+        // virtual-clock scheduler so the round-trips run inline on the test clock
+        // — a real `Dispatchers.IO` default would leak a thread the `runTest`
+        // virtual clock cannot advance (a flaky pass/fail race). Production
+        // defaults to `Dispatchers.IO` (off the UI thread).
+        it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
+    }
 
     @Test
     fun sendWaitPollsWarmLeaseAndDoesNotRedialEvenWhenSessionTransientlyDead() = runVmTest {

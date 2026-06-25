@@ -14,6 +14,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
+import com.pocketshell.app.diagnostics.StrictModeInstaller
 import com.pocketshell.app.portfwd.ForwardingResumeScheduler
 import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.settings.AppSettings
@@ -259,6 +260,17 @@ class App : Application() {
         DiagnosticEvents.record("app", "created")
         CrashReporter.install(this)
         StartupTiming.mark("app-crash-reporter-installed")
+        // Issue #933 (#928 D9 / P1): install the process-wide Main-thread
+        // StrictMode tripwire so a main-thread disk read / write / mutex wait
+        // (the #926/#928-D1 freeze class — `runBlocking { … }` Room reads that
+        // `detectNetwork()` misses) is routed into DiagnosticEvents as a
+        // `strictmode.violation` for the load-bearing journeys to HARD-assert.
+        // DEBUG/TEST-scoped (no-op on the signed release APK) and NEVER
+        // penaltyDeath — the journey is the gate, not a process kill. Installed
+        // right after the crash reporter and before the rest of onCreate so the
+        // startup hot window is itself observed.
+        StrictModeInstaller.installIfDebuggable(this)
+        StartupTiming.mark("strict-mode-installed")
         // No-background-work hook-up (issue #161 / D21). Attach the
         // ProcessLifecycleOwner observer before starting the loop so
         // the loop's `processStarted.first { it }` gate sees the

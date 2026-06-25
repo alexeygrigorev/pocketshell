@@ -1,5 +1,8 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import java.io.InputStream
@@ -54,9 +57,22 @@ internal class RealSshShell(
         // Both `Session.Shell.close()` and `Session.close()` send
         // `SSH_MSG_CHANNEL_CLOSE` over the live transport — real socket writes,
         // so they go through the dispatcher (issue #847) which also serialises
-        // them against any in-flight `-CC` write. The dispatcher runs on its
-        // own IO thread, so this also keeps the channel-close socket write off
-        // the Main thread (issue #166 StrictMode `NetworkOnMainThreadException`).
+        // them against any in-flight `-CC` write.
+        //
+        // Issue #937 / S1-F1: this `close()` is called SYNCHRONOUSLY from the
+        // Main thread during `TmuxSessionViewModel.onCleared` (activity
+        // destroy). The previous body did a bare `dispatcher.runBlockingDispatch`
+        // which blocks the CALLING thread (Main) until the dispatch-thread op
+        // completes. On a half-open link that channel-close socket write wedges,
+        // so Main parks → ANR and the activity never finishes destroying. We now
+        // hop the whole teardown OFF Main onto `Dispatchers.IO` under a hard
+        // [CLOSE_TIMEOUT_MS] ceiling: the Main thread waits at most that long,
+        // and `Dispatchers.IO` (not Main) is the thread that parks if the wire
+        // is truly wedged. The dispatcher's own per-op ceiling (#937 S4-1) then
+        // interrupts the wedged op and reclaims its thread. The runBlocking here
+        // is a bounded bridge for the non-suspending [SshShell.close] contract,
+        // mirroring the proven `RecurringJobsViewModel`/`GitHistoryViewModel`
+        // off-Main bounded teardown pattern.
         //
         // sshj's `close` calls are idempotent, so the runCatching guards are
         // belt-and-braces against the channel already being torn down by the
@@ -64,9 +80,22 @@ internal class RealSshShell(
         // teardown drained it), the operation is rejected — there is nothing
         // left to close, so swallow that too.
         runCatching {
-            dispatcher.runBlockingDispatch {
-                runCatching { shell.close() }
-                runCatching { sessionChannel.close() }
+            runBlocking(Dispatchers.IO) {
+                // Call the SUSPENDING `dispatcher.run` (not the blocking
+                // `runBlockingDispatch`) so `withTimeoutOrNull` can actually
+                // cancel the wait when the ceiling trips — a cancellation here
+                // unparks the IO coroutine; the dispatcher's own per-op ceiling
+                // (#937 S4-1) interrupts the wedged socket write and reclaims
+                // the dispatch thread.
+                //
+                // Each channel close is its OWN `dispatcher.run` op so each is
+                // independently bounded + interrupted: a single interrupt only
+                // unblocks ONE blocking call, so two closes in one op would let
+                // the second wedge silently after the first was interrupted.
+                withTimeoutOrNull(CLOSE_TIMEOUT_MS) {
+                    runCatching { dispatcher.run { shell.close() } }
+                    runCatching { dispatcher.run { sessionChannel.close() } }
+                }
             }
         }
     }
@@ -82,6 +111,17 @@ internal class RealSshShell(
                 runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
             }
         }
+    }
+
+    private companion object {
+        /**
+         * Hard ceiling on the Main-thread caller's wait inside [close] (issue
+         * #937 / S1-F1). `onCleared`/activity-destroy hops the channel-close
+         * teardown to `Dispatchers.IO` and waits at most this long, so a wedged
+         * half-open close cannot ANR. Comfortably exceeds a healthy channel
+         * close (low-millisecond) while staying well under the ~5s ANR window.
+         */
+        const val CLOSE_TIMEOUT_MS: Long = 2_000L
     }
 }
 

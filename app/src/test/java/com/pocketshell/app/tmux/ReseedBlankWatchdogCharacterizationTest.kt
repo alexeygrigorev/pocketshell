@@ -133,7 +133,15 @@ class ReseedBlankWatchdogCharacterizationTest {
         runtimeCache = TmuxSessionRuntimeCache(),
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
-    ).also { createdVms.add(it) }
+    ).also {
+        // Issue #926: pin the seed-IO dispatcher (the off-Main hop for the
+        // attach/reattach `capture-pane`/`list-panes` IO) to the shared
+        // virtual-clock scheduler so the round-trips run inline on the test
+        // clock and `advanceUntilIdle` drains them deterministically. Production
+        // defaults to `Dispatchers.IO` (a real thread off the UI thread).
+        it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
+        createdVms.add(it)
+    }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {
         val live = AlwaysConnectedSession(id = "live")

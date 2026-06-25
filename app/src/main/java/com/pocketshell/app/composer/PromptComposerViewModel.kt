@@ -327,6 +327,39 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #939 (audit #935 S5-2): the transcribe-FSM watchdog. Unlike the send
+     * path (which has the #891 [sendWatchdogJob]), the voice-transcribe launch had
+     * NO time bound at all — so a wedged Whisper round-trip (or any throw before
+     * the FSM was driven back to Idle) left the composer stuck on "Transcribing…"
+     * with the mic locked, recoverable only by killing the app. This watchdog is
+     * the sibling escape hatch: the instant the FSM enters [RecordingState.Transcribing]
+     * we arm a single watchdog; if it is still `Transcribing` after
+     * [TRANSCRIBE_TIMEOUT_MS] we route back to Idle with a retryable error banner.
+     */
+    private var transcribeWatchdogJob: Job? = null
+
+    /**
+     * Issue #939 test seam, mirroring [sendWatchdogTimeoutMs]. Defaults to the
+     * production [TRANSCRIBE_TIMEOUT_MS]. Unit tests that DON'T care about the
+     * watchdog set it to `null` (so `runTest`'s terminal `advanceUntilIdle` does
+     * not drain a pending long `delay` and spuriously flip Transcribing→Idle);
+     * the dedicated watchdog test sets a small virtual-time value so the timeout
+     * fires deterministically. Production always uses the non-null default — the
+     * watchdog is never disabled on-device.
+     */
+    private var transcribeWatchdogTimeoutMs: Long? = TRANSCRIBE_TIMEOUT_MS
+
+    /**
+     * Issue #939 test seam. `timeoutMs = null` disables the transcribe watchdog
+     * for unit tests not about it; a small value drives it deterministically
+     * under virtual time.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setTranscribeWatchdogTimeoutForTest(timeoutMs: Long?) {
+        transcribeWatchdogTimeoutMs = timeoutMs
+    }
+
+    /**
      * Issue #900: upload hook for durable outbound attachment sidecars. The host
      * owns the live SSH/session upload primitive; the ViewModel owns when queued
      * local bytes must be uploaded before a row is claimed for delivery.
@@ -899,12 +932,27 @@ public class PromptComposerViewModel @Inject constructor(
         armSendWatchdog()
         if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
             viewModelScope.launch {
-                enqueueAndDispatchSidecarBackedSend(
-                    cleanDraft = draft,
-                    attachments = attachments,
-                    withEnter = withEnter,
-                    sendTarget = sendTarget,
-                )
+                try {
+                    enqueueAndDispatchSidecarBackedSend(
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        withEnter = withEnter,
+                        sendTarget = sendTarget,
+                    )
+                } catch (cancelled: CancellationException) {
+                    // Issue #929: a real cancellation (e.g. VM cleared) — clear
+                    // the in-flight gates so a recreated composer is not wedged,
+                    // then rethrow to honour structured concurrency.
+                    clearStrandedSendInFlight()
+                    throw cancelled
+                } catch (t: Throwable) {
+                    // Issue #929: any unexpected failure in the sidecar dispatch
+                    // is still a non-delivering exit — clear the strand so the
+                    // pipeline self-heals instead of waiting on the watchdog.
+                    clearStrandedSendInFlight(
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
+                }
             }
             return
         }
@@ -946,9 +994,19 @@ public class PromptComposerViewModel @Inject constructor(
         withEnter: Boolean,
         sendTarget: SendTargetSnapshot,
     ) {
+        // Issue #929: this whole dispatch runs while `sendInFlight = true` (set by
+        // [emitSendRequest] before launching us). EVERY exit that does not deliver
+        // must clear the in-flight gates, or the pipeline wedges for the watchdog
+        // window. The early config-missing returns below are non-delivering exits.
         val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() }
-        val sidecarStore = outboundAttachmentSidecarStore ?: return
-        if (sessionKey == null) return
+        val sidecarStore = outboundAttachmentSidecarStore ?: run {
+            clearStrandedSendInFlight()
+            return
+        }
+        if (sessionKey == null) {
+            clearStrandedSendInFlight()
+            return
+        }
         val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
             attachment.previewUri?.let { index to it }
         }
@@ -959,13 +1017,9 @@ public class PromptComposerViewModel @Inject constructor(
             attachmentIndices = localAttachments.map { it.first },
         )
         if (sidecars.size != localAttachments.size) {
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
-                )
-            }
+            clearStrandedSendInFlight(
+                error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
+            )
             return
         }
         val item = OutboundItem(
@@ -1152,6 +1206,99 @@ public class PromptComposerViewModel @Inject constructor(
     private fun disarmSendWatchdog() {
         sendWatchdogJob?.cancel()
         sendWatchdogJob = null
+    }
+
+    /**
+     * Issue #939 (audit #935 S5-2): arm the transcribe watchdog the instant the
+     * FSM enters [RecordingState.Transcribing]. Sibling of [armSendWatchdog]; the
+     * voice path had no time bound before this, so a wedged Whisper round-trip or
+     * a slow IO call inside the transcribe launch left the mic locked on
+     * "Transcribing…" until app restart. If the FSM is still `Transcribing` after
+     * [transcribeWatchdogTimeoutMs] we route it back to Idle with a retryable
+     * error so the user is never stuck.
+     */
+    private fun armTranscribeWatchdog() {
+        transcribeWatchdogJob?.cancel()
+        val timeoutMs = transcribeWatchdogTimeoutMs ?: return
+        transcribeWatchdogJob = viewModelScope.launch {
+            delay(timeoutMs)
+            onTranscribeWatchdogExpired()
+        }
+    }
+
+    /**
+     * Issue #939: cancel the transcribe watchdog because the FSM resolved (Idle
+     * via success, handled failure, offline-queue, empty/no-speech, or an
+     * unexpected throw caught by the launch's `catch`). Idempotent.
+     */
+    private fun disarmTranscribeWatchdog() {
+        transcribeWatchdogJob?.cancel()
+        transcribeWatchdogJob = null
+    }
+
+    /**
+     * Issue #939: the transcribe watchdog fired — the FSM has been stuck on
+     * [RecordingState.Transcribing] past [transcribeWatchdogTimeoutMs] without
+     * resolving (a wedged Whisper call or an unguarded IO hang). Route back to
+     * Idle, unlock the mic, and surface a retryable error so the user can record
+     * again. A no-op if the FSM already left Transcribing (benign race where the
+     * resolution won but the cancel had not been observed). The audio (if any) is
+     * already on disk in the pending-transcription queue (#180), so the user can
+     * still retry the persisted recording.
+     */
+    private fun onTranscribeWatchdogExpired() {
+        transcribeWatchdogJob = null
+        if (_uiState.value.recording != RecordingState.Transcribing) return
+        DiagnosticEvents.record(
+            "action",
+            "composer_transcribe_watchdog_timeout",
+            "provider" to (activeProvider?.name ?: "unknown"),
+        )
+        transcribeJob?.cancel()
+        transcribeJob = null
+        clearPendingTranscriptionSend()
+        activeProvider = null
+        savedStateHandle[KEY_WAS_RECORDING] = false
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                recordingLocked = false,
+                error = TRANSCRIBE_TIMEOUT_MESSAGE,
+            )
+        }
+    }
+
+    /**
+     * Issue #929: clear the in-flight send state PROMPTLY when a send resolved
+     * without delivering — the catch-all that ends the "attachment send wedges
+     * all subsequent sends until restart" bug.
+     *
+     * #928 D5 found the sidecar-backed dispatch path has several internal
+     * `return false` early-outs (queue row vanished, `markUploading` lost the
+     * race, `claim` lost the race, `markAttachmentsUploaded` no longer Queued)
+     * that left `sendInFlight = true` with ONLY the slow ~110s #891 watchdog to
+     * clear it. While `sendInFlight` is stranded true, `dispatchSendNow` /
+     * `emitSendRequest` reject EVERY subsequent send — including a plain
+     * text-only one — so the user "can't send anything" until they restart.
+     *
+     * This clears all three in-flight gates at once: `sendInFlight`, the
+     * `outboundSidecarDispatchInFlight` dispatch latch (the silent-drop window
+     * at [emitSendRequest]), and the overall-send watchdog. Every non-delivering
+     * exit of the dispatch path routes through here, so the pipeline self-heals
+     * immediately instead of after the watchdog window. Idempotent; safe to call
+     * even when no send was in flight.
+     */
+    private fun clearStrandedSendInFlight(error: String? = null) {
+        disarmSendWatchdog()
+        outboundSidecarDispatchInFlight = false
+        _uiState.update { current ->
+            if (error != null) {
+                current.copy(sendInFlight = false, error = error)
+            } else {
+                current.copy(sendInFlight = false)
+            }
+        }
     }
 
     /**
@@ -1398,6 +1545,17 @@ public class PromptComposerViewModel @Inject constructor(
                     } else {
                         claimAndEmitOutboundItem(id)
                     }
+                } catch (cancelled: CancellationException) {
+                    // Issue #929: clear the in-flight gates on cancellation so a
+                    // recreated composer is not wedged, then rethrow.
+                    clearStrandedSendInFlight()
+                    throw cancelled
+                } catch (t: Throwable) {
+                    // Issue #929: an unexpected throw is a non-delivering exit —
+                    // clear the strand so the next send is not wedged.
+                    clearStrandedSendInFlight(
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
                 } finally {
                     outboundSidecarDispatchInFlight = false
                 }
@@ -1416,22 +1574,29 @@ public class PromptComposerViewModel @Inject constructor(
         val sidecarStore = outboundAttachmentSidecarStore ?: return true
         val sidecars = sidecarStore.refsFor(id)
         if (sidecars.isEmpty()) return true
-        val item = outboundQueueStore.item(id) ?: return false
+        // Issue #929: the queue row vanished out from under this dispatch. That
+        // is a non-delivering exit, so clear the in-flight gates instead of
+        // stranding `sendInFlight = true` for the watchdog window.
+        val item = outboundQueueStore.item(id) ?: run {
+            clearStrandedSendInFlight()
+            return false
+        }
         val uploader = outboundAttachmentUploader
         if (uploader == null) {
             outboundQueueStore.markFailed(id, lastError = "Attachment upload unavailable")
             refreshOutboundQueueItemsFor(item.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = "Attachment upload failed: reconnect, then send again or discard the draft.",
-                )
-            }
+            clearStrandedSendInFlight(
+                error = "Attachment upload failed: reconnect, then send again or discard the draft.",
+            )
             return false
         }
+        // Issue #929: `markUploading` lost the claim race (row no longer exactly
+        // claimable). Non-delivering exit — clear the strand.
         val uploading = outboundQueueStore.markUploading(id, lastAttemptAtMs = clock())
-            ?: return false
+            ?: run {
+                clearStrandedSendInFlight()
+                return false
+            }
         refreshOutboundQueueItemsFor(uploading.sessionKey)
         val result = try {
             withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { uploader(sidecars) }
@@ -1445,21 +1610,14 @@ public class PromptComposerViewModel @Inject constructor(
         val uploadedPaths = result.getOrElse { error ->
             outboundQueueStore.markFailed(id, lastError = attachmentErrorMessage(error))
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = attachmentErrorMessage(error),
-                )
-            }
+            clearStrandedSendInFlight(error = attachmentErrorMessage(error))
             return false
         }.filter { it.isNotBlank() }
         if (uploadedPaths.size != sidecars.size) {
             val message = "Attachment upload failed: uploaded ${uploadedPaths.size} of ${sidecars.size} files."
             outboundQueueStore.markFailed(id, lastError = message)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update { it.copy(sendInFlight = false, error = message) }
+            clearStrandedSendInFlight(error = message)
             return false
         }
         val uploadedSidecarRefs = sidecars.mapIndexed { index, ref ->
@@ -1473,6 +1631,9 @@ public class PromptComposerViewModel @Inject constructor(
         val uploaded = outboundQueueStore.markAttachmentsUploaded(id, updatedRefs)
         if (uploaded?.state != OutboundState.Queued) {
             refreshOutboundQueueItemsFor(item.sessionKey)
+            // Issue #929: post-upload state is no longer dispatchable — clear the
+            // in-flight gates rather than stranding the pipeline.
+            clearStrandedSendInFlight()
             return false
         }
         refreshOutboundQueueItemsFor(item.sessionKey)
@@ -1480,12 +1641,19 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun claimAndEmitOutboundItem(id: String): Boolean {
-        val active = outboundQueueStore.claim(id) ?: return false
+        // Issue #929: the claim lost the race (row already claimed/delivered/
+        // gone). Non-delivering exit — clear the in-flight gates so the next
+        // send is not wedged behind a stranded `sendInFlight`.
+        val active = outboundQueueStore.claim(id) ?: run {
+            clearStrandedSendInFlight()
+            return false
+        }
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {
             outboundQueueStore.markFailed(id, lastError = "Nothing to send")
             refreshOutboundQueueItemsFor(active.sessionKey)
+            clearStrandedSendInFlight()
             return false
         }
         refreshOutboundQueueItemsFor(active.sessionKey)
@@ -1953,7 +2121,12 @@ public class PromptComposerViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
                 }
-                transcribeJob = viewModelScope.launch {
+                // Issue #939 (#935 S5-2): even this recoverable-no-speech path
+                // flips the FSM to Transcribing then does an UNGUARDED Room write
+                // (`enqueueAudio`). A throw there left the mic locked on
+                // "Transcribing…" with no escape — so route it through the
+                // guarded [launchTranscribe] like the main path.
+                launchTranscribe {
                     val pendingId = pendingTranscriptionStore.enqueueAudio(
                         audio = audio,
                         destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
@@ -2001,7 +2174,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
         }
 
-        transcribeJob = viewModelScope.launch {
+        launchTranscribe {
             val client = whisperClientFactory.create()
             if (client == null) {
                 savedStateHandle[KEY_WAS_RECORDING] = false
@@ -2026,7 +2199,7 @@ public class PromptComposerViewModel @Inject constructor(
                         error = "No OpenAI API key saved. Open settings to add one.",
                     )
                 }
-                return@launch
+                return@launchTranscribe
             }
 
             // Issue #180: persist the audio BEFORE the Whisper call so a
@@ -2089,7 +2262,7 @@ public class PromptComposerViewModel @Inject constructor(
                         error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
                     )
                 }
-                return@launch
+                return@launchTranscribe
             }
 
             // WhisperClient implementations are responsible for jumping
@@ -2259,6 +2432,73 @@ public class PromptComposerViewModel @Inject constructor(
                     )
                 },
             )
+        }
+    }
+
+    /**
+     * Issue #939 (audit #935 S5-2): the guarded launcher for the OpenAI-Whisper
+     * transcribe FSM. Before this, the transcribe body ran as a bare
+     * `viewModelScope.launch {}` with NO surrounding `try/finally` and NO time
+     * bound, so any throw OUTSIDE the inner `result.fold` — `enqueueAudio` (a
+     * Room/filesystem write), `connectivity.refresh()`, or a WhisperClient impl
+     * that threw instead of returning `Result.failure` — stranded the FSM on
+     * [RecordingState.Transcribing] with the mic locked, recoverable only by
+     * killing the app (the #891 send-wedge shape, but for voice).
+     *
+     * This launcher closes that whole class:
+     *  - **Arm a watchdog** ([armTranscribeWatchdog]) so even a Whisper round-trip
+     *    that wedges (never returns, never throws) is bounded — the send path has
+     *    the #891 watchdog; transcribe had none.
+     *  - **`catch`** any non-Cancellation throw → drive the FSM back to Idle, drop
+     *    the queued send, unlock the mic, and surface a RETRYABLE error banner so
+     *    the user can record again. CancellationException (job cancel / onCleared)
+     *    is rethrown to preserve structured cancellation.
+     *  - **`finally`** disarms the watchdog and, as a belt, guarantees the FSM is
+     *    never left on Transcribing on ANY exit (idempotent — the normal terminal
+     *    arms already drove it to Idle).
+     */
+    private fun launchTranscribe(block: suspend () -> Unit) {
+        armTranscribeWatchdog()
+        transcribeJob = viewModelScope.launch {
+            try {
+                block()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (t: Throwable) {
+                DiagnosticEvents.record(
+                    "action",
+                    "composer_transcription_result",
+                    "provider" to (activeProvider?.name ?: VoiceTranscriptionProvider.OpenAiWhisper.name),
+                    "status" to "failure",
+                    "cause" to t.javaClass.simpleName,
+                    "unguarded" to true,
+                )
+                clearPendingTranscriptionSend()
+                activeProvider = null
+                savedStateHandle[KEY_WAS_RECORDING] = false
+                _uiState.update {
+                    it.copy(
+                        recording = RecordingState.Idle,
+                        amplitude = 0f,
+                        recordingLocked = false,
+                        error = userFacingWhisperError(t),
+                    )
+                }
+            } finally {
+                disarmTranscribeWatchdog()
+                // Belt: no normal terminal arm should leave the FSM on
+                // Transcribing, but if a future edit forgets one, this guarantees
+                // the mic is never stuck. Idempotent when already Idle.
+                if (_uiState.value.recording == RecordingState.Transcribing) {
+                    _uiState.update {
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            amplitude = 0f,
+                            recordingLocked = false,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -2808,6 +3048,9 @@ public class PromptComposerViewModel @Inject constructor(
         }
         transcribeJob?.cancel()
         transcribeJob = null
+        // Issue #939: the user cancelled — drop the transcribe watchdog so it
+        // does not fire later and re-surface a spurious timeout banner.
+        disarmTranscribeWatchdog()
         clearPendingTranscriptionSend()
         activeProvider = null
         savedStateHandle[KEY_WAS_RECORDING] = false
@@ -2871,6 +3114,9 @@ public class PromptComposerViewModel @Inject constructor(
         // ViewModel (parity with the other jobs above; viewModelScope cancel
         // already covers it, but be explicit).
         sendWatchdogJob?.cancel()
+        // Issue #939: drop the transcribe watchdog too (parity with the send
+        // watchdog above) so it never outlives the ViewModel.
+        transcribeWatchdogJob?.cancel()
         // Issue #882: the #880 recording-elapsed ticker is an infinite
         // `while { delay() }` loop that only breaks when recording leaves
         // [RecordingState.Recording]. Cancel it explicitly on clear so it
@@ -3459,6 +3705,26 @@ public class PromptComposerViewModel @Inject constructor(
          */
         internal const val SEND_TIMEOUT_MESSAGE: String =
             "Send failed — it took too long. Tap Send to retry, or discard the draft."
+
+        /**
+         * Issue #939 (audit #935 S5-2): the end-to-end ceiling on the voice
+         * transcribe FSM. The send path has the #891 [OVERALL_SEND_TIMEOUT_MS]
+         * watchdog; transcribe had NO bound at all, so a wedged Whisper round-trip
+         * (or an unguarded IO hang) locked the mic on "Transcribing…" until app
+         * restart. This sits ABOVE a realistic Whisper round-trip (the network
+         * call self-bounds in the OkHttp client) so the normal `result.fold`
+         * failure surfaces its own banner first; the watchdog only fires when the
+         * FSM failed to resolve at all.
+         */
+        public const val TRANSCRIBE_TIMEOUT_MS: Long = 90_000L
+
+        /**
+         * Issue #939: the banner shown when the transcribe watchdog fires. Calm,
+         * retryable copy — the audio is still on disk in the pending-transcription
+         * queue (#180) so the user can retry the persisted recording.
+         */
+        internal const val TRANSCRIBE_TIMEOUT_MESSAGE: String =
+            "Transcription took too long. Tap the mic to try again."
 
         /**
          * Issue #169 Part 2: [SavedStateHandle] key for the current

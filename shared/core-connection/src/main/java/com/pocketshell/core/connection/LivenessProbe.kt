@@ -15,11 +15,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  * The connection core can DECIDE a drop's lifecycle (`ConnectionController`
  * walks `Live --TransportDropped--> Reattaching --> Reconnecting(n) -->
  * Unreachable`), but on a QUIET, idle control channel nothing was telling it a
- * silent half-open Wi-Fi drop had happened: sshj's `isConnected` lies for up to
- * ~60s until the keep-alive miss-counter trips, and `TmuxClient.disconnected`
- * only flips on a reader EOF or a watchdog-covered DISPATCHED command. With the
- * user reading or recording a voice note (the exact #822 scenario), no command
- * is in flight, so the dead channel is invisible — the "detection void".
+ * silent half-open Wi-Fi drop had happened: there is NO SSH transport keepalive
+ * backstop (it was removed in #847 — see [com.pocketshell.core.ssh.SshConnection]
+ * — because a background keepalive writer is a SECOND transport writer that
+ * corrupts the KEX sequence), so `sshj.isConnected` lies indefinitely on a
+ * half-open socket, and `TmuxClient.disconnected` only flips on a reader EOF or a
+ * watchdog-covered DISPATCHED command. With the user reading or recording a voice
+ * note (the exact #822 scenario), no command is in flight, so the dead channel is
+ * invisible — the "detection void". **This probe is therefore the SOLE dead-peer
+ * detector on a foregrounded session — its budget IS the entire detection
+ * guarantee, not a fast-path in front of a transport keepalive (there is none).**
  *
  * [LivenessProbe] closes that void. While the session is FOREGROUNDED + `Live`
  * (and only then — D21: no background work, no probe inside grace, no probe
@@ -40,20 +45,23 @@ import kotlinx.coroutines.withTimeoutOrNull
  *     foregrounded AND `Live`. A backgrounded app, an in-grace detach, an
  *     in-flight attach/reconnect, or a non-current client all return `false`, so
  *     the probe never competes with a reconnect or trips while backgrounded.
- *  2. **Generous per-probe timeout** ([perProbeTimeoutMs], default 8s): a single
- *     probe round-trip is given far more than a healthy RTT. On a BUSY channel
- *     (a heavy `%output` burst) the probe waits behind the control-mode FIFO but
- *     still replies once the burst drains; the timeout only bites a channel that
- *     is genuinely not answering.
- *  3. **N consecutive failures** ([failureThreshold], default 2): a SINGLE slow
+ *  2. **Generous per-probe timeout** ([perProbeTimeoutMs], default 5s): a single
+ *     probe round-trip is given far more than a healthy RTT (a `refresh-client`
+ *     round-trip is sub-second even on a congested link). On a BUSY channel (a
+ *     heavy `%output` burst) the probe both waits behind the control-mode FIFO
+ *     AND — crucially — the busy-vs-dead guard in
+ *     [com.pocketshell.core.tmux.TmuxClient.probeLiveness] reports ALIVE off
+ *     recent reader activity even if the reply is parked, so the timeout only
+ *     bites a channel that is genuinely silent.
+ *  3. **N consecutive failures** ([failureThreshold], default 4): a SINGLE slow
  *     probe (a momentary stall, a long burst that outlasts one timeout) does NOT
  *     declare the channel dead — the counter resets on the next success. Only
- *     [failureThreshold] probes in a row, each timing out across
- *     ~[failureThreshold] × [perProbeTimeoutMs] of total silence, trips the drop.
- *     With the defaults that is ~16s of an unresponsive channel before a drop is
- *     declared — still FAR below the ~60s keep-alive worst case (so the product
- *     detection budget is met) yet generous enough that no momentary stall on a
- *     healthy session false-positives.
+ *     [failureThreshold] probes in a row trip the drop, so up to THREE consecutive
+ *     missed probes on a flaky-but-alive link are absorbed (the #927 fix — a
+ *     conservative SSH client's `ServerAliveCountMax` of 3–6). See the companion
+ *     constants for the exact worst-case detection budget and why it must stay
+ *     well under the three coupled 60s windows (lease idle TTL, passive grace,
+ *     controller grace).
  *
  * ## Determinism (the test seam)
  * The loop's cadence is driven entirely by [delay] on the [CoroutineScope]'s
@@ -192,27 +200,72 @@ class LivenessProbe(
 
     companion object {
         /**
-         * How often the probe fires while foregrounded + `Live`. ~10s is below
-         * the 60s sshj keep-alive (`SshConnection` 15s × 4) so detection is
-         * proactive, yet sparse enough that a single `refresh-client` round-trip
-         * per 10s is negligible control-channel traffic.
+         * ### #927 detection budget — the load-bearing arithmetic
+         *
+         * The loop is `delay(intervalMs)` then ONE probe bounded by
+         * [perProbeTimeoutMs], per iteration (see [start]). So the WORST-CASE time
+         * to declare a genuine silent half-open drop is:
+         *
+         *     worstCase = failureThreshold × (intervalMs + perProbeTimeoutMs)
+         *               = 4 × (7s + 5s) = 48s
+         *
+         * This probe is the SOLE dead-peer detector (there is NO 60s SSH keepalive
+         * backstop — #847 removed it; the old "below the 60s keep-alive" reasoning
+         * was vacuous). The budget therefore must land with a real margin BELOW the
+         * three coupled 60s windows it would otherwise race:
+         *   - lease idle TTL (`SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS = 60_000`),
+         *   - passive disconnect grace (`PASSIVE_DISCONNECT_GRACE_MS = 60_000`),
+         *   - controller grace (`ConnectionController.DEFAULT_GRACE_MS = 60_000`).
+         *
+         * 48s is **under the D3-mandated hard ceiling of < 55s** with a ~12s margin
+         * below the 60s floor. The `< 50_000` ceiling is enforced by
+         * `LivenessProbeBudgetUnder55sTest` so a future bump that brushes the floor
+         * fails at PR time. The tolerance for a flaky-but-alive link comes from the
+         * threshold ([DEFAULT_FAILURE_THRESHOLD]) AND the busy-vs-dead reader-
+         * activity guard ([com.pocketshell.core.tmux.TmuxClient.probeLiveness]) —
+         * NOT from inflating the raw budget toward the floor.
          */
-        const val DEFAULT_INTERVAL_MS: Long = 10_000L
 
         /**
-         * Per-probe response budget. Generous (8s) so a busy / momentarily-slow
+         * How often the probe fires while foregrounded + `Live`. 7s keeps
+         * detection proactive and, paired with [DEFAULT_PER_PROBE_TIMEOUT_MS] and
+         * [DEFAULT_FAILURE_THRESHOLD], lands the worst-case budget (see above) at
+         * 48s — under the < 55s ceiling. A single `refresh-client` round-trip per
+         * 7s is negligible control-channel traffic.
+         */
+        const val DEFAULT_INTERVAL_MS: Long = 7_000L
+
+        /**
+         * Per-probe response budget. Generous (5s) so a busy / momentarily-slow
          * but HEALTHY channel answers within it rather than false-positiving; a
-         * genuinely dead half-open channel never answers and the probe times out.
+         * healthy `refresh-client` round-trip is sub-second even on a congested
+         * home/train link, so 5s is comfortably above a real RTT while keeping each
+         * missed-probe iteration short enough to land the 48s budget below the
+         * 60s floor (#927). The busy-vs-dead guard
+         * ([com.pocketshell.core.tmux.TmuxClient.probeLiveness]) absorbs a reply
+         * parked behind a legitimate `%output` burst, so this timeout only ever
+         * bites a genuinely silent channel.
          */
-        const val DEFAULT_PER_PROBE_TIMEOUT_MS: Long = 8_000L
+        const val DEFAULT_PER_PROBE_TIMEOUT_MS: Long = 5_000L
 
         /**
-         * Consecutive probe failures before a drop is declared. 2 means a single
-         * slow probe never trips it (the counter resets on the next success);
-         * only ~2 × the timeout of sustained silence does. Net worst-case
-         * detection ≈ interval + threshold × timeout, still well under the ~60s
-         * keep-alive lag.
+         * Consecutive probe failures before a drop is declared.
+         *
+         * #927: raised 2 → 4 so a flaky-but-alive link survives. The previous
+         * value of 2 declared a drop — and force-redialed the warm lease (the
+         * visible "restart") — after only TWO back-to-back missed `refresh-client`
+         * probes (~16–26s of imperfect connectivity). With 4, up to THREE
+         * consecutive slow/missed probes are absorbed — the counter resets the
+         * moment one succeeds — so only sustained silence trips a drop (a
+         * conservative SSH client's `ServerAliveCountMax` of 3–6).
+         *
+         * Worst-case dead-peer detection = `threshold × (interval + per-probe
+         * timeout)` = `4 × (7s + 5s)` = **48s** — under the D3 < 55s ceiling with a
+         * ~12s margin below the three coupled 60s windows (#822 not regressed),
+         * while no longer false-positiving on a flaky-but-alive link. The tolerance
+         * is raised WITHOUT inflating the raw budget toward the floor because the
+         * busy-vs-dead reader-activity guard handles `%output`-burst parking.
          */
-        const val DEFAULT_FAILURE_THRESHOLD: Int = 2
+        const val DEFAULT_FAILURE_THRESHOLD: Int = 4
     }
 }

@@ -11,6 +11,10 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref) }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     name: Unit tests
@@ -613,7 +617,7 @@ jobs:
 
       # Issue #835/#470: inspect the first attempt's suite-owned summary before
       # spending the second cold boot. If the first attempt already reached the
-      # 38-min suite budget and wrote a pure JOURNEY_STEP_TIMEOUT summary (no
+      # 20-min suite budget and wrote a pure JOURNEY_STEP_TIMEOUT summary (no
       # JOURNEY_FAILED / Failed BOTH attempts section), retrying inside this
       # same 45-min job cannot recover it; it only gets cancelled by the job cap
       # and creates another red email. Genuine journey failures and no-summary
@@ -738,7 +742,7 @@ jobs:
           # verdicts) but the suite-level time budget was exhausted — typically
           # by the recurring #470 in-emulator tmux `list-sessions` enumeration
           # stall consuming the session/reconnect journeys' retry windows. The
-          # suite now bails CLEANLY at its own deadline (below the 45-min step
+          # suite now bails CLEANLY at its own deadline (below the 45-min job
           # cap) and writes summary.md with the `JOURNEY_STEP_TIMEOUT` marker, so
           # this is a distinct, correctly-attributed advisory — NOT a never-booted
           # emulator (#771) and NOT a genuine test regression.

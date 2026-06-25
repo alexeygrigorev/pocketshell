@@ -855,19 +855,22 @@ echo "=========================================================="
 #
 # ---------------------------------------------------------------------------
 # Issue #835: SUITE-LEVEL time budget so the recurring #470 enumeration stall
-# can never burn the whole 45-min step to a `cancelled` (which writes NO
+# can never burn the whole 45-min job to a `cancelled` (which writes NO
 # summary.md and mis-routes the workflow classifier to the #771
 # "EMULATOR INFRA UNAVAILABLE" branch).
 #
 # The per-test `timeout_msec` above bounds ONE @Test method, but a single
 # stalling CLASS still costs ~2 × 5 min (attempt + retry), and SIX such
 # session/reconnect classes stalling on #470 in one run (run 27845074217) added
-# up past the step cap → the step was SIGKILLed mid-loop before
+# up past the job cap → the step was SIGKILLed mid-loop before
 # `summary.md` was ever written. Without an artifact the classifier cannot tell a
 # #470 time-budget stall from a never-booted emulator.
 #
-# Fix: the suite owns its OWN deadline (JOURNEY_STEP_BUDGET_SECS, default 38 min)
-# which is comfortably BELOW the workflow's 45-min `timeout-minutes` step cap.
+# Fix (#908): the suite owns its OWN deadline (JOURNEY_STEP_BUDGET_SECS,
+# default 20 min). Arithmetic against the workflow cap is explicit:
+# 45-min job cap (2700s) - worst-case emulator boot (900s) - default suite
+# budget (1200s) = 600s for setup, classifier, Docker log collection, and
+# artifact upload.
 # When the remaining budget is exhausted the suite STOPS launching new classes,
 # records the not-run classes as a distinct BUDGET-timeout bucket, ALWAYS writes
 # summary.md (with the greppable `JOURNEY_STEP_TIMEOUT` marker), and exits
@@ -883,7 +886,7 @@ echo "=========================================================="
 #                                420s = 7 min: above the 300s per-test
 #                                timeout_msec so the runner's own interrupt is
 #                                preferred, but a backstop if even that wedges).
-JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-2280}"
+JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-1200}"
 JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
 
 # budget_remaining — seconds left in the suite-level budget (never negative).
@@ -896,7 +899,7 @@ budget_remaining() {
 
 # budget_exhausted — true (0) once the suite-level budget is spent. Checked
 # before launching each class so the loop stops cleanly instead of being
-# SIGKILLed by the workflow step cap mid-class (which writes no summary).
+# SIGKILLed by the workflow job cap mid-class (which writes no summary).
 budget_exhausted() {
   (( $(budget_remaining) <= 0 ))
 }
@@ -1063,12 +1066,12 @@ STEP_TIMEOUT_HIT=0    # issue #835: set to 1 once the suite-level budget is spen
 SUITE_START=$SECONDS
 
 echo ">>> Suite-level time budget (issue #835): ${JOURNEY_STEP_BUDGET_SECS}s"
-echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow step cap: 45 min)"
+echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow job cap: 45 min)"
 
 for fqcn in "${JOURNEY_CLASSES[@]}"; do
   # Issue #835: stop launching new classes once the suite-level budget is spent.
   # A #470 enumeration stall earlier in the run can eat the budget; rather than
-  # let the workflow step SIGKILL us mid-class (which writes NO summary and
+  # let the workflow job SIGKILL us mid-class (which writes NO summary and
   # mis-routes the classifier to the #771 infra branch), we bail cleanly here,
   # bucket the remaining classes as BUDGET-timeouts, and fall through to ALWAYS
   # write the summary below with the `JOURNEY_STEP_TIMEOUT` marker.
@@ -1095,7 +1098,7 @@ for fqcn in "${JOURNEY_CLASSES[@]}"; do
   # Issue #835: if the budget is now spent (this attempt was cut by `timeout`, or
   # an earlier attempt drained the clock), do NOT burn the remaining-class retry
   # on a stalled AVD — bucket this class as a BUDGET-timeout and move on so the
-  # summary still gets written before the workflow step cap.
+  # summary still gets written before the workflow job cap.
   if budget_exhausted; then
     STEP_TIMEOUT_HIT=1
     echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835 / #470 stall)"
@@ -1159,7 +1162,7 @@ run_core_terminal_append_burst() {
 
 # Issue #835: if the suite budget was already spent by a #470 stall in the
 # journey loop above, SKIP the core-terminal proofs and go straight to writing
-# the summary — running another ~2 proofs would push us into the workflow step
+# the summary — running another ~2 proofs would push us into the workflow job
 # cap and lose the artifact. A skipped proof is recorded as SKIPPED (not PASS,
 # not FAIL) so the summary is honest; the budget-timeout label below makes the
 # job red regardless.
@@ -1443,7 +1446,7 @@ echo "=========================================================="
   # marker to label the red as a journey timeout / #470 stall — DISTINCT from a
   # genuine `JOURNEY_FAILED` regression and from a "no summary at all" #771
   # EMULATOR INFRA UNAVAILABLE abort. Writing this summary at all (instead of
-  # being SIGKILLed mid-loop by the 45-min step cap) is the whole point: an
+  # being SIGKILLed mid-loop by the 45-min job cap) is the whole point: an
   # artifact exists, so the classifier can attribute the red correctly.
   if [[ "$STEP_TIMEOUT_HIT" -eq 1 ]]; then
     echo

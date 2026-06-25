@@ -501,34 +501,46 @@ public class SshLeaseManager(
     }
 
     private suspend fun release(key: SshLeaseKey, entryId: Long) {
-        val closeNow = mutex.withLock {
-            val entry = entries[key] ?: return
-            if (entry.id != entryId) return
-            if (entry.refCount <= 0) return
-            entry.refCount -= 1
-            if (entry.refCount > 0) return
-            if (!entry.session.isConnected || !processStarted || idleTtlMillis == 0L || maxIdleLeases == 0) {
-                entries.remove(key)
-                emitStateLocked(
-                    key = key,
-                    state = SshLeaseConnectionState.Closed,
-                    closeReason = when {
-                        !entry.session.isConnected -> SshLeaseCloseReason.Disconnected
-                        !processStarted -> SshLeaseCloseReason.ProcessStopped
-                        else -> SshLeaseCloseReason.IdleExpired
-                    },
-                )
-                return@withLock entry
-            }
+        // Issue #937 / S1-F2: the refcount bookkeeping MUST be atomic — it can
+        // never be torn in half by the caller's teardown timeout, or a
+        // cancelled release would leak a refcount and pin the pooled transport
+        // open forever (the #699 invariant). So ONLY this fast, wedge-free
+        // bookkeeping is wrapped in NonCancellable. The wedge-prone part — the
+        // actual transport `close()` socket write below — is left OUTSIDE the
+        // NonCancellable boundary so the caller's `withTimeoutOrNull` can
+        // interrupt a release that blocks behind a half-open close. (The close
+        // is itself bounded by the dispatcher's per-op ceiling + RealSshShell's
+        // off-Main bound, so even when reached it cannot wedge unboundedly.)
+        val closeNow = withContext(NonCancellable) {
+            mutex.withLock {
+                val entry = entries[key] ?: return@withContext null
+                if (entry.id != entryId) return@withContext null
+                if (entry.refCount <= 0) return@withContext null
+                entry.refCount -= 1
+                if (entry.refCount > 0) return@withContext null
+                if (!entry.session.isConnected || !processStarted || idleTtlMillis == 0L || maxIdleLeases == 0) {
+                    entries.remove(key)
+                    emitStateLocked(
+                        key = key,
+                        state = SshLeaseConnectionState.Closed,
+                        closeReason = when {
+                            !entry.session.isConnected -> SshLeaseCloseReason.Disconnected
+                            !processStarted -> SshLeaseCloseReason.ProcessStopped
+                            else -> SshLeaseCloseReason.IdleExpired
+                        },
+                    )
+                    return@withLock entry
+                }
 
-            entry.idleSinceMillis = nowMillis()
-            entry.closeJob?.cancel()
-            entry.closeJob = scope.launch {
-                delay(idleTtlMillis)
-                closeIfStillIdle(key, entryId)
+                entry.idleSinceMillis = nowMillis()
+                entry.closeJob?.cancel()
+                entry.closeJob = scope.launch {
+                    delay(idleTtlMillis)
+                    closeIfStillIdle(key, entryId)
+                }
+                emitStateLocked(key, SshLeaseConnectionState.Idle)
+                trimIdleLocked()
             }
-            emitStateLocked(key, SshLeaseConnectionState.Idle)
-            trimIdleLocked()
         }
         closeNow?.close()
     }
@@ -714,12 +726,32 @@ public class SshLease internal constructor(
     private val releaseMutex = Mutex()
     private var released: Boolean = false
 
+    /**
+     * Decrement the lease refcount.
+     *
+     * Issue #937 / S1-F2: the release MUST be interruptible by the caller's
+     * teardown timeout. Previously the whole [releaseAction] ran inside
+     * `withContext(NonCancellable)`, so the bounded teardown (#710 — the
+     * `withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) { lease.release() }` in
+     * `TmuxSessionViewModel`/`GitHistoryViewModel`/`RecurringJobsViewModel`)
+     * could NOT interrupt a release that blocked behind a wedged transport
+     * close on the contended lease mutex — defeating the very ceiling meant to
+     * stop the onCleared/activity-destroy ANR. The release now runs WITHOUT
+     * NonCancellable, so when the caller's `withTimeoutOrNull` fires the
+     * suspension is cancelled and the timeout actually takes effect.
+     *
+     * The bookkeeping is still correct under cancellation: [released] is only
+     * set true AFTER [releaseAction] returns normally, so a cancelled release
+     * leaves the lease un-released and a later retry/close path can still tear
+     * it down. (The pool-side refcount/idle teardown that [releaseAction]
+     * drives keeps its own NonCancellable boundary where it genuinely must not
+     * be torn in half — see [SshLeaseManager]; the *caller-visible* wait here
+     * is what must stay interruptible.)
+     */
     public suspend fun release() {
         releaseMutex.withLock {
             if (released) return
-            withContext(NonCancellable) {
-                releaseAction(key, entryId)
-            }
+            releaseAction(key, entryId)
             released = true
         }
     }

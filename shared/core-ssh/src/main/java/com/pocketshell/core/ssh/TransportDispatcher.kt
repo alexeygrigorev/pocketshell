@@ -3,9 +3,10 @@ package com.pocketshell.core.ssh
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,8 +62,31 @@ import java.util.concurrent.atomic.AtomicLong
  *    [TransportClosedException] BEFORE it touches the transport. Operations
  *    already enqueued/in-flight finish first (the teardown takes the mutex
  *    behind them), so the final `disconnect()` is the last write on the wire.
+ * 4. **Bounded, interruptible per-op (issue #937 / S4-1).** Every operation runs
+ *    under a hard [perOpTimeoutMs] ceiling, and its body runs inside
+ *    [runInterruptible] so the timeout's cancellation can interrupt a wedged
+ *    blocking sshj write/close and reclaim the dispatch thread. Without this a
+ *    single sshj write that lands on a half-open link holds [mutex] FOREVER,
+ *    freezing every other write on the connection and parking the single
+ *    dispatch thread unreclaimably (the #935 S4-1 "always freezing / can't
+ *    escape" root). With it, a wedged op fails THAT op with
+ *    [TransportOpTimeoutException] (or surfaces a [TransportClosedException]
+ *    once teardown has run) WITHOUT freezing the connection or leaking the
+ *    thread.
  */
-internal class TransportDispatcher {
+internal class TransportDispatcher(
+    /**
+     * Hard per-operation ceiling (issue #937 / S4-1). One transport op — an
+     * exec channel open, a `-CC` stdin write/flush, a `resizePty`, a channel
+     * close — may hold [mutex] for at most this long. A real write on a healthy
+     * link completes in low-millisecond time; this ceiling exists to bound the
+     * pathological half-open case where the blocking JDK socket write never
+     * returns. Generous enough to never trip a healthy slow op, tight enough
+     * that a wedged op cannot freeze the connection or park the thread for the
+     * lifetime of the process.
+     */
+    private val perOpTimeoutMs: Long = DEFAULT_PER_OP_TIMEOUT_MS,
+) {
 
     /**
      * One dedicated daemon thread per connection. A dedicated single thread
@@ -100,12 +124,29 @@ internal class TransportDispatcher {
      * Rejects with [TransportClosedException] if the dispatcher is already
      * [closed] — checked under the lock so it can never race a concurrent
      * [closeAndAwaitDrain] (invariant 3).
+     *
+     * Bounded + interruptible (issue #937 / S4-1): the body runs under
+     * [perOpTimeoutMs] inside [runInterruptible], so a wedged blocking sshj
+     * call is interrupted and the dispatch thread reclaimed when the ceiling
+     * trips. A timed-out op throws [TransportOpTimeoutException] — that one op
+     * fails, every other write on the connection keeps flowing.
      */
     suspend fun <T> run(block: () -> T): T = mutex.withLock {
         if (closed.get()) {
             throw TransportClosedException()
         }
-        withContext(context) { block() }
+        try {
+            withTimeout(perOpTimeoutMs) {
+                // runInterruptible pins the body to [context] (the single
+                // dispatch thread) AND makes cancellation interrupt the
+                // running thread — so when withTimeout fires, the wedged
+                // blocking sshj write/close is interrupted and the thread is
+                // reclaimed rather than parked forever.
+                runInterruptible(context) { block() }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            throw TransportOpTimeoutException(perOpTimeoutMs, e)
+        }
     }
 
     /**
@@ -135,16 +176,57 @@ internal class TransportDispatcher {
         if (closed.get()) return
         mutex.withLock {
             if (closed.getAndSet(true)) return@withLock
-            runCatching { withContext(context) { disconnect() } }
+            // Issue #937 / S4-1: bound + interrupt the final disconnect too —
+            // a `disconnect()` on a half-open link is itself a blocking socket
+            // write that can wedge. Without a ceiling here a wedged disconnect
+            // would hold [mutex] forever and the teardown's own caller-side
+            // timeout (TmuxSessionViewModel / lease release) could never make
+            // progress. runInterruptible reclaims the dispatch thread when the
+            // ceiling trips; runCatching swallows the resulting timeout so
+            // teardown always completes and the executor is shut down.
+            runCatching {
+                withTimeout(perOpTimeoutMs) {
+                    runInterruptible(context) { disconnect() }
+                }
+            }
         }
-        executor.shutdown()
+        executor.shutdownNow()
     }
 
     private companion object {
         /** Per-process dispatcher id, for thread-name uniqueness in logs. */
         private val SEQ = AtomicLong(0)
+
+        /**
+         * Default per-op ceiling (issue #937 / S4-1). 8s comfortably exceeds
+         * any healthy transport write/open/close (those are low-millisecond)
+         * while bounding the half-open pathological case to a single op's
+         * worth of wedge instead of a permanent freeze.
+         */
+        const val DEFAULT_PER_OP_TIMEOUT_MS: Long = 8_000L
     }
 }
+
+/**
+ * Thrown when a single transport operation exceeds the [TransportDispatcher]'s
+ * per-op ceiling (issue #937 / S4-1) — a wedged blocking sshj write/open/close
+ * on a half-open link. The op is interrupted and the dispatch thread reclaimed;
+ * the connection is NOT frozen, so this surfaces as an ordinary transient
+ * transport fault the tmux/reconnect layer handles as a recoverable drop.
+ *
+ * The message INTENTIONALLY contains the exact substring
+ * `SSH session is not connected` so the cross-module heal matcher
+ * `isSessionNotConnected` classifies a timed-out op identically to a
+ * [TransportClosedException] — evict-and-retry/reconnect rather than a false
+ * "connected" assumption against a dead transport.
+ */
+internal class TransportOpTimeoutException(
+    timeoutMs: Long,
+    cause: Throwable? = null,
+) : SshException(
+    "SSH session is not connected (transport operation wedged > ${timeoutMs}ms and was interrupted)",
+    cause,
+)
 
 /**
  * Thrown when an operation is submitted to a [TransportDispatcher] that has

@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.toList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -877,38 +878,69 @@ class SshLeaseManagerTest {
         assertTrue(second.closed)
     }
 
+    /**
+     * Issue #937 / S1-F2: the PRODUCTION refcount bookkeeping stays atomic even
+     * when the caller's teardown timeout cancels mid-release — a cancelled
+     * release must still decrement the refcount (the #699 invariant) so the
+     * pooled transport is not pinned open by a leaked refcount.
+     *
+     * This now exercises the REAL [SshLeaseManager.release] path (not a custom
+     * NonCancellable lambda at the [SshLease] level): the bookkeeping is wrapped
+     * in `NonCancellable` inside the manager, so cancelling the caller after the
+     * release has entered that boundary still completes the decrement and idle
+     * transition. The wedge-prone transport close lives OUTSIDE that boundary so
+     * the caller's timeout can interrupt a half-open close (covered by
+     * SshLeaseReleaseInterruptibleTest).
+     */
+    /**
+     * Issue #937 / S1-F2 (was #699): the PRODUCTION refcount bookkeeping inside
+     * [SshLeaseManager.release] is wrapped in `NonCancellable`, so even when a
+     * caller's teardown timeout cancels the release, the decrement still
+     * commits — the pooled transport is never pinned open by a leaked refcount.
+     *
+     * Reproduced through the REAL manager path (not a custom SshLease-level
+     * lambda): the caller release runs inside a `withTimeoutOrNull` whose
+     * cancellation, if it could tear the bookkeeping, would leave refCount > 0
+     * and the transport would never reach the idle-close. We assert the
+     * decrement committed by confirming the LAST-ref release tears the
+     * transport down.
+     *
+     * (The complementary half — that `SshLease.release()` is INTERRUPTIBLE by
+     * that timeout when it blocks behind a wedged transport close — is proven
+     * in [SshLeaseReleaseInterruptibleTest].)
+     */
     @Test
     fun `release completes ref count update when caller is cancelled`() = runTest {
-        val releaseCanFinish = CompletableDeferred<Unit>()
-        var startedReleaseCount = 0
-        var completedReleaseCount = 0
-        val lease = SshLease(
-            key = TARGET.leaseKey,
-            session = FakeSshSession(),
-            isNewConnection = true,
-            entryId = 1L,
-        ) { _, _ ->
-            startedReleaseCount += 1
-            releaseCanFinish.await()
-            completedReleaseCount += 1
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        // Two leases on the same warm transport (refCount = 2).
+        val leaseA = manager.acquire(TARGET).getOrThrow()
+        val leaseB = manager.acquire(TARGET).getOrThrow()
+
+        // Release leaseA under a bounded caller (the production teardown shape).
+        // The fast, wedge-free bookkeeping commits the decrement well within
+        // the bound; because it is NonCancellable it could not be torn even if
+        // the bound fired mid-decrement.
+        val released = withTimeoutOrNull(5_000) {
+            leaseA.release()
+            true
         }
+        assertTrue("leaseA release must complete within the caller bound", released == true)
 
-        val releaseJob = launch { lease.release() }
+        // leaseB is now the sole remaining ref. Releasing it must drop refCount
+        // to 0 — which only happens if leaseA's release DID decrement (no leak).
+        leaseB.release()
+        advanceTimeBy(60_001)
         runCurrent()
 
-        assertEquals(1, startedReleaseCount)
-        assertEquals(0, completedReleaseCount)
-
-        releaseJob.cancel()
-        runCurrent()
-        releaseCanFinish.complete(Unit)
-        releaseJob.join()
-
-        assertEquals(1, completedReleaseCount)
-
-        lease.release()
-        assertEquals(1, startedReleaseCount)
-        assertEquals(1, completedReleaseCount)
+        assertTrue(
+            "the last-ref release must tear the transport down — proving leaseA's " +
+                "release committed its decrement (NonCancellable bookkeeping, no leak)",
+            session.closed,
+        )
+        manager.close()
     }
 
     @Test

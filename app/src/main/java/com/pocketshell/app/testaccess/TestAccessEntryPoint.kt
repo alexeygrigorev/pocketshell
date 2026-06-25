@@ -3,6 +3,7 @@ package com.pocketshell.app.testaccess
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.LastSessionStore
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -83,4 +84,17 @@ internal interface TestAccessEntryPoint {
      * reconnect (the AVD cannot mint a new `networkHandle` on demand).
      */
     fun terminalNetworkObserver(): TerminalNetworkObserver
+
+    /**
+     * Issue #951 (#928 D2): the singleton [SettingsRepository] — the SAME
+     * instance `MainActivity` reads `settings.value.defaultHostId` from when it
+     * resolves the default-host launch destination. The connected proof
+     * ([com.pocketshell.app.proof.LaunchNoMainThreadRoomReadE2eTest]) sets the
+     * default host on THIS instance before launch so the activity's off-Main
+     * resolve sees the seeded value (a throwaway `SettingsRepository(context)`
+     * writes SharedPreferences but its `_settings` snapshot is a different
+     * instance from the singleton the activity reads — see SettingsRepository's
+     * construction-time `readSnapshot()`).
+     */
+    fun settingsRepository(): SettingsRepository
 }

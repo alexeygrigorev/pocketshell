@@ -86,7 +86,8 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -314,34 +315,33 @@ class MainActivity : FragmentActivity() {
             } else {
                 null
             }
-        val defaultHostDestination =
-            if (
-                intentDestination == AppDestination.HostList &&
+        // Issue #951 (#928 D2): the default-host resolution does two Room reads
+        // + a key-file stat. Doing it here via `runBlocking { … }` on the Main
+        // thread blocked the UI thread on every cold launch (ANR / cold-start
+        // jank) and turned any DB read failure into a launch crash-loop, since
+        // the throw escaped onCreate. Hard-cut (D22) that blocking read: the
+        // activity now opens synchronously on the host list and the default
+        // host is resolved OFF the Main thread (see
+        // [resolveDefaultHostLaunchAsync] below). When it returns a
+        // destination, we route to it via [requestedDestination] — a brief
+        // host-list flash is acceptable, and a DB failure simply leaves the
+        // user on the host list instead of crashing.
+        val resolveDefaultHostOnLaunch =
+            intentDestination == AppDestination.HostList &&
                 !resumingFromProcessDeath &&
                 importPayload == null
-            ) {
-                runBlocking {
-                    resolveDefaultHostLaunchDestination(
-                        defaultHostId = settingsRepository.settings.value.defaultHostId,
-                        hostDao = hostDao,
-                        sshKeyDao = sshKeyDao,
-                    )
-                }
-            } else {
-                null
-            }
         requestedDestination = resolveInitialDestination(
             intentDestination = intentDestination,
             resumingFromProcessDeath = resumingFromProcessDeath,
             restoredDestination = restored?.let { with(lastSessionStore) { it.toDestination() } },
-            defaultHostDestination = defaultHostDestination,
+            defaultHostDestination = null,
         )
         StartupTiming.mark(
             "main-requested-destination",
             "destination" to requestedDestination.timingName(),
             "restoredSnapshot" to (restored != null),
             "processDeathResume" to resumingFromProcessDeath,
-            "defaultHostLaunch" to (defaultHostDestination != null),
+            "defaultHostLaunchPending" to resolveDefaultHostOnLaunch,
         )
         restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
         restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
@@ -480,7 +480,52 @@ class MainActivity : FragmentActivity() {
         maybeRequestNotificationPermission()
         observeForwardingForNotificationPermission()
         observeKilledSessionsForLastSession()
+        if (resolveDefaultHostOnLaunch) {
+            resolveDefaultHostLaunchAsync()
+        }
         StartupTiming.mark("main-on-create-end")
+    }
+
+    /**
+     * Issue #951 (#928 D2): resolve the default-host launch destination OFF the
+     * Main thread, then route to it. This replaces the old
+     * `runBlocking { resolveDefaultHostLaunchDestination(...) }` in [onCreate]
+     * (deleted, D22) that blocked the UI thread on two Room reads during cold
+     * start.
+     *
+     * The Room reads + key-file stat run on [Dispatchers.IO]. On success we
+     * publish the resolved [AppDestination.FolderList] into
+     * [requestedDestination] on the Main thread; the navigator picks it up via
+     * its `requestedDestination` effect and routes to it — but ONLY if the user
+     * has not already navigated away (see [AppNavigator]). A null result (no
+     * default host, passphrase key, missing key file) leaves the user on the
+     * host list.
+     *
+     * Failure containment is the crash-loop fix: any throw from the DB read is
+     * swallowed here (the worst case is "no auto-open", the host list), so a
+     * corrupt/locked DB can never propagate out of launch and crash-loop the
+     * app the way the in-`onCreate` `runBlocking` did.
+     */
+    private fun resolveDefaultHostLaunchAsync() {
+        lifecycleScope.launch {
+            val destination = withContext(Dispatchers.IO) {
+                resolveDefaultHostLaunchDestinationSafely(
+                    defaultHostId = settingsRepository.settings.value.defaultHostId,
+                    hostDao = hostDao,
+                    sshKeyDao = sshKeyDao,
+                )
+            } ?: return@launch
+            StartupTiming.mark(
+                "main-default-host-resolved",
+                "destination" to destination.timingName(),
+            )
+            // Publish the resolved destination so the navigator can route to it.
+            // The navigator only honors it while the user is still on the
+            // cold-launch host list (it never overrides an in-progress
+            // navigation), so a late resolve cannot yank the user off a screen
+            // they opened in the meantime.
+            requestedDestination = destination
+        }
     }
 
     /**
@@ -731,6 +776,22 @@ private fun AppNavigator(
         )
         if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
             backStack += current
+            setCurrentDestination(requestedDestination)
+        }
+        // Issue #951 (#928 D2): the default-host launch destination is now
+        // resolved OFF the Main thread (MainActivity.resolveDefaultHostLaunchAsync)
+        // instead of via a blocking Room read in onCreate. It arrives here as a
+        // late `requestedDestination` update. Route to it ONLY while the user is
+        // still sitting on the cold-launch host list with an empty back stack —
+        // a resolve that lands after the user already tapped into a host/screen
+        // must never yank them away. This is the async equivalent of seeding
+        // `requestedDestination = FolderList` synchronously before the first
+        // composition, minus the Main-thread DB read.
+        if (
+            requestedDestination is AppDestination.FolderList &&
+            current == AppDestination.HostList &&
+            backStack.isEmpty()
+        ) {
             setCurrentDestination(requestedDestination)
         }
     }
@@ -1658,6 +1719,36 @@ internal fun resolveInitialDestination(
     if (!resumingFromProcessDeath) return defaultHostDestination ?: AppDestination.HostList
     return restoredDestination ?: AppDestination.HostList
 }
+
+/**
+ * Issue #951 (#928 D2): the failure-contained wrapper over
+ * [resolveDefaultHostLaunchDestination] used by the off-Main launch resolve in
+ * [MainActivity.resolveDefaultHostLaunchAsync].
+ *
+ * The crash-loop fix lives here: ANY throw from the Room reads / key-file stat
+ * (corrupt or locked DB, migration edge) is swallowed and mapped to `null` (=
+ * "no auto-open", land on the host list). The old in-`onCreate`
+ * `runBlocking { resolveDefaultHostLaunchDestination(...) }` let such a throw
+ * escape `onCreate`, crashing the activity on every launch — an unrecoverable
+ * launch crash-loop. Pulled out as its own top-level function so a JVM test can
+ * drive the containment directly with a throwing DAO.
+ */
+internal suspend fun resolveDefaultHostLaunchDestinationSafely(
+    defaultHostId: Long?,
+    hostDao: HostDao,
+    sshKeyDao: SshKeyDao,
+    keyFileExists: (String) -> Boolean = { path -> File(path).exists() },
+): AppDestination.FolderList? =
+    runCatching {
+        resolveDefaultHostLaunchDestination(
+            defaultHostId = defaultHostId,
+            hostDao = hostDao,
+            sshKeyDao = sshKeyDao,
+            keyFileExists = keyFileExists,
+        )
+    }.onFailure {
+        Log.w("MainActivity", "issue951-default-host-resolve-failed", it)
+    }.getOrNull()
 
 internal suspend fun resolveDefaultHostLaunchDestination(
     defaultHostId: Long?,

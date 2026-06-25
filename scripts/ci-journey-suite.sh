@@ -973,6 +973,24 @@ JOURNEY_CLASSES=(
   # com.pocketshell.app.projects, not the proof prefix, so it carries its
   # fully-qualified name directly.
   "com.pocketshell.app.projects.CliVersionMismatchBannerUpdateButtonTest"
+  # ---------------------------------------------------------------------------
+  # Issue #951 (#928 D2 — launch ANR / crash-loop). The reproduce-first
+  # end-to-end for the D2 finding: MainActivity.onCreate used to do an
+  # unguarded `runBlocking { resolveDefaultHostLaunchDestination(...) }` — two
+  # Room reads + a key-file stat — ON the Main thread on every default-host cold
+  # launch (UI-thread block = ANR/jank; a DB-read throw escaping onCreate =
+  # launch crash-loop). This journey drives the REAL launch path
+  # (ActivityScenario.launch(MainActivity) with a default host seeded in Room),
+  # with a capturing main-thread StrictMode disk-read policy active, and asserts
+  # the launch-time resolution trips NO MainActivity-attributed main-thread
+  # disk-read violation (red on base, green with the off-Main fix) WHILE the
+  # default host still auto-opens its FolderList (the #305 contract). NO Docker
+  # fixture / SSH / tmux / toxiproxy / port — a pure on-device launch exercise,
+  # deterministic on the CI swiftshader AVD, so it needs no tests.yml service
+  # change, and it does NOT self-skip on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi()) on the load-bearing assertion — process.md
+  # F3 / D33). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.LaunchNoMainThreadRoomReadE2eTest"
 )
 
 echo "=========================================================="

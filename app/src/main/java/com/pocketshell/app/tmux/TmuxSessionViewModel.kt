@@ -23,6 +23,7 @@ import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.crash.CrashReporter
+import com.pocketshell.app.composer.LocalAttachmentSidecarRef
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
@@ -38,6 +39,8 @@ import com.pocketshell.app.projects.ProfilesResult
 import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
+import com.pocketshell.app.share.FilenameSanitiser
+import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationSyncStatus
@@ -92,6 +95,7 @@ import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.terminal.bridge.TerminalSeedGateOverflowException
 import com.pocketshell.core.storage.dao.ProjectRootDao
@@ -10412,6 +10416,69 @@ public class TmuxSessionViewModel @Inject constructor(
             },
         )
         return result
+    }
+
+    public suspend fun uploadQueuedAttachmentSidecars(
+        sidecars: List<LocalAttachmentSidecarRef>,
+    ): Result<List<String>> {
+        DiagnosticEvents.record("action", "tmux_outbound_sidecar_upload_start", "count" to sidecars.size)
+        if (sidecars.isEmpty()) return Result.success(emptyList())
+        val session = awaitLiveSessionForAttachment()
+            ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
+        if (!session.isConnected) {
+            return Result.failure(SshException("SSH session is not connected"))
+        }
+        val target = activeTarget
+        val scopeKey = when (target) {
+            null -> "tmux-session"
+            else -> "host-${target.hostId}-${target.sessionName}"
+        }
+        val safeScope = PromptAttachmentStager.safeScopeSegment(scopeKey)
+        val remoteDir = "${PromptAttachmentStager.REMOTE_DIRECTORY}/$safeScope"
+        val displayDir = "~/$remoteDir"
+        val timestamp = ShareUploader.formatTimestamp(sidecars.minOf { it.createdAtMs })
+        return try {
+            val mkdir = session.exec("mkdir -p \"\$HOME/$remoteDir\"")
+            if (mkdir.exitCode != 0) {
+                val detail = mkdir.stderr.ifBlank { mkdir.stdout }.trim()
+                return Result.failure(
+                    SshException("Could not create attachment directory: ${detail.ifBlank { "mkdir failed" }}"),
+                )
+            }
+            val uploadedPaths = sidecars.mapIndexed { index, ref ->
+                val local = File(ref.localPath)
+                if (!local.exists()) {
+                    throw SshException("Queued attachment no longer exists: ${ref.displayName}")
+                }
+                val sanitised = FilenameSanitiser.sanitise(
+                    ref.displayName,
+                    defaultExtension = ShareUploader.extensionForMimeType(ref.mimeType),
+                )
+                val remoteName = PromptAttachmentStager.composeAttachmentName(timestamp, index, sanitised)
+                val remotePath = "$remoteDir/$remoteName"
+                session.uploadFile(local, remotePath)
+                "$displayDir/$remoteName"
+            }
+            DiagnosticEvents.record(
+                "action",
+                "tmux_outbound_sidecar_upload_success",
+                "count" to uploadedPaths.size,
+                "scope" to scopeKey,
+            )
+            Result.success(uploadedPaths)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (t: Throwable) {
+            DiagnosticEvents.record(
+                "action",
+                "tmux_outbound_sidecar_upload_fail",
+                "count" to sidecars.size,
+                "scope" to scopeKey,
+                "cause" to t.javaClass.simpleName,
+                "message" to t.message,
+            )
+            Result.failure(if (t is SshException) t else SshException("Attachment upload failed: ${t.message}", t))
+        }
     }
 
     /**

@@ -307,6 +307,41 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun requeueStaleInFlightAlsoRequeuesAbandonedUploadingRows() {
+        val store = store()
+        val staleUpload = OutboundItem(
+            id = "stale-upload",
+            sessionKey = "sessA",
+            cleanText = "upload died",
+            state = OutboundState.Uploading,
+            createdAtMs = 10L,
+            lastAttemptAtMs = null,
+            attemptCount = 0,
+        )
+        val freshUpload = OutboundItem(
+            id = "fresh-upload",
+            sessionKey = "sessA",
+            cleanText = "upload still active",
+            state = OutboundState.Uploading,
+            createdAtMs = 200L,
+            lastAttemptAtMs = null,
+            attemptCount = 0,
+        )
+        store.enqueueExisting(staleUpload)
+        store.enqueueExisting(freshUpload)
+
+        val requeued = store.requeueStaleInFlight("sessA", cutoffMs = 100L)
+
+        assertEquals(listOf(staleUpload.id), requeued.map { it.id })
+        assertEquals(OutboundState.Queued, store.item(staleUpload.id)!!.state)
+        assertEquals(0, store.item(staleUpload.id)!!.attemptCount)
+        assertEquals(OutboundState.Uploading, store.item(freshUpload.id)!!.state)
+        val claimed = store.claimNext("sessA")!!
+        assertEquals(staleUpload.id, claimed.id)
+        assertEquals(1, claimed.attemptCount)
+    }
+
+    @Test
     fun markDeliveredIsExactlyOnce_lateDuplicateAckIsNoOp() {
         val store = store()
         val item = store.enqueue("sessA", "deliver once")
@@ -491,12 +526,15 @@ class OutboundQueueStoreTest {
         val item = store.enqueue("sessA", "uploading first")
 
         // Upload-in-progress is a real persisted state transition.
-        assertEquals(OutboundState.Uploading, store.markUploading(item.id)!!.state)
+        val uploading = store.markUploading(item.id, lastAttemptAtMs = 42L)!!
+        assertEquals(OutboundState.Uploading, uploading.state)
+        assertEquals(42L, uploading.lastAttemptAtMs)
         assertEquals(OutboundState.Uploading, store.item(item.id)!!.state)
 
         // An Uploading item is NOT claimable (claimNext only claims Queued), so a
         // racing flush cannot grab an item whose attachment upload is mid-flight.
         assertNull(store.claimNext("sessA"))
+        assertNull(store.markUploading(item.id, lastAttemptAtMs = 43L))
     }
 
     @Test
@@ -581,16 +619,36 @@ class OutboundQueueStoreTest {
     }
 
     @Test
-    fun lateAckAfterFailureCannotResurrectAlreadyFailedItem() {
-        // markUploading/markDelivered must not undo a terminal Failed except via
-        // an explicit re-arm. markUploading on a Failed item is a no-op.
+    fun markUploadingCanOwnFailedRetryButNotActiveRows() {
         val store = store()
         val item = store.enqueue("sessA", "x")
         store.claimNext("sessA")
         store.markFailed(item.id, "boom")
-        val afterUpload = store.markUploading(item.id)
-        assertEquals("markUploading must not move a Failed item",
-            OutboundState.Failed, afterUpload!!.state)
+
+        val afterUpload = store.markUploading(item.id, lastAttemptAtMs = 100L)!!
+        assertEquals(OutboundState.Uploading, afterUpload.state)
+        assertEquals(100L, afterUpload.lastAttemptAtMs)
+        assertNull(store.markUploading(item.id, lastAttemptAtMs = 101L))
+        assertNull(store.claim(item.id))
+    }
+
+    @Test
+    fun requeueStaleInFlightDoesNotRequeueFreshUploadingRowWithOldFailureTimestamp() {
+        val store = store()
+        val item = store.enqueue("sessA", "retry upload", createdAtMs = 1L)
+        store.claimNext("sessA")
+        store.markFailed(item.id, "old failure", lastAttemptAtMs = 10L)
+
+        val uploading = store.markUploading(item.id, lastAttemptAtMs = 200L)!!
+        assertEquals(OutboundState.Uploading, uploading.state)
+        assertEquals(200L, uploading.lastAttemptAtMs)
+
+        assertTrue(store.requeueStaleInFlight("sessA", cutoffMs = 100L).isEmpty())
+        assertEquals(OutboundState.Uploading, store.item(item.id)!!.state)
+
+        val requeued = store.requeueStaleInFlight("sessA", cutoffMs = 200L)
+        assertEquals(listOf(item.id), requeued.map { it.id })
+        assertEquals(OutboundState.Queued, store.item(item.id)!!.state)
     }
 
     // --- Durability across a simulated restart (in-memory analogue) --------

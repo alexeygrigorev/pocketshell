@@ -52,6 +52,23 @@ class OutboundAttachmentSidecarStoreTest {
     }
 
     @Test
+    fun stagePersistsAttachmentIndicesAndRefsSortByAttachmentOrder() = runTest {
+        newStore().stage(
+            outboundItemId = "queue-1",
+            uris = listOf(
+                Uri.fromFile(sourceFile("third.txt", "third")),
+                Uri.fromFile(sourceFile("first.txt", "first")),
+            ),
+            attachmentIndices = listOf(2, 0),
+        )
+
+        val reloaded = newStore().refsFor("queue-1")
+
+        assertEquals(listOf("first.txt", "third.txt"), reloaded.map { it.displayName })
+        assertEquals(listOf(0, 2), reloaded.map { it.attachmentIndex })
+    }
+
+    @Test
     fun multipleOutboundItemsDoNotBleedIntoEachOther() = runTest {
         val store = newStore()
         val first = store.stage("queue-a", listOf(Uri.fromFile(sourceFile("a.txt", "a")))).single()

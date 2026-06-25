@@ -456,6 +456,14 @@ public fun TmuxSessionScreen(
     LaunchedEffect(targetSessionId.value) {
         promptComposerViewModel.onComposerTargetChanged(targetSessionId.value)
     }
+    DisposableEffect(promptComposerViewModel, viewModel) {
+        promptComposerViewModel.setOutboundAttachmentSidecarUploader { refs ->
+            viewModel.uploadQueuedAttachmentSidecars(refs)
+        }
+        onDispose {
+            promptComposerViewModel.setOutboundAttachmentSidecarUploader(null)
+        }
+    }
     LaunchedEffect(sessionLive, targetSessionId.value) {
         promptComposerViewModel.setConnectionDegraded(!sessionLive)
         outboundQueueAutoFlushController.onConnectionWindowChanged(

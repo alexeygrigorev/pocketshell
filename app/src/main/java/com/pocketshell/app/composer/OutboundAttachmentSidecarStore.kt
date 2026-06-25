@@ -34,9 +34,12 @@ class OutboundAttachmentSidecarStore @Inject constructor(
     suspend fun stage(
         outboundItemId: String,
         uris: List<Uri>,
+        attachmentIndices: List<Int> = emptyList(),
     ): List<LocalAttachmentSidecarRef> = withContext(Dispatchers.IO) {
         if (outboundItemId.isBlank() || uris.isEmpty()) return@withContext emptyList()
-        uris.mapNotNull { uri -> stageOne(outboundItemId, uri) }
+        uris.mapIndexedNotNull { index, uri ->
+            stageOne(outboundItemId, uri, attachmentIndices.getOrNull(index))
+        }
     }
 
     suspend fun refsFor(outboundItemId: String): List<LocalAttachmentSidecarRef> = withContext(Dispatchers.IO) {
@@ -70,7 +73,11 @@ class OutboundAttachmentSidecarStore @Inject constructor(
             .forEach { dir -> runCatching { dir.delete() } }
     }
 
-    private fun stageOne(outboundItemId: String, uri: Uri): LocalAttachmentSidecarRef? {
+    private fun stageOne(
+        outboundItemId: String,
+        uri: Uri,
+        attachmentIndex: Int?,
+    ): LocalAttachmentSidecarRef? {
         val description = describe(uri)
         val sanitised = FilenameSanitiser.sanitise(
             description.displayName ?: uri.lastPathSegment,
@@ -102,6 +109,7 @@ class OutboundAttachmentSidecarStore @Inject constructor(
             mimeType = description.mimeType,
             byteSize = byteSize,
             createdAtMs = clock(),
+            attachmentIndex = attachmentIndex,
         )
         persistAll(allRefsBlocking() + ref)
         return ref
@@ -134,7 +142,9 @@ class OutboundAttachmentSidecarStore @Inject constructor(
     private fun refsForBlocking(outboundItemId: String): List<LocalAttachmentSidecarRef> =
         allRefsBlocking()
             .filter { it.outboundItemId == outboundItemId && File(it.localPath).exists() }
-            .sortedBy { it.createdAtMs }
+            .sortedWith(compareBy<LocalAttachmentSidecarRef> { it.attachmentIndex ?: Int.MAX_VALUE }
+                .thenBy { it.createdAtMs }
+                .thenBy { it.id })
 
     private fun allRefsBlocking(): List<LocalAttachmentSidecarRef> =
         decodeRefs(prefs.getString(KEY_REFS, "").orEmpty())
@@ -170,6 +180,7 @@ data class LocalAttachmentSidecarRef(
     val mimeType: String?,
     val byteSize: Long,
     val createdAtMs: Long,
+    val attachmentIndex: Int? = null,
 )
 
 private fun encodeRefs(refs: List<LocalAttachmentSidecarRef>): String =
@@ -182,6 +193,7 @@ private fun encodeRefs(refs: List<LocalAttachmentSidecarRef>): String =
             ref.mimeType.orEmpty(),
             ref.byteSize.toString(),
             ref.createdAtMs.toString(),
+            ref.attachmentIndex?.toString().orEmpty(),
         ).joinToString("\t") { field -> escapeSidecarField(field) }
     }
 
@@ -196,6 +208,7 @@ private fun decodeRefs(raw: String): List<LocalAttachmentSidecarRef> {
         val displayName = fields.getOrNull(3).orEmpty()
         val byteSize = fields.getOrNull(5)?.toLongOrNull() ?: return@mapNotNull null
         val createdAtMs = fields.getOrNull(6)?.toLongOrNull() ?: return@mapNotNull null
+        val attachmentIndex = fields.getOrNull(7)?.toIntOrNull()
         if (id.isBlank() || outboundItemId.isBlank() || localPath.isBlank()) return@mapNotNull null
         LocalAttachmentSidecarRef(
             id = id,
@@ -205,6 +218,7 @@ private fun decodeRefs(raw: String): List<LocalAttachmentSidecarRef> {
             mimeType = fields.getOrNull(4).orEmpty().ifBlank { null },
             byteSize = byteSize,
             createdAtMs = createdAtMs,
+            attachmentIndex = attachmentIndex,
         )
     }
 }

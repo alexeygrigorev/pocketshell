@@ -36,6 +36,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -1298,5 +1301,147 @@ class InlineDictationViewModelTest {
         assertEquals(startsBefore, mic.startCount)
         assertEquals(stopsBefore, mic.stopCount)
         assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+    }
+
+    // -- onCleared teardown bound (#957 / #928 D1) --------------------------
+
+    /**
+     * A [PromptComposerViewModel.MicCapture] whose `stop()` blocks on a latch,
+     * standing in for the unbounded `captureThread.join()` inside the real
+     * `PcmCapturePump.stop` when the platform capture thread is wedged. The
+     * blocked worker honours [Thread.interrupt] so the bounded-stop path can
+     * unwind it the same way it would unwind the real blocked join.
+     */
+    private class WedgedMicCapture(
+        private val releaseStop: CountDownLatch,
+    ) : PromptComposerViewModel.MicCapture {
+        val stopEntered = CountDownLatch(1)
+        val stopInterrupted = AtomicBoolean(false)
+        private var running = false
+
+        override fun start() {
+            running = true
+        }
+
+        override fun stop(): ByteArray {
+            stopEntered.countDown()
+            try {
+                // Block until released OR interrupted — mirrors a wedged
+                // captureThread.join() that only unblocks on interrupt.
+                if (!releaseStop.await(30, TimeUnit.SECONDS)) {
+                    // Latch was never released and we were not interrupted —
+                    // treat as a hung stop that exhausted our patience.
+                    stopInterrupted.set(true)
+                }
+            } catch (e: InterruptedException) {
+                stopInterrupted.set(true)
+                Thread.currentThread().interrupt()
+            }
+            running = false
+            return ByteArray(0)
+        }
+
+        override fun currentAmplitude(): Float = if (running) 0.5f else 0f
+    }
+
+    /**
+     * Reproduce-first (#957 / #928 D1): with a wedged `stop()` that never
+     * returns, `onCleared` must STILL return within its budget — it must not
+     * block the Main thread on the unbounded capture-thread join.
+     *
+     * Red on base: the old `runCatching { audioRecorder.stop() }` blocks until
+     * the latch is released (here: never within the assertion window), so
+     * `clearForTest()` does not return and the elapsed time blows past the
+     * budget. Green with the fix: the bounded worker is abandoned after the
+     * budget and `clearForTest()` returns promptly.
+     */
+    @Test
+    fun onClearedReturnsWithinBudgetWhenStopIsWedged() = runTest {
+        val releaseStop = CountDownLatch(1) // deliberately never released
+        val mic = WedgedMicCapture(releaseStop)
+        val vm = newVm(mic = mic, samplerDispatcher = StandardTestDispatcher(testScheduler))
+        // Shrink the budget so the wedged path resolves fast under test.
+        vm.oncClearedStopBudgetMs = 200L
+
+        vm.onMicTap() // -> Recording (Whisper provider, activeProvider set)
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        val budget = vm.oncClearedStopBudgetMs
+        val startNs = System.nanoTime()
+        vm.clearForTest() // drives onCleared() teardown
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+
+        // The stop worker was actually entered (we exercised the real path),
+        // and clearForTest returned within a small multiple of the budget
+        // rather than blocking on the wedged stop.
+        assertTrue(
+            "stop() worker should have been started",
+            mic.stopEntered.await(2, TimeUnit.SECONDS),
+        )
+        assertTrue(
+            "onCleared blocked $elapsedMs ms; expected to return within the " +
+                "$budget ms bound (plus scheduling slack)",
+            elapsedMs < budget + 1_000,
+        )
+    }
+
+    /**
+     * Normal path: when `stop()` completes quickly, teardown still invokes it
+     * exactly once and returns without engaging the timeout/abandon path.
+     */
+    @Test
+    fun onClearedStillStopsRecorderOnNormalPath() = runTest {
+        val mic = FakeMicCapture()
+        val vm = newVm(mic = mic, samplerDispatcher = StandardTestDispatcher(testScheduler))
+
+        vm.onMicTap() // -> Recording
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        val stopsBefore = mic.stopCount
+
+        val startNs = System.nanoTime()
+        vm.clearForTest()
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+
+        // stop() was driven exactly once during teardown and it completed
+        // well within the budget (no abandon path).
+        assertEquals(stopsBefore + 1, mic.stopCount)
+        assertTrue(
+            "normal-path teardown took $elapsedMs ms; should be near-instant",
+            elapsedMs < vm.oncClearedStopBudgetMs,
+        )
+    }
+
+    /**
+     * When the bounded stop times out, a diagnostic is recorded so a wedged
+     * recorder stays visible, and teardown does not throw.
+     */
+    @Test
+    fun onClearedRecordsTimeoutDiagnosticWhenStopIsWedged() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val releaseStop = CountDownLatch(1)
+            val mic = WedgedMicCapture(releaseStop)
+            val vm = newVm(mic = mic, samplerDispatcher = StandardTestDispatcher(testScheduler))
+            vm.oncClearedStopBudgetMs = 150L
+
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+            vm.clearForTest()
+
+            assertTrue(
+                "expected an inline_recording_cancel_stop_timeout diagnostic",
+                diagnostics.events.any { it.name == "inline_recording_cancel_stop_timeout" },
+            )
+            // The cancel diagnostic is still recorded — teardown completed.
+            assertTrue(
+                diagnostics.events.any { it.name == "inline_recording_cancel" },
+            )
+        } finally {
+            // Nothing to release; the abandoned worker honours interrupt.
+        }
     }
 }

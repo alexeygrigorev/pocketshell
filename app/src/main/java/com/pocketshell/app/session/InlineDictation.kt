@@ -67,7 +67,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
+import kotlin.concurrent.thread
 
 /**
  * Backs the key-bar mic slot ([KeyBarWithMic]). Issue #16: tap mic → stream
@@ -821,7 +824,7 @@ public class InlineDictationViewModel @Inject constructor(
             if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
                 cancelAndroidSpeechRecognition()
             } else {
-                runCatching { audioRecorder.stop() }
+                stopAudioRecorderBounded()
                 activeProvider = null
                 DiagnosticEvents.record(
                     "action",
@@ -833,6 +836,75 @@ public class InlineDictationViewModel @Inject constructor(
             clearAndroidSpeechSession()
         }
         super.onCleared()
+    }
+
+    /**
+     * Issue #957 (#928 D1 freeze sweep): tear down the Whisper-path audio
+     * recorder WITHOUT ever blocking the Main thread unboundedly.
+     *
+     * The plain `audioRecorder.stop()` call transitively does an unbounded
+     * `captureThread.join()` (`PcmCapturePump.stop`): if the platform capture
+     * thread is wedged (a stalled `AudioRecord.read`, a driver hiccup), that
+     * join — and therefore [onCleared], which runs on the Main thread during
+     * ViewModel teardown — blocks for as long as the thread is stuck, i.e. an
+     * ANR on teardown (e.g. navigating away mid-dictation).
+     *
+     * We hard-cut (D22) the unbounded join at this call site: run `stop()` on a
+     * throwaway daemon worker, wait at most [ONCLEARED_STOP_BUDGET_MS] for it,
+     * and if it does not finish in time, interrupt the worker and abandon it so
+     * teardown returns immediately. On the normal (fast) path the worker
+     * completes well within the budget and `stop()` runs exactly as before; the
+     * captured audio is discarded here regardless because the recording is
+     * being cancelled, not transcribed.
+     *
+     * Worker IO exceptions are swallowed — teardown must not throw — but a
+     * timeout is recorded as a diagnostic so a wedged recorder stays visible.
+     */
+    private fun stopAudioRecorderBounded() {
+        val done = CountDownLatch(1)
+        val worker = thread(start = true, isDaemon = true, name = "inline-dictation-stop") {
+            try {
+                audioRecorder.stop()
+            } catch (e: Throwable) {
+                // Teardown path: never propagate. A wedged/erroring stop must
+                // not crash ViewModel clearing. (AudioRecorderException and any
+                // unexpected throw from the platform recorder are both caught.)
+                DiagnosticEvents.record(
+                    "action",
+                    "inline_recording_cancel_stop_error",
+                    "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                    "cause" to e.javaClass.simpleName,
+                )
+            } finally {
+                done.countDown()
+            }
+        }
+        val finishedInTime = done.await(oncClearedStopBudgetMs, TimeUnit.MILLISECONDS)
+        if (!finishedInTime) {
+            // The capture thread is wedged. Interrupt the worker (which in turn
+            // interrupts the blocked join / read so it can unwind on its own)
+            // and abandon it — teardown returns now instead of stalling Main.
+            worker.interrupt()
+            DiagnosticEvents.record(
+                "action",
+                "inline_recording_cancel_stop_timeout",
+                "provider" to VoiceTranscriptionProvider.OpenAiWhisper.name,
+                "budgetMs" to oncClearedStopBudgetMs,
+            )
+        }
+    }
+
+    // Test seam — the bounded-stop budget. Production uses the companion
+    // default; tests shrink it so the wedged-stop path is exercised fast.
+    internal var oncClearedStopBudgetMs: Long = ONCLEARED_STOP_BUDGET_MS
+
+    /**
+     * Test-only hook to drive [onCleared] (which is `protected` on
+     * [ViewModel]). Production teardown still goes through the framework's
+     * `clear()`; this only exposes the same code path to JVM unit tests.
+     */
+    internal fun clearForTest() {
+        onCleared()
     }
 
     /** Coarse-grained recording state — drives the mic-slot visual treatment. */
@@ -879,6 +951,17 @@ public class InlineDictationViewModel @Inject constructor(
 
         /** Same poll interval as [PromptComposerViewModel.SAMPLE_INTERVAL_MS]. */
         public const val SAMPLE_INTERVAL_MS: Long = 50L
+
+        /**
+         * Issue #957 (#928 D1): the maximum time [onCleared] will wait for the
+         * Whisper-path `audioRecorder.stop()` to complete before abandoning the
+         * stuck worker. Generous enough that a healthy stop (which drains the
+         * capture buffer and joins a live thread) always finishes inside it, but
+         * small enough that a wedged capture thread cannot turn teardown into an
+         * ANR. The Android ANR threshold is 5s; 750ms keeps Main responsive with
+         * wide margin.
+         */
+        public const val ONCLEARED_STOP_BUDGET_MS: Long = 750L
 
         /**
          * Issue #452: hint surfaced via [UiState.error] when a recording is

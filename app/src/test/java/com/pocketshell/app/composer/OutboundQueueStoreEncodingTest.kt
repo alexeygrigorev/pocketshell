@@ -71,6 +71,34 @@ class OutboundQueueStoreEncodingTest {
     }
 
     @Test
+    fun encodeDecodeRoundTripsSendKey() {
+        // Issue #961: the logical-send coalesce key must survive process death so
+        // a re-Send after app restart still coalesces onto the persisted row.
+        val items = listOf(
+            OutboundItem(
+                id = "id-sk",
+                sessionKey = "sessA",
+                cleanText = "deploy now",
+                state = OutboundState.Failed,
+                createdAtMs = 1L,
+                sendKey = "abc123def456",
+            ),
+        )
+        val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
+        assertEquals(items, decoded)
+        assertEquals("abc123def456", decoded.single().sendKey)
+    }
+
+    @Test
+    fun decodeLegacyRowsWithoutSendKeyDefaultToEmpty() {
+        // Issue #961: pre-sendKey rows ended at agentKind (field 11). They must
+        // decode to an empty sendKey (never-coalesce), not a malformed row.
+        val raw = "id-legacy\tx\t1\tQueued\t100\t\t0\t\t\t%0\tRawBytes\tclaude"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+        assertEquals("", decoded.sendKey)
+    }
+
+    @Test
     fun decodeEmptyStringIsEmptyList() {
         assertTrue(decodeOutboundItems("sessA", "").isEmpty())
     }

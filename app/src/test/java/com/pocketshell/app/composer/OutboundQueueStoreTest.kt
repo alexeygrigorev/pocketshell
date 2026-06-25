@@ -70,11 +70,26 @@ class OutboundQueueStoreTest {
     }
 
     @Test
-    fun twoSeparateEnqueuesGetDistinctIdsAndAreTwoItems() {
+    fun twoDistinctContentEnqueuesGetDistinctIdsAndAreTwoItems() {
         val store = store()
-        val a = store.enqueue("sessA", "one")
-        val b = store.enqueue("sessA", "two")
+        // Issue #961: distinct LOGICAL prompts (distinct sendKey) still mint
+        // distinct rows — the coalesce only collapses a re-send of the SAME
+        // logical prompt while its row is still un-delivered.
+        val a = store.enqueue("sessA", "one", sendKey = "key-one")
+        val b = store.enqueue("sessA", "two", sendKey = "key-two")
         assertFalse("distinct taps mint distinct ids", a.id == b.id)
+        assertEquals(2, store.itemsFor("sessA").size)
+    }
+
+    @Test
+    fun enqueueOfEmptySendKeyNeverCoalesces_eachIsItsOwnRow() {
+        val store = store()
+        // Issue #961: an empty sendKey is the legacy / no-logical-key path — it
+        // must NEVER coalesce, so two same-content empty-key enqueues stay two
+        // rows (the store contract for callers that do not supply a key).
+        val a = store.enqueue("sessA", "same text")
+        val b = store.enqueue("sessA", "same text")
+        assertFalse("empty sendKey must not coalesce", a.id == b.id)
         assertEquals(2, store.itemsFor("sessA").size)
     }
 
@@ -110,6 +125,103 @@ class OutboundQueueStoreTest {
         val rearmed = store.enqueueExisting(store.item(item.id)!!)
         assertEquals(OutboundState.Queued, rearmed.state)
         assertEquals(1, store.itemsFor("sessA").size)
+    }
+
+    // --- Issue #961: logical-send coalesce-on-enqueue ----------------------
+
+    @Test
+    fun enqueueOfSameSendKeyWhilePendingCoalescesToOneRow() {
+        val store = store()
+        // First Send: a Queued row with a logical key.
+        val first = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+
+        // A second Send of the SAME logical prompt while the first is still
+        // un-delivered must COALESCE to the existing row, not mint a second.
+        val second = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        assertEquals("same-sendKey re-send must coalesce to the SAME row", first.id, second.id)
+        assertEquals("coalesce must not add a second row", 1, store.itemsFor("sessA").size)
+    }
+
+    @Test
+    fun enqueueOfSameSendKeyAfterFailureReArmsTheSameRow_theDropReconnectCase() {
+        val store = store()
+        // The reported scenario, at the store level: row A enqueued + claimed +
+        // failed (drop). It is left Failed, still queued/retryable.
+        val first = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        store.claimNext("sessA")
+        store.markFailed(first.id, "link dropped")
+        assertEquals(OutboundState.Failed, store.item(first.id)!!.state)
+
+        // The user re-Sends the restored draft (NEW enqueue, same logical key).
+        // Today this minted a second deliverable row → double-send on flush.
+        // It must instead RE-ARM the existing Failed row back to Queued.
+        val second = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        assertEquals("re-Send must coalesce onto the existing row", first.id, second.id)
+        assertEquals("must be exactly ONE row, not two", 1, store.itemsFor("sessA").size)
+        assertEquals(OutboundState.Queued, store.item(first.id)!!.state)
+
+        // Reconnect auto-flush: exactly one Queued row → exactly one delivery.
+        val claimed = store.claimNext("sessA")
+        assertEquals(first.id, claimed!!.id)
+        assertTrue(store.markDelivered(first.id))
+        assertNull("no second row to flush after the one delivery", store.claimNext("sessA"))
+        assertEquals(0, store.itemsFor("sessA").size)
+    }
+
+    @Test
+    fun enqueueOfDifferentSendKeyStillMintsASecondRow() {
+        val store = store()
+        store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        // A genuinely-different prompt (different key) must still make a row.
+        val other = store.enqueue("sessA", "rollback", sendKey = "logical-2")
+        assertEquals(2, store.itemsFor("sessA").size)
+        assertEquals(OutboundState.Queued, store.item(other.id)!!.state)
+    }
+
+    @Test
+    fun enqueueOfSameSendKeyAfterDeliveryMintsAFreshRow() {
+        val store = store()
+        val first = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        store.claimNext("sessA")
+        // Deliver + prune the first logical send.
+        assertTrue(store.markDelivered(first.id))
+        assertEquals(0, store.itemsFor("sessA").size)
+
+        // An intentional identical send AFTER delivery is a brand-new prompt —
+        // the delivered row was pruned, so there is nothing to coalesce into.
+        val second = store.enqueue("sessA", "deploy now", sendKey = "logical-1")
+        assertFalse("a post-delivery identical send is a fresh row", first.id == second.id)
+        assertEquals(1, store.itemsFor("sessA").size)
+    }
+
+    @Test
+    fun enqueueExistingWithFreshIdCoalescesOnSendKey_theSidecarPath() {
+        val store = store()
+        // The sidecar/attachment path mints a NEW id on every send and calls
+        // enqueueExisting, so the id branch never fires — coalesce on sendKey.
+        val first = OutboundItem(
+            id = "id-A",
+            sessionKey = "sessA",
+            cleanText = "with file",
+            createdAtMs = 1L,
+            sendKey = "logical-att",
+        )
+        store.enqueueExisting(first)
+        store.claimNext("sessA")
+        store.markFailed("id-A", "drop")
+
+        val second = OutboundItem(
+            id = "id-B", // brand-new id, same logical prompt
+            sessionKey = "sessA",
+            cleanText = "with file",
+            createdAtMs = 2L,
+            sendKey = "logical-att",
+        )
+        val coalesced = store.enqueueExisting(second)
+        assertEquals("fresh-id re-send must coalesce onto the existing row", "id-A", coalesced.id)
+        assertEquals(1, store.itemsFor("sessA").size)
+        assertEquals(OutboundState.Queued, store.item("id-A")!!.state)
+        assertNull("the throwaway id must not have been stored", store.item("id-B"))
     }
 
     // --- The exactly-once heart: two concurrent claims, one delivers -------

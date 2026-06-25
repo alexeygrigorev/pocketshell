@@ -3905,6 +3905,156 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
     }
 
+    // --- Issue #961: drop+reconnect double-send (coalesce-on-enqueue) -------
+
+    @Test
+    fun reSendAfterFailedSendCoalescesToOneRowAndDeliversExactlyOnce() = runTest {
+        // Issue #961 — THE REPORTED CASE (drop+reconnect double-send).
+        // Connected → Send (row A, InFlight) → drop fails the send
+        // (restoreFailedSend: row A Failed, sendInFlight reset, draft restored)
+        // → user re-Sends the restored draft → deliver → reconnect auto-flush.
+        //
+        // RED on base: the re-Send minted row B (new UUID, same text), so the
+        // queue held TWO rows (A Failed + B). Delivering B pruned it, then the
+        // reconnect auto-flush claimed the leftover A and delivered the prompt a
+        // SECOND time → TWO distinct delivered ids.
+        // GREEN: the re-Send coalesces onto A → ONE row ever, ONE delivery.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("deploy now")
+
+        // 1) First Send → row A goes in-flight.
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        val firstRequest = sent.single()
+        assertEquals(1, vm.outboundQueueItems.value.size)
+
+        // 2) The link drops mid-send → the dispatcher restores the failed send.
+        //    Row A is left Failed (still queued/retryable), sendInFlight reset,
+        //    and the draft is restored to "deploy now".
+        vm.restoreFailedSend(firstRequest, message = "Not sent. Reconnect, then send again or discard.")
+        assertEquals("deploy now", vm.uiState.value.draft)
+        assertEquals(OutboundState.Failed, queue.item(firstRequest.outboundQueueItemId!!)!!.state)
+
+        // 3) The user re-Sends the restored draft (the banner says "send again").
+        //    The re-Send itself emits a SendRequest for the (coalesced) row.
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        // The coalesce: STILL exactly ONE row — no duplicate deliverable row.
+        assertEquals(
+            "re-Send of the restored draft must coalesce — exactly ONE queued row",
+            1,
+            queue.itemsFor("1/session-a").size,
+        )
+
+        // 4) Deliver the re-Send, then drive reconnect auto-flush passes. Count
+        //    every distinct queue row that ever reaches delivery.
+        val deliveredIds = mutableSetOf<String>()
+        sent.last().outboundQueueItemId?.let { deliveredIds += it }
+        vm.markSendDelivered(sent.last())
+        advanceUntilIdle()
+
+        repeat(3) {
+            val drained = vm.retryNextOutboundItem()
+            advanceUntilIdle()
+            if (drained != null) {
+                sent.last().outboundQueueItemId?.let { deliveredIds += it }
+                vm.markSendDelivered(sent.last())
+                advanceUntilIdle()
+            }
+        }
+
+        assertEquals(
+            "the prompt must be delivered EXACTLY ONCE, not twice — deliveries: $deliveredIds",
+            1,
+            deliveredIds.size,
+        )
+        assertTrue("queue fully drained", queue.itemsFor("1/session-a").isEmpty())
+    }
+
+    @Test
+    fun reSendOfADifferentPromptStillMintsASecondRow() = runTest {
+        // Issue #961 — class coverage: a genuinely different prompt must NOT be
+        // swallowed by the coalesce. After a failed send, typing + sending a
+        // DIFFERENT prompt makes a second row (two distinct logical sends).
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.onDraftChange("deploy now")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        vm.restoreFailedSend(sent.single(), message = "down")
+
+        // A different prompt this time.
+        vm.onDraftChange("rollback")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        assertEquals(
+            "a different prompt must still make a second row",
+            2,
+            queue.itemsFor("1/session-a").size,
+        )
+    }
+
+    @Test
+    fun reconnectStormReSendDeliversExactlyOnce() = runTest {
+        // Issue #961 — class coverage: reconnect-storm. After a failed send and
+        // a re-Send (coalesced), MULTIPLE reconnect auto-flush passes must still
+        // deliver the prompt exactly once (the per-row send-once + the dedup
+        // together). Repeated retryNextOutboundItem calls after delivery return
+        // null — they can never re-deliver a pruned row.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("deploy now")
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        vm.restoreFailedSend(sent.single(), message = "down")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        assertEquals(1, queue.itemsFor("1/session-a").size)
+
+        // The re-Send emitted its own request — deliver it.
+        val deliveries = mutableSetOf<String>()
+        sent.last().outboundQueueItemId?.let { deliveries += it }
+        vm.markSendDelivered(sent.last())
+        advanceUntilIdle()
+
+        // Storm: fire several flush passes. None may re-deliver the pruned row.
+        repeat(5) {
+            val claimed = vm.retryNextOutboundItem()
+            advanceUntilIdle()
+            if (claimed != null) {
+                sent.last().outboundQueueItemId?.let { deliveries += it }
+                vm.markSendDelivered(sent.last())
+                advanceUntilIdle()
+            }
+        }
+
+        assertEquals("reconnect-storm must still deliver exactly once", 1, deliveries.size)
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+    }
+
     @Test
     fun requestSendAppendsAttachmentSuffixToSentPromptAndClearsChips() = runTest {
         // Issue #544: the "Attached files:" suffix is composed ONLY at SEND

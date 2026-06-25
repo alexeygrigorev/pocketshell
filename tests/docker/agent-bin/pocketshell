@@ -451,6 +451,473 @@ case "${1:-}" in
     fi
     exit 0
     ;;
+  push)
+    # Issue #859 Slice A — the agent->app typed-card feed transport, made REAL
+    # in the deterministic fixture so the connected emulator+Docker journey
+    # exercises the SAME warm-session exec path the device hits (D21), not a
+    # happy unit proxy. This mirrors the observable contract of the real Python
+    # CLI (tools/pocketshell/src/pocketshell/cards.py):
+    #
+    #   * `pocketshell push checklist --session S [--title T] [--id ID]
+    #       --item "a" --item "b" ...`  -> writes/replaces the per-session card
+    #     store. Item ids are `<slug>-<index>` (slug = lowercase ascii, `-`-
+    #     joined, <=48 chars; index = the 0-based position in the --item list),
+    #     EXACTLY matching cards.py `_slug` + `parse_checklist_markdown`. A re-
+    #     push of the same `--id` is a FULL replace (hard-cut, like cards.py
+    #     `upsert_card`).
+    #   * `pocketshell push get --json --session S` -> emits the app's contract
+    #     `{"session":S,"cards":[{id,type,title?,created_at,updated_at,
+    #       body:{items:[{id,text}]},state:{checked:[...]}}]}` — the exact JSON
+    #     SessionCardsRemoteSource.parseFeed reads. (No --json => human/YAML-ish.)
+    #   * `pocketshell push check --id ID --item ITEM --done|--undone
+    #       --session S` -> ticks/unticks one item in `state.checked` (the app's
+    #     toggle path), like cards.py `apply_interaction`. Unknown id/item -> 65.
+    #   * `pocketshell push status [--json] --session S` -> the agent's read-back
+    #     of the human's ticks (cards.py `push status`).
+    #
+    # The store is per-session JSON under
+    # `${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}/<session>.json`,
+    # mode 0600 / dir 0700 (the cards.py private-write convention). The real CLI
+    # persists YAML and emits JSON for the app; the app ONLY ever reads JSON, so
+    # a JSON-backed fixture store is faithful to the app's exact contract while
+    # staying parseable in POSIX `/bin/sh` (no python/yaml in this Alpine image).
+    shift
+    push_sub="${1:-}"
+    shift 2>/dev/null || true
+
+    push_cards_dir="${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}"
+    push_now="$(date -u +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null || printf '1970-01-01T00:00:00+00:00')"
+
+    # `tmux display-message -p '#S'` auto-detection when --session is omitted and
+    # $TMUX is set, mirroring cards.py detect_session. The journey always passes
+    # --session, but the agent-CLI happy path relies on auto-detect.
+    push_detect_session() {
+      if [ -n "${1:-}" ]; then
+        printf '%s' "$1"
+        return 0
+      fi
+      if [ -n "${TMUX:-}" ]; then
+        tmux display-message -p '#S' 2>/dev/null && return 0
+      fi
+      return 1
+    }
+
+    # JSON-escape a string for embedding in a double-quoted JSON value.
+    push_json_escape() {
+      printf '%s' "$1" | awk '
+        BEGIN { ORS="" }
+        {
+          s=$0
+          gsub(/\\/, "\\\\", s)
+          gsub(/"/, "\\\"", s)
+          gsub(/\t/, "\\t", s)
+          if (NR>1) printf "\\n"
+          printf "%s", s
+        }'
+    }
+
+    # Stable item id = `<slug>-<index>` (cards.py _slug + the parse index).
+    push_slug() {
+      printf '%s' "$1" | awk '
+        {
+          s=tolower($0)
+          gsub(/[^a-z0-9]+/, "-", s)
+          sub(/^-+/, "", s); sub(/-+$/, "", s)
+          if (length(s) > 48) s=substr(s, 1, 48)
+          if (s == "") s="item"
+          printf "%s", s
+        }'
+    }
+
+    push_session_file() {
+      printf '%s/%s.json' "$push_cards_dir" "$1"
+    }
+
+    case "$push_sub" in
+      checklist)
+        push_title=""
+        push_card_id="checklist"
+        push_session_arg=""
+        push_items=""   # newline-separated raw item texts
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --title) push_title="${2:-}"; shift 2 ;;
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --item) push_items="${push_items}${2:-}
+"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        # Build the items JSON array. The store JSON IS the app contract object.
+        push_items_json=""
+        push_count=0
+        push_index=0
+        # NOTE: iterate preserving order; a trailing empty line from the
+        # accumulation is skipped.
+        OLDIFS="$IFS"
+        IFS='
+'
+        for push_raw in $push_items; do
+          [ -n "$push_raw" ] || { push_index=$((push_index + 1)); continue; }
+          push_text="$(printf '%s' "$push_raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          [ -n "$push_text" ] || { push_index=$((push_index + 1)); continue; }
+          push_slug_val="$(push_slug "$push_text")"
+          push_item_id="${push_slug_val}-${push_index}"
+          push_text_esc="$(push_json_escape "$push_text")"
+          [ "$push_count" -gt 0 ] && push_items_json="${push_items_json},"
+          push_items_json="${push_items_json}{\"id\":\"${push_item_id}\",\"text\":\"${push_text_esc}\"}"
+          push_count=$((push_count + 1))
+          push_index=$((push_index + 1))
+        done
+        IFS="$OLDIFS"
+        if [ "$push_count" -eq 0 ]; then
+          printf 'no checklist items: pass --item (or pipe markdown on stdin).\n' >&2
+          exit 64
+        fi
+
+        # Read any existing cards for this session and drop the one we replace,
+        # preserving the others (hard-cut replace of THIS card id only).
+        push_file="$(push_session_file "$push_session")"
+        # Compose the title key if provided.
+        push_title_json=""
+        if [ -n "$push_title" ]; then
+          push_title_json="\"title\":\"$(push_json_escape "$push_title")\","
+        fi
+        push_card="{\"id\":\"$(push_json_escape "$push_card_id")\",\"type\":\"checklist\",\"created_at\":\"${push_now}\",\"updated_at\":\"${push_now}\",${push_title_json}\"body\":{\"items\":[${push_items_json}]},\"state\":{\"checked\":[]}}"
+
+        # Preserve any OTHER existing cards (different id) verbatim. Extract them
+        # from the existing store with a small python-free splitter.
+        push_other_cards="$(
+          if [ -f "$push_file" ]; then
+            awk -v want="$push_card_id" '
+              BEGIN { depth=0; incards=0; buf=""; first=1; out="" }
+              {
+                line=line $0 "\n"
+              }
+              END {
+                # Parse the cards array char-by-char, emitting top-level card
+                # objects whose `"id":"..."` != want.
+                s=line
+                n=length(s)
+                # locate `"cards":[`
+                idx=index(s, "\"cards\":[")
+                if (idx == 0) { printf ""; exit }
+                i=idx + length("\"cards\":[")
+                arrdepth=1
+                obj=""; objdepth=0; collecting=0
+                res=""
+                while (i <= n) {
+                  c=substr(s, i, 1)
+                  if (collecting == 0) {
+                    if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                    else if (c == "]") { break }
+                  } else {
+                    obj=obj c
+                    if (c == "{") objdepth++
+                    else if (c == "}") {
+                      objdepth--
+                      if (objdepth == 0) {
+                        # got one card object in obj
+                        idpos=match(obj, /"id"[ ]*:[ ]*"[^"]*"/)
+                        cid=""
+                        if (idpos > 0) {
+                          frag=substr(obj, idpos, RLENGTH)
+                          sub(/"id"[ ]*:[ ]*"/, "", frag)
+                          sub(/".*/, "", frag)
+                          cid=frag
+                        }
+                        if (cid != want) {
+                          if (res != "") res=res ","
+                          res=res obj
+                        }
+                        collecting=0; obj=""
+                      }
+                    }
+                  }
+                  i++
+                }
+                printf "%s", res
+              }
+            ' "$push_file"
+          fi
+        )"
+
+        push_all_cards="$push_card"
+        if [ -n "$push_other_cards" ]; then
+          push_all_cards="${push_other_cards},${push_card}"
+        fi
+
+        mkdir -p "$push_cards_dir" 2>/dev/null || true
+        chmod 700 "$push_cards_dir" 2>/dev/null || true
+        push_tmp="${push_file}.tmp.$$"
+        printf '{"session":"%s","cards":[%s]}\n' "$(push_json_escape "$push_session")" "$push_all_cards" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        printf "checklist '%s' (%d items) -> session '%s' (%s)\n" "$push_card_id" "$push_count" "$push_session" "$push_file"
+        exit 0
+        ;;
+      get)
+        push_as_json=0
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) push_as_json=1; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        push_file="$(push_session_file "$push_session")"
+        if [ "$push_as_json" -eq 1 ]; then
+          if [ -f "$push_file" ]; then
+            cat "$push_file"
+          else
+            printf '{"session":"%s","cards":[]}\n' "$(push_json_escape "$push_session")"
+          fi
+          exit 0
+        fi
+        if [ -f "$push_file" ]; then
+          cat "$push_file"
+        else
+          printf '(no cards for session %s)\n' "$push_session"
+        fi
+        exit 0
+        ;;
+      status)
+        push_as_json=0
+        push_session_arg=""
+        push_only_id=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --json) push_as_json=1; shift ;;
+            --id) push_only_id="${2:-}"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          if [ "$push_as_json" -eq 1 ]; then
+            printf '{"session":"%s","status":[]}\n' "$(push_json_escape "$push_session")"
+          else
+            printf '(no cards for session %s)\n' "$push_session"
+          fi
+          exit 0
+        fi
+        # Re-emit each card's {id,type,state} from the store JSON. Use the same
+        # awk card-splitter and pull the id/type/state fragments.
+        push_status_body="$(
+          awk -v want="$push_only_id" -v session="$push_session" '
+            BEGIN { res="" }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf ""; exit }
+              i=idx + length("\"cards\":["); collecting=0; obj=""; objdepth=0
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") break
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""; ctype=""; cstate="{}"
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (match(obj, /"type"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"type"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); ctype=f
+                      }
+                      sp=index(obj, "\"state\":")
+                      if (sp > 0) {
+                        rest=substr(obj, sp + length("\"state\":"))
+                        # capture the balanced {...} of state
+                        d=0; st=""; started=0
+                        for (k=1; k<=length(rest); k++) {
+                          ch=substr(rest, k, 1)
+                          if (ch == "{") { d++; started=1 }
+                          st=st ch
+                          if (ch == "}") { d--; if (started && d==0) break }
+                        }
+                        cstate=st
+                      }
+                      if (want == "" || cid == want) {
+                        if (res != "") res=res ","
+                        res=res "{\"id\":\"" cid "\",\"type\":\"" ctype "\",\"state\":" cstate "}"
+                      }
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              printf "%s", res
+            }
+          ' "$push_file"
+        )"
+        if [ "$push_as_json" -eq 1 ]; then
+          printf '{"session":"%s","status":[%s]}\n' "$(push_json_escape "$push_session")" "$push_status_body"
+        else
+          printf 'session %s:\n%s\n' "$push_session" "$push_status_body"
+        fi
+        exit 0
+        ;;
+      check)
+        push_card_id=""
+        push_item_id=""
+        push_done=1
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --item) push_item_id="${2:-}"; shift 2 ;;
+            --done) push_done=1; shift ;;
+            --undone) push_done=0; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_card_id" ] || [ -z "$push_item_id" ]; then
+          printf 'push check requires --id and --item.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+          exit 65
+        fi
+        # Mutate state.checked for the named card+item. Faithful to cards.py
+        # apply_interaction: unknown card id or unknown item id -> error (65).
+        push_new="$(
+          awk -v want="$push_card_id" -v item="$push_item_id" -v done="$push_done" '
+            BEGIN { found_card=0; found_item=0 }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              # Split the whole document into a prefix `{"session":...,"cards":[`,
+              # the card objects, and the suffix `]}`.
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf "%s", s; exit }
+              prefix=substr(s, 1, idx + length("\"cards\":[") - 1)
+              i=idx + length("\"cards\":[")
+              collecting=0; obj=""; objdepth=0; cards=""; suffix=""
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") { suffix=substr(s, i); break }
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (cid == want) {
+                        found_card=1
+                        # confirm the item id exists in body.items
+                        if (obj ~ ("\"id\":\"" item "\"")) {
+                          # locate item by checking body items only is overkill;
+                          # the items + checked both use "id":"..." — but the
+                          # checked entries are bare strings. A body item match
+                          # is enough to confirm existence.
+                          found_item=1
+                        }
+                        # rebuild state.checked
+                        sp=index(obj, "\"state\":")
+                        head=substr(obj, 1, sp - 1)
+                        rest=substr(obj, sp)
+                        # extract existing checked list contents
+                        cp=index(rest, "\"checked\":[")
+                        chk=""
+                        if (cp > 0) {
+                          after=substr(rest, cp + length("\"checked\":["))
+                          # read up to the closing ]
+                          end=index(after, "]")
+                          chk=substr(after, 1, end - 1)
+                        }
+                        # split chk into existing ids (quoted, comma-sep)
+                        nids=0; split("", ids)
+                        tmp=chk
+                        while (match(tmp, /"[^"]*"/)) {
+                          v=substr(tmp, RSTART + 1, RLENGTH - 2)
+                          ids[++nids]=v
+                          tmp=substr(tmp, RSTART + RLENGTH)
+                        }
+                        present=0
+                        for (j=1;j<=nids;j++) if (ids[j]==item) present=1
+                        newchk=""
+                        if (done == "1") {
+                          for (j=1;j<=nids;j++) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" ids[j] "\"" }
+                          if (!present) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" item "\"" }
+                        } else {
+                          for (j=1;j<=nids;j++) if (ids[j]!=item) { if (newchk!="") newchk=newchk ","; newchk=newchk "\"" ids[j] "\"" }
+                        }
+                        obj=head "\"state\":{\"checked\":[" newchk "]}}"
+                      }
+                      if (cards != "") cards=cards ","
+                      cards=cards obj
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              if (found_card == 0) { printf "__NO_CARD__"; exit }
+              if (found_item == 0) { printf "__NO_ITEM__"; exit }
+              printf "%s%s%s", prefix, cards, suffix
+            }
+          ' "$push_file"
+        )"
+        case "$push_new" in
+          __NO_CARD__)
+            printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+            exit 65 ;;
+          __NO_ITEM__)
+            printf "checklist: unknown item id '%s'\n" "$push_item_id" >&2
+            exit 65 ;;
+        esac
+        push_tmp="${push_file}.tmp.$$"
+        printf '%s' "$push_new" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        if [ "$push_done" -eq 1 ]; then
+          printf "%s: item '%s' checked\n" "$push_card_id" "$push_item_id"
+        else
+          printf "%s: item '%s' unchecked\n" "$push_card_id" "$push_item_id"
+        fi
+        exit 0
+        ;;
+      *)
+        printf 'pocketshell push fixture supports: checklist|get|status|check\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
 esac
 
 printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind\n' >&2

@@ -920,6 +920,39 @@ JOURNEY_CLASSES=(
   # assumeTrue / assumeFalse(isRunningOnCi()) on the load-bearing assertions —
   # process.md F3 / D33). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"
+
+  # ===========================================================================
+  # Issue #949 (epic #859 Slice A — host→app card push, Phase-1 verify-gone,
+  # D33). Kept in its OWN block to minimize merge friction with the sibling
+  # blocks above.
+  #
+  # Phase-1 (the host CLI `pocketshell push checklist|get|check|status` + the
+  # app's SessionCardsRemoteSource + the checklist chip / bottom-sheet) shipped
+  # code-complete on `main` but WITHOUT an end-to-end emulator+Docker acceptance
+  # journey, so the real warm-session card-push path was UNPROVEN (D33). This
+  # journey closes that gap and gate-wires it per-push so the transport cannot
+  # silently regress.
+  #
+  # It exercises the REAL path, not a unit proxy: a host (the deterministic
+  # agents fixture) runs `pocketshell push checklist --session <s> --item …`
+  # over a real SSH session to write the per-session card store; the PRODUCTION
+  # SessionCardsRemoteSource.getCards reads it back over the SAME warm session
+  # (D21) and parses a ChecklistCard; the PRODUCTION checklist chip +
+  # ChecklistCardsContent render the real feed and the test asserts the card +
+  # its items ACTUALLY appear; tapping an item drives the PRODUCTION
+  # setChecklistItemChecked tick exec, and re-reading the host (`push status` +
+  # getCards) confirms the tick ROUND-TRIPPED (untick too). The
+  # readPathBroken_wrongSessionName_yieldsEmptyFeed_redGuard case is the
+  # inverted RED→GREEN guard (D32 G10) that pins the load-bearing
+  # "card-reaches-the-feed" assertions. The fixture `pocketshell push` verb is
+  # now faithful to cards.py (item ids <slug>-<index>, full-replace on re-push,
+  # the JSON `get` contract the app reads, unknown-id error). It uses ONLY the
+  # deterministic agents:2222 fixture (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222,
+  # or the pool-allocated port under `--pool`) that tests.yml already brings up
+  # with `up -d --build` (so CI gets the new `push` verb, not a stale image) —
+  # no new Docker service/port, no toxiproxy — and does NOT self-skip on CI. It
+  # lives under com.pocketshell.app.cards, so it carries its FQCN directly.
+  "com.pocketshell.app.cards.SessionChecklistPushJourneyDockerTest"
 )
 
 echo "=========================================================="

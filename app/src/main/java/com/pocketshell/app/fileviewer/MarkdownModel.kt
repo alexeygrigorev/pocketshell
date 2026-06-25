@@ -53,6 +53,24 @@ internal sealed interface MarkdownBlock {
     /** A `>` block quote; [spans] is the inline content of the quoted text. */
     data class BlockQuote(val spans: List<InlineSpan>) : MarkdownBlock
 
+    /**
+     * A GitHub-flavored pipe table (issue #921).
+     *
+     * [header] is the single header row; [rows] are the body rows. Each cell is
+     * its own list of inline spans (so emphasis/code/links render inside cells).
+     * [alignments] mirrors the delimiter row (one entry per column) so the
+     * renderer can justify cells; columns with no explicit alignment are
+     * [Alignment.NONE].
+     */
+    data class Table(
+        val header: List<List<InlineSpan>>,
+        val alignments: List<Alignment>,
+        val rows: List<List<List<InlineSpan>>>,
+    ) : MarkdownBlock {
+        /** Per-column text justification derived from the `|---|:--:|` delimiter row. */
+        enum class Alignment { NONE, LEFT, CENTER, RIGHT }
+    }
+
     /** A thematic break (`---`, `***`, `___`). */
     data object HorizontalRule : MarkdownBlock
 }

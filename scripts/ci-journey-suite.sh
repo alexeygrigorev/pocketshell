@@ -881,6 +881,12 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#successTransferShowsDismissibleBanner"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
+  # ADDED (#921, D32 G9): rendered Markdown shows GFM pipe tables as laid-out
+  # cells, not raw `|---|---|` delimiter text. Drives the REAL FileViewerScaffold
+  # with a benchmark/report `.md` and HARD-asserts the table surface is present
+  # and the delimiter row is NOT shown as literal text. PURE Compose (no Docker /
+  # SSH / tmux / port — runs on the already-booted AVD), no self-skip.
+  "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"
   # ADDED (#885, D32 G9): the post-update "Host ready" success sheet must show
   # ONLY Continue — the "Open Usage" CTA (#117) was removed (hard cut, D22).
   # This connected test drives the REAL HostBootstrapSheet in its Success state

@@ -4,12 +4,17 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -26,6 +31,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -33,6 +39,9 @@ import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.PocketShellColors
 
 const val FILE_VIEWER_MARKDOWN_TAG = "fileViewerMarkdown"
+
+/** Test tag for a rendered Markdown pipe table (issue #921). */
+const val FILE_VIEWER_MARKDOWN_TABLE_TAG = "fileViewerMarkdownTable"
 
 /** The clickable-text URL annotation tag for Markdown links. */
 private const val MD_URL_TAG = "md_url"
@@ -66,6 +75,7 @@ internal fun MarkdownView(
                 is MarkdownBlock.CodeBlock -> CodeBlock(block)
                 is MarkdownBlock.ListBlock -> ListBlock(block)
                 is MarkdownBlock.BlockQuote -> BlockQuoteBlock(block)
+                is MarkdownBlock.Table -> TableBlock(block)
                 MarkdownBlock.HorizontalRule -> HorizontalRuleBlock()
             }
         }
@@ -169,6 +179,95 @@ private fun BlockQuoteBlock(block: MarkdownBlock.BlockQuote) {
                 .fillMaxWidth()
                 .padding(12.dp),
         )
+    }
+}
+
+/**
+ * Renders a GFM pipe table (issue #921) as laid-out cells: a tinted header row
+ * over equal-width body rows, hairline borders between cells, per-column
+ * justification from the delimiter row, and a horizontal scroll so a wide table
+ * stays readable. The header and each body row share the same column count
+ * (padded/truncated to the header width) so cells line up.
+ */
+@Composable
+private fun TableBlock(block: MarkdownBlock.Table) {
+    val columnCount = block.header.size.coerceAtLeast(1)
+    val hScroll = rememberScrollState()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .testTag(FILE_VIEWER_MARKDOWN_TABLE_TAG),
+    ) {
+        Column(
+            modifier = Modifier
+                .horizontalScroll(hScroll)
+                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp)),
+        ) {
+            // Header row.
+            TableRow(
+                cells = block.header,
+                columnCount = columnCount,
+                alignments = block.alignments,
+                isHeader = true,
+            )
+            // Body rows.
+            block.rows.forEach { row ->
+                Box(
+                    modifier = Modifier
+                        .height(1.dp)
+                        .fillMaxWidth()
+                        .background(PocketShellColors.BorderSoft),
+                )
+                TableRow(
+                    cells = row,
+                    columnCount = columnCount,
+                    alignments = block.alignments,
+                    isHeader = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TableRow(
+    cells: List<List<InlineSpan>>,
+    columnCount: Int,
+    alignments: List<MarkdownBlock.Table.Alignment>,
+    isHeader: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .height(IntrinsicSize.Min)
+            .then(if (isHeader) Modifier.background(PocketShellColors.SurfaceElev) else Modifier),
+    ) {
+        for (col in 0 until columnCount) {
+            if (col > 0) {
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(PocketShellColors.BorderSoft),
+                )
+            }
+            val spans = cells.getOrNull(col) ?: listOf(InlineSpan.Text(""))
+            val alignment = alignments.getOrNull(col) ?: MarkdownBlock.Table.Alignment.NONE
+            Text(
+                text = annotated(spans),
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                fontWeight = if (isHeader) FontWeight.SemiBold else FontWeight.Normal,
+                textAlign = when (alignment) {
+                    MarkdownBlock.Table.Alignment.CENTER -> TextAlign.Center
+                    MarkdownBlock.Table.Alignment.RIGHT -> TextAlign.End
+                    else -> TextAlign.Start
+                },
+                modifier = Modifier
+                    .width(140.dp)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
     }
 }
 

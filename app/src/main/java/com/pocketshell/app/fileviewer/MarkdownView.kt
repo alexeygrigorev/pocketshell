@@ -182,6 +182,14 @@ private fun BlockQuoteBlock(block: MarkdownBlock.BlockQuote) {
     }
 }
 
+// Genuine sub-ladder "micro role" geometry: an inline code/table tint band uses
+// a 3–6dp radius (design-system.md "Radius, Elevation, And Borders" — "Micro
+// role badges | 3-6dp"), smaller than the named ladder rungs (8/14/20/28dp).
+// 6dp matches the sibling CodeBlock tint; named here so it reads as one
+// intentional token rather than off-ladder drift. See docs/design-system.md.
+private val MarkdownTableBorderRadius = 6.dp
+private val MarkdownTableBorderShape = RoundedCornerShape(MarkdownTableBorderRadius)
+
 /**
  * Renders a GFM pipe table (issue #921) as laid-out cells: a tinted header row
  * over equal-width body rows, hairline borders between cells, per-column
@@ -202,7 +210,7 @@ private fun TableBlock(block: MarkdownBlock.Table) {
         Column(
             modifier = Modifier
                 .horizontalScroll(hScroll)
-                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(6.dp)),
+                .border(1.dp, PocketShellColors.BorderSoft, MarkdownTableBorderShape),
         ) {
             // Header row.
             TableRow(

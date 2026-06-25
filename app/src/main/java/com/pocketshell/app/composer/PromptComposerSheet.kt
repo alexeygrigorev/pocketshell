@@ -1781,6 +1781,15 @@ private fun DiscardRecordingButton(
     }
 }
 
+// Genuine sub-ladder component geometry: the composer's 44–48dp action pills
+// (Send / Stop / To-field / Lock) read as fully-rounded "pills", which needs a
+// half-height radius the named ladder rungs (8/14/20/28dp — design-system.md
+// "Radius, Elevation, And Borders") don't provide. 22dp is that pill radius for
+// this control height; named here (vs an inline literal) so it stays a single
+// intentional token rather than off-ladder drift. See docs/design-system.md.
+private val ComposerActionPillRadius = 22.dp
+private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
+
 /**
  * Issue #585: the deterministic hands-free LOCK affordance shown while
  * Recording but not yet locked. A single tap calls [onLockRecording] so the
@@ -1800,15 +1809,15 @@ private fun LockRecordingButton(
     Row(
         modifier = modifier
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(22.dp))
+            .clip(ComposerActionPillShape)
             .background(
                 color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(22.dp),
+                shape = ComposerActionPillShape,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.Accent,
-                shape = RoundedCornerShape(22.dp),
+                shape = ComposerActionPillShape,
             )
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Lock recording to continue hands-free" }

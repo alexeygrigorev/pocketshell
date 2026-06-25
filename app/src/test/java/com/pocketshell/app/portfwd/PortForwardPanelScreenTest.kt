@@ -3,7 +3,9 @@ package com.pocketshell.app.portfwd
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PortForwardPanelScreenTest {
@@ -206,6 +208,90 @@ class PortForwardPanelScreenTest {
         )
 
         assertEquals(false, shouldClearPendingForwardAutoOpen(state, remotePort = 5173))
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #931: LazyColumn duplicate-key crash guard.
+    //
+    // The captured crash (`IllegalArgumentException: Key "22" already used`)
+    // happened because the row list was keyed on `it.remotePort`. These tests
+    // pin the contract `tunnelRowKeys` exists to uphold: NO duplicate keys, no
+    // matter what the data model produces — the exact precondition LazyColumn
+    // requires and the thing the crash violated.
+    //
+    // The full-composition reproduction of the actual crash lives in
+    // `app/src/androidTest/.../PortForwardDuplicateKeyCrashTest.kt`, which
+    // renders the real `PortForwardPanelScreen` LazyColumn with these same
+    // lists. These JVM tests are the fast, gate-free (Unit job) backstop on the
+    // load-bearing invariant — assert the keys are unique, which is what stops
+    // the crash.
+    // -------------------------------------------------------------------
+
+    @Test
+    fun `tunnelRowKeys produces unique keys for two forwards sharing a remote port`() {
+        // The exact reported shape: two remote-22 forwards (the "Key 22 already
+        // used" crash). Old `key = { it.remotePort }` => [22, 22] => crash.
+        val tunnels = listOf(
+            forwardingTunnel(remotePort = 22, localPort = 10022),
+            forwardingTunnel(remotePort = 22, localPort = 10023),
+        )
+
+        val keys = tunnelRowKeys(tunnels)
+
+        assertEquals("one key per row", tunnels.size, keys.size)
+        assertEquals("no duplicate keys", keys.size, keys.toSet().size)
+        assertNotEquals(keys[0], keys[1])
+    }
+
+    @Test
+    fun `tunnelRowKeys produces unique keys for two forwards sharing a local port`() {
+        // Class coverage: the dedup must also survive a duplicate LOCAL port
+        // (distinct remote ports remapped onto the same loopback port).
+        val tunnels = listOf(
+            forwardingTunnel(remotePort = 3000, localPort = 18080),
+            forwardingTunnel(remotePort = 8080, localPort = 18080),
+        )
+
+        val keys = tunnelRowKeys(tunnels)
+
+        assertEquals(keys.size, keys.toSet().size)
+        assertNotEquals(keys[0], keys[1])
+    }
+
+    @Test
+    fun `tunnelRowKeys produces unique keys when remote and local ports both collide`() {
+        // The worst case the composite alone cannot disambiguate: two rows with
+        // identical remote AND local port AND status. The occurrence counter
+        // still has to keep them apart.
+        val tunnels = listOf(
+            forwardingTunnel(remotePort = 22, localPort = 22),
+            forwardingTunnel(remotePort = 22, localPort = 22),
+            forwardingTunnel(remotePort = 22, localPort = 22),
+        )
+
+        val keys = tunnelRowKeys(tunnels)
+
+        assertEquals(3, keys.size)
+        assertEquals("all three rows keep distinct keys", 3, keys.toSet().size)
+    }
+
+    @Test
+    fun `tunnelRowKeys returns empty list for empty input`() {
+        // Class coverage: the empty list must not blow up.
+        assertTrue(tunnelRowKeys(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun `tunnelRowKeys is stable across recompositions for the same list`() {
+        // Stable keys are what preserve item identity/animation; recomputing the
+        // keys for an unchanged list must yield the same keys.
+        val tunnels = listOf(
+            forwardingTunnel(remotePort = 22, localPort = 10022),
+            forwardingTunnel(remotePort = 22, localPort = 10023),
+            forwardingTunnel(remotePort = 3000, localPort = 3000),
+        )
+
+        assertEquals(tunnelRowKeys(tunnels), tunnelRowKeys(tunnels))
     }
 
     private fun forwardingTunnel(remotePort: Int, localPort: Int = remotePort): TunnelInfo =

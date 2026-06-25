@@ -62,6 +62,20 @@ jobs:
           chmod +x scripts/check-test-validity.sh
           scripts/check-test-validity.sh
 
+      # Issue #848: old journey harness regression guard. Per-push proof
+      # journeys listed by scripts/ci-journey-suite.sh that launch MainActivity
+      # should use the launch-owned harness
+      # createAndroidComposeRule<MainActivity>() + SeedBeforeLaunchRule, not the
+      # #743/#788 createEmptyComposeRule() + manual ActivityScenario.launch
+      # shape, unless the file carries a local JOURNEY_HARNESS_JUSTIFIED reason.
+      # Cheap static shell guard; current main's known legacy classes are
+      # baselined so this does not duplicate the open #911 migration.
+      - name: CI journey harness guard (issue #848)
+        run: |
+          chmod +x scripts/check-ci-journey-harness.sh scripts/check-ci-journey-harness-selftest.sh
+          scripts/check-ci-journey-harness.sh
+          scripts/check-ci-journey-harness-selftest.sh
+
       # Issue #865: raw-component drift guardrail. After the #756 design-
       # consistency migrations landed (#860/#861/#862/#863 — shared ConfirmDialog
       # / FormDialog / LoadingIndicator.Spinner / PocketShellButton own the
@@ -628,18 +642,40 @@ jobs:
         if: always()
         run: |
           summary="artifacts/ci-journey/summary.md"
+          first_failed_classes_file="artifacts/ci-journey/first-failed-classes.txt"
           first_timeout="false"
           first_failure="false"
+          first_failed_classes=""
           if [[ -f "$summary" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary"; then
             first_failure="true"
+            first_failed_classes="$(awk '
+              /^Failed BOTH attempts/ { capture=1; next }
+              capture && /^- / {
+                gsub(/`/, "")
+                sub(/^- /, "")
+                sub(/[[:space:]]+\(.*/, "")
+                print
+                next
+              }
+              capture && /^$/ { capture=0 }
+            ' "$summary" || true)"
           fi
           if [[ "$first_failure" != "true" && -f "$summary" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"; then
             first_timeout="true"
+          fi
+          if [[ -n "$first_failed_classes" ]]; then
+            printf '%s\n' "$first_failed_classes" > "$first_failed_classes_file"
+          else
+            rm -f "$first_failed_classes_file"
           fi
           echo "first_timeout=$first_timeout" >> "$GITHUB_OUTPUT"
           echo "first_failure=$first_failure" >> "$GITHUB_OUTPUT"
           echo "first summary timeout-only: $first_timeout"
           echo "first summary genuine failure: $first_failure"
+          if [[ -n "$first_failed_classes" ]]; then
+            echo "first summary failed class(es):"
+            printf '%s\n' "$first_failed_classes" | sed 's/^/  /'
+          fi
 
       # Preserve the first cold-boot attempt before a retry can overwrite the
       # shared artifacts/ci-journey summary or Gradle connected-test outputs.
@@ -745,18 +781,55 @@ jobs:
           first_timeout="${{ steps.journey_summary.outputs.first_timeout }}"
           first_failure="${{ steps.journey_summary.outputs.first_failure }}"
           summary="artifacts/ci-journey/summary.md"
+          first_failed_classes_file="artifacts/ci-journey/first-failed-classes.txt"
           echo "first attempt outcome:  $first"
           echo "retry attempt outcome:  ${retry:-<skipped>}"
           echo "first attempt conclusion:  $first_concl"
           echo "retry attempt conclusion:  ${retry_concl:-<skipped>}"
           echo "first summary timeout-only: ${first_timeout:-false}"
           echo "first summary genuine failure: ${first_failure:-false}"
+
+          retry_summary_is_timeout_only() {
+            [[ -f "$summary" ]] \
+              && ! grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary" \
+              && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"
+          }
+
+          retry_resolved_first_failures() {
+            [[ -s "$first_failed_classes_file" && -f "$summary" ]] || return 1
+            local resolved
+            resolved="$(awk '
+              /^Passed first try:/ || /^Recovered on retry/ { capture=1; next }
+              capture && /^- / {
+                gsub(/`/, "")
+                sub(/^- /, "")
+                sub(/[[:space:]]+\(.*/, "")
+                print
+                next
+              }
+              capture && /^$/ { capture=0 }
+            ' "$summary" || true)"
+            [[ -n "$resolved" ]] || return 1
+            local class_name
+            while IFS= read -r class_name; do
+              [[ -z "$class_name" ]] && continue
+              grep -Fxq "$class_name" <<< "$resolved" || return 1
+            done < "$first_failed_classes_file"
+            return 0
+          }
+
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
             exit 0
           fi
           if [[ "$retry" == "success" ]]; then
             echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
+            exit 0
+          fi
+          if [[ "${first_failure:-false}" == "true" ]] && retry_summary_is_timeout_only && retry_resolved_first_failures; then
+            timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
+            echo "::warning title=Emulator journey TIMEOUT after cleared first-attempt flake::The first cold boot wrote a JOURNEY_FAILED summary, but the retry cold boot passed the first-failed class(es) before later exhausting the suite budget (issue #835 / #470). Treating this as the timeout class, not a persistent journey regression. Class(es) cut short / not run:"
+            [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
             exit 0
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then

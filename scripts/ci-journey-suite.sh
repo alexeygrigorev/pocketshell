@@ -1505,6 +1505,13 @@ echo "=========================================================="
   echo
   echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
   echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
+  if [[ "${#PASSED_FIRST_TRY[@]}" -gt 0 ]]; then
+    echo
+    echo "Passed first try:"
+    for c in "${PASSED_FIRST_TRY[@]}"; do
+      echo "- \`$c\`"
+    done
+  fi
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -1547,7 +1554,8 @@ echo "=========================================================="
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
   if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
-        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
+        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" \
+        || "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -1564,6 +1572,9 @@ echo "=========================================================="
     fi
     if [[ "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\` (#871 agent-pane link-affordance off-main proof)"
+    fi
+    if [[ "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\` (#879 beyond-grace reattach-repaint proof)"
     fi
   fi
 } > "$SUMMARY"

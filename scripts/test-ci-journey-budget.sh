@@ -108,6 +108,33 @@ grep -q 'summary-missing.txt' "$WORKFLOW" \
 pass "(pre) #908 budget arithmetic pinned (${job_cap_secs}s job - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s slack)"
 pass "(pre) first-attempt diagnostics are preserved before emulator retry"
 
+# (pre) Every standalone proof that can make the suite red must also appear in
+# the Failed BOTH attempts summary. The workflow classifier only treats a first
+# attempt as a genuine failure when that section is present, so omissions can
+# incorrectly downgrade a proof failure followed by a retry timeout.
+failed_summary_block="$(awk '
+  /Failed BOTH attempts/ { capture=1 }
+  capture { print }
+  capture && /^  fi$/ { exit }
+' "$REAL_SUITE")"
+for proof_pair in \
+  'APPEND_BURST_STATUS:CORE_TERMINAL_APPEND_BURST_CLASS' \
+  'OUTPUT_BURST_IME_STATUS:CORE_TERMINAL_OUTPUT_BURST_IME_CLASS' \
+  'MULTICHUNK_SEED_STATUS:CORE_TERMINAL_MULTICHUNK_SEED_CLASS' \
+  'AGENT_LINK_AFFORDANCE_STATUS:CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS' \
+  'REATTACH_REPAINT_STATUS:CORE_TERMINAL_REATTACH_REPAINT_CLASS'
+do
+  status_var="${proof_pair%%:*}"
+  class_var="${proof_pair#*:}"
+  grep -q "\$$status_var\" == \"FAIL\"" "$REAL_SUITE" \
+    || fail "(pre) $status_var is not represented in the suite failure verdict"
+  grep -q "\$$status_var\" == \"FAIL\"" <<< "$failed_summary_block" \
+    || fail "(pre) $status_var is not represented in the Failed BOTH summary predicate"
+  grep -q "\$$class_var" <<< "$failed_summary_block" \
+    || fail "(pre) $class_var is not emitted in the Failed BOTH summary"
+done
+pass "(pre) every standalone proof failure is emitted under Failed BOTH attempts"
+
 # ---------------------------------------------------------------------------
 # Build a sandbox "repo root": a copy of the suite script + a stub gradlew that
 # SLEEPS (modelling a #470-stalling class) + stub scripts the suite shells out
@@ -200,6 +227,7 @@ classify() {
   local retry_concl="${5:-failure}"
   local first_timeout="${6:-}"
   local first_failure="${7:-false}"
+  local first_failed_classes="${8:-}"
   if [[ -z "$first_timeout" ]]; then
     first_timeout="false"
     if [[ -f "$s" ]] \
@@ -215,6 +243,33 @@ classify() {
     echo "PASS_RETRY"; return
   fi
   if [[ "$first_failure" == "true" ]]; then
+    if [[ -n "$first_failed_classes" ]] \
+      && [[ -f "$s" ]] \
+      && ! grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$s" \
+      && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$s"; then
+      local resolved all_cleared class_name
+      resolved="$(awk '
+        /^Passed first try:/ || /^Recovered on retry/ { capture=1; next }
+        capture && /^- / {
+          gsub(/`/, "")
+          sub(/^- /, "")
+          sub(/[[:space:]]+\(.*/, "")
+          print
+          next
+        }
+        capture && /^$/ { capture=0 }
+      ' "$s" || true)"
+      all_cleared="true"
+      while IFS= read -r class_name; do
+        [[ -z "$class_name" ]] && continue
+        if ! grep -Fxq "$class_name" <<< "$resolved"; then
+          all_cleared="false"
+        fi
+      done <<< "$first_failed_classes"
+      if [[ "$all_cleared" == "true" ]]; then
+        echo "FIRST_FAILURE_CLEARED_RETRY_TIMEOUT"; return
+      fi
+    fi
     echo "FIRST_GENUINE_FAILURE"; return
   fi
   if [[ "$first_timeout" == "true" ]]; then
@@ -266,18 +321,38 @@ mixed_verdict="$(classify "$mixed_summary" failure failure failure failure false
 pass "(g) genuine Failed BOTH summary remains red even with timeout markers present"
 
 # (h) workflow-real shared-summary overwrite: first attempt wrote a genuine
-#     failure, retry overwrote summary.md with timeout-only content and did not
-#     pass. The captured first_failure output must prevent advisory-green.
+#     failure, retry overwrote summary.md with timeout-only content, and the
+#     retry summary proves the first-failed class passed before the later budget
+#     timeout. This is not a failed-on-both-cold-boots regression.
 retry_timeout_summary="$SANDBOX/retry-timeout-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
+  'Passed first try:' \
+  '- `com.pocketshell.app.RealRegressionTest`' \
+  '' \
   'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
   '- `com.pocketshell.app.RetryTimedOutClass`' \
   > "$retry_timeout_summary"
-overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure failure false true)"
-[[ "$overwrite_verdict" == "FIRST_GENUINE_FAILURE" ]] \
-  || fail "(h) first genuine failure + retry timeout overwrite routed to '$overwrite_verdict', expected FIRST_GENUINE_FAILURE"
-pass "(h) first genuine failure remains red when retry overwrites summary with timeout-only content"
+overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure failure false true $'com.pocketshell.app.RealRegressionTest')"
+[[ "$overwrite_verdict" == "FIRST_FAILURE_CLEARED_RETRY_TIMEOUT" ]] \
+  || fail "(h) cleared first failure + retry timeout routed to '$overwrite_verdict', expected FIRST_FAILURE_CLEARED_RETRY_TIMEOUT"
+pass "(h) first-attempt failed class cleared on retry routes to timeout advisory"
+
+# (i) Negative guard for (h): if the retry timeout summary does not prove the
+#     first-failed class passed/recovered, preserve the first genuine-failure red.
+uncleared_retry_timeout_summary="$SANDBOX/uncleared-retry-timeout-summary.md"
+printf '%s\n' \
+  '# Per-push CI journey suite — summary' \
+  'Passed first try:' \
+  '- `com.pocketshell.app.SomeOtherClass`' \
+  '' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  '- `com.pocketshell.app.RetryTimedOutClass`' \
+  > "$uncleared_retry_timeout_summary"
+uncleared_verdict="$(classify "$uncleared_retry_timeout_summary" failure failure failure failure false true $'com.pocketshell.app.RealRegressionTest')"
+[[ "$uncleared_verdict" == "FIRST_GENUINE_FAILURE" ]] \
+  || fail "(i) uncleared first failure + retry timeout routed to '$uncleared_verdict', expected FIRST_GENUINE_FAILURE"
+pass "(i) first-attempt failure remains red when retry summary does not prove it cleared"
 
 # ---------------------------------------------------------------------------
 # Issue #918: if the per-class `timeout` kills a Gradle invocation, the next

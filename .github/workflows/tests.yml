@@ -272,6 +272,7 @@ jobs:
   # connect-break class was structurally invisible to CI — the exact #848 gate gap.
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
+    needs: [unit, python, integration]
     runs-on: ubuntu-latest
     # Issue #691 (STABILIZE): lowered 75 -> 45 as a backstop. A wedging test
     # should now fail fast via the per-test `timeout_msec` in

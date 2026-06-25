@@ -115,4 +115,62 @@ class TerminalSurfaceStatePartialBlankTest {
             state.visibleScreenIsPartiallyBlank(),
         )
     }
+
+    // ----------------------------------------------------------------- Issue #941
+    // The combined oracle [visibleScreenIsBlankOrPartiallyBlank] is the single
+    // "needs heal" predicate the switch-reveal gate, the connected blank watchdog,
+    // and the send-overpaint heal now share, so a PARTIAL-black pane (the "sent a
+    // message -> black" symptom) is healed on every reveal/watchdog path, not only
+    // on reattach. These pin its union semantics.
+
+    @Test
+    fun blankOrPartiallyBlankIsTrueForAFullyBlankPane() = withAttachedSurface { state ->
+        state.appendRemoteOutput("[2J[H".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "precondition: a clear-only frame is fully blank",
+            state.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            "the combined oracle must be true for a fully-blank pane",
+            state.visibleScreenIsBlankOrPartiallyBlank(),
+        )
+    }
+
+    @Test
+    fun blankOrPartiallyBlankIsTrueForAPartialBlackPane() = withAttachedSurface { state ->
+        // The #941 symptom: a send/switch overpaint wiped the static viewport and
+        // left ONE live line. Fully-blank is false (the line is present), but the
+        // combined oracle must catch it so the heal fires.
+        state.appendRemoteOutput("[2J[HISSUE941-OVERPAINT 7\r\n".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(
+            "precondition: a partial-black pane is NOT fully blank",
+            state.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            "precondition: a partial-black pane IS partially blank",
+            state.visibleScreenIsPartiallyBlank(),
+        )
+        assertTrue(
+            "the combined oracle must be true for a partial-black pane (the heal " +
+                "gates the switch-reveal / watchdog / send-overpaint paths read on it)",
+            state.visibleScreenIsBlankOrPartiallyBlank(),
+        )
+    }
+
+    @Test
+    fun blankOrPartiallyBlankIsFalseForANormallyPaintedPane() = withAttachedSurface { state ->
+        val frame = buildString {
+            append("[2J[H")
+            repeat(20) { append("line $it has real content here\r\n") }
+        }
+        state.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(
+            "the combined oracle must be FALSE for a normally-painted pane so the " +
+                "heal correctly no-ops (no reseed-thrash on a healthy pane)",
+            state.visibleScreenIsBlankOrPartiallyBlank(),
+        )
+    }
 }

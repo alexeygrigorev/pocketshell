@@ -531,6 +531,34 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #941 (black-screen residual B1) — true when the visible screen is FULLY
+     * blank ([visibleScreenIsBlank]) OR partially blank ([visibleScreenIsPartiallyBlank]):
+     * the union "the active pane looks lost (black, or one-live-line-rest-black)".
+     *
+     * The maintainer's "I sent a message and everything became black" symptom is a
+     * PARTIAL black — a `%output` overpaint (or a plain session switch reveal) wiped the
+     * static viewport and left one live line. The reattach/manual-Redraw heals already
+     * branch on `blank || partialBlank` inline (see
+     * [com.pocketshell.app.tmux.TmuxSessionViewModel.reseedActivePaneForReattach] and
+     * `maybeHealActivePaneOnNoOpResize`), but the SWITCH-reveal gate and the connected
+     * blank watchdog used pure `visibleScreenIsBlank()` — so a partial-black pane reached
+     * via a switch or a send-overpaint reads "not blank", passes the gate, and is never
+     * reseeded. This combined oracle is the single "needs heal" predicate those gates now
+     * share, so the partial-black case is healed on EVERY reveal/watchdog path, not only
+     * on reattach.
+     *
+     * Inherits [visibleScreenIsPartiallyBlank]'s best-effort-heuristic caveat: a lone
+     * fresh-prompt line is indistinguishable from a lone timer line, so this can be true
+     * for a legitimately-mostly-empty pane. That is acceptable because the heal it gates
+     * is a `capture-pane` full-viewport restore — re-seeding a real prompt re-paints the
+     * SAME authoritative content (idempotent, no visible change), and the callers guard
+     * against reseed-thrash by only healing once per reveal / per send-quiescence, not on
+     * a tight loop.
+     */
+    fun visibleScreenIsBlankOrPartiallyBlank(): Boolean =
+        visibleScreenIsBlank() || visibleScreenIsPartiallyBlank()
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid

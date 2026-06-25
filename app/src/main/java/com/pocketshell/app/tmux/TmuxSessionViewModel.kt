@@ -8892,6 +8892,29 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #941 (black-screen B1) test seam: invoke the production switch-reveal
+     * gate [awaitActivePaneSeededOrLoading] directly against the supplied client,
+     * building a runtime guard for the current generation/target. A passthrough —
+     * no test-only behavior. Lets a JVM regression test prove the gate heals a
+     * PARTIAL-black active pane (the switch-to-black symptom) without driving the
+     * full connect coroutine state machine. Returns the gate's reveal decision.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun awaitActivePaneSeededOrLoadingForTest(client: TmuxClient): Boolean {
+        val target = activeTarget
+        val guard = if (target != null) {
+            RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+        } else {
+            null
+        }
+        return awaitActivePaneSeededOrLoading(guard)
+    }
+
+    /**
      * Issue #722 (characterization test seam): arm [armConnectedBlankWatchdog]
      * directly against the supplied guard. A passthrough — no production logic.
      */
@@ -9115,12 +9138,51 @@ public class TmuxSessionViewModel @Inject constructor(
     ): Boolean {
         val client = clientRef ?: return true
         var attempt = 0
+        var partialBlankHealed = false
         while (true) {
             if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return true
             if (client.disconnected.value) return true
             val activePane = activeVisiblePane() ?: return true
-            if (!activePane.terminalState.visibleScreenIsBlank()) return true
-            // Active pane is blank: try to (re-)seed it before revealing.
+            val blank = activePane.terminalState.visibleScreenIsBlank()
+            val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+            if (!blank && !partialBlank) return true
+            // Issue #941 (black-screen B1): a plain session switch can reveal a
+            // PARTIAL-black pane (one live line, the rest of the prior viewport
+            // gone). That reads "not blank", so the pre-#941 gate passed it and the
+            // partial-black pane was revealed as Connected and never reseeded (the
+            // maintainer's "switched and it was black" symptom). Heal it here too —
+            // `seedPaneFromCapture` does a full clear+repaint, so it restores the
+            // FULL viewport from tmux's authoritative grid.
+            //
+            // Over-heal guard: a partial-black read is a HEURISTIC and a real
+            // one-line prompt looks identical to "one live line, rest black". So
+            // for partial-black we do EXACTLY ONE heal capture, then REVEAL — never
+            // loop while it persists (a real prompt legitimately stays "partial",
+            // and re-capturing it just re-paints the same content). Only a FULLY
+            // blank pane keeps the bounded retry loop (a degraded link's empty
+            // capture genuinely needs another attempt). This prevents reseed-thrash
+            // and a spurious "Attaching…" overlay on a real blank prompt.
+            if (!blank && partialBlank) {
+                if (partialBlankHealed) return true
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-reveal-gate-active-pane-partial-blank pane=${activePane.paneId} " +
+                        "session=${activeTarget?.sessionName} -> one heal capture then reveal",
+                )
+                seedPaneFromCapture(
+                    client = client,
+                    pane = activePane,
+                    refreshGuard = refreshGuard,
+                    recordMilestone = false,
+                    maxAttempts = 1,
+                )
+                partialBlankHealed = true
+                // Reveal regardless of the post-heal partial-black read (a real
+                // small prompt is legitimately partial); the capture restored
+                // whatever tmux's grid holds.
+                return true
+            }
+            // Active pane is FULLY blank: try to (re-)seed it before revealing.
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-reveal-gate-active-pane-blank pane=${activePane.paneId} " +
@@ -9191,6 +9253,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
                     // A frame landed (seed or live %output) — drop the loading
                     // overlay and let the Connected surface show the content.
+                    //
+                    // Issue #941 (black-screen B1): the watchdog INTENTIONALLY stays
+                    // FULLY-blank-only here. A partial-black active pane (one live
+                    // line) is healed by the switch-reveal gate BEFORE this watchdog
+                    // is even armed ([awaitActivePaneSeededOrLoading]), and a
+                    // send-overpaint partial-black is healed by the post-send heal
+                    // ([scheduleSendOverpaintHeal]). Extending this post-reveal net to
+                    // partial-black would over-heal a legitimately small single-line
+                    // pane (a real one-line prompt that landed after reveal reads
+                    // partial-black), reseed-thrashing it on every arming — so the
+                    // watchdog keeps its narrow fully-blank contract.
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
                     return@launch
                 }
@@ -11067,6 +11140,64 @@ public class TmuxSessionViewModel @Inject constructor(
             awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
             client.sendCommand("send-keys -t $paneId Enter")
                 .throwIfTmuxError("submit pasted agent input")
+            // Issue #941 (black-screen B1): the maintainer's "I sent a message and
+            // everything became black" symptom. After the submit Enter, a full-screen
+            // agent TUI repaints — it can `clear`+redraw and emit a `%output` overpaint
+            // that leaves the active pane PARTIAL-black (a single live status/spinner
+            // line, the rest of the prior viewport gone). The reattach/manual-Redraw
+            // heals already restore a partial-black pane; a SEND-triggered overpaint had
+            // NO heal, so the pane stayed black until the user manually redrew. Schedule
+            // a one-shot, guarded active-pane heal that fires ONLY if the pane settles
+            // partial-black/blank after the overpaint.
+            scheduleSendOverpaintHeal(client, paneId)
+        }
+    }
+
+    /**
+     * Issue #941 (black-screen B1): after a send's submit Enter, the agent's
+     * `%output` overpaint can leave the active pane partial-black. Wait one settle
+     * tick for the overpaint to land, then — ONLY if the active pane is blank /
+     * partial-black — do the UNCONDITIONAL active-pane full-viewport restore
+     * ([reseedActivePaneForReattach], a `capture-pane` clear+repaint). Guarded by a
+     * [RuntimeRefreshGuard] keyed to the current generation + target + client so a
+     * late heal can never paint a switched-away session, and scoped to the pane the
+     * user is actually looking at (the active visible pane), since only that pane's
+     * overpaint is the reported "everything went black".
+     *
+     * One-shot, no loop: a real one-line agent prompt looks partial-black too, and
+     * re-capturing it just re-paints the same authoritative content, so there is no
+     * reseed-thrash. The heal is a no-op when the overpaint left a normally-painted
+     * pane (the common case — a multi-line agent response), so a healthy send costs
+     * nothing beyond the cheap blank/partial-blank pre-check.
+     */
+    private fun scheduleSendOverpaintHeal(client: TmuxClient, paneId: String) {
+        val target = activeTarget ?: return
+        val healGeneration = connectGeneration
+        bridgeScope.launch {
+            // Let the post-submit agent overpaint land before judging the pane.
+            delay(SEND_OVERPAINT_HEAL_SETTLE_MS)
+            if (clientRef !== client) return@launch
+            if (client.disconnected.value) return@launch
+            val activePane = activeVisiblePane() ?: return@launch
+            // Heal only the pane the send targeted while it is still the active pane
+            // (the reported "sent a message → everything black" is the focused pane).
+            if (activePane.paneId != paneId) return@launch
+            val blank = activePane.terminalState.visibleScreenIsBlank()
+            val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+            if (!blank && !partialBlank) return@launch
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-send-overpaint-active-pane-heal pane=${activePane.paneId} " +
+                    "window=${activePane.windowId} session=${target.sessionName} " +
+                    "blank=$blank partialBlank=$partialBlank",
+            )
+            reseedActivePaneForReattach(
+                RuntimeRefreshGuard(
+                    generation = healGeneration,
+                    target = target,
+                    client = client,
+                ),
+            )
         }
     }
 
@@ -15053,6 +15184,15 @@ internal const val CONNECTED_BLANK_WATCHDOG_TICK_MS: Long = 500L
  * over once the channel actually drops.
  */
 internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
+
+/**
+ * Issue #941 (black-screen B1): after a send's submit Enter, wait this long for
+ * the agent's `%output` overpaint to land before judging whether the active pane
+ * settled partial-black/blank and needs the one-shot send-overpaint heal. Short
+ * enough that the heal restores a black pane promptly, long enough that a normal
+ * multi-line agent response has painted (so the heal correctly no-ops).
+ */
+internal const val SEND_OVERPAINT_HEAL_SETTLE_MS: Long = 350L
 
 /**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line

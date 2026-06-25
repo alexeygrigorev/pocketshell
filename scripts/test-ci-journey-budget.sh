@@ -4,7 +4,7 @@
 #
 # The recurring failure: the in-emulator #470 tmux `list-sessions` enumeration
 # stall makes session/reconnect journeys burn their retry windows; with no
-# suite-level deadline the 45-min workflow step cap SIGKILLs the suite mid-loop
+# suite-level deadline the 45-min workflow job cap SIGKILLs the suite mid-loop
 # before summary.md is written, so the workflow classifier mis-routes the red to
 # "EMULATOR INFRA UNAVAILABLE (#771)".
 #
@@ -33,6 +33,61 @@ fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
 [[ -f "$REAL_SUITE" ]] || fail "cannot find ci-journey-suite.sh at $REAL_SUITE"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKFLOW="$REPO_ROOT/.github/workflows/tests.yml"
+THIS_TEST="$SCRIPT_DIR/test-ci-journey-budget.sh"
+
+# (pre) #908 budget/default/comment guard: prove the suite budget leaves
+# explicit slack under the workflow cap after a worst-case emulator boot.
+job_cap_min="$(awk '
+  /^  emulator-journey:/ { in_job=1; next }
+  in_job && /^  [A-Za-z0-9_-]+:/ { in_job=0 }
+  in_job && /timeout-minutes:/ { print $2; exit }
+' "$WORKFLOW")"
+[[ "$job_cap_min" =~ ^[0-9]+$ ]] \
+  || fail "(pre) could not parse emulator-journey timeout-minutes from tests.yml"
+job_cap_secs=$((job_cap_min * 60))
+[[ "$job_cap_secs" -eq 2700 ]] \
+  || fail "(pre) emulator-journey job cap must stay 45 min / 2700s (got ${job_cap_secs}s)"
+
+mapfile -t emulator_boot_timeout_values < <(awk '/emulator-boot-timeout:/ { print $2 }' "$WORKFLOW")
+[[ "${#emulator_boot_timeout_values[@]}" -gt 0 ]] \
+  || fail "(pre) could not parse emulator-boot-timeout from tests.yml"
+for emulator_boot_timeout_secs in "${emulator_boot_timeout_values[@]}"; do
+  [[ "$emulator_boot_timeout_secs" =~ ^[0-9]+$ ]] \
+    || fail "(pre) emulator-boot-timeout must be numeric (got ${emulator_boot_timeout_secs})"
+  [[ "$emulator_boot_timeout_secs" -eq 900 ]] \
+    || fail "(pre) every emulator boot timeout must stay 900s (got ${emulator_boot_timeout_secs}s)"
+done
+emulator_boot_timeout_secs="${emulator_boot_timeout_values[0]}"
+
+# Match the literal shell assignment in ci-journey-suite.sh.
+# shellcheck disable=SC2016
+default_suite_budget_secs="$(sed -n 's/^JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-\([0-9][0-9]*\)}"$/\1/p' "$REAL_SUITE")"
+[[ "$default_suite_budget_secs" =~ ^[0-9]+$ ]] \
+  || fail "(pre) could not parse default JOURNEY_STEP_BUDGET_SECS from ci-journey-suite.sh"
+[[ "$default_suite_budget_secs" -eq 1200 ]] \
+  || fail "(pre) default JOURNEY_STEP_BUDGET_SECS must stay 1200s / 20 min (got ${default_suite_budget_secs}s)"
+
+remaining_slack_secs=$((job_cap_secs - emulator_boot_timeout_secs - default_suite_budget_secs))
+[[ "$remaining_slack_secs" -ge 600 ]] \
+  || fail "(pre) insufficient post-boot slack: ${job_cap_secs}s job cap - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s (< 600s)"
+
+grep -q 'default 20 min' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh budget comment must document the 20-min default"
+grep -q '45-min job cap (2700s) - worst-case emulator boot (900s) - default suite' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh budget comment must show the safe arithmetic"
+grep -q 'workflow job cap: 45 min' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh log line must refer to the 45-min job cap"
+grep -q '20-min suite budget' "$WORKFLOW" \
+  || fail "(pre) tests.yml first-summary comment must match the 20-min suite budget"
+stale_step_cap_re="workflow ste""p|ste""p cap|45-min ste""p|45 min ste""p"
+if grep -qE "$stale_step_cap_re" \
+  "$REAL_SUITE" "$WORKFLOW" "$THIS_TEST"; then
+  fail "(pre) stale workflow-timeout wording found; use 45-min job cap"
+fi
+pass "(pre) #908 budget arithmetic pinned (${job_cap_secs}s job - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s slack)"
 
 # ---------------------------------------------------------------------------
 # Build a sandbox "repo root": a copy of the suite script + a stub gradlew that

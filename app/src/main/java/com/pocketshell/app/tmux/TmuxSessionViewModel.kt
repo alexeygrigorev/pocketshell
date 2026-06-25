@@ -1058,6 +1058,22 @@ public class TmuxSessionViewModel @Inject constructor(
     internal var forceCleanOutageForTest: Boolean = false
 
     /**
+     * Issue #959 test seam (#780 synthetic-injection model): when set, the
+     * background teardown ([closeCurrentConnectionAndJoin]) closes the live `-CC`
+     * client but PRESERVES the pane runtime — `paneRows`, their `TerminalSurfaceState`s,
+     * the per-pane output producers, input queues + drain jobs, and the
+     * `paneProducerClients` bindings — instead of clearing them. This deterministically
+     * reproduces the on-device RACE the freeze needs: a pane that SURVIVES the teardown's
+     * clear into the foreground `connect(LifecycleReattach)` reconcile, so the reconcile
+     * takes the REUSE branch against a FRESH client while the producer/input are still
+     * wired to the now-dead client. The clean teardown clears `paneRows` (no freeze), so
+     * the journey can only enter the failing state by injecting it here — hard-fail
+     * otherwise, never self-skip. Default false (production clears everything).
+     */
+    @Volatile
+    internal var preservePaneRuntimeOnBackgroundTeardownForTest: Boolean = false
+
+    /**
      * EPIC #792 #833 test seam: fire the CLEAN passive-disconnect path directly —
      * the body the EOF oracle (`TmuxClient.disconnected` true-edge with a
      * [TmuxDisconnectReason.ReaderEof]) drives. This is the clean-drop analogue of
@@ -2041,6 +2057,19 @@ public class TmuxSessionViewModel @Inject constructor(
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneOutputActivityJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    // Issue #959: track the EXACT `-CC` client each pane's output producer +
+    // input drain are currently bound to. A beyond-grace background→foreground
+    // fires `connect(LifecycleReattach)` with a fresh SSH lease + fresh
+    // [TmuxClient], but [applyParsedPanes]'s reuse branch keeps the EXISTING
+    // [TmuxPaneState] (so the emulator scrollback survives) and copies metadata
+    // only — it never re-bound the producer/input. Result: a reused pane stays
+    // wired to the DEAD client (`outputFor(paneId)` never delivers new %output;
+    // the stale buffer stays painted; key bar / IME bytes route nowhere) — the
+    // "content on screen but frozen, no I/O" symptom. This map lets the reuse
+    // branch detect the stale binding and re-bind to the live client (the
+    // post-grace reattach has no `rebindVisiblePaneProducersToClient` call that
+    // the silent passive-reattach paths rely on). Identity comparison only.
+    private val paneProducerClients: MutableMap<String, TmuxClient> = ConcurrentHashMap()
 
     // Issue #423: track recent terminal-surface recovery attempts per pane.
     // A single IME/resize/render exception recovers transparently by
@@ -4496,6 +4525,11 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
+        // Issue #959: the parked panes' producers will be re-bound to a (new
+        // or same) client on restore via [rebindRestoredRuntimePaneJobsIfNeeded];
+        // drop the stale-client bindings so a restore re-binds rather than
+        // assuming the cached client is still live.
+        paneProducerClients.clear()
         paneOutputActivityJobs.values.forEach { it.cancel() }
         paneOutputActivityJobs.clear()
         paneInputQueues.clear()
@@ -4540,6 +4574,11 @@ public class TmuxSessionViewModel @Inject constructor(
             val producerActive = paneProducerJobs[paneId]?.isActive == true
             val inputActive = paneInputJobs[paneId]?.isActive == true
             if (producerActive && inputActive && pane.terminalState.isAttached) {
+                // Issue #959: the still-active producer is bound to this restored
+                // client (the cached runtime carries its own client). Record the
+                // binding so the next reconcile's reuse branch does NOT redundantly
+                // re-bind a producer that is already live on the current client.
+                paneProducerClients[paneId] = client
                 startPaneOutputActivityForPane(paneId = paneId, client = client)
                 startPortDetectionForPane(paneId = paneId, client = client)
                 continue
@@ -4601,6 +4640,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows.putAll(runtime.paneRows)
         paneProducerJobs.clear()
         paneProducerJobs.putAll(runtime.paneProducerJobs)
+        // Issue #959: the cached client bindings are re-established below by
+        // [rebindRestoredRuntimePaneJobsIfNeeded] (keep-or-rebind to the
+        // restored client). Start empty so a reconcile that races the restore
+        // never trusts a stale binding.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         paneInputQueues.clear()
         paneInputQueues.putAll(runtime.paneInputQueues)
@@ -8257,6 +8301,33 @@ public class TmuxSessionViewModel @Inject constructor(
         for (p in sorted) {
             val existing = paneRows[p.paneId]
             val row = if (existing != null) {
+                // Issue #959: a beyond-grace background→foreground reattaches
+                // via `connect(LifecycleReattach)` against a FRESH client, but
+                // tmux preserves pane ids across detach/reattach, so this is the
+                // reuse branch. We keep the existing [TerminalSurfaceState] (so
+                // scrollback survives), but the pane's output producer + input
+                // drain are still wired to the DEAD client. RE-BIND them to the
+                // live client whenever it changed identity — without this the
+                // terminal is frozen (stale buffer painted, no new %output, key
+                // bar / IME bytes route nowhere). This makes the reuse branch the
+                // single re-bind site for EVERY reconcile caller (LifecycleReattach
+                // cold reattach, parked-runtime restore, cache refresh), so the
+                // post-grace path no longer depends on a `paneRows.clear()` having
+                // raced ahead of it. Identity comparison: a producer bound to a
+                // closed client must be replaced.
+                if (client != null && paneProducerClients[p.paneId] !== client) {
+                    paneProducerJobs.remove(p.paneId)?.cancel()
+                    paneOutputActivityJobs.remove(p.paneId)?.cancel()
+                    panePortDetectorJobs.remove(p.paneId)?.cancel()
+                    paneInputJobs.remove(p.paneId)?.cancel()
+                    paneInputQueues.remove(p.paneId)?.close()
+                    existing.terminalState.detachExternalProducer()
+                    attachTerminalProducerForPane(
+                        paneId = p.paneId,
+                        state = existing.terminalState,
+                        client = client,
+                    )
+                }
                 // Reuse the existing TerminalSurfaceState so the emulator
                 // and its scrollback survive the reconcile. Update the
                 // immutable metadata if it changed.
@@ -8338,6 +8409,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val gonePaneIds = paneRows.keys - nextById.keys
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
+            paneProducerClients.remove(paneId)
             paneOutputActivityJobs.remove(paneId)?.cancel()
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
@@ -8393,6 +8465,10 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
+            // Issue #959: remember which client this producer (and the
+            // 1-arg [inputSinkForPane] drain it just created) is bound to so a
+            // later reconcile can detect a stale binding after a client swap.
+            paneProducerClients[paneId] = client
             startPaneOutputActivityForPane(paneId = paneId, client = client)
             // Issue #448 (epic #432 slice C): tap the same shared output
             // flow for new-port detection whenever a pane's producer is
@@ -8577,6 +8653,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()
+        paneProducerClients.remove(overflow.paneId) // Issue #959
         paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorJobs.remove(overflow.paneId)?.cancel()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -8625,6 +8702,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(paneId)?.cancel()
+        paneProducerClients.remove(paneId) // Issue #959
         paneOutputActivityJobs.remove(paneId)?.cancel()
         panePortDetectorJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
@@ -13758,16 +13836,26 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
-        paneInputJobs.clear()
-        paneInputQueues.clear()
         _agentConversations.value = emptyMap()
-        paneProducerJobs.clear()
-        paneOutputActivityJobs.clear()
-        for ((_, row) in paneRows) {
-            runCatching { row.terminalState.detachExternalProducer() }
+        // Issue #959 (#780 synthetic-injection seam): when the test forces the
+        // pane-runtime-survives-teardown race, KEEP paneRows + their producers +
+        // input queues + the paneProducerClients bindings (still pointing at the
+        // now-dead client) so the foreground reattach reconcile REUSES them and
+        // must re-bind. Production ALWAYS clears (the common no-freeze path).
+        if (!preservePaneRuntimeOnBackgroundTeardownForTest) {
+            paneInputJobs.clear()
+            paneInputQueues.clear()
+            paneProducerJobs.clear()
+            // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+            // re-binds every reused pane's producer/input to the new client.
+            paneProducerClients.clear()
+            paneOutputActivityJobs.clear()
+            for ((_, row) in paneRows) {
+                runCatching { row.terminalState.detachExternalProducer() }
+            }
+            paneRows.clear()
+            _panes.value = emptyList()
         }
-        paneRows.clear()
-        _panes.value = emptyList()
         rebuildUnifiedPanes()
         // Issue #215: ask tmux to detach this `-CC` control client before
         // we drop the SSH transport. Without the detach round-trip,
@@ -13879,6 +13967,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+        // re-binds every reused pane's producer/input to the new client.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -14024,6 +14115,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+        // re-binds every reused pane's producer/input to the new client.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }

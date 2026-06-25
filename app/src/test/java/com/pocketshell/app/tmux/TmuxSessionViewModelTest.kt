@@ -1041,6 +1041,148 @@ class TmuxSessionViewModelTest {
         assertEquals("after", secondRow.title)
     }
 
+    /**
+     * Issue #959 — DURABLE JVM GUARD for the beyond-grace
+     * background→foreground "terminal frozen (no I/O) but app responsive"
+     * symptom, at the precise re-bind site ([applyParsedPanes]'s reuse branch).
+     *
+     * A ~2-minute background fires the grace-elapsed teardown; the foreground
+     * `connect(TmuxConnectTrigger.LifecycleReattach)` forces a FRESH SSH lease +
+     * a brand-new [TmuxClient]. tmux preserves pane ids across detach/reattach,
+     * so the reconcile takes the REUSE branch: it keeps the existing
+     * [TerminalSurfaceState] (scrollback survives) and — before this fix —
+     * copied metadata ONLY, leaving the pane's output producer (subscribed to
+     * the DEAD client's `outputFor(paneId)`) and its input drain still wired to
+     * the dead client. Result: the stale buffer stays painted, NEW `%output`
+     * never reaches the emulator, and key bar / IME bytes route nowhere — the
+     * exact "content visible but frozen" report. The post-grace `connect`
+     * reattach had no `rebindVisiblePaneProducersToClient` call (only the silent
+     * passive-reattach paths did).
+     *
+     * This guard reproduces the client swap directly: connect client A, seed +
+     * prove I/O is live on A, swap [clientRef] to a fresh client B, then run the
+     * reconcile that REUSES pane `%0`. The load-bearing assertions are
+     * BEHAVIORAL, on BOTH directions:
+     *  - OUTPUT: a `%output` emitted on client B reaches the pane's emulator
+     *    (proves the producer re-subscribed to B's `outputFor`).
+     *  - INPUT: a key written to the pane's input sink lands as a `send-keys` on
+     *    client B (proves the input drain re-bound to B).
+     *
+     * RED on base: output emitted on B never renders (producer still on A) and
+     * the test fails on the OUTPUT assertion. GREEN with the reuse-branch
+     * re-bind. Covers the class — output AND input — for the reused-pane swap.
+     */
+    @Test
+    fun reusedPaneRebindsProducerAndInputToNewClientAfterClientSwap() = runTest(scheduler) {
+        val vm = newVm()
+        // Pin the producer's collect dispatcher to the shared virtual clock so the
+        // %output -> emulator feed drains deterministically under advanceUntilIdle
+        // (production default is a real Dispatchers.IO thread). Same harness the
+        // #576 overflow regression uses.
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(scheduler))
+        }
+        // decoupleOutputForFromEvents: outputFor() reads emittedPaneOutputs, so a
+        // test can emit pane %output directly and watch its producer subscription.
+        val clientA = FakeTmuxClient().apply { decoupleOutputForFromEvents = true }
+        vm.attachClientForTest(clientA)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        runCurrent()
+        // Wait until client A's pane-output collectors (producer + activity +
+        // port detector) are all subscribed before emitting.
+        assertTrue(
+            "client A pane-output collectors must subscribe",
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 3 }
+                true
+            } ?: false,
+        )
+
+        // Open the seed gate so live %output flushes to the emulator, then prove
+        // I/O is wired to client A: an %output emitted on A renders.
+        val state = vm.panes.value.single().terminalState
+        state.appendRemoteOutput("SEED-A\r\n".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        clientA.emittedPaneOutputs.emit(
+            ControlEvent.Output("%0", "OUTPUT-ON-A\r\n".toByteArray(Charsets.US_ASCII)),
+        )
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "precondition: A's %output reaches the emulator transcript",
+            renderedTranscriptFrom(state).contains("OUTPUT-ON-A"),
+        )
+
+        // The beyond-grace reattach: a fresh client B becomes the live control
+        // client (mirrors `connect(LifecycleReattach)` swapping clientRef to the
+        // fresh-lease client), then tmux re-lists the SAME pane id %0.
+        val clientB = FakeTmuxClient().apply { decoupleOutputForFromEvents = true }
+        vm.attachClientForTest(clientB)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        runCurrent()
+        // After the fix, the reused pane's producer + activity + port detector
+        // re-subscribe to client B. On base they stay on the dead client A, so
+        // this wait TIMES OUT — making the bug observable as a re-bind failure.
+        val reboundToB = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+            clientB.emittedPaneOutputs.subscriptionCount.first { it >= 1 }
+            true
+        } ?: false
+        assertTrue(
+            "REGRESSION (#959): after a beyond-grace reattach the reused pane's " +
+                "output producer must re-subscribe to the NEW client. On base it " +
+                "stayed bound to the dead client -> no collector on B.",
+            reboundToB,
+        )
+
+        // The reused pane must keep its TerminalSurfaceState (scrollback survives)
+        // — the whole reason the reuse branch exists.
+        assertSame(
+            "reused pane must keep its emulator/scrollback across the reattach",
+            state,
+            vm.panes.value.single().terminalState,
+        )
+
+        // The rebind re-arms the producer's seed gate (awaitSeed=true closes it
+        // until the reattach re-seed lands — in production that is
+        // reseedActivePaneForReattach). Open it so live %output from B flushes,
+        // exactly as the production reattach re-seed does.
+        state.appendRemoteOutput("SEED-B\r\n".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // LOAD-BEARING (output): a %output emitted on the NEW client B must now
+        // reach the emulator. RED on base — the producer was still subscribed to
+        // the dead client A, so B's output was dropped (the frozen terminal).
+        clientB.emittedPaneOutputs.emit(
+            ControlEvent.Output("%0", "OUTPUT-ON-B\r\n".toByteArray(Charsets.US_ASCII)),
+        )
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "REGRESSION (#959): fresh %output on the NEW client must render after " +
+                "the reattach. On base it stayed bound to the dead client -> frozen.",
+            renderedTranscriptFrom(state).contains("OUTPUT-ON-B"),
+        )
+
+        // LOAD-BEARING (input): a key written to the pane's input sink must drain
+        // to the NEW client B (a send-keys on B), NOT the dead client A.
+        val keysOnBBefore = clientB.sentCommands.count { it.startsWith("send-keys") }
+        vm.tmuxInputSinkForTest("%0").write("x".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        assertTrue(
+            "REGRESSION (#959): input after a reattach must reach the NEW client " +
+                "(a send-keys on B), not the dead client.",
+            clientB.sentCommands.count { it.startsWith("send-keys") } > keysOnBBefore,
+        )
+        assertTrue(
+            "the input key must carry the typed byte to client B",
+            clientB.sentCommands.any { it.startsWith("send-keys") && it.contains("'x'") },
+        )
+    }
+
     @Test
     fun newPaneInReconcileGetsDistinctTerminalState() = runTest(scheduler) {
         val vm = newVm()

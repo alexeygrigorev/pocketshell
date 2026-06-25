@@ -147,6 +147,14 @@ JOURNEY_CLASSES=(
   # (toxiproxy clean-cut, `withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect`),
   # which is opt-in (assumeNetworkFaultProofsEnabled self-skips on CI since tests.yml
   # keeps this job toxiproxy-free); it is the local/manual fault-injection proof.
+  #
+  # Issue #959: this class now ALSO carries the beyond-grace "terminal frozen (no
+  # I/O) but app responsive" reproduction
+  # (postGraceReattachLeavesTerminalLiveWithFreshInputEcho): after the post-grace
+  # reattach it types a unique token through the real input path and requires the
+  # shell's FRESH echo to render — the live-terminal property a frozen reattach
+  # fails. The whole class FQCN runs every method, so the #959 method is gated
+  # here at PR time with no extra entry. agents:2222, no toxiproxy.
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
   # PROMOTED (#727, epic #657 Wave 1 / S1): the share-auth journey pair. The
   # maintainer's recurring share-auth breakages had nightly-only / advisory E2E

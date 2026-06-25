@@ -8,6 +8,20 @@ The multi-orchestrator experiment is paused. The active orchestrator should not
 spend startup time discovering peer orchestrators or negotiating shared
 ownership unless the maintainer explicitly restarts that experiment.
 
+**Do not halt for maintainer confirmation — ship autonomously (locked
+directive, 2026-06-25).** When a release is ready (all required CI checks green
+on the validated commit), the orchestrator **tags and ships it directly** — it
+does NOT pause to ask "want me to tag?" or hold the release for a go-ahead.
+"Make a release" / "release it" is a standing authorization, not a per-cut
+approval gate. The same applies to the rest of the loop: keep dispatching
+implementers/reviewers, integrating approved slices, filing issues, and cutting
+releases without waiting on the maintainer between steps. Surface honest status
+and blockers as they happen, and STILL stop-and-flag the things that are
+genuinely the maintainer's call (D28 rewrite-vs-patch, destructive/irreversible
+data resets, scope changes) — but a normal, validated release is never one of
+them. Reporting "ready, awaiting your go" on a green release is itself a process
+miss; tag it and report that it shipped.
+
 **Never babysit CI — delegate it to the on-call, who runs a blocking watcher
 (locked directive, 2026-06-25).** The orchestrator does NOT sit in a poll-and-
 wait loop watching a CI run; that wastes tokens (every poll is an LLM turn).

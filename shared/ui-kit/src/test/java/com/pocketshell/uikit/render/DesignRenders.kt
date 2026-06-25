@@ -3769,6 +3769,7 @@ class DesignRenders {
     }
 
     /**
+<<<<<<< ours
      * Issue #859 Slice B: the typed-card session feed sheet — a heterogeneous
      * card list rendered through the renderer registry (checklist + the new
      * `note` type + a graceful "unsupported card" fallback for an unknown type).
@@ -3849,12 +3850,110 @@ class DesignRenders {
                         text = "Unsupported card (approval) — update the app to view it.",
                         color = PocketShellColors.TextSecondary,
                         style = PocketShellType.bodyDense,
+=======
+     * Issue #947: the host-pocketshell-version-mismatch banner with the one-tap
+     * **Update** button next to **Dismiss**, plus its running-spinner and
+     * failure states. The production composable
+     * (`app/.../projects/FolderListScreen.kt#CliVersionMismatchBanner`) is
+     * app-private, so this render faithfully re-creates the same layout with the
+     * same ui-kit primitives (Update = Primary, Dismiss = Text, the running
+     * spinner, the red failure line) — the fast first visual check that the
+     * Update button fits the banner cleanly. The emulator screenshot of the real
+     * FolderList banner is the acceptance.
+     */
+    @Test
+    fun cliVersionMismatchBannerUpdateButton() = render("cli-version-mismatch-update-button") {
+        val message = "This host's pocketshell is 0.4.14; the app expects 0.4.16. " +
+            "Update it on the host:\nuv tool install --upgrade " +
+            "--exclude-newer-package pocketshell=2099-12-31 pocketshell\n" +
+            "(or: pipx upgrade pocketshell / pip install -U pocketshell)"
+        SectionHeader(label = "DEFAULT — Update + Dismiss")
+        CliVersionBannerRender(message = message, state = BannerRenderState.Idle)
+        SectionHeader(label = "RUNNING — host upgrade in flight")
+        CliVersionBannerRender(message = message, state = BannerRenderState.Running)
+        SectionHeader(label = "FAILURE — error shown, Retry + Dismiss")
+        CliVersionBannerRender(
+            message = message,
+            state = BannerRenderState.Failure(
+                "Update failed (exit 1):\nerror: network unreachable",
+            ),
+        )
+    }
+
+    private sealed interface BannerRenderState {
+        data object Idle : BannerRenderState
+        data object Running : BannerRenderState
+        data class Failure(val message: String) : BannerRenderState
+    }
+
+    @Composable
+    private fun CliVersionBannerRender(message: String, state: BannerRenderState) {
+        val color = PocketShellColors.Accent
+        val running = state is BannerRenderState.Running
+        val failure = state as? BannerRenderState.Failure
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .background(PocketShellColors.Surface, PocketShellShapes.medium)
+                .background(color.copy(alpha = 0.12f), PocketShellShapes.medium)
+                .border(1.dp, color.copy(alpha = 0.4f), PocketShellShapes.medium)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            Text(
+                text = message,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            failure?.let { fail ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = fail.message,
+                    color = PocketShellColors.Red,
+                    style = PocketShellType.bodyDense,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End,
+            ) {
+                if (running) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        color = color,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Updating…",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                    )
+                } else {
+                    PocketShellButton(
+                        text = if (failure != null) "Retry" else "Update",
+                        onClick = {},
+                        variant = ButtonVariant.Primary,
+                        compact = true,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    PocketShellButton(
+                        text = "Dismiss",
+                        onClick = {},
+                        variant = ButtonVariant.Text,
+                        compact = true,
+>>>>>>> theirs
                     )
                 }
             }
         }
     }
 
+<<<<<<< ours
     @Composable
     private fun sessionCardCheckRow(text: String, checked: Boolean) {
         Row(
@@ -3872,6 +3971,8 @@ class DesignRenders {
         }
     }
 
+=======
+>>>>>>> theirs
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

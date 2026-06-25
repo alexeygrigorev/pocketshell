@@ -921,6 +921,7 @@ JOURNEY_CLASSES=(
   # process.md F3 / D33). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"
 
+<<<<<<< ours
   # ===========================================================================
   # Issue #949 (epic #859 Slice A — host→app card push, Phase-1 verify-gone,
   # D33). Kept in its OWN block to minimize merge friction with the sibling
@@ -953,6 +954,28 @@ JOURNEY_CLASSES=(
   # no new Docker service/port, no toxiproxy — and does NOT self-skip on CI. It
   # lives under com.pocketshell.app.cards, so it carries its FQCN directly.
   "com.pocketshell.app.cards.SessionChecklistPushJourneyDockerTest"
+=======
+  # ADDED (#947): the host-version-mismatch banner's one-tap Update button — the
+  # UI gate (#641/#567/#657/G9) for a maintainer-reported UI control. The
+  # maintainer asked for an Update button on the FolderList host-version banner
+  # (the arrow in the issue screenshot) so the host `pocketshell` upgrade runs
+  # over the warm session instead of copy-paste. This connected proof composes the
+  # PRODUCTION CliVersionMismatchBanner (internal, no proxy/stand-in) in all THREE
+  # states — Idle (Update + Dismiss), Running (spinner replaces the buttons, no
+  # double-run), Failure (error line + Retry + Dismiss, no stuck spinner) — pinned
+  # to the bottom edge like its real placement, and HARD-asserts viewport
+  # CONTAINMENT (assertNodeFullyWithinRoot, the #657/F1 helper — NOT a bare
+  # assertIsDisplayed, which a control pushed off the right edge by the long
+  # version message would still satisfy) plus reachability (enabled + clickable)
+  # of the Update + Dismiss controls. Each state writes a full-device screenshot
+  # (the maintainer's arrow-target acceptance: Update next to Dismiss). It uses NO
+  # Docker fixture, NO SSH/tmux/port (pure Compose UI test on the booted AVD) and
+  # does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
+  # load-bearing assertions — process.md F3 / D33). It lives under
+  # com.pocketshell.app.projects, not the proof prefix, so it carries its
+  # fully-qualified name directly.
+  "com.pocketshell.app.projects.CliVersionMismatchBannerUpdateButtonTest"
+>>>>>>> theirs
 )
 
 echo "=========================================================="

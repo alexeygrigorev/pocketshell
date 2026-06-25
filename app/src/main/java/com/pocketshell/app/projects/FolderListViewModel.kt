@@ -527,6 +527,146 @@ class FolderListViewModel internal constructor(
     /** Dismiss the passive CLI-version update prompt (issue #885). */
     fun dismissCliVersionMismatch() {
         _cliVersionMismatch.value = null
+        _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+    }
+
+    /**
+     * Issue #947: the progress state of the banner's one-tap **Update** action,
+     * which runs the host-side `pocketshell` upgrade over the warm SSH session.
+     *
+     * - [Idle] — no update in flight (the banner shows the Update + Dismiss
+     *   buttons).
+     * - [Running] — the upgrade exec is in flight (the banner shows a spinner;
+     *   Update is disabled).
+     * - [Failure] — the upgrade failed; [Failure.message] (installer stderr /
+     *   timeout / no-installer) is shown and the user can Retry or Dismiss. There
+     *   is NO stuck spinner: the state always leaves [Running] (the exec is
+     *   bounded, #944/#939).
+     *
+     * A SUCCESS does not get its own state — the upgrade re-checks the host
+     * version and, when it now matches, clears [cliVersionMismatch] so the whole
+     * banner disappears (the success signal is the banner going away).
+     */
+    public sealed interface CliVersionUpdateState {
+        public data object Idle : CliVersionUpdateState
+        public data object Running : CliVersionUpdateState
+        public data class Failure(val message: String) : CliVersionUpdateState
+    }
+
+    private val _cliVersionUpdateState: MutableStateFlow<CliVersionUpdateState> =
+        MutableStateFlow(CliVersionUpdateState.Idle)
+    val cliVersionUpdateState: StateFlow<CliVersionUpdateState> =
+        _cliVersionUpdateState.asStateFlow()
+
+    /**
+     * Issue #947: the host-upgrade seam. Runs `pocketshell`'s installer upgrade
+     * (uv / pipx / pip, auto-detected) over the warm session, bounded. Injectable
+     * for tests; the production default is a real [HostPocketshellUpgrade].
+     */
+    private var hostPocketshellUpgrade: HostPocketshellUpgrade = HostPocketshellUpgrade()
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setHostPocketshellUpgradeForTest(upgrade: HostPocketshellUpgrade) {
+        hostPocketshellUpgrade = upgrade
+    }
+
+    private var hostUpgradeJob: Job? = null
+
+    /**
+     * Issue #947: run the host-side `pocketshell` upgrade for the
+     * [cliVersionMismatch] banner's one-tap **Update** button.
+     *
+     * Over the EXISTING warm SSH session (D21 — no new connection) it:
+     *  1. flips the banner to [CliVersionUpdateState.Running] (spinner);
+     *  2. execs the auto-detected installer upgrade (bounded — #944/#939);
+     *  3. on success RE-CHECKS the host version via a fresh `tree get` and feeds
+     *     it through [observePayloadCliVersion] — when it now matches, the
+     *     mismatch clears and the whole banner disappears;
+     *  4. on failure (or a re-check that still reports outdated) surfaces a
+     *     [CliVersionUpdateState.Failure] with the installer error so the user can
+     *     Retry or Dismiss — never a stuck spinner.
+     *
+     * Idempotent against a double tap: a second call while one is in flight is
+     * ignored.
+     */
+    fun runHostPocketshellUpgrade() {
+        if (_cliVersionUpdateState.value is CliVersionUpdateState.Running) return
+        val params = bound
+        if (params == null) {
+            _cliVersionUpdateState.value =
+                CliVersionUpdateState.Failure("Not connected to the host — reconnect and try again.")
+            return
+        }
+        hostUpgradeJob?.cancel()
+        _cliVersionUpdateState.value = CliVersionUpdateState.Running
+        hostUpgradeJob = viewModelScope.launch {
+            val session = awaitWarmSession()
+            if (session == null || bound != params) {
+                _cliVersionUpdateState.value =
+                    CliVersionUpdateState.Failure("Not connected to the host — reconnect and try again.")
+                return@launch
+            }
+            when (val result = hostPocketshellUpgrade.run(session)) {
+                is HostPocketshellUpgrade.Result.Success -> {
+                    // Re-check the host version from a fresh payload. A SUCCESSFUL
+                    // upgrade should now report the matching version, clearing the
+                    // banner; a no-op upgrade (already-newest / capped) re-raises
+                    // a failure so the user isn't left thinking it worked.
+                    recheckHostVersionAfterUpgrade(params, session)
+                }
+                is HostPocketshellUpgrade.Result.Failure -> {
+                    _cliVersionUpdateState.value = CliVersionUpdateState.Failure(result.message)
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #947: after a successful upgrade exec, re-read the host CLI version
+     * from a fresh `tree get` and re-evaluate the mismatch. When it now matches
+     * (or the host is newer), [observePayloadCliVersion] clears
+     * [cliVersionMismatch] and we drop back to [CliVersionUpdateState.Idle] (the
+     * banner disappears). When it STILL reports outdated — e.g. the upgrade was a
+     * silent no-op — we surface a failure so the spinner never sticks and the
+     * user can retry/dismiss.
+     */
+    private suspend fun recheckHostVersionAfterUpgrade(params: BoundParams, session: SshSession) {
+        val source = treeRemoteSource
+        if (source == null) {
+            // No durable source (some unit paths): trust the exit-0 success and
+            // clear the banner so the spinner doesn't stick.
+            _cliVersionMismatch.value = null
+            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+            return
+        }
+        // `getTree` is itself bounded (TreeRemoteSource.execTreeRpcBounded), but
+        // wrap the re-check in an OUTER bound too so a future unbounded `getTree`
+        // can never leave the banner's spinner stuck (#947 / #944 / #939).
+        val treeResult = withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
+            runCatching { source.getTree(session, params.hostName) }
+                .getOrDefault(TreeRemoteSource.TreeResult.Empty)
+        } ?: TreeRemoteSource.TreeResult.Empty
+        if (treeResult.cliVersion.isNullOrBlank()) {
+            // The re-read carried NO version (timed out / old-CLI omits it /
+            // empty payload). The upgrade exec itself exited 0, so trust that
+            // success and clear the banner rather than raising a false
+            // "still outdated" — and never leave the spinner stuck.
+            _cliVersionMismatch.value = null
+            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+            return
+        }
+        observePayloadCliVersion(treeResult.cliVersion)
+        if (_cliVersionMismatch.value == null) {
+            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+        } else {
+            // The re-read reported a CONCRETE version that is STILL older — the
+            // upgrade was a silent no-op (e.g. capped). Don't pretend it worked.
+            _cliVersionUpdateState.value = CliVersionUpdateState.Failure(
+                "Update ran but the host still reports " +
+                    "${_cliVersionMismatch.value?.hostVersion ?: "an older version"}. " +
+                    "It may be capped — try the command on the host.",
+            )
+        }
     }
 
     /**

@@ -858,6 +858,31 @@ JOURNEY_CLASSES=(
   # SSH / tmux / port — runs on the already-booted AVD), no self-skip. Carries
   # its fully-qualified name directly (not under the proof prefix).
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"
+
+  # ===========================================================================
+  # Issue #933 (#928 D9 — detection net). Kept in its OWN block to minimize
+  # merge friction with the sibling #931 edits to this file.
+  #
+  # The recurring meta-problem: the maintainer hits freezes/crashes/ANRs that CI
+  # did NOT catch, because the per-PR journeys carry no freeze/ANR/crash
+  # DETECTOR. This is the safety net. One on-device end-to-end class exercises
+  # all three D9 detectors with a RED (symptom present) and a GREEN (symptom
+  # absent) case each:
+  #   * P1 StrictMode — a real MAIN-THREAD DISK READ (the #926/#928-D1 freeze
+  #     class that `detectNetwork()` misses) trips the process-wide policy
+  #     App.onCreate installs and records a `strictmode.violation`; the same read
+  #     off the main thread records none.
+  #   * P2 responsiveness probe — a synthetically-BLOCKED main thread
+  #     (Thread.sleep(2000) on Main, the freeze signature) is detected as a
+  #     heartbeat gap beyond the frame budget; a responsive main thread passes.
+  #   * P3 zero-crash gate — a crash persisted to the REAL CrashReportStore FAILS
+  #     the gate; a clean store passes.
+  # It uses NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO port — a pure
+  # on-device detector exercise, deterministic on the CI swiftshader AVD — so it
+  # needs no tests.yml service change, and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi()) on the load-bearing assertions —
+  # process.md F3 / D33). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"
 )
 
 echo "=========================================================="

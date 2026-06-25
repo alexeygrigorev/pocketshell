@@ -333,6 +333,364 @@ class AppDatabaseTest {
         )
     }
 
+    // --- Issue #932 (#928 D2/D9 P5): full migration-chain completeness. The
+    // older v8/v11/v13/v15 spot tests only prove FOUR start versions migrate;
+    // a forgotten/gapped step (e.g. a future `MIGRATION_16_17` omitted on a
+    // version bump, or a removed mid-chain `MIGRATION_x_y`) slips past them and
+    // then crash-loops 100% of users on their first launch after the update
+    // (Room hard-fails validation when no migration path reaches `version`).
+    // These two tests close that: (1) a derived graph check that the migration
+    // set forms one unbroken path from the earliest supported schema up to the
+    // current `version`, and (2) a seed+migrate sweep that opens EVERY supported
+    // start version through the migration set to current without throwing.
+
+    /**
+     * The migration graph must form a single unbroken chain from the earliest
+     * supported start version up to [APP_DATABASE_SCHEMA_VERSION], with no gap.
+     *
+     * Derived entirely from [APP_DATABASE_MIGRATIONS] — NOT a hardcoded version
+     * list — so the day someone bumps [APP_DATABASE_SCHEMA_VERSION] (or removes
+     * a mid-chain migration) without supplying the matching migration, this
+     * assertion goes RED in the JVM Unit job instead of the maintainer's device.
+     */
+    @Test
+    fun migrationGraphReachesCurrentVersionWithoutGaps() {
+        // Each migration covers the half-open interval [startVersion, endVersion).
+        // Order by start so we can walk the chain and detect any gap/overlap.
+        val ordered = APP_DATABASE_MIGRATIONS.sortedBy { it.startVersion }
+        assertTrue(
+            "Expected at least one migration in APP_DATABASE_MIGRATIONS",
+            ordered.isNotEmpty(),
+        )
+
+        val earliestSupported = ordered.first().startVersion
+        var reached = earliestSupported
+        for (migration in ordered) {
+            // The next migration must pick up exactly where the chain currently
+            // ends. A startVersion past `reached` means a forgotten step (a hole
+            // in the chain); a startVersion before it means an overlap/regress.
+            assertEquals(
+                "Migration chain gap/overlap: chain reached v$reached but the next " +
+                    "migration starts at v${migration.startVersion} " +
+                    "(no MIGRATION_${reached}_* covers the step from v$reached)",
+                reached,
+                migration.startVersion,
+            )
+            assertTrue(
+                "Migration ${migration.startVersion}->${migration.endVersion} does not advance the version",
+                migration.endVersion > migration.startVersion,
+            )
+            reached = migration.endVersion
+        }
+
+        // The chain must terminate exactly at the database's declared version.
+        // If `version` was bumped past the last migration's endVersion (the
+        // classic "forgot MIGRATION_N_N+1" update crash), this fails RED.
+        assertEquals(
+            "Migration chain ends at v$reached but APP_DATABASE_SCHEMA_VERSION is " +
+                "$APP_DATABASE_SCHEMA_VERSION — a version step has no migration; every " +
+                "installed user on v$reached would crash-loop on update (D22).",
+            APP_DATABASE_SCHEMA_VERSION,
+            reached,
+        )
+    }
+
+    /**
+     * Seed a real on-disk database at EVERY supported start version and confirm
+     * the production [APP_DATABASE_MIGRATIONS] set opens + migrates it all the
+     * way to current without throwing, with the seeded host row preserved.
+     *
+     * This is the on-disk counterpart to the graph check: it proves each step's
+     * SQL actually runs against a real DB carrying user data, not just that a
+     * `Migration` object with the right version numbers exists.
+     */
+    @Test
+    fun everySupportedStartVersionMigratesToCurrentPreservingRows() = runTest {
+        val supportedStartVersions = APP_DATABASE_MIGRATIONS
+            .map { it.startVersion }
+            .filter { it !in APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.toSet() }
+            .sorted()
+
+        // Sanity: the sweep must actually exercise every start version in the
+        // chain (guards against a vacuous loop — G3).
+        assertEquals(
+            "Expected the sweep to cover the full chain of supported start versions",
+            APP_DATABASE_MIGRATIONS.map { it.startVersion }.sorted(),
+            supportedStartVersions,
+        )
+        assertTrue("No supported start versions to sweep", supportedStartVersions.isNotEmpty())
+
+        for (startVersion in supportedStartVersions) {
+            val databaseName = "chain-v$startVersion-${System.nanoTime()}.db"
+            seedSchemaAtVersionWithHostRow(databaseName, startVersion)
+
+            val migratedDb = openOnDiskDatabase(databaseName)
+            try {
+                // Forces Room to run the migration chain to APP_DATABASE_SCHEMA_VERSION.
+                migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+                val hosts = migratedDb.hostDao().getAll().first()
+                assertEquals(
+                    "Host row lost migrating from v$startVersion to current",
+                    1,
+                    hosts.size,
+                )
+                assertEquals(
+                    "Host name corrupted migrating from v$startVersion",
+                    "host-v$startVersion",
+                    hosts[0].name,
+                )
+
+                val key = migratedDb.sshKeyDao().getById(1)
+                assertNotNull("ssh_key row lost migrating from v$startVersion", key)
+            } finally {
+                migratedDb.close()
+            }
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    /**
+     * Seed a raw SQLite database at [version] with one ssh_key + one host row,
+     * stamping `user_version = version` so Room runs the migration chain. The
+     * per-version schema is built by replaying the production migrations forward
+     * from the v8 baseline (the same shapes [APP_DATABASE_MIGRATIONS] produce),
+     * so a seed at vN is byte-for-byte what an on-device vN install looks like.
+     */
+    private fun seedSchemaAtVersionWithHostRow(databaseName: String, version: Int) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            buildSchemaLadderUpTo(it, version)
+            insertHostRowForVersion(it, version)
+            it.execSQL("PRAGMA user_version = $version")
+        }
+    }
+
+    /**
+     * Build the schema for [targetVersion] by starting at the v8 baseline and
+     * applying the forward DDL of each production migration in turn, stopping
+     * once the schema matches [targetVersion]. Mirrors [APP_DATABASE_MIGRATIONS]
+     * exactly so the seed cannot drift from the real on-device shapes.
+     */
+    private fun buildSchemaLadderUpTo(db: SQLiteDatabase, targetVersion: Int) {
+        createVersionEightSchema(db) // v8 baseline (ssh_keys + hosts + host-scoped tables)
+        if (targetVersion <= 8) return
+
+        applyMigration8To10Schema(db) // -> v10
+        if (targetVersion <= 10) return
+
+        applyMigration10To11Schema(db) // -> v11
+        if (targetVersion <= 11) return
+
+        applyMigration11To12Schema(db) // -> v12
+        if (targetVersion <= 12) return
+
+        applyMigration12To13Schema(db) // -> v13
+        if (targetVersion <= 13) return
+
+        applyMigration13To14Schema(db) // -> v14
+        if (targetVersion <= 14) return
+
+        applyMigration14To15Schema(db) // -> v15
+        if (targetVersion <= 15) return
+
+        applyMigration15To16Schema(db) // -> v16
+    }
+
+    /** v8 hosts has the `pathOverride` column and ssh_keys has no `fingerprint`. */
+    private fun insertHostRowForVersion(db: SQLiteDatabase, version: Int) {
+        if (version <= 8) {
+            db.execSQL(
+                "INSERT INTO ssh_keys(id, name, privateKeyPath, hasPassphrase, createdAt) " +
+                    "VALUES(1, 'key-v$version', '/keys/k', 1, 100)",
+            )
+            db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    usageCommandOverride, pathOverride
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json', '~/bin'
+                )
+                """.trimIndent(),
+            )
+        } else {
+            // v10+ : ssh_keys has `fingerprint`, hosts dropped `pathOverride`.
+            db.execSQL(
+                "INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt) " +
+                    "VALUES(1, 'key-v$version', '/keys/k', 'sha256:v$version', 1, 100)",
+            )
+            db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    usageCommandOverride
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+        }
+    }
+
+    // --- Forward DDL for each production migration, applied to a raw SQLite db
+    // so a seed at any version matches what an on-device install at that version
+    // actually carries. Each block mirrors the matching MIGRATION_*_* in
+    // AppDatabase.kt; keep them in lockstep when a migration changes.
+
+    /** Mirrors MIGRATION_8_10: ssh_keys gains `fingerprint`, hosts loses `pathOverride`. */
+    private fun applyMigration8To10Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE ssh_keys ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+        db.execSQL(
+            """
+            CREATE TABLE hosts_v10 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_v10 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                usageCommandOverride
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                usageCommandOverride
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_v10 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+
+    /** Mirrors MIGRATION_10_11: pocketshell CLI version columns. */
+    private fun applyMigration10To11Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellCliVersion TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellExpectedCliVersion TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellVersionCompatible INTEGER")
+    }
+
+    /** Mirrors MIGRATION_11_12: pocketshell daemon columns. */
+    private fun applyMigration11To12Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellDaemonRunning INTEGER")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellDaemonEnabled INTEGER")
+    }
+
+    /** Mirrors MIGRATION_12_13: command_templates table. */
+    private fun applyMigration12To13Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS command_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                commands TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_command_templates_hostId ON command_templates(hostId)")
+    }
+
+    /** Mirrors MIGRATION_13_14: claudeProfilesJson column. */
+    private fun applyMigration13To14Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN claudeProfilesJson TEXT")
+    }
+
+    /** Mirrors MIGRATION_14_15: codexProfilesJson column. */
+    private fun applyMigration14To15Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN codexProfilesJson TEXT")
+    }
+
+    /** Mirrors MIGRATION_15_16: rebuild hosts without the two profile JSON columns. */
+    private fun applyMigration15To16Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE hosts_v16 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                pocketshellDaemonRunning INTEGER,
+                pocketshellDaemonEnabled INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_v16 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                pocketshellCliVersion, pocketshellExpectedCliVersion,
+                pocketshellVersionCompatible, pocketshellDaemonRunning,
+                pocketshellDaemonEnabled, usageCommandOverride
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                pocketshellCliVersion, pocketshellExpectedCliVersion,
+                pocketshellVersionCompatible, pocketshellDaemonRunning,
+                pocketshellDaemonEnabled, usageCommandOverride
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_v16 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+
     @Test
     fun migrationFromVersionEightToCurrent_preservesUserRowsAndDropsPathOverride() = runTest {
         val databaseName = "v8-to-current-${System.nanoTime()}.db"

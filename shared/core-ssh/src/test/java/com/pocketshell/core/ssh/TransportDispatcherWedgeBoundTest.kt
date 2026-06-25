@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -177,6 +178,54 @@ class TransportDispatcherWedgeBoundTest {
             threw = true
         }
         assertFalse("a healthy op must not surface a per-op timeout", threw)
+        dispatcher.closeAndAwaitDrain { }
+    }
+
+    /**
+     * Issue #940 regression — the v0.4.16 integration break.
+     *
+     * The per-op ceiling MUST be driven by REAL wall-clock time, NOT by the
+     * caller's coroutine delay source. The combined #927+#930+#937 stack failed
+     * 13/21 core-ssh integration tests because every integration test runs under
+     * `runTest`, whose virtual clock AUTO-ADVANCES past `withTimeout(8s)`: the
+     * old ceiling fired INSTANTLY in virtual time while the real sshj op was
+     * still legitimately in progress on the executor thread, interrupting every
+     * healthy connect/exec/open (surfacing as `ConnectionException` ->
+     * `InterruptedException`, or a spurious `TransportOpTimeoutException`).
+     *
+     * This reproduces that exact mechanism in pure JVM: a HEALTHY op that takes
+     * real time (a blocking sleep WELL under the wall-clock ceiling) is run from
+     * inside `runTest`. On the old `withTimeout`-based dispatcher the virtual
+     * clock fires the 8s ceiling immediately and the op is aborted with a
+     * timeout; with the wall-clock watchdog the op completes normally because
+     * the watchdog measures real elapsed time, independent of the test scheduler.
+     */
+    @Test
+    fun `healthy op under runTest virtual clock is not aborted by the per-op ceiling`() = runTest {
+        // Generous wall-clock ceiling; the real op below takes ~150ms, so the
+        // watchdog must NEVER fire. Under the buggy withTimeout the runTest
+        // virtual clock would auto-advance past this instantly and abort the op.
+        val dispatcher = TransportDispatcher(perOpTimeoutMs = 5_000L)
+        val ran = AtomicBoolean(false)
+        var timedOut = false
+        try {
+            dispatcher.run {
+                // A real blocking call — the kind sshj's startSession()/exec()
+                // make while waiting on their AQS reply latch. It must run to
+                // completion; the watchdog only fires after 5s of REAL time.
+                Thread.sleep(150)
+                ran.set(true)
+            }
+        } catch (e: TransportOpTimeoutException) {
+            timedOut = true
+        }
+        assertFalse(
+            "a healthy real-time op run under runTest's virtual clock must NOT be " +
+                "aborted by the per-op ceiling (#940 regression — fails on the " +
+                "withTimeout-based dispatcher because runTest auto-advances virtual time)",
+            timedOut,
+        )
+        assertTrue("the healthy op must have completed", ran.get())
         dispatcher.closeAndAwaitDrain { }
     }
 

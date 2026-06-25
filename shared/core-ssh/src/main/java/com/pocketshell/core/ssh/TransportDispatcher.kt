@@ -6,9 +6,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -64,15 +65,27 @@ import java.util.concurrent.atomic.AtomicLong
  *    behind them), so the final `disconnect()` is the last write on the wire.
  * 4. **Bounded, interruptible per-op (issue #937 / S4-1).** Every operation runs
  *    under a hard [perOpTimeoutMs] ceiling, and its body runs inside
- *    [runInterruptible] so the timeout's cancellation can interrupt a wedged
- *    blocking sshj write/close and reclaim the dispatch thread. Without this a
- *    single sshj write that lands on a half-open link holds [mutex] FOREVER,
- *    freezing every other write on the connection and parking the single
- *    dispatch thread unreclaimably (the #935 S4-1 "always freezing / can't
- *    escape" root). With it, a wedged op fails THAT op with
- *    [TransportOpTimeoutException] (or surfaces a [TransportClosedException]
- *    once teardown has run) WITHOUT freezing the connection or leaking the
- *    thread.
+ *    [runInterruptible] so the ceiling can interrupt a wedged blocking sshj
+ *    write/close and reclaim the dispatch thread. Without this a single sshj
+ *    write that lands on a half-open link holds [mutex] FOREVER, freezing every
+ *    other write on the connection and parking the single dispatch thread
+ *    unreclaimably (the #935 S4-1 "always freezing / can't escape" root). With
+ *    it, a wedged op fails THAT op with [TransportOpTimeoutException] (or
+ *    surfaces a [TransportClosedException] once teardown has run) WITHOUT
+ *    freezing the connection or leaking the thread.
+ *
+ *    The ceiling is driven by a REAL wall-clock watchdog ([WATCHDOG]), NOT by
+ *    coroutine `withTimeout` (issue #940). `withTimeout` reads the delay source
+ *    from the CALLER's coroutine context — under `runTest`'s virtual,
+ *    auto-advancing test clock that fires the ceiling INSTANTLY in virtual time
+ *    while the real sshj op is still legitimately in progress on the executor
+ *    thread, interrupting every healthy connect/exec/open and aborting it as a
+ *    `ConnectionException`/`InterruptedException` or a spurious
+ *    `TransportOpTimeoutException`. That broke the combined #927+#930+#937
+ *    integration suite (13/21 red). A wall-clock watchdog interrupts the worker
+ *    thread only after [perOpTimeoutMs] of REAL elapsed time, identically in
+ *    production and under any test scheduler, so a healthy op is never aborted
+ *    and a genuinely-wedged op is still reclaimed.
  */
 internal class TransportDispatcher(
     /**
@@ -125,27 +138,73 @@ internal class TransportDispatcher(
      * [closed] — checked under the lock so it can never race a concurrent
      * [closeAndAwaitDrain] (invariant 3).
      *
-     * Bounded + interruptible (issue #937 / S4-1): the body runs under
-     * [perOpTimeoutMs] inside [runInterruptible], so a wedged blocking sshj
-     * call is interrupted and the dispatch thread reclaimed when the ceiling
-     * trips. A timed-out op throws [TransportOpTimeoutException] — that one op
-     * fails, every other write on the connection keeps flowing.
+     * Bounded + interruptible (issue #937 / S4-1, watchdog fix #940): the body
+     * runs inside [runInterruptible] on [context], guarded by a REAL wall-clock
+     * watchdog ([runUnderWallClockCeiling]) that interrupts the dispatch thread
+     * only after [perOpTimeoutMs] of elapsed REAL time. A wedged blocking sshj
+     * call is interrupted and the dispatch thread reclaimed; a timed-out op
+     * throws [TransportOpTimeoutException] — that one op fails, every other
+     * write on the connection keeps flowing. A healthy op is never aborted,
+     * because the watchdog is decoupled from the caller's (possibly virtual,
+     * `runTest`) coroutine clock.
      */
     suspend fun <T> run(block: () -> T): T = mutex.withLock {
         if (closed.get()) {
             throw TransportClosedException()
         }
+        // runInterruptible pins the body to [context] (the single dispatch
+        // thread) AND makes a Thread.interrupt() abort the running blocking
+        // sshj write/close. The watchdog inside the body schedules that
+        // interrupt on real wall-clock expiry, so the thread is reclaimed
+        // rather than parked forever when an op truly wedges.
+        runInterruptible(context) {
+            runUnderWallClockCeiling { block() }
+        }
+    }
+
+    /**
+     * Run [block] on the CURRENT (dispatch) thread under a real wall-clock
+     * ceiling (issue #940). A [WATCHDOG] task is scheduled to interrupt THIS
+     * thread after [perOpTimeoutMs] of real elapsed time; it is cancelled the
+     * instant [block] returns. If the watchdog fired (the op wedged past the
+     * ceiling), the interrupt is converted into a [TransportOpTimeoutException]
+     * and the thread's interrupt status is CLEARED so it can never leak onto the
+     * next op reusing this single dispatch thread (the #937 interrupt-leak
+     * invariant, now driven by the wall clock instead of the caller's coroutine
+     * clock).
+     *
+     * MUST be called from inside [runInterruptible] so the surrounding coroutine
+     * machinery does not also try to interrupt the thread; the watchdog is the
+     * sole source of interruption here.
+     */
+    private fun <T> runUnderWallClockCeiling(block: () -> T): T {
+        val target = Thread.currentThread()
+        val firedByWatchdog = AtomicBoolean(false)
+        val watchdog = WATCHDOG.schedule(
+            {
+                firedByWatchdog.set(true)
+                target.interrupt()
+            },
+            perOpTimeoutMs,
+            TimeUnit.MILLISECONDS,
+        )
         try {
-            withTimeout(perOpTimeoutMs) {
-                // runInterruptible pins the body to [context] (the single
-                // dispatch thread) AND makes cancellation interrupt the
-                // running thread — so when withTimeout fires, the wedged
-                // blocking sshj write/close is interrupted and the thread is
-                // reclaimed rather than parked forever.
-                runInterruptible(context) { block() }
+            return block()
+        } catch (t: Throwable) {
+            // If the watchdog interrupted a wedged op, surface the bounded
+            // timeout regardless of which blocking call the interrupt landed in
+            // (sshj wraps an InterruptedException as a ConnectionException, a
+            // raw JDK blocking read/write throws InterruptedException directly).
+            if (firedByWatchdog.get()) {
+                throw TransportOpTimeoutException(perOpTimeoutMs, t)
             }
-        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            throw TransportOpTimeoutException(perOpTimeoutMs, e)
+            throw t
+        } finally {
+            watchdog.cancel(false)
+            // Clear any interrupt status the watchdog set so it can never leak
+            // onto the next op reusing this dispatch thread. Safe even when the
+            // watchdog never fired (no-op then).
+            Thread.interrupted()
         }
     }
 
@@ -176,17 +235,19 @@ internal class TransportDispatcher(
         if (closed.get()) return
         mutex.withLock {
             if (closed.getAndSet(true)) return@withLock
-            // Issue #937 / S4-1: bound + interrupt the final disconnect too —
-            // a `disconnect()` on a half-open link is itself a blocking socket
-            // write that can wedge. Without a ceiling here a wedged disconnect
-            // would hold [mutex] forever and the teardown's own caller-side
-            // timeout (TmuxSessionViewModel / lease release) could never make
-            // progress. runInterruptible reclaims the dispatch thread when the
-            // ceiling trips; runCatching swallows the resulting timeout so
-            // teardown always completes and the executor is shut down.
+            // Issue #937 / S4-1 (watchdog fix #940): bound + interrupt the final
+            // disconnect too — a `disconnect()` on a half-open link is itself a
+            // blocking socket write that can wedge. Without a ceiling here a
+            // wedged disconnect would hold [mutex] forever and the teardown's own
+            // caller-side timeout (TmuxSessionViewModel / lease release) could
+            // never make progress. The real wall-clock watchdog inside
+            // [runUnderWallClockCeiling] reclaims the dispatch thread when the
+            // ceiling trips (decoupled from the caller's possibly-virtual test
+            // clock); runCatching swallows the resulting timeout so teardown
+            // always completes and the executor is shut down.
             runCatching {
-                withTimeout(perOpTimeoutMs) {
-                    runInterruptible(context) { disconnect() }
+                runInterruptible(context) {
+                    runUnderWallClockCeiling { disconnect() }
                 }
             }
         }
@@ -196,6 +257,21 @@ internal class TransportDispatcher(
     private companion object {
         /** Per-process dispatcher id, for thread-name uniqueness in logs. */
         private val SEQ = AtomicLong(0)
+
+        /**
+         * Shared real wall-clock watchdog (issue #940). A single daemon
+         * scheduler across all dispatchers schedules a per-op interrupt that
+         * fires after [perOpTimeoutMs] of REAL elapsed time — decoupled from the
+         * caller's coroutine delay source so the ceiling behaves identically in
+         * production and under `runTest`'s virtual clock. Each scheduled task is
+         * cancelled the instant its op returns, so a healthy fast op leaves no
+         * pending timer; the scheduler is therefore effectively idle between
+         * wedges. Daemon so it never holds the JVM open.
+         */
+        private val WATCHDOG: ScheduledExecutorService =
+            Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "ps-ssh-dispatch-watchdog").apply { isDaemon = true }
+            }
 
         /**
          * Default per-op ceiling (issue #937 / S4-1). 8s comfortably exceeds

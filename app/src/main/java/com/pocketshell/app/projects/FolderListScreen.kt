@@ -34,7 +34,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -1437,12 +1436,9 @@ internal fun CliVersionMismatchBanner(
             if (running) {
                 // Issue #947: running spinner — Update is in flight; the action
                 // buttons are replaced so a second tap can't double-run.
-                CircularProgressIndicator(
-                    color = color,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .testTag(FOLDER_LIST_CLI_VERSION_UPDATE_SPINNER_TAG),
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Small,
+                    modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_UPDATE_SPINNER_TAG),
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(

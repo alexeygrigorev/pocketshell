@@ -8,6 +8,23 @@ The multi-orchestrator experiment is paused. The active orchestrator should not
 spend startup time discovering peer orchestrators or negotiating shared
 ownership unless the maintainer explicitly restarts that experiment.
 
+**Never babysit CI — delegate it to the on-call, who runs a blocking watcher
+(locked directive, 2026-06-25).** The orchestrator does NOT sit in a poll-and-
+wait loop watching a CI run; that wastes tokens (every poll is an LLM turn).
+Instead, dispatch an **`oncall-engineer`** (`run_in_background: true`) that runs
+the committed **`scripts/watch-ci.py`** watcher ONCE (a single blocking call,
+near-zero tokens). The watcher polls the run, exits 0 when the required checks
+pass, exits non-zero on a real failure, and **stops itself on a hang / no-
+progress / max-wall-clock timeout** so nothing waits forever. The harness wakes
+the **on-call** (not the orchestrator) when the watcher exits; the on-call then
+acts: green → ping `main` to tag; infra flake (captured signature) → re-run the
+failed job and re-watch; real failure → fix it if small and commit-bound, else
+report to `main`. **If something breaks, the on-call fixes it, not the
+orchestrator.** The orchestrator, meanwhile, keeps the backlog moving (dispatch
+implementers/reviewers, integrate, file issues) or ends the turn. "I'll poll it
+every few minutes" is the banned anti-pattern. Every agent that needs to wait on
+CI uses `scripts/watch-ci.py`, never a hand-rolled poll loop or an LLM-turn wait.
+
 Use GitHub issues as the durable backlog and release record. Keep product work
 isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 

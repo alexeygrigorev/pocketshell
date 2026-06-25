@@ -87,24 +87,22 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() = runBlocking {
-        // STOPGAP — tracked in #207. The CI emulator has been failing this
-        // tmux-attach journey on every push since recent merges. Symptom
-        // is an assertion failure ("expected visible terminal text for
-        // tmux input effect, got: ...") rather than a crash, and the
-        // test still passes locally. Gate the test on CI so the main
-        // branch CI signal returns to green while the real root cause is
-        // investigated in parallel under #207. Same skip pattern as #132
-        // (a4ccbff).
+        // STOPGAP — tracked in #207/#470/#835. The historical terminal-input
+        // assertion is wrap-tolerant now, but PR #905 proved the journey still
+        // reaches terminal input through the tmux picker enumeration path. On CI
+        // that path can stall before `claude-main` appears, so this method is not
+        // safe as a per-push load-bearing gate until the picker/list-sessions
+        // stall is fixed or the journey opens the seeded session directly.
         Assume.assumeFalse(
-            "STOPGAP for #207 — passes locally, fails intermittently on CI; root cause under investigation.",
+            "STOPGAP for #207/#470/#835 — picker enumeration can stall on CI before terminal input is reached.",
             TerminalTestTimeouts.isRunningOnCi(),
         )
-        // #134 / #139: this test was previously skipped on CI because the typed
-        // command in sendCommandThroughTerminalInput() wraps at the Compose
-        // grid width after #102's resize-window propagation, breaking the
-        // naive `command in visibleText` predicate. The helper now uses
-        // TerminalTextMatcher.containsWrapTolerant(...) so the test is safe
-        // to run on CI again.
+        // #134 / #139: the typed command in sendCommandThroughTerminalInput()
+        // wraps at the Compose grid width after #102's resize-window
+        // propagation. The helper uses
+        // TerminalTextMatcher.containsWrapTolerant(...) so the terminal-input
+        // assertion itself is no longer the CI blocker; the skip above is only
+        // for the picker enumeration route used to reach that assertion.
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "t${System.currentTimeMillis().toString(36).takeLast(5)}"

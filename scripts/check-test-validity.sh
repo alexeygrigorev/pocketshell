@@ -135,7 +135,7 @@ A5_BASELINE=(
 # --------------------------------------------------------------------------
 C1_BASELINE=(
   "app/src/androidTest/java/com/pocketshell/app/tmux/AgentConversationReconnectDockerTest.kt"         # issue #495 local-only reconnect evidence
-  "app/src/androidTest/java/com/pocketshell/app/proof/EmulatorWorkflowE2eTest.kt"                     # issue #207 CI-flaky stopgap
+  "app/src/androidTest/java/com/pocketshell/app/proof/EmulatorWorkflowE2eTest.kt"                     # issue #207/#470/#835 picker-enumeration CI stopgap
 )
 
 # --------------------------------------------------------------------------

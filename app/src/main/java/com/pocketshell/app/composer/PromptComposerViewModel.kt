@@ -899,12 +899,27 @@ public class PromptComposerViewModel @Inject constructor(
         armSendWatchdog()
         if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
             viewModelScope.launch {
-                enqueueAndDispatchSidecarBackedSend(
-                    cleanDraft = draft,
-                    attachments = attachments,
-                    withEnter = withEnter,
-                    sendTarget = sendTarget,
-                )
+                try {
+                    enqueueAndDispatchSidecarBackedSend(
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        withEnter = withEnter,
+                        sendTarget = sendTarget,
+                    )
+                } catch (cancelled: CancellationException) {
+                    // Issue #929: a real cancellation (e.g. VM cleared) — clear
+                    // the in-flight gates so a recreated composer is not wedged,
+                    // then rethrow to honour structured concurrency.
+                    clearStrandedSendInFlight()
+                    throw cancelled
+                } catch (t: Throwable) {
+                    // Issue #929: any unexpected failure in the sidecar dispatch
+                    // is still a non-delivering exit — clear the strand so the
+                    // pipeline self-heals instead of waiting on the watchdog.
+                    clearStrandedSendInFlight(
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
+                }
             }
             return
         }
@@ -946,9 +961,19 @@ public class PromptComposerViewModel @Inject constructor(
         withEnter: Boolean,
         sendTarget: SendTargetSnapshot,
     ) {
+        // Issue #929: this whole dispatch runs while `sendInFlight = true` (set by
+        // [emitSendRequest] before launching us). EVERY exit that does not deliver
+        // must clear the in-flight gates, or the pipeline wedges for the watchdog
+        // window. The early config-missing returns below are non-delivering exits.
         val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() }
-        val sidecarStore = outboundAttachmentSidecarStore ?: return
-        if (sessionKey == null) return
+        val sidecarStore = outboundAttachmentSidecarStore ?: run {
+            clearStrandedSendInFlight()
+            return
+        }
+        if (sessionKey == null) {
+            clearStrandedSendInFlight()
+            return
+        }
         val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
             attachment.previewUri?.let { index to it }
         }
@@ -959,13 +984,9 @@ public class PromptComposerViewModel @Inject constructor(
             attachmentIndices = localAttachments.map { it.first },
         )
         if (sidecars.size != localAttachments.size) {
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
-                )
-            }
+            clearStrandedSendInFlight(
+                error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
+            )
             return
         }
         val item = OutboundItem(
@@ -1152,6 +1173,38 @@ public class PromptComposerViewModel @Inject constructor(
     private fun disarmSendWatchdog() {
         sendWatchdogJob?.cancel()
         sendWatchdogJob = null
+    }
+
+    /**
+     * Issue #929: clear the in-flight send state PROMPTLY when a send resolved
+     * without delivering — the catch-all that ends the "attachment send wedges
+     * all subsequent sends until restart" bug.
+     *
+     * #928 D5 found the sidecar-backed dispatch path has several internal
+     * `return false` early-outs (queue row vanished, `markUploading` lost the
+     * race, `claim` lost the race, `markAttachmentsUploaded` no longer Queued)
+     * that left `sendInFlight = true` with ONLY the slow ~110s #891 watchdog to
+     * clear it. While `sendInFlight` is stranded true, `dispatchSendNow` /
+     * `emitSendRequest` reject EVERY subsequent send — including a plain
+     * text-only one — so the user "can't send anything" until they restart.
+     *
+     * This clears all three in-flight gates at once: `sendInFlight`, the
+     * `outboundSidecarDispatchInFlight` dispatch latch (the silent-drop window
+     * at [emitSendRequest]), and the overall-send watchdog. Every non-delivering
+     * exit of the dispatch path routes through here, so the pipeline self-heals
+     * immediately instead of after the watchdog window. Idempotent; safe to call
+     * even when no send was in flight.
+     */
+    private fun clearStrandedSendInFlight(error: String? = null) {
+        disarmSendWatchdog()
+        outboundSidecarDispatchInFlight = false
+        _uiState.update { current ->
+            if (error != null) {
+                current.copy(sendInFlight = false, error = error)
+            } else {
+                current.copy(sendInFlight = false)
+            }
+        }
     }
 
     /**
@@ -1398,6 +1451,17 @@ public class PromptComposerViewModel @Inject constructor(
                     } else {
                         claimAndEmitOutboundItem(id)
                     }
+                } catch (cancelled: CancellationException) {
+                    // Issue #929: clear the in-flight gates on cancellation so a
+                    // recreated composer is not wedged, then rethrow.
+                    clearStrandedSendInFlight()
+                    throw cancelled
+                } catch (t: Throwable) {
+                    // Issue #929: an unexpected throw is a non-delivering exit —
+                    // clear the strand so the next send is not wedged.
+                    clearStrandedSendInFlight(
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
                 } finally {
                     outboundSidecarDispatchInFlight = false
                 }
@@ -1416,22 +1480,29 @@ public class PromptComposerViewModel @Inject constructor(
         val sidecarStore = outboundAttachmentSidecarStore ?: return true
         val sidecars = sidecarStore.refsFor(id)
         if (sidecars.isEmpty()) return true
-        val item = outboundQueueStore.item(id) ?: return false
+        // Issue #929: the queue row vanished out from under this dispatch. That
+        // is a non-delivering exit, so clear the in-flight gates instead of
+        // stranding `sendInFlight = true` for the watchdog window.
+        val item = outboundQueueStore.item(id) ?: run {
+            clearStrandedSendInFlight()
+            return false
+        }
         val uploader = outboundAttachmentUploader
         if (uploader == null) {
             outboundQueueStore.markFailed(id, lastError = "Attachment upload unavailable")
             refreshOutboundQueueItemsFor(item.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = "Attachment upload failed: reconnect, then send again or discard the draft.",
-                )
-            }
+            clearStrandedSendInFlight(
+                error = "Attachment upload failed: reconnect, then send again or discard the draft.",
+            )
             return false
         }
+        // Issue #929: `markUploading` lost the claim race (row no longer exactly
+        // claimable). Non-delivering exit — clear the strand.
         val uploading = outboundQueueStore.markUploading(id, lastAttemptAtMs = clock())
-            ?: return false
+            ?: run {
+                clearStrandedSendInFlight()
+                return false
+            }
         refreshOutboundQueueItemsFor(uploading.sessionKey)
         val result = try {
             withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { uploader(sidecars) }
@@ -1445,21 +1516,14 @@ public class PromptComposerViewModel @Inject constructor(
         val uploadedPaths = result.getOrElse { error ->
             outboundQueueStore.markFailed(id, lastError = attachmentErrorMessage(error))
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    error = attachmentErrorMessage(error),
-                )
-            }
+            clearStrandedSendInFlight(error = attachmentErrorMessage(error))
             return false
         }.filter { it.isNotBlank() }
         if (uploadedPaths.size != sidecars.size) {
             val message = "Attachment upload failed: uploaded ${uploadedPaths.size} of ${sidecars.size} files."
             outboundQueueStore.markFailed(id, lastError = message)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            disarmSendWatchdog()
-            _uiState.update { it.copy(sendInFlight = false, error = message) }
+            clearStrandedSendInFlight(error = message)
             return false
         }
         val uploadedSidecarRefs = sidecars.mapIndexed { index, ref ->
@@ -1473,6 +1537,9 @@ public class PromptComposerViewModel @Inject constructor(
         val uploaded = outboundQueueStore.markAttachmentsUploaded(id, updatedRefs)
         if (uploaded?.state != OutboundState.Queued) {
             refreshOutboundQueueItemsFor(item.sessionKey)
+            // Issue #929: post-upload state is no longer dispatchable — clear the
+            // in-flight gates rather than stranding the pipeline.
+            clearStrandedSendInFlight()
             return false
         }
         refreshOutboundQueueItemsFor(item.sessionKey)
@@ -1480,12 +1547,19 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun claimAndEmitOutboundItem(id: String): Boolean {
-        val active = outboundQueueStore.claim(id) ?: return false
+        // Issue #929: the claim lost the race (row already claimed/delivered/
+        // gone). Non-delivering exit — clear the in-flight gates so the next
+        // send is not wedged behind a stranded `sendInFlight`.
+        val active = outboundQueueStore.claim(id) ?: run {
+            clearStrandedSendInFlight()
+            return false
+        }
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {
             outboundQueueStore.markFailed(id, lastError = "Nothing to send")
             refreshOutboundQueueItemsFor(active.sessionKey)
+            clearStrandedSendInFlight()
             return false
         }
         refreshOutboundQueueItemsFor(active.sessionKey)

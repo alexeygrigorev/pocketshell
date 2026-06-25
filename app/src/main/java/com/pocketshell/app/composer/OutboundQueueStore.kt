@@ -321,7 +321,10 @@ public enum class OutboundState {
  * serialized under a single [lock]. Two concurrent flushers calling
  * [claimNext] for the same session therefore cannot both win the same item.
  */
-public class InMemoryOutboundQueueStore : OutboundQueueStore {
+// `open` so unit tests can override a single store method to deterministically
+// drive an internal early-return strand (issue #929 regression coverage) without
+// minting a whole parallel fake store.
+public open class InMemoryOutboundQueueStore : OutboundQueueStore {
 
     private val lock = Any()
 
@@ -393,7 +396,7 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         claimed
     }
 
-    override fun claim(id: String): OutboundItem? = synchronized(lock) {
+    override open fun claim(id: String): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (!existing.state.isExactClaimable) return null
         val claimed = existing.claimedForAttempt()
@@ -411,7 +414,7 @@ public class InMemoryOutboundQueueStore : OutboundQueueStore {
         updated
     }
 
-    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
+    override open fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (!existing.state.isExactClaimable) return null
         val updated = existing.copy(

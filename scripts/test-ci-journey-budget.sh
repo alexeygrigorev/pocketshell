@@ -125,6 +125,9 @@ chmod +x "$SANDBOX/scripts/ci-journey-suite.sh"
 # trips after the first class or two — exactly the #470-stall time-burn shape.
 cat > "$SANDBOX/gradlew" <<'STUB'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "--stop" ]]; then
+  exit 0
+fi
 sleep "${GRADLE_STUB_SLEEP:-2}"
 exit 0
 STUB
@@ -275,6 +278,266 @@ overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure f
 [[ "$overwrite_verdict" == "FIRST_GENUINE_FAILURE" ]] \
   || fail "(h) first genuine failure + retry timeout overwrite routed to '$overwrite_verdict', expected FIRST_GENUINE_FAILURE"
 pass "(h) first genuine failure remains red when retry overwrites summary with timeout-only content"
+
+# ---------------------------------------------------------------------------
+# Issue #918: if the per-class `timeout` kills a Gradle invocation, the next
+# retry can be poisoned by the still-running Gradle daemon/file-hash cache lock:
+# "Cannot lock file hash cache ... locked by this process". Model that class:
+# first :app invocation times out and leaves a poison marker; `gradlew --stop`
+# clears it; the retry fails unless cleanup ran before it.
+echo "== Timeout cleanup: per-class Gradle timeout stops daemons before retry =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+
+state_dir="${GRADLE_LOCK_STUB_DIR:?}"
+mkdir -p "$state_dir"
+printf '%s\n' "$*" >> "$state_dir/args.log"
+
+if [[ "${1:-}" == "--stop" ]]; then
+  rm -f "$state_dir/poisoned-lock"
+  printf 'stop\n' >> "$state_dir/stop.log"
+  exit 0
+fi
+
+if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
+  count="$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state_dir/app-count"
+
+  if [[ "$count" -eq 1 ]]; then
+    touch "$state_dir/poisoned-lock"
+    sleep 30
+    exit 0
+  fi
+
+  if [[ -e "$state_dir/poisoned-lock" ]]; then
+    printf 'Cannot lock file hash cache (%s/caches/fileHashes) as it has already been locked by this process.\n' "$state_dir" >&2
+    exit 77
+  fi
+fi
+
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+lock_stub_dir="$SANDBOX/lock-stub"
+rm -rf "$lock_stub_dir"
+mkdir -p "$lock_stub_dir"
+out_lock="$SANDBOX/run-timeout-cleanup.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  GRADLE_LOCK_STUB_DIR="$lock_stub_dir" \
+  JOURNEY_STEP_BUDGET_SECS=3600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_lock" 2>&1
+rc_lock=$?
+set -e
+
+[[ "$rc_lock" -eq 0 ]] \
+  || { sed -n '1,120p' "$out_lock"; fail "(i) timeout cleanup run exited $rc_lock; expected recovered success"; }
+[[ -s "$lock_stub_dir/stop.log" ]] \
+  || fail "(i) per-class timeout did not run gradlew --stop before retry"
+grep -q 'GRADLE_TIMEOUT_CLEANUP:' "$out_lock" \
+  || fail "(i) cleanup marker was not logged after timeout"
+grep -q 'JOURNEY_FLAKE_RECOVERED:' "$out_lock" \
+  || fail "(i) timed-out class did not recover on retry"
+grep -q -- '--no-daemon :app:connectedDebugAndroidTest' "$lock_stub_dir/args.log" \
+  || fail "(i) per-class journey invocation did not use --no-daemon"
+if grep -q 'Cannot lock file hash cache' "$out_lock"; then
+  sed -n '1,160p' "$out_lock"
+  fail "(i) retry still saw the simulated Gradle file-hash lock"
+fi
+pass "(i) per-class timeout stops Gradle and retry avoids the poisoned file-hash lock"
+
+# The hard timeout path matters too: GNU `timeout --kill-after` returns 137 when
+# the child ignores TERM and is killed by the SIGKILL backstop. That path must
+# still stop Gradle before retry or the #918 lock poisoning can survive.
+echo "== Timeout cleanup: SIGKILL backstop also stops daemons before retry =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+
+state_dir="${GRADLE_LOCK_STUB_DIR:?}"
+mkdir -p "$state_dir"
+printf '%s\n' "$*" >> "$state_dir/args.log"
+
+if [[ "${1:-}" == "--stop" ]]; then
+  rm -f "$state_dir/poisoned-lock"
+  printf 'stop\n' >> "$state_dir/stop.log"
+  exit 0
+fi
+
+if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
+  count="$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state_dir/app-count"
+
+  if [[ "$count" -eq 1 ]]; then
+    trap '' TERM
+    touch "$state_dir/poisoned-lock"
+    sleep 30
+    exit 0
+  fi
+
+  if [[ -e "$state_dir/poisoned-lock" ]]; then
+    printf 'Cannot lock file hash cache (%s/caches/fileHashes) as it has already been locked by this process.\n' "$state_dir" >&2
+    exit 77
+  fi
+fi
+
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+kill_stub_dir="$SANDBOX/kill-lock-stub"
+rm -rf "$kill_stub_dir"
+mkdir -p "$kill_stub_dir"
+out_kill="$SANDBOX/run-timeout-kill-cleanup.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  GRADLE_LOCK_STUB_DIR="$kill_stub_dir" \
+  JOURNEY_STEP_BUDGET_SECS=3600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=1 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_kill" 2>&1
+rc_kill=$?
+set -e
+
+[[ "$rc_kill" -eq 0 ]] \
+  || { sed -n '1,140p' "$out_kill"; fail "(j) SIGKILL timeout cleanup run exited $rc_kill; expected recovered success"; }
+[[ -s "$kill_stub_dir/stop.log" ]] \
+  || fail "(j) SIGKILL timeout did not run gradlew --stop before retry"
+grep -q 'GRADLE_TIMEOUT_CLEANUP:' "$out_kill" \
+  || fail "(j) cleanup marker was not logged after SIGKILL timeout"
+grep -q 'JOURNEY_FLAKE_RECOVERED:' "$out_kill" \
+  || fail "(j) SIGKILL-timed-out class did not recover on retry"
+if grep -q 'Cannot lock file hash cache' "$out_kill"; then
+  sed -n '1,180p' "$out_kill"
+  fail "(j) retry still saw the simulated Gradle file-hash lock after SIGKILL timeout"
+fi
+pass "(j) SIGKILL timeout stops Gradle and retry avoids the poisoned file-hash lock"
+
+echo "== Timeout cleanup: repeated SIGKILL timeout stays classified as timeout =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+
+state_dir="${GRADLE_LOCK_STUB_DIR:?}"
+mkdir -p "$state_dir"
+printf '%s\n' "$*" >> "$state_dir/args.log"
+
+if [[ "${1:-}" == "--stop" ]]; then
+  rm -f "$state_dir/poisoned-lock"
+  printf 'stop\n' >> "$state_dir/stop.log"
+  exit 0
+fi
+
+if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
+  count="$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state_dir/app-count"
+  trap '' TERM
+  touch "$state_dir/poisoned-lock"
+  sleep 30
+  exit 0
+fi
+
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+repeat_kill_stub_dir="$SANDBOX/repeat-kill-lock-stub"
+rm -rf "$repeat_kill_stub_dir"
+mkdir -p "$repeat_kill_stub_dir"
+out_repeat_kill="$SANDBOX/run-timeout-repeat-kill-cleanup.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  GRADLE_LOCK_STUB_DIR="$repeat_kill_stub_dir" \
+  JOURNEY_STEP_BUDGET_SECS=5 \
+  JOURNEY_CLASS_TIMEOUT_SECS=1 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_repeat_kill" 2>&1
+rc_repeat_kill=$?
+set -e
+
+summary_repeat_kill="$SANDBOX/artifacts/ci-journey/summary.md"
+[[ "$rc_repeat_kill" -ne 0 ]] \
+  || fail "(k) repeated SIGKILL timeout exited 0; expected timeout-red"
+[[ -f "$summary_repeat_kill" ]] \
+  || fail "(k) repeated SIGKILL timeout did not write summary.md"
+grep -q 'JOURNEY_STEP_TIMEOUT' "$summary_repeat_kill" \
+  || { cat "$summary_repeat_kill"; fail "(k) repeated SIGKILL timeout summary missing JOURNEY_STEP_TIMEOUT"; }
+grep -q 'JOURNEY_STEP_TIMEOUT: .*rc=137' "$out_repeat_kill" \
+  || { sed -n '1,180p' "$out_repeat_kill"; fail "(k) repeated SIGKILL timeout did not exercise rc=137 classification"; }
+if grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary_repeat_kill"; then
+  cat "$summary_repeat_kill"
+  fail "(k) repeated SIGKILL timeout was misclassified as a genuine failed-both regression"
+fi
+stop_count="$(wc -l < "$repeat_kill_stub_dir/stop.log" 2>/dev/null || printf '0')"
+[[ "$stop_count" -ge 2 ]] \
+  || fail "(k) repeated SIGKILL timeout did not clean up after both attempts"
+pass "(k) repeated SIGKILL timeout remains JOURNEY_STEP_TIMEOUT, not JOURNEY_FAILED"
+
+echo "== Timeout cleanup: immediate SIGKILL remains a genuine failure =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+
+state_dir="${GRADLE_LOCK_STUB_DIR:?}"
+mkdir -p "$state_dir"
+printf '%s\n' "$*" >> "$state_dir/args.log"
+
+if [[ "${1:-}" == "--stop" ]]; then
+  sleep "${GRADLE_STOP_STUB_SLEEP_SECS:-0}"
+  printf 'stop\n' >> "$state_dir/stop.log"
+  exit 0
+fi
+
+if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
+  count="$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state_dir/app-count"
+  kill -9 "$$"
+fi
+
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+early_kill_stub_dir="$SANDBOX/early-kill-lock-stub"
+rm -rf "$early_kill_stub_dir"
+mkdir -p "$early_kill_stub_dir"
+out_early_kill="$SANDBOX/run-timeout-early-kill-cleanup.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  GRADLE_LOCK_STUB_DIR="$early_kill_stub_dir" \
+  GRADLE_STOP_STUB_SLEEP_SECS=3 \
+  JOURNEY_STEP_BUDGET_SECS=2 \
+  JOURNEY_CLASS_TIMEOUT_SECS=30 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_early_kill" 2>&1
+rc_early_kill=$?
+set -e
+
+summary_early_kill="$SANDBOX/artifacts/ci-journey/summary.md"
+[[ "$rc_early_kill" -ne 0 ]] \
+  || fail "(l) immediate SIGKILL exited 0; expected genuine failure"
+[[ -f "$summary_early_kill" ]] \
+  || fail "(l) immediate SIGKILL did not write summary.md"
+grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary_early_kill" \
+  || { cat "$summary_early_kill"; fail "(l) immediate SIGKILL summary missing genuine failed-both marker"; }
+if grep -q 'JOURNEY_STEP_TIMEOUT: .*rc=137' "$out_early_kill"; then
+  sed -n '1,180p' "$out_early_kill"
+  fail "(l) immediate SIGKILL was misclassified as a timeout-owned rc=137"
+fi
+[[ -s "$early_kill_stub_dir/stop.log" ]] \
+  || fail "(l) immediate SIGKILL still should run Gradle cleanup before retry"
+pass "(l) immediate SIGKILL remains JOURNEY_FAILED even when cleanup spends the budget"
 
 # ---------------------------------------------------------------------------
 # Negative control: a clean PASS run (generous budget, fast gradle stub) must

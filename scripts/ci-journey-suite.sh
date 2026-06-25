@@ -892,8 +892,16 @@ echo "=========================================================="
 #                                420s = 7 min: above the 300s per-test
 #                                timeout_msec so the runner's own interrupt is
 #                                preferred, but a backstop if even that wedges).
+#   JOURNEY_GRADLE_STOP_TIMEOUT_SECS
+#                              — bounded cleanup window after a class attempt is
+#                                killed by `timeout` (default 60s).
+#   JOURNEY_CLASS_KILL_AFTER_SECS
+#                              — SIGKILL backstop after the per-class timeout
+#                                sends TERM (default 30s).
 JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-1200}"
 JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
+JOURNEY_GRADLE_STOP_TIMEOUT_SECS="${JOURNEY_GRADLE_STOP_TIMEOUT_SECS:-60}"
+JOURNEY_CLASS_KILL_AFTER_SECS="${JOURNEY_CLASS_KILL_AFTER_SECS:-30}"
 
 # budget_remaining — seconds left in the suite-level budget (never negative).
 budget_remaining() {
@@ -910,6 +918,37 @@ budget_exhausted() {
   (( $(budget_remaining) <= 0 ))
 }
 
+cleanup_gradle_after_timeout() {
+  local fqcn="$1"
+  local stop_rc
+
+  echo "GRADLE_TIMEOUT_CLEANUP: $fqcn timed out; stopping Gradle daemons before any retry"
+  if timeout --signal=TERM --kill-after=10 "${JOURNEY_GRADLE_STOP_TIMEOUT_SECS}s" \
+      "$GRADLEW" --stop; then
+    echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop completed for $fqcn"
+    return 0
+  fi
+
+  stop_rc=$?
+  echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop exited $stop_rc for $fqcn; continuing with retry/budget handling" >&2
+  return 0
+}
+
+LAST_RUN_CLASS_TIMEOUT_HIT=0
+LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
+
+is_timeout_rc() {
+  [[ "$1" -eq 124 || ( "$1" -eq 137 && "${LAST_RUN_CLASS_TIMEOUT_HIT:-0}" -eq 1 ) ]]
+}
+
+class_attempt_hit_time_budget() {
+  is_timeout_rc "$1" || [[ "${LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT:-0}" -eq 1 ]]
+}
+
+needs_gradle_cleanup_after_class_abort() {
+  [[ "$1" -eq 124 || "$1" -eq 137 ]]
+}
+
 # run_class <FQCN> — runs ONE journey class as its own gradle connected-test
 # invocation and returns gradle's exit code (0 == that class passed). Running
 # one class per invocation (rather than all classes comma-joined into a single
@@ -924,19 +963,38 @@ budget_exhausted() {
 # caller treats that as a failed attempt (the retry/budget logic handles it).
 run_class() {
   local fqcn="$1"
-  local remaining cap
+  local remaining cap rc attempt_start attempt_elapsed
+  LAST_RUN_CLASS_TIMEOUT_HIT=0
+  LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
   remaining="$(budget_remaining)"
   cap="$JOURNEY_CLASS_TIMEOUT_SECS"
   (( remaining < cap )) && cap="$remaining"
   # Guard: if the budget is already spent, don't even start gradle — return the
   # `timeout` 124 code so the caller records it as a (non-)attempt uniformly.
-  (( cap <= 0 )) && return 124
-  timeout --signal=TERM --kill-after=30 "${cap}s" \
-    "$GRADLEW" :app:connectedDebugAndroidTest \
+  if (( cap <= 0 )); then
+    LAST_RUN_CLASS_TIMEOUT_HIT=1
+    LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
+    return 124
+  fi
+  attempt_start=$SECONDS
+  timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${cap}s" \
+    "$GRADLEW" --no-daemon :app:connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace
+  rc=$?
+  attempt_elapsed=$((SECONDS - attempt_start))
+  if [[ $rc -eq 124 || ( $rc -eq 137 && $attempt_elapsed -ge $cap ) ]]; then
+    LAST_RUN_CLASS_TIMEOUT_HIT=1
+  fi
+  if budget_exhausted; then
+    LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
+  fi
+  if needs_gradle_cleanup_after_class_abort "$rc"; then
+    cleanup_gradle_after_timeout "$fqcn"
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -1105,10 +1163,15 @@ for fqcn in "${JOURNEY_CLASSES[@]}"; do
   # an earlier attempt drained the clock), do NOT burn the remaining-class retry
   # on a stalled AVD — bucket this class as a BUDGET-timeout and move on so the
   # summary still gets written before the workflow job cap.
-  if budget_exhausted; then
+  if [[ "${LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT:-0}" -eq 1 ]]; then
     STEP_TIMEOUT_HIT=1
     echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835 / #470 stall)"
     BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+    continue
+  fi
+  if budget_exhausted; then
+    echo "JOURNEY_FAILED: $fqcn failed before retry and cleanup exhausted the suite budget (rc=$rc)"
+    FAILED_CLASSES+=("$fqcn")
     continue
   fi
 
@@ -1127,15 +1190,18 @@ for fqcn in "${JOURNEY_CLASSES[@]}"; do
     # degrading trend is detectable in the CI logs.
     echo "JOURNEY_FLAKE_RECOVERED: $fqcn passed on retry (attempt 2) (retry elapsed $((SECONDS - retry_start))s)"
     RECOVERED_CLASSES+=("$fqcn")
-  elif [[ $rc -eq 124 ]] || budget_exhausted; then
-    # rc=124 == the `timeout` wrapper cut this attempt at the budget ceiling, OR
-    # the budget is otherwise spent: this is a TIME-budget casualty (the #470
-    # stall), not a clean twice-failed regression. Bucket it distinctly so the
-    # classifier labels the red as a journey timeout, not a real test failure
-    # and not an infra abort.
+  elif class_attempt_hit_time_budget "$rc"; then
+    # rc=124 == `timeout` sent TERM at the class cap; rc=137 == the command
+    # survived TERM and hit the SIGKILL backstop. Either way this is a time-
+    # budget casualty (the #470 stall), not a clean twice-failed regression.
+    # Bucket it distinctly so the classifier labels the red as a journey
+    # timeout, not a real test failure and not an infra abort.
     STEP_TIMEOUT_HIT=1
     echo "JOURNEY_STEP_TIMEOUT: $fqcn retry was cut by the suite budget (rc=$rc) (issue #835 / #470 stall)"
     BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+  elif budget_exhausted; then
+    echo "JOURNEY_FAILED: $fqcn retry failed and cleanup exhausted the suite budget (rc=$rc)"
+    FAILED_CLASSES+=("$fqcn")
   else
     echo "JOURNEY_FAILED: $fqcn failed twice"
     FAILED_CLASSES+=("$fqcn")

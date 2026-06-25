@@ -21,6 +21,8 @@
 #       genuine failure / infra abort routes this summary to advisory-green.
 #   (f) a cancelled retry is classified before any `Failed BOTH attempts`
 #       summary, because summary.md can be stale from the first cold boot.
+#   (g) first-attempt diagnostics are snapshotted before the workflow retry can
+#       overwrite summary.md or connected-test outputs.
 #
 # It runs entirely on the JVM-free shell layer — NO emulator, NO Docker, NO
 # gradle — so it can run as a fast unit check on any box and in the Unit CI job.
@@ -87,7 +89,24 @@ if grep -qE "$stale_step_cap_re" \
   "$REAL_SUITE" "$WORKFLOW" "$THIS_TEST"; then
   fail "(pre) stale workflow-timeout wording found; use 45-min job cap"
 fi
+
+preserve_line="$(grep -n 'name: Preserve first journey attempt diagnostics' "$WORKFLOW" | cut -d: -f1)"
+retry_line="$(grep -n 'name: Retry journey subset on a fresh cold-booted emulator' "$WORKFLOW" | cut -d: -f1)"
+upload_line="$(grep -n 'artifacts/ci-journey-attempt-1/' "$WORKFLOW" | cut -d: -f1 | tail -n 1)"
+[[ "$preserve_line" =~ ^[0-9]+$ ]] \
+  || fail "(pre) workflow must preserve first-attempt diagnostics before retry"
+[[ "$retry_line" =~ ^[0-9]+$ ]] \
+  || fail "(pre) could not find emulator retry step in tests.yml"
+[[ "$upload_line" =~ ^[0-9]+$ ]] \
+  || fail "(pre) first-attempt diagnostics must be uploaded as an artifact"
+[[ "$preserve_line" -lt "$retry_line" ]] \
+  || fail "(pre) first-attempt diagnostics preservation must run before retry"
+grep -q 'cp -a artifacts/ci-journey/.' "$WORKFLOW" \
+  || fail "(pre) preservation step must snapshot artifacts/ci-journey before retry overwrites summary.md"
+grep -q 'summary-missing.txt' "$WORKFLOW" \
+  || fail "(pre) preservation step must record first-attempt missing-summary infra aborts"
 pass "(pre) #908 budget arithmetic pinned (${job_cap_secs}s job - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s slack)"
+pass "(pre) first-attempt diagnostics are preserved before emulator retry"
 
 # ---------------------------------------------------------------------------
 # Build a sandbox "repo root": a copy of the suite script + a stub gradlew that

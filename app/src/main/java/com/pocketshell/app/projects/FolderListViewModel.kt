@@ -40,6 +40,7 @@ import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -2094,8 +2095,57 @@ class FolderListViewModel internal constructor(
             // it releases on the next ON_START.
             processStarted.first { it }
             setSessionRefreshInFlight(true)
-            runReconcile(params)
+            // Issue #939 (audit #935 S5-1): [runReconcile] sets
+            // `sessionRefreshInFlight = true` then runs an unguarded suspend body
+            // (`tree.reconcile`, `persistTree`/`persistClientCache`, the
+            // `hostDao.getById` Room read, the gateway enumeration). Before this
+            // guard, ANY throw between the flag set and one of `runReconcile`'s
+            // explicit `setSessionRefreshInFlight(false)` clears escaped without
+            // ever releasing the flag — the cold-launch session-picker refresh
+            // bar then spun FOREVER with no error band, and the in-flight guard at
+            // [setSessionRefreshInFlight] made a re-tap a no-op (the user could
+            // not retry without leaving + re-binding the host). The `finally`
+            // guarantees the flag is released on EVERY exit (success, handled
+            // failure, OR an unexpected throw); the `catch` surfaces a retryable
+            // error so the picker is escapable instead of silently wedged.
+            // CancellationException (stopPolling / host change / onCleared) is
+            // rethrown so structured cancellation is preserved.
+            try {
+                runReconcile(params)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (t: Throwable) {
+                surfaceUnexpectedReconcileFailure(params, t)
+            } finally {
+                // Idempotent: the `when` arms in [runReconcile] already clear the
+                // flag on every normal exit, and [setSessionRefreshInFlight]
+                // no-ops when it is already false. This `finally` is the backstop
+                // for the throwing paths only.
+                setSessionRefreshInFlight(false)
+            }
         }
+    }
+
+    /**
+     * Issue #939 (audit #935 S5-1): an UNEXPECTED throw inside [runReconcile]
+     * (e.g. an `SQLiteException` from the host read, a `persistTree` IO error, or
+     * a `tree.reconcile` projection fault) must NOT leave the picker silently
+     * stuck on the refresh spinner. Surface the same calm, RETRYABLE error the
+     * `ConnectFailed` arm uses: keep the last-known tree visible with a
+     * dismissable refresh-failure banner when one is already painted, otherwise
+     * show the retryable [FolderListUiState.ConnectError] panel. Either way the
+     * user has an escape (Retry / the banner clears on the next success) instead
+     * of a frozen spinner.
+     */
+    private fun surfaceUnexpectedReconcileFailure(params: BoundParams, cause: Throwable) {
+        // A reconcile for a host the user has since navigated away from must not
+        // clobber the now-current binding's state.
+        if (bound != params) return
+        if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+        _state.value = FolderListUiState.ConnectError(
+            message = connectErrorCopy(cause),
+            cause = cause,
+        )
     }
 
     /**

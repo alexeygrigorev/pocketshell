@@ -327,6 +327,39 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #939 (audit #935 S5-2): the transcribe-FSM watchdog. Unlike the send
+     * path (which has the #891 [sendWatchdogJob]), the voice-transcribe launch had
+     * NO time bound at all — so a wedged Whisper round-trip (or any throw before
+     * the FSM was driven back to Idle) left the composer stuck on "Transcribing…"
+     * with the mic locked, recoverable only by killing the app. This watchdog is
+     * the sibling escape hatch: the instant the FSM enters [RecordingState.Transcribing]
+     * we arm a single watchdog; if it is still `Transcribing` after
+     * [TRANSCRIBE_TIMEOUT_MS] we route back to Idle with a retryable error banner.
+     */
+    private var transcribeWatchdogJob: Job? = null
+
+    /**
+     * Issue #939 test seam, mirroring [sendWatchdogTimeoutMs]. Defaults to the
+     * production [TRANSCRIBE_TIMEOUT_MS]. Unit tests that DON'T care about the
+     * watchdog set it to `null` (so `runTest`'s terminal `advanceUntilIdle` does
+     * not drain a pending long `delay` and spuriously flip Transcribing→Idle);
+     * the dedicated watchdog test sets a small virtual-time value so the timeout
+     * fires deterministically. Production always uses the non-null default — the
+     * watchdog is never disabled on-device.
+     */
+    private var transcribeWatchdogTimeoutMs: Long? = TRANSCRIBE_TIMEOUT_MS
+
+    /**
+     * Issue #939 test seam. `timeoutMs = null` disables the transcribe watchdog
+     * for unit tests not about it; a small value drives it deterministically
+     * under virtual time.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setTranscribeWatchdogTimeoutForTest(timeoutMs: Long?) {
+        transcribeWatchdogTimeoutMs = timeoutMs
+    }
+
+    /**
      * Issue #900: upload hook for durable outbound attachment sidecars. The host
      * owns the live SSH/session upload primitive; the ViewModel owns when queued
      * local bytes must be uploaded before a row is claimed for delivery.
@@ -1173,6 +1206,67 @@ public class PromptComposerViewModel @Inject constructor(
     private fun disarmSendWatchdog() {
         sendWatchdogJob?.cancel()
         sendWatchdogJob = null
+    }
+
+    /**
+     * Issue #939 (audit #935 S5-2): arm the transcribe watchdog the instant the
+     * FSM enters [RecordingState.Transcribing]. Sibling of [armSendWatchdog]; the
+     * voice path had no time bound before this, so a wedged Whisper round-trip or
+     * a slow IO call inside the transcribe launch left the mic locked on
+     * "Transcribing…" until app restart. If the FSM is still `Transcribing` after
+     * [transcribeWatchdogTimeoutMs] we route it back to Idle with a retryable
+     * error so the user is never stuck.
+     */
+    private fun armTranscribeWatchdog() {
+        transcribeWatchdogJob?.cancel()
+        val timeoutMs = transcribeWatchdogTimeoutMs ?: return
+        transcribeWatchdogJob = viewModelScope.launch {
+            delay(timeoutMs)
+            onTranscribeWatchdogExpired()
+        }
+    }
+
+    /**
+     * Issue #939: cancel the transcribe watchdog because the FSM resolved (Idle
+     * via success, handled failure, offline-queue, empty/no-speech, or an
+     * unexpected throw caught by the launch's `catch`). Idempotent.
+     */
+    private fun disarmTranscribeWatchdog() {
+        transcribeWatchdogJob?.cancel()
+        transcribeWatchdogJob = null
+    }
+
+    /**
+     * Issue #939: the transcribe watchdog fired — the FSM has been stuck on
+     * [RecordingState.Transcribing] past [transcribeWatchdogTimeoutMs] without
+     * resolving (a wedged Whisper call or an unguarded IO hang). Route back to
+     * Idle, unlock the mic, and surface a retryable error so the user can record
+     * again. A no-op if the FSM already left Transcribing (benign race where the
+     * resolution won but the cancel had not been observed). The audio (if any) is
+     * already on disk in the pending-transcription queue (#180), so the user can
+     * still retry the persisted recording.
+     */
+    private fun onTranscribeWatchdogExpired() {
+        transcribeWatchdogJob = null
+        if (_uiState.value.recording != RecordingState.Transcribing) return
+        DiagnosticEvents.record(
+            "action",
+            "composer_transcribe_watchdog_timeout",
+            "provider" to (activeProvider?.name ?: "unknown"),
+        )
+        transcribeJob?.cancel()
+        transcribeJob = null
+        clearPendingTranscriptionSend()
+        activeProvider = null
+        savedStateHandle[KEY_WAS_RECORDING] = false
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                recordingLocked = false,
+                error = TRANSCRIBE_TIMEOUT_MESSAGE,
+            )
+        }
     }
 
     /**
@@ -2027,7 +2121,12 @@ public class PromptComposerViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
                 }
-                transcribeJob = viewModelScope.launch {
+                // Issue #939 (#935 S5-2): even this recoverable-no-speech path
+                // flips the FSM to Transcribing then does an UNGUARDED Room write
+                // (`enqueueAudio`). A throw there left the mic locked on
+                // "Transcribing…" with no escape — so route it through the
+                // guarded [launchTranscribe] like the main path.
+                launchTranscribe {
                     val pendingId = pendingTranscriptionStore.enqueueAudio(
                         audio = audio,
                         destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
@@ -2075,7 +2174,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(recording = RecordingState.Transcribing, amplitude = 0f, recordingLocked = false)
         }
 
-        transcribeJob = viewModelScope.launch {
+        launchTranscribe {
             val client = whisperClientFactory.create()
             if (client == null) {
                 savedStateHandle[KEY_WAS_RECORDING] = false
@@ -2100,7 +2199,7 @@ public class PromptComposerViewModel @Inject constructor(
                         error = "No OpenAI API key saved. Open settings to add one.",
                     )
                 }
-                return@launch
+                return@launchTranscribe
             }
 
             // Issue #180: persist the audio BEFORE the Whisper call so a
@@ -2163,7 +2262,7 @@ public class PromptComposerViewModel @Inject constructor(
                         error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
                     )
                 }
-                return@launch
+                return@launchTranscribe
             }
 
             // WhisperClient implementations are responsible for jumping
@@ -2333,6 +2432,73 @@ public class PromptComposerViewModel @Inject constructor(
                     )
                 },
             )
+        }
+    }
+
+    /**
+     * Issue #939 (audit #935 S5-2): the guarded launcher for the OpenAI-Whisper
+     * transcribe FSM. Before this, the transcribe body ran as a bare
+     * `viewModelScope.launch {}` with NO surrounding `try/finally` and NO time
+     * bound, so any throw OUTSIDE the inner `result.fold` — `enqueueAudio` (a
+     * Room/filesystem write), `connectivity.refresh()`, or a WhisperClient impl
+     * that threw instead of returning `Result.failure` — stranded the FSM on
+     * [RecordingState.Transcribing] with the mic locked, recoverable only by
+     * killing the app (the #891 send-wedge shape, but for voice).
+     *
+     * This launcher closes that whole class:
+     *  - **Arm a watchdog** ([armTranscribeWatchdog]) so even a Whisper round-trip
+     *    that wedges (never returns, never throws) is bounded — the send path has
+     *    the #891 watchdog; transcribe had none.
+     *  - **`catch`** any non-Cancellation throw → drive the FSM back to Idle, drop
+     *    the queued send, unlock the mic, and surface a RETRYABLE error banner so
+     *    the user can record again. CancellationException (job cancel / onCleared)
+     *    is rethrown to preserve structured cancellation.
+     *  - **`finally`** disarms the watchdog and, as a belt, guarantees the FSM is
+     *    never left on Transcribing on ANY exit (idempotent — the normal terminal
+     *    arms already drove it to Idle).
+     */
+    private fun launchTranscribe(block: suspend () -> Unit) {
+        armTranscribeWatchdog()
+        transcribeJob = viewModelScope.launch {
+            try {
+                block()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (t: Throwable) {
+                DiagnosticEvents.record(
+                    "action",
+                    "composer_transcription_result",
+                    "provider" to (activeProvider?.name ?: VoiceTranscriptionProvider.OpenAiWhisper.name),
+                    "status" to "failure",
+                    "cause" to t.javaClass.simpleName,
+                    "unguarded" to true,
+                )
+                clearPendingTranscriptionSend()
+                activeProvider = null
+                savedStateHandle[KEY_WAS_RECORDING] = false
+                _uiState.update {
+                    it.copy(
+                        recording = RecordingState.Idle,
+                        amplitude = 0f,
+                        recordingLocked = false,
+                        error = userFacingWhisperError(t),
+                    )
+                }
+            } finally {
+                disarmTranscribeWatchdog()
+                // Belt: no normal terminal arm should leave the FSM on
+                // Transcribing, but if a future edit forgets one, this guarantees
+                // the mic is never stuck. Idempotent when already Idle.
+                if (_uiState.value.recording == RecordingState.Transcribing) {
+                    _uiState.update {
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            amplitude = 0f,
+                            recordingLocked = false,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -2882,6 +3048,9 @@ public class PromptComposerViewModel @Inject constructor(
         }
         transcribeJob?.cancel()
         transcribeJob = null
+        // Issue #939: the user cancelled — drop the transcribe watchdog so it
+        // does not fire later and re-surface a spurious timeout banner.
+        disarmTranscribeWatchdog()
         clearPendingTranscriptionSend()
         activeProvider = null
         savedStateHandle[KEY_WAS_RECORDING] = false
@@ -2945,6 +3114,9 @@ public class PromptComposerViewModel @Inject constructor(
         // ViewModel (parity with the other jobs above; viewModelScope cancel
         // already covers it, but be explicit).
         sendWatchdogJob?.cancel()
+        // Issue #939: drop the transcribe watchdog too (parity with the send
+        // watchdog above) so it never outlives the ViewModel.
+        transcribeWatchdogJob?.cancel()
         // Issue #882: the #880 recording-elapsed ticker is an infinite
         // `while { delay() }` loop that only breaks when recording leaves
         // [RecordingState.Recording]. Cancel it explicitly on clear so it
@@ -3533,6 +3705,26 @@ public class PromptComposerViewModel @Inject constructor(
          */
         internal const val SEND_TIMEOUT_MESSAGE: String =
             "Send failed — it took too long. Tap Send to retry, or discard the draft."
+
+        /**
+         * Issue #939 (audit #935 S5-2): the end-to-end ceiling on the voice
+         * transcribe FSM. The send path has the #891 [OVERALL_SEND_TIMEOUT_MS]
+         * watchdog; transcribe had NO bound at all, so a wedged Whisper round-trip
+         * (or an unguarded IO hang) locked the mic on "Transcribing…" until app
+         * restart. This sits ABOVE a realistic Whisper round-trip (the network
+         * call self-bounds in the OkHttp client) so the normal `result.fold`
+         * failure surfaces its own banner first; the watchdog only fires when the
+         * FSM failed to resolve at all.
+         */
+        public const val TRANSCRIBE_TIMEOUT_MS: Long = 90_000L
+
+        /**
+         * Issue #939: the banner shown when the transcribe watchdog fires. Calm,
+         * retryable copy — the audio is still on disk in the pending-transcription
+         * queue (#180) so the user can retry the persisted recording.
+         */
+        internal const val TRANSCRIBE_TIMEOUT_MESSAGE: String =
+            "Transcription took too long. Tap the mic to try again."
 
         /**
          * Issue #169 Part 2: [SavedStateHandle] key for the current

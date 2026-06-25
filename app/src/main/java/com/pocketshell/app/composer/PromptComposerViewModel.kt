@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -2887,6 +2888,7 @@ public class PromptComposerViewModel @Inject constructor(
             }
         }
         runCatching { speechRecognitionSession?.cancel() }
+        viewModelScope.cancel()
         super.onCleared()
     }
 

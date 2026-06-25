@@ -331,13 +331,14 @@ data class AppSettings(
          */
         const val AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS: Long = 350L
 
-        // Issue #549: opt-in by default. The recorder stays silent until the
-        // user turns it on in Settings → Diagnostics, then records a short
-        // targeted session. The single gate in DiagnosticRecorder.record()
-        // reads this through SettingsRepository, so flipping the default to
-        // false makes the whole app default to not recording (hard-cut, D22 —
-        // no always-on fallback branch anywhere).
-        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = false
+        // Issue #969: recording is ON by default so a FRESH install captures the
+        // FIRST reconnect — the one that matters most for diagnosing the
+        // maintainer's stability complaints, previously lost because recording
+        // defaulted off (#549's opt-in). The Settings → Diagnostics toggle still
+        // turns it OFF; the single gate in DiagnosticRecorder.record() reads this
+        // through SettingsRepository, so the default just flips the starting
+        // value (hard-cut, D22 — no always-on fallback branch anywhere).
+        const val DEFAULT_DIAGNOSTICS_RECORDING_ENABLED: Boolean = true
         const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
 
         /**

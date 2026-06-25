@@ -84,6 +84,21 @@ internal class RealSshSession(
     private var lastInboundActivityNanos: Long = System.nanoTime()
 
     /**
+     * Why this session's transport went down (issue #969 — reconnect
+     * observability). Flipped to [SshSessionCloseCause.KeepaliveDead] by the
+     * keepalive watchdog ([TransportKeepAlive.KeepAliveIo.onKeepAliveDead]) the
+     * instant it declares the peer dead — BEFORE [close] runs — so the
+     * [SshLeaseManager] reads it when the now-disconnected session surfaces a
+     * lease `Closed` event and stamps `keepalive_dead` instead of an anonymous
+     * disconnect. Pass-through state only; core-ssh never reaches into the app.
+     */
+    @Volatile
+    private var transportCloseCause: SshSessionCloseCause = SshSessionCloseCause.Unknown
+
+    override val closeCause: SshSessionCloseCause
+        get() = transportCloseCause
+
+    /**
      * Issue #945 — the always-on, dispatcher-serialized SSH transport keepalive
      * (the real "stays up like Terminus" fix). It is the SAFE successor to sshj's
      * removed `KeepAliveRunner` background writer (#847): every keepalive packet
@@ -101,6 +116,11 @@ internal class RealSshSession(
             override fun lastInboundActivityNanos(): Long = lastInboundActivityNanos
             override suspend fun sendKeepAlive(): Boolean = this@RealSshSession.sendKeepAlive()
             override fun onKeepAliveDead(consecutiveMisses: Int) {
+                // Issue #969: NAME the cause BEFORE the close so the lease layer
+                // can read it when the now-disconnected session surfaces a
+                // `Closed` event. A keepalive-driven drop is a proactive
+                // silent-drop detection, not an anonymous disconnect.
+                transportCloseCause = SshSessionCloseCause.KeepaliveDead
                 KEEPALIVE_LOGGER.log(
                     Level.INFO,
                     "[$KEEPALIVE_LOG_TAG] transport keepalive declared the peer dead after " +

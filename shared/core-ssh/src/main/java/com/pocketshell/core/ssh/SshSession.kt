@@ -18,6 +18,25 @@ public interface SshSession : AutoCloseable {
     public val isConnected: Boolean
 
     /**
+     * Why this session's transport went down (issue #969 — reconnect
+     * observability). [SshSessionCloseCause.KeepaliveDead] when the always-on
+     * transport keepalive (#945) declared the peer dead and closed the
+     * transport; [SshSessionCloseCause.Unknown] otherwise (an ordinary
+     * reader-EOF drop, an explicit teardown, or a session that never died).
+     *
+     * The [SshLeaseManager] reads this when it stamps a lease `Closed` event so
+     * a keepalive-driven drop is NAMED (`keepalive_dead`) instead of surfacing
+     * as an anonymous `lease_down` — the exact attribution ambiguity #964 turns
+     * on. This is a pass-through value read by the lease layer; core-ssh never
+     * reaches up into the app's `ReconnectCauseTrail` (no layering violation).
+     *
+     * Has a default body so the many bespoke per-test [SshSession] fakes don't
+     * all have to override it; only [RealSshSession] flips it on keepalive death.
+     */
+    public val closeCause: SshSessionCloseCause
+        get() = SshSessionCloseCause.Unknown
+
+    /**
      * Run [command] over a single `exec` channel and wait for it to finish.
      *
      * Returns the full stdout/stderr/exit-code triple. Does NOT throw on
@@ -264,4 +283,28 @@ public interface SshSession : AutoCloseable {
          */
         public const val DEFAULT_MAX_LIST_ENTRIES: Int = 5_000
     }
+}
+
+/**
+ * Why an [SshSession]'s transport went down (issue #969 — reconnect
+ * observability). Read by [SshLeaseManager] when it stamps a lease `Closed`
+ * event so a keepalive-driven drop is NAMED rather than surfacing as an
+ * anonymous disconnect.
+ */
+public enum class SshSessionCloseCause {
+    /**
+     * The always-on transport keepalive (#945) declared the peer dead after
+     * [TransportKeepAlive.DEFAULT_COUNT_MAX] consecutive missed replies and
+     * closed the dead transport. This is the proactive silent-drop detection
+     * the maintainer can't currently see because it surfaces as an anonymous
+     * `lease_down` (#964).
+     */
+    KeepaliveDead,
+
+    /**
+     * No specific attribution: an ordinary reader-EOF drop, an explicit
+     * teardown, or a still-live session. The default for every session that did
+     * not die via the keepalive watchdog.
+     */
+    Unknown,
 }

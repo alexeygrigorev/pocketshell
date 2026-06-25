@@ -853,6 +853,84 @@ class SshLeaseManagerTest {
         assertSame(second, lease.session)
     }
 
+    // --- #969: keepalive_dead attribution on the lease close event ----------
+
+    @Test
+    fun `a keepalive-dead held session is stamped KeepaliveDead, not anonymous Disconnected`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 60_000)
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val collectJob = backgroundScope.launch { manager.stateEvents.toList(events) }
+        runCurrent()
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        runCurrent()
+        // The always-on keepalive watchdog (#945) declared the peer dead and
+        // closed the transport: the session reports it via closeCause BEFORE the
+        // lease observes the disconnect.
+        session.sessionCloseCause = SshSessionCloseCause.KeepaliveDead
+        session.connected = false
+        lease.release()
+        runCurrent()
+        collectJob.cancel()
+
+        // GREEN with the fix: the close is NAMED keepalive_dead. RED on base:
+        // the same drop is stamped anonymous Disconnected (the #964 ambiguity).
+        assertTrue(
+            "a keepalive-driven drop must be stamped KeepaliveDead",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.KeepaliveDead
+            },
+        )
+        assertFalse(
+            "a keepalive-driven drop must NOT be the anonymous Disconnected",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.Disconnected
+            },
+        )
+    }
+
+    @Test
+    fun `a genuine (non-keepalive) dead session stays Disconnected, not KeepaliveDead`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 60_000)
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val collectJob = backgroundScope.launch { manager.stateEvents.toList(events) }
+        runCurrent()
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        runCurrent()
+        // A plain reader-EOF / link drop: the session never set a keepalive
+        // cause (closeCause stays Unknown).
+        session.connected = false
+        lease.release()
+        runCurrent()
+        collectJob.cancel()
+
+        // Class-coverage: a genuine drop keeps its anonymous attribution; only a
+        // keepalive-watchdog death is renamed — neither is mislabelled.
+        assertTrue(
+            "a genuine drop must stay Disconnected",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.Disconnected
+            },
+        )
+        assertFalse(
+            "a genuine drop must NOT be mislabelled KeepaliveDead",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.KeepaliveDead
+            },
+        )
+    }
+
     @Test
     fun `release from replaced disconnected lease does not mutate active replacement`() = runTest {
         val first = FakeSshSession()
@@ -1020,8 +1098,15 @@ class SshLeaseManagerTest {
         var connected: Boolean = true
         var closeCount: Int = 0
 
+        // Issue #969: lets a test simulate a keepalive-watchdog death so the
+        // lease manager's close-reason attribution can be exercised.
+        var sessionCloseCause: SshSessionCloseCause = SshSessionCloseCause.Unknown
+
         override val isConnected: Boolean
             get() = connected && !closed
+
+        override val closeCause: SshSessionCloseCause
+            get() = sessionCloseCause
 
         override suspend fun exec(command: String): ExecResult =
             ExecResult(stdout = "", stderr = "", exitCode = 0)

@@ -9,6 +9,7 @@ import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
+import com.pocketshell.core.ssh.SshLeaseCloseReason
 import com.pocketshell.core.ssh.SshLeaseConnectionState
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -146,12 +147,36 @@ internal fun leaseStateToTransportEdge(event: SshLeaseStateEvent): TransportUpDo
     return when (event.state) {
         SshLeaseConnectionState.Connected -> TransportUpDown.Up(host)
         SshLeaseConnectionState.Closed ->
-            TransportUpDown.Down(host, reason = event.closeReason?.name ?: "closed")
+            TransportUpDown.Down(host, reason = transportDropReason(event.closeReason))
         SshLeaseConnectionState.Connecting,
         SshLeaseConnectionState.Idle,
         -> null
     }
 }
+
+/**
+ * Issue #969 — canonical, lower-snake reconnect-cause token for a lease `Closed`
+ * event's [SshLeaseCloseReason]. The keepalive watchdog (#945) close is NAMED
+ * `keepalive_dead` so a keepalive-driven drop is no longer an anonymous
+ * `lease_down:Disconnected` in the reconnect trail — the #964 attribution
+ * ambiguity. Every other reason keeps its existing enum name so genuine
+ * lease-downs (`Disconnected`), explicit teardowns, idle expiry, etc. stay
+ * distinct (not mislabelled as keepalive death). Exposed as a top-level pure
+ * function so it is unit-testable without a real lease manager.
+ */
+internal fun transportDropReason(closeReason: SshLeaseCloseReason?): String =
+    when (closeReason) {
+        SshLeaseCloseReason.KeepaliveDead -> KEEPALIVE_DEAD_REASON
+        null -> "closed"
+        else -> closeReason.name
+    }
+
+/**
+ * Canonical reconnect-cause token (#969) for a transport the always-on keepalive
+ * (#945) declared dead. Matches the lower-snake convention of the other
+ * [com.pocketshell.app.diagnostics.ReconnectCauseTrail] causes.
+ */
+internal const val KEEPALIVE_DEAD_REASON: String = "keepalive_dead"
 
 /**
  * EPIC #687 Phase-2, slice 1c-iv-b-A2 (#739) — a [TmuxPort] over the VM's CURRENT

@@ -33,16 +33,22 @@ class DiagnosticRecorderTest {
     }
 
     @Test
-    fun `recorder is off by default and records nothing until enabled`() = runTest {
-        // Issue #549: opt-in. A fresh install records nothing until the user
-        // flips the Settings → Diagnostics toggle.
-        assertEquals(false, settingsRepository.settings.value.diagnosticsRecordingEnabled)
+    fun `recorder is ON by default and captures the first reconnect`() = runTest {
+        // Issue #969: recording defaults ON so a FRESH install captures the
+        // FIRST reconnect (the one that matters), previously lost under #549's
+        // opt-in. The Settings → Diagnostics toggle still turns it off (covered
+        // by `recorder skips new events when disabled`).
+        assertTrue(
+            "diagnostics recording must default ON (issue #969)",
+            settingsRepository.settings.value.diagnosticsRecordingEnabled,
+        )
         val recorder = DiagnosticRecorder(context, settingsRepository)
 
+        // The very first event on a fresh install is captured — no opt-in needed.
         recorder.record("connection", "connect_start", mapOf("host" to "dev"))
 
-        assertEquals(null, recorder.exportSnapshot())
-        assertEquals(emptyList<DiagnosticsEvent>(), recorder.readEvents())
+        assertNotNull(recorder.exportSnapshot())
+        assertEquals(1, recorder.readEvents().size)
     }
 
     @Test

@@ -524,6 +524,14 @@ public class SshLeaseManager(
                         key = key,
                         state = SshLeaseConnectionState.Closed,
                         closeReason = when {
+                            // Issue #969: a transport the keepalive watchdog
+                            // (#945) declared dead is NAMED `keepalive_dead`,
+                            // not lumped into the anonymous `Disconnected` —
+                            // resolving the #964 attribution ambiguity. Read the
+                            // session's own cause so the lease layer never
+                            // reaches up into the app (no layering violation).
+                            entry.session.closeCause == SshSessionCloseCause.KeepaliveDead ->
+                                SshLeaseCloseReason.KeepaliveDead
                             !entry.session.isConnected -> SshLeaseCloseReason.Disconnected
                             !processStarted -> SshLeaseCloseReason.ProcessStopped
                             else -> SshLeaseCloseReason.IdleExpired
@@ -681,6 +689,15 @@ public enum class SshLeaseCloseReason {
     ManagerClosed,
     Disconnected,
     ForceRefresh,
+
+    /**
+     * Issue #969: the held session's transport was closed by the always-on
+     * keepalive watchdog ([SshSessionCloseCause.KeepaliveDead], #945) — a
+     * proactive silent-drop detection. Distinct from the anonymous
+     * [Disconnected] so the app names `keepalive_dead` in the reconnect trail
+     * instead of an undifferentiated `lease_down` (the #964 ambiguity).
+     */
+    KeepaliveDead,
 }
 
 public data class SshLeaseKey(

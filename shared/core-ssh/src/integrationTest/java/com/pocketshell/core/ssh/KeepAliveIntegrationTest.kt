@@ -1,0 +1,579 @@
+package com.pocketshell.core.ssh
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import org.junit.AfterClass
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.BeforeClass
+import org.junit.Test
+import org.testcontainers.DockerClientFactory
+import org.testcontainers.containers.GenericContainer
+import org.testcontainers.images.builder.ImageFromDockerfile
+import java.io.File
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
+
+/**
+ * Issue #945 — the SAFE dispatcher-serialized SSH transport keepalive (the real
+ * "stays up like Terminus" fix) END-TO-END against a real Docker OpenSSH server.
+ *
+ * The maintainer's #1 dogfood pain: "I'm tired of reconnects and glitches and I
+ * have to use Terminus." Terminus survives flaky Wi-Fi because it runs an
+ * always-on, transport-level `ServerAliveInterval` keepalive. PocketShell had
+ * NONE (removed in #847 because sshj's `KeepAliveRunner` was an un-ownable second
+ * writer that corrupted KEX). [TransportDispatcher] is now the sole FIFO writer,
+ * so a keepalive sent THROUGH it ([SshSession.sendKeepAlive]) is safe.
+ *
+ * Reproduce-first (D33/G10) — these run on the REAL [RealSshSession] /
+ * [TransportKeepAlive] path against a real sshd, with a controllable in-JVM TCP
+ * relay ([PausableTcpRelay]) in front of it so we can inject a REAL link gap on
+ * the REAL encrypted transport:
+ *
+ *  - **Ride-through:** pause the relay for a window SHORTER than the keepalive
+ *    budget (no FIN — a half-open starve), then resume. The transport keepalive
+ *    rides through it: the session stays connected and a keepalive answers again
+ *    after recovery. RED without a keepalive (nothing keeps the link warm / the
+ *    detector has nothing to reset); GREEN with it.
+ *  - **Dead-peer detection:** CUT the relay permanently. The keepalive misses
+ *    answer, the loop declares dead within `countMax × interval`, and the dead
+ *    transport is closed (the existing reconnect entrypoint) — no #822 regression.
+ *  - **No KEX corruption (the #847 guard):** hold a real session > 100s with the
+ *    keepalive cadence ON under concurrent traffic + rekey and assert the sshd
+ *    log NEVER shows `Connection corrupted` / `Bad packet length` /
+ *    `ssh_dispatch_run_fatal` — proving the keepalive-through-the-dispatcher does
+ *    NOT reintroduce the #847 corruption.
+ *
+ * Wired into the per-push required check `Integration tests (Docker)` via the
+ * `:shared:core-ssh:integrationTest` task (it includes all `*IntegrationTest`).
+ */
+class KeepAliveIntegrationTest {
+
+    companion object {
+        private const val CONTAINER_SSH_PORT = 22
+
+        private val projectRoot: Path by lazy { findProjectRoot() }
+
+        @Volatile
+        private var container: GenericContainer<*>? = null
+
+        /** Same #847 server-side desync signatures as [SshIntegrationTest]. */
+        private val CORRUPTION_SIGNATURES = listOf(
+            "Connection corrupted",
+            "Bad packet length",
+            "ssh_dispatch_run_fatal",
+            "message authentication code incorrect",
+            "padding error",
+        )
+
+        @BeforeClass
+        @JvmStatic
+        fun setUp() {
+            val dockerAvailable = runCatching {
+                DockerClientFactory.instance().isDockerAvailable
+            }.getOrDefault(false)
+            assumeTrue("Docker not available; skipping keepalive integration tests", dockerAvailable)
+
+            val dockerDir = projectRoot.resolve("tests/docker")
+            val image = ImageFromDockerfile("pocketshell-test-ssh", false)
+                .withDockerfile(dockerDir.resolve("Dockerfile.ssh"))
+            container = GenericContainer(image)
+                .withExposedPorts(CONTAINER_SSH_PORT)
+                .also { it.start() }
+        }
+
+        @AfterClass
+        @JvmStatic
+        fun tearDown() {
+            container?.stop()
+            container = null
+        }
+
+        private fun findProjectRoot(): Path {
+            var dir: Path? = Paths.get(System.getProperty("user.dir")).toAbsolutePath()
+            while (dir != null) {
+                if (dir.resolve("tests/docker/Dockerfile.ssh").toFile().exists()) {
+                    return dir
+                }
+                dir = dir.parent
+            }
+            error(
+                "Could not locate tests/docker/Dockerfile.ssh from user.dir=" +
+                    System.getProperty("user.dir"),
+            )
+        }
+    }
+
+    private val sshHost: String get() = container!!.host
+    private val sshPort: Int get() = container!!.getMappedPort(CONTAINER_SSH_PORT)
+    private val privateKeyFile: File
+        get() = projectRoot.resolve("tests/docker/test_key").toFile()
+
+    private fun connectDirect(): SshSession = runBlocking {
+        SshConnection.connect(
+            host = sshHost,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+    }
+
+    private fun connectThroughRelay(relay: PausableTcpRelay): SshSession = runBlocking {
+        SshConnection.connect(
+            host = "127.0.0.1",
+            port = relay.localPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+    }
+
+    @Test
+    fun sendKeepAliveRoundTripsAgainstRealOpenSsh() = runTest {
+        // The base mechanism proof: the `keepalive@openssh.com` global request,
+        // sent through the dispatcher, gets a reply from a real OpenSSH server
+        // (a REQUEST_FAILURE, since the server doesn't implement the request type)
+        // — and that reply STILL counts as proof of life. RED without the fix:
+        // `sendKeepAlive` doesn't exist / throws NotImplementedError.
+        connectDirect().use { session ->
+            assertTrue("session should be connected", session.isConnected)
+            assertTrue(
+                "sendKeepAlive() must return true (peer is alive) against a real " +
+                    "OpenSSH server — the REQUEST_FAILURE reply for keepalive@openssh.com " +
+                    "proves liveness exactly as OpenSSH's own ServerAlive does",
+                session.sendKeepAlive(),
+            )
+            // After close, a keepalive must be a miss, not a crash.
+            session.close()
+            assertFalse(
+                "sendKeepAlive() on a closed transport must return false (miss), not throw",
+                session.sendKeepAlive(),
+            )
+        }
+    }
+
+    @Test
+    fun transientGapShorterThanBudgetIsRiddenThrough() {
+        // RIDE-THROUGH (the Terminus behaviour, the red->green core): pause the
+        // link for a window SHORTER than the keepalive budget, then resume. The
+        // transport keepalive absorbs the blip — the session stays connected and
+        // answers a keepalive again after recovery — where PocketShell used to
+        // drop. The keepalive loop runs at a SHORTENED cadence so the gap is
+        // meaningful relative to its budget without a multi-minute test.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val deadDeclared = AtomicBoolean(false)
+            val keepAliveSends = AtomicInteger(0)
+            val keepAliveOks = AtomicInteger(0)
+            try {
+                // A short-cadence keepalive: interval 2s, countMax 3 -> ~6s budget.
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        override fun lastInboundActivityNanos(): Long = Long.MIN_VALUE
+                        override suspend fun sendKeepAlive(): Boolean {
+                            keepAliveSends.incrementAndGet()
+                            val ok = session.sendKeepAlive()
+                            if (ok) keepAliveOks.incrementAndGet()
+                            return ok
+                        }
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclared.set(true)
+                        }
+                    },
+                    intervalMs = 2_000L,
+                    countMax = 3,
+                )
+                keepAlive.start(ioScope)
+
+                // Let a couple of healthy keepalives land first.
+                runBlocking { waitUntil(8_000) { keepAliveOks.get() >= 1 } }
+                val oksBeforeGap = keepAliveOks.get()
+
+                // Inject a TRANSIENT gap of ~4s — under the ~6s budget (3x2s).
+                relay.pause()
+                Thread.sleep(4_000)
+                relay.resume()
+
+                // The session must NOT have been declared dead (rode through), and
+                // a keepalive must answer again after recovery.
+                runBlocking { waitUntil(10_000) { keepAliveOks.get() > oksBeforeGap } }
+                assertFalse(
+                    "a transient gap shorter than the keepalive budget must be ridden " +
+                        "through — the peer was NOT declared dead (sends=${keepAliveSends.get()} " +
+                        "oks=${keepAliveOks.get()})",
+                    deadDeclared.get(),
+                )
+                assertTrue(
+                    "the session must still be connected after riding through the gap",
+                    session.isConnected,
+                )
+                assertTrue(
+                    "a keepalive must answer again after the link recovers " +
+                        "(oksBeforeGap=$oksBeforeGap oksNow=${keepAliveOks.get()})",
+                    keepAliveOks.get() > oksBeforeGap,
+                )
+
+                keepAlive.stop()
+            } finally {
+                ioScope.cancel()
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
+    fun genuinelyDeadPeerIsDetectedWithinTheKeepAliveBudget() {
+        // DEAD-PEER detection (no #822 regression): a HALF-OPEN dead peer — the
+        // link goes permanently silent with NO FIN (the exact #822 silent-Wi-Fi
+        // drop), so `sshj.isConnected` LIES indefinitely and the reader never
+        // sees EOF. The transport keepalive is the SOLE detector here: every ping
+        // misses (no reply), and the loop declares dead within
+        // countMax x interval. (A clean FIN-close is detected faster by the reader
+        // EOF; the keepalive's reason to exist is THIS half-open case.) The budget
+        // is 3 x 2s = 6s; assert detection within a generous ceiling.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val deadDeclaredAtNanos = AtomicLong(0L)
+            try {
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        override fun lastInboundActivityNanos(): Long = Long.MIN_VALUE
+                        override suspend fun sendKeepAlive(): Boolean = session.sendKeepAlive()
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclaredAtNanos.compareAndSet(0L, System.nanoTime())
+                        }
+                    },
+                    intervalMs = 2_000L,
+                    countMax = 3,
+                )
+                keepAlive.start(ioScope)
+
+                // Prove it's healthy first.
+                runBlocking {
+                    assertTrue(
+                        "session healthy before the cut",
+                        waitUntil(8_000) { session.sendKeepAlive() },
+                    )
+                }
+
+                // Permanent HALF-OPEN starve: drop bytes both ways, NO FIN, so
+                // the socket stays "established" and isConnected lies — only the
+                // keepalive can catch it.
+                val cutAtNanos = System.nanoTime()
+                relay.pause()
+
+                // The keepalive loop must declare dead within a generous ceiling
+                // (budget 6s; allow margin for the in-flight reply timeout). The
+                // session is STILL nominally connected (half-open) — isAlive()
+                // stays true — so the loop reaches the dead-peer reaction rather
+                // than ending on a closed transport.
+                runBlocking { waitUntil(40_000) { deadDeclaredAtNanos.get() != 0L } }
+                assertTrue(
+                    "a genuinely dead peer must be detected by the keepalive loop",
+                    deadDeclaredAtNanos.get() != 0L,
+                )
+                val detectMs = TimeUnit.NANOSECONDS.toMillis(deadDeclaredAtNanos.get() - cutAtNanos)
+                assertTrue(
+                    "dead-peer detection ($detectMs ms) must land within a generous " +
+                        "budget ceiling. Each missed tick is interval (2s) + the reply " +
+                        "timeout (5s), so 3 misses ~21s worst case; allow margin.",
+                    detectMs in 0..35_000,
+                )
+
+                keepAlive.stop()
+            } finally {
+                ioScope.cancel()
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
+    fun keepAliveCadenceDoesNotCorruptTheTransportOver100s() {
+        // The #847 GUARD (acceptance #3): a real session held > 100s with the
+        // transport keepalive cadence ON, under concurrent exec churn + shell
+        // writes + PTY resize (the corruption amplifier) near rekey boundaries.
+        // The keepalive goes through the dispatcher, so it must NOT reintroduce
+        // the `Connection corrupted` desync the un-ownable sshj writer caused.
+        runBlocking {
+            val session = connectDirect()
+            val logMarkStartLen = container!!.logs.length
+            val execCount = AtomicInteger(0)
+            val keepAliveOks = AtomicInteger(0)
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            try {
+                session.use { s ->
+                    // An aggressive keepalive cadence (interval 1s) MAXIMISES the
+                    // number of keepalive global requests interleaved with the
+                    // exec/resize churn and rekey windows over the hold — the
+                    // worst case for the #847 race, now serialized through the
+                    // dispatcher.
+                    val keepAlive = TransportKeepAlive(
+                        io = object : TransportKeepAlive.KeepAliveIo {
+                            override fun isAlive(): Boolean = s.isConnected
+                            override fun lastInboundActivityNanos(): Long = Long.MIN_VALUE
+                            override suspend fun sendKeepAlive(): Boolean {
+                                val ok = s.sendKeepAlive()
+                                if (ok) keepAliveOks.incrementAndGet()
+                                return ok
+                            }
+                            override fun onKeepAliveDead(consecutiveMisses: Int) { /* no-op for the soak */ }
+                        },
+                        intervalMs = 1_000L,
+                        countMax = 3,
+                    )
+                    keepAlive.start(ioScope)
+
+                    s.startShell().use { shell ->
+                        val holdMs = 105_000L
+                        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs)
+
+                        val shellWriter = ioScope.launch {
+                            while (isActive && System.nanoTime() < deadline) {
+                                runCatching {
+                                    shell.stdin.write("echo tick\n".toByteArray(Charsets.UTF_8))
+                                    shell.stdin.flush()
+                                }
+                                delay(250)
+                            }
+                        }
+                        val shellReader = ioScope.launch {
+                            val buf = ByteArray(4096)
+                            while (isActive && System.nanoTime() < deadline) {
+                                if (shell.stdout.available() > 0) {
+                                    if (shell.stdout.read(buf) < 0) break
+                                } else {
+                                    delay(50)
+                                }
+                            }
+                        }
+                        val execChurn = (0 until 4).map {
+                            ioScope.async {
+                                while (isActive && System.nanoTime() < deadline) {
+                                    runCatching {
+                                        s.exec("true")
+                                        execCount.incrementAndGet()
+                                    }
+                                    delay(20)
+                                }
+                            }
+                        }
+                        val resizer = ioScope.launch {
+                            var cols = 80
+                            while (isActive && System.nanoTime() < deadline) {
+                                runCatching { shell.resizePty(cols, 24) }
+                                cols = if (cols == 80) 120 else 80
+                                delay(2_000)
+                            }
+                        }
+
+                        while (System.nanoTime() < deadline) {
+                            assertTrue(
+                                "session must stay connected across the >100s keepalive hold (#945/#847)",
+                                s.isConnected,
+                            )
+                            delay(2_000)
+                        }
+                        shellWriter.cancel()
+                        shellReader.cancel()
+                        execChurn.forEach { it.cancel() }
+                        resizer.cancel()
+                    }
+
+                    assertEquals(
+                        "a final exec must round-trip after the >100s keepalive hold",
+                        0,
+                        s.exec("true").exitCode,
+                    )
+                    assertTrue(
+                        "the keepalive must have answered repeatedly during the hold " +
+                            "(it was actually running): oks=${keepAliveOks.get()}",
+                        keepAliveOks.get() >= 10,
+                    )
+                }
+            } finally {
+                ioScope.cancel()
+            }
+
+            // Authoritative server-side assertion: no corruption signature in the
+            // sshd log produced during the hold.
+            val newLogs = container!!.logs.substring(
+                minOf(logMarkStartLen, container!!.logs.length),
+            )
+            for (signature in CORRUPTION_SIGNATURES) {
+                assertFalse(
+                    "sshd log must NOT contain `$signature` after a >100s keepalive-cadence " +
+                        "hold (#945: the dispatcher-serialized keepalive must NOT reintroduce the " +
+                        "#847 corruption); execs=${execCount.get()} keepalive_oks=${keepAliveOks.get()}; " +
+                        "offending sshd log:\n$newLogs",
+                    newLogs.contains(signature, ignoreCase = true),
+                )
+            }
+        }
+    }
+
+    private suspend fun waitUntil(timeoutMs: Long, predicate: suspend () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < deadline) {
+            if (runCatching { predicate() }.getOrDefault(false)) return true
+            delay(100)
+        }
+        return runCatching { predicate() }.getOrDefault(false)
+    }
+}
+
+/**
+ * A minimal in-JVM TCP relay (issue #945 test seam): forwards a local port to
+ * [targetHost]:[targetPort] and lets the test inject a REAL link fault on the
+ * REAL encrypted SSH transport without pulling in a Toxiproxy container.
+ *
+ *  - [pause]: stop forwarding bytes in BOTH directions (a half-open starve —
+ *    the sockets stay established, no FIN) — the transient-gap case.
+ *  - [resume]: forward bytes again.
+ *  - [cut]: close all live tunnels and refuse new accepts (a hard dead peer) —
+ *    the genuinely-dead-peer case.
+ */
+private class PausableTcpRelay(
+    private val targetHost: String,
+    private val targetPort: Int,
+) : AutoCloseable {
+    private val serverSocket = ServerSocket().apply {
+        reuseAddress = true
+        bind(InetSocketAddress("127.0.0.1", 0))
+    }
+    val localPort: Int get() = serverSocket.localPort
+
+    private val paused = AtomicBoolean(false)
+    private val cut = AtomicBoolean(false)
+    private val closed = AtomicBoolean(false)
+    private val tunnels = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
+    private var acceptThread: Thread? = null
+
+    fun start() {
+        acceptThread = thread(name = "ps945-relay-accept", isDaemon = true) {
+            while (!closed.get()) {
+                val client = try {
+                    serverSocket.accept()
+                } catch (t: Throwable) {
+                    if (closed.get()) break else continue
+                }
+                if (cut.get()) {
+                    runCatching { client.close() }
+                    continue
+                }
+                handleTunnel(client)
+            }
+        }
+    }
+
+    private fun handleTunnel(client: Socket) {
+        thread(name = "ps945-relay-tunnel", isDaemon = true) {
+            val upstream = try {
+                Socket(targetHost, targetPort)
+            } catch (t: Throwable) {
+                runCatching { client.close() }
+                return@thread
+            }
+            tunnels.add(client)
+            tunnels.add(upstream)
+            val a = pump(client, upstream)
+            val b = pump(upstream, client)
+            runCatching { a.join() }
+            runCatching { b.join() }
+            tunnels.remove(client)
+            tunnels.remove(upstream)
+            runCatching { client.close() }
+            runCatching { upstream.close() }
+        }
+    }
+
+    private fun pump(from: Socket, to: Socket): Thread =
+        thread(isDaemon = true) {
+            val buf = ByteArray(16 * 1024)
+            try {
+                val input = from.getInputStream()
+                val output = to.getOutputStream()
+                while (!closed.get() && !cut.get()) {
+                    // While paused, hold the bytes (do NOT read) — a half-open
+                    // starve: the socket stays established, the peer just goes
+                    // quiet, exactly the flaky-Wi-Fi gap.
+                    if (paused.get()) {
+                        Thread.sleep(50)
+                        continue
+                    }
+                    if (input.available() <= 0) {
+                        // Avoid a busy spin while still being responsive to a
+                        // pause/cut transition; a short blocking read with a
+                        // timeout keeps latency low without burning CPU.
+                        from.soTimeout = 100
+                        val n = try {
+                            input.read(buf)
+                        } catch (e: java.net.SocketTimeoutException) {
+                            continue
+                        }
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        output.flush()
+                    } else {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        output.flush()
+                    }
+                }
+            } catch (t: Throwable) {
+                // tunnel broken — let the join() finish and clean up.
+            }
+        }
+
+    fun pause() { paused.set(true) }
+    fun resume() { paused.set(false) }
+
+    fun cut() {
+        cut.set(true)
+        tunnels.forEach { runCatching { it.close() } }
+        tunnels.clear()
+    }
+
+    override fun close() {
+        closed.set(true)
+        cut.set(true)
+        tunnels.forEach { runCatching { it.close() } }
+        tunnels.clear()
+        runCatching { serverSocket.close() }
+        runCatching { acceptThread?.join(1_000) }
+    }
+}

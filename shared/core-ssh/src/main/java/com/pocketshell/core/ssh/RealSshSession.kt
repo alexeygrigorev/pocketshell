@@ -72,8 +72,117 @@ internal class RealSshSession(
      */
     private val dispatcher = TransportDispatcher()
 
+    /**
+     * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
+     * transport activity — bumped on every successful keepalive reply (issue
+     * #945). The keepalive loop reads this to SKIP a ping when the link answered
+     * within the last interval (OpenSSH reset-on-server-traffic semantics), so a
+     * busy link is self-evidently alive and we never ping a channel that just
+     * round-tripped.
+     */
+    @Volatile
+    private var lastInboundActivityNanos: Long = System.nanoTime()
+
+    /**
+     * Issue #945 — the always-on, dispatcher-serialized SSH transport keepalive
+     * (the real "stays up like Terminus" fix). It is the SAFE successor to sshj's
+     * removed `KeepAliveRunner` background writer (#847): every keepalive packet
+     * is sent through [dispatcher] (`dispatcher.run`), so it is FIFO-serialized
+     * against every channel open / `-CC` write / exec and can never race a
+     * KEX/rekey boundary the way the un-ownable background thread did. On
+     * [TransportKeepAlive.DEFAULT_COUNT_MAX] consecutive misses it closes the dead
+     * transport so the existing reader-EOF / reconnect machinery surfaces the
+     * drop and recovers (the SAME single recovery entrypoint the app-level
+     * `LivenessProbe` uses — never a second reconnect writer).
+     */
+    private val keepAlive = TransportKeepAlive(
+        io = object : TransportKeepAlive.KeepAliveIo {
+            override fun isAlive(): Boolean = isConnected
+            override fun lastInboundActivityNanos(): Long = lastInboundActivityNanos
+            override suspend fun sendKeepAlive(): Boolean = this@RealSshSession.sendKeepAlive()
+            override fun onKeepAliveDead(consecutiveMisses: Int) {
+                KEEPALIVE_LOGGER.log(
+                    Level.INFO,
+                    "[$KEEPALIVE_LOG_TAG] transport keepalive declared the peer dead after " +
+                        "$consecutiveMisses consecutive misses; closing the dead transport so the " +
+                        "reconnect machinery recovers",
+                )
+                // Close the dead transport on the session scope. This drives the
+                // reader to EOF, which the tmux/reconnect layer already handles as
+                // a recoverable drop through its single reconnect entrypoint — no
+                // second reconnect writer (D28).
+                scope.launch { runCatching { close() } }
+            }
+        },
+        log = { msg -> KEEPALIVE_LOGGER.log(Level.FINE, "[$KEEPALIVE_LOG_TAG] $msg") },
+    )
+
+    init {
+        // Start the always-on transport keepalive immediately. Under D21 the app
+        // backgrounds and tmux holds state remotely, so a backgrounded transport
+        // is intentionally torn down and the keepalive loop ends with it (its IO
+        // `isAlive()` reads the live transport); the loop's value is the
+        // FOREGROUNDED-but-flaky window — congested/bufferbloat/train-Wi-Fi links
+        // and the transition windows — where it absorbs a transient gap the way
+        // Terminus does, without the `-CC` `refresh-client` contention.
+        keepAlive.start(scope)
+    }
+
     override val isConnected: Boolean
         get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
+
+    override suspend fun sendKeepAlive(): Boolean {
+        // Route the global request through the single-writer dispatcher so it is
+        // FIFO-serialized against every other transport op (the #847-safe path).
+        //
+        // OpenSSH does NOT implement the `keepalive@openssh.com` request type, so
+        // it answers with `SSH_MSG_REQUEST_FAILURE` — which sshj surfaces as a
+        // thrown `ConnectionException("Global request [...] failed")` rather than
+        // a returned packet (see ConnectionImpl.gotGlobalReqResponse). That
+        // FAILURE reply STILL proves the peer is alive — it is exactly how
+        // OpenSSH's own client treats its `ServerAliveInterval` ping. So BOTH a
+        // returned packet (REQUEST_SUCCESS) AND the "request failed" exception
+        // (REQUEST_FAILURE) count as proof of life; only a timeout (no reply) or a
+        // genuine transport-death error is a miss.
+        return runCatching {
+            dispatcher.run {
+                if (!isConnected) return@run false
+                val promise = client.connection.sendGlobalRequest(
+                    KEEPALIVE_REQUEST_NAME,
+                    /* wantReply = */ true,
+                    EMPTY_PAYLOAD,
+                )
+                val answered = try {
+                    // A returned packet (REQUEST_SUCCESS) is proof of life; a null
+                    // (timeout — no reply at all) is a miss.
+                    promise.tryRetrieve(
+                        KEEPALIVE_REPLY_TIMEOUT_MS,
+                        java.util.concurrent.TimeUnit.MILLISECONDS,
+                    ) != null
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    // The reader thread delivered an error to this promise. A
+                    // REQUEST_FAILURE response is delivered as the specific
+                    // "Global request [...] failed" ConnectionException — the
+                    // server DID answer, so the peer is ALIVE. Any OTHER error
+                    // (connection lost, MAC failure, transport torn down) is a
+                    // genuine miss.
+                    isKeepAliveServerAnswered(t)
+                }
+                if (answered) {
+                    lastInboundActivityNanos = System.nanoTime()
+                }
+                answered
+            }
+        }.getOrElse { t ->
+            if (t is CancellationException) throw t
+            // The send itself (write / dispatcher) failed, or a non-promise
+            // exception escaped — but a REQUEST_FAILURE that escaped the inner
+            // catch still proves the peer answered. Otherwise it is a miss.
+            isKeepAliveServerAnswered(t)
+        }
+    }
 
     @OptIn(InternalCoroutinesApi::class)
     override suspend fun exec(command: String): ExecResult {
@@ -837,6 +946,9 @@ internal class RealSshSession(
     }
 
     override fun close() {
+        // Issue #945: stop the transport keepalive before tearing the scope down
+        // so no keepalive op is submitted to a dispatcher that is about to close.
+        keepAlive.stop()
         scope.cancel()
         // Issue #151 + #239: `close()` is idempotent and silent by
         // contract. The v0.2.7 crash report showed the original
@@ -966,6 +1078,35 @@ internal class RealSshSession(
 
     private fun ensureConnected() {
         if (!isConnected) throw SshException("SSH session is not connected")
+    }
+
+    /**
+     * True iff [t] is the sshj-delivered response to our `keepalive@openssh.com`
+     * global request that PROVES the peer answered (issue #945).
+     *
+     * OpenSSH does not implement the request type, so it replies
+     * `SSH_MSG_REQUEST_FAILURE`, which sshj's `ConnectionImpl.gotGlobalReqResponse`
+     * delivers to the promise as `deliverError(ConnectionException("Global request
+     * [...] failed"))`. That exception means the SERVER ANSWERED — proof of life,
+     * exactly as OpenSSH's own `ServerAliveInterval` treats it. We match the
+     * stable sshj message text on the cause chain. A genuine transport death
+     * (connection lost, MAC failure, reader EOF) carries a DIFFERENT message and
+     * is therefore correctly a miss.
+     */
+    private fun isKeepAliveServerAnswered(t: Throwable): Boolean {
+        var cause: Throwable? = t
+        var depth = 0
+        while (cause != null && depth < 8) {
+            val msg = cause.message
+            if (msg != null && msg.contains("Global request", ignoreCase = true) &&
+                msg.contains("failed", ignoreCase = true)
+            ) {
+                return true
+            }
+            cause = cause.cause
+            depth += 1
+        }
+        return false
     }
 }
 
@@ -1215,6 +1356,38 @@ internal const val UPLOAD_TRANSFER_TIMEOUT_MS: Long = 60_000L
 internal const val UPLOAD_CLEANUP_TIMEOUT_MS: Long = 10_000L
 
 private val CLOSE_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".close")
+
+/**
+ * The SSH global-request name OpenSSH uses for its `ServerAliveInterval` keepalive
+ * (issue #945). The server replies with `SSH_MSG_REQUEST_FAILURE` because it does
+ * not implement this request type — and that FAILURE reply still proves the peer
+ * is alive, exactly as OpenSSH's own client treats it.
+ */
+internal const val KEEPALIVE_REQUEST_NAME: String = "keepalive@openssh.com"
+
+/**
+ * Per-keepalive reply budget (issue #945). A healthy global-request round-trip is
+ * sub-second even on a congested link; this generous ceiling means a single
+ * momentarily-slow reply is a soft miss the loop absorbs (it takes
+ * [TransportKeepAlive.DEFAULT_COUNT_MAX] consecutive misses to declare dead), not
+ * a false positive. The send itself is also bounded by the dispatcher's per-op
+ * wall-clock ceiling, so a wedged write can never park the keepalive forever.
+ */
+internal const val KEEPALIVE_REPLY_TIMEOUT_MS: Long = 5_000L
+
+/** Empty payload for the [KEEPALIVE_REQUEST_NAME] global request (issue #945). */
+private val EMPTY_PAYLOAD: ByteArray = ByteArray(0)
+
+/**
+ * Logcat-grep tag for the transport keepalive (issue #945) — declaring a dead
+ * peer and the per-tick diagnostics. Routed through `java.util.logging` for the
+ * same reason the other [RealSshSession] tags are: no Android-only dependency
+ * from this shared module.
+ */
+internal const val KEEPALIVE_LOG_TAG: String = "issue945-keepalive"
+
+private val KEEPALIVE_LOGGER: Logger =
+    Logger.getLogger(RealSshSession::class.java.name + ".keepalive")
 
 /**
  * Logcat-grep tag for `RealSshSession.tail()` swallowing a recoverable

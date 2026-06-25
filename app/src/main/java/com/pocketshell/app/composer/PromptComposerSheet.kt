@@ -84,6 +84,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.pointerInput
@@ -1943,7 +1944,7 @@ private fun MicTriggerButton(
     }
 }
 
-private fun Modifier.micSwipeUpLockGesture(
+internal fun Modifier.micSwipeUpLockGesture(
     lockThresholdPx: Float,
     startSlopPx: Float,
     enabled: () -> Boolean,
@@ -1953,12 +1954,14 @@ private fun Modifier.micSwipeUpLockGesture(
 ): Modifier {
     return pointerInput(lockThresholdPx, startSlopPx) {
         awaitEachGesture {
-            // requireUnconsumed = false so we still see the down even when a
-            // parent (the ModalBottomSheet drag-to-dismiss nested scroll) has
-            // a claim on vertical motion; we then aggressively own the pointer
-            // so a fast hold-and-pull-up cannot be reinterpreted as a sheet
-            // drag before recording starts (#585).
-            val down = awaitFirstDown(requireUnconsumed = false)
+            // Issue #585: listen in the Initial pass so this nested mic gesture
+            // beats the ModalBottomSheet's Main-pass drag-to-dismiss detector.
+            // The real-device failure was a fast upward pull being won by the
+            // sheet before the mic lock detector saw enough movement.
+            val down = awaitFirstDown(
+                requireUnconsumed = false,
+                pass = PointerEventPass.Initial,
+            )
             val bounds = startBounds()
             // Issue #585: the mic disc is a small 44dp target at the far
             // bottom-right; a real hold-and-pull-up frequently lands the
@@ -1979,7 +1982,7 @@ private fun Modifier.micSwipeUpLockGesture(
             // drag-to-dismiss.
             down.consume()
             while (true) {
-                val event = awaitPointerEvent()
+                val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 val drag = change.position - down.position
                 // Consume every move belonging to our pointer so the upward

@@ -80,4 +80,12 @@ sh -c 'while true; do sleep 3600; done' idle-agent-a &
 sh -c 'while true; do sleep 3600; done' idle-agent-b &
 sh -c 'while true; do sleep 3600; done' idle-agent-c &
 
+install -d -m 0777 /tmp/pocketshell-fixture-daemon
+: > /tmp/pocketshell-fixture-daemon/ready
+chmod 0666 /tmp/pocketshell-fixture-daemon/ready
+(
+  echo "$$" > /tmp/pocketshell-fixture-daemon/pid
+  while true; do sleep 3600; done
+) &
+
 exec /usr/sbin/sshd -D -e

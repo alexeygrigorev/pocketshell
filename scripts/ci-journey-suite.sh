@@ -750,6 +750,15 @@ JOURNEY_CLASSES=(
   # fixture is started by the workflow. It lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListBootstrapSkipTreeLoadsDockerTest"
+  # ADDED (#839): daemon-backed durable tree journey against the standard
+  # agents fixture. It drives the production FolderListViewModel +
+  # TreeRemoteSource + SshFolderListGateway through the fixture's
+  # `pocketshell daemon status` and `pocketshell tree get/upsert/reconcile`
+  # seams, then proves app relaunch hydrates the persisted order/collapse and
+  # stale resume deltas prune/escalate correctly. This is the CI gate for the
+  # #837 daemon-tree acceptance gap, so fixture readiness hard-fails instead of
+  # self-skipping.
+  "com.pocketshell.app.projects.FolderListDaemonTreeDurabilityDockerTest"
   # ADDED (#867): the stale-while-revalidate INSTANT-RENDER journey. A cold
   # connect must paint the LAST-KNOWN tree instantly from the per-host CLIENT
   # cache (Ready, NOT the empty 'No folders yet / 0 projects' rebuild flash the

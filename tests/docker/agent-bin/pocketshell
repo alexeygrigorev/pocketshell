@@ -59,10 +59,169 @@ END {
 }
 '
 
+tree_registry_file() {
+  state_home="${XDG_STATE_HOME:-${HOME:-/home/testuser}/.local/state}"
+  printf '%s\n' "${POCKETSHELL_TREE_REGISTRY:-${state_home}/pocketshell/tree/registry.json}"
+}
+
+tree_registry_init() {
+  registry="$(tree_registry_file)"
+  registry_dir="$(dirname "$registry")"
+  mkdir -p "$registry_dir"
+  chmod 700 "$registry_dir" 2>/dev/null || true
+  if [ ! -s "$registry" ]; then
+    printf '{"hosts":{}}\n' > "$registry"
+    chmod 600 "$registry" 2>/dev/null || true
+  fi
+}
+
+tree_read_stdin_json() {
+  if [ ! -t 0 ]; then
+    cat
+  else
+    printf '{}\n'
+  fi
+}
+
+tree_live_sessions_json() {
+  if tmux list-sessions -F '#{session_name}' >/tmp/pocketshell-tree-live.$$ 2>/dev/null; then
+    jq -Rsc 'split("\n") | map(select(length > 0))' /tmp/pocketshell-tree-live.$$
+    rm -f /tmp/pocketshell-tree-live.$$
+    return 0
+  fi
+  rm -f /tmp/pocketshell-tree-live.$$
+  return 1
+}
+
 case "${1:-}" in
   --version)
     printf 'pocketshell fixture %s\n' "$(fixture_version)"
     exit 0
+    ;;
+  daemon)
+    shift
+    case "${1:-}" in
+      status)
+        if [ -f /tmp/pocketshell-fixture-daemon/ready ]; then
+          printf 'running (fixture daemon)\n'
+          exit 0
+        fi
+        printf 'not running\n' >&2
+        exit 3
+        ;;
+      start)
+        install -d -m 0777 /tmp/pocketshell-fixture-daemon
+        : > /tmp/pocketshell-fixture-daemon/ready
+        chmod 0666 /tmp/pocketshell-fixture-daemon/ready
+        printf 'started (fixture daemon)\n'
+        exit 0
+        ;;
+      stop)
+        rm -f /tmp/pocketshell-fixture-daemon/ready
+        printf 'stopped (fixture daemon)\n'
+        exit 0
+        ;;
+    esac
+    printf 'pocketshell daemon fixture supports: start|status|stop\n' >&2
+    exit 64
+    ;;
+  tree)
+    shift
+    tree_registry_init
+    registry="$(tree_registry_file)"
+    request="$(tree_read_stdin_json)"
+    host="$(printf '%s' "$request" | jq -r '.host // empty' 2>/dev/null || true)"
+    if [ -z "$host" ]; then
+      printf 'tree fixture requires stdin JSON with non-empty host\n' >&2
+      exit 64
+    fi
+    case "${1:-}" in
+      get)
+        jq -c --arg h "$host" --arg version "$(fixture_version)" '
+          {
+            nodes: (.hosts[$h].nodes // []),
+            version: (.hosts[$h].version // 0),
+            cli_version: $version
+          }
+        ' "$registry"
+        exit 0
+        ;;
+      upsert)
+        req_file="$(mktemp)"
+        tmp_file="$(mktemp)"
+        printf '%s' "$request" > "$req_file"
+        jq -c --arg h "$host" --slurpfile req "$req_file" '
+          .hosts = (.hosts // {}) |
+          .hosts[$h] = {
+            nodes: (
+              (($req[0].nodes // []) | if type == "array" then . else [] end) |
+              to_entries |
+              map(
+                .key as $idx |
+                .value |
+                select(type == "object") |
+                select((.session // "") | type == "string" and length > 0) |
+                {
+                  session: .session,
+                  order: ((.order // $idx) | tonumber? // $idx),
+                  folder_path: ((.folder_path // "") | tostring),
+                  collapsed: (.collapsed // false)
+                } + (
+                  if ((.foreign_kind // "") | type == "string" and length > 0)
+                  then {foreign_kind: .foreign_kind}
+                  else {}
+                  end
+                )
+              )
+            ),
+            version: ((.hosts[$h].version // 0) + 1)
+          }
+        ' "$registry" > "$tmp_file"
+        mv "$tmp_file" "$registry"
+        chmod 600 "$registry" 2>/dev/null || true
+        rm -f "$req_file"
+        jq -c --arg h "$host" '{status:"ok", version:(.hosts[$h].version // 0)}' "$registry"
+        exit 0
+        ;;
+      reconcile)
+        if live_json="$(tree_live_sessions_json)"; then
+          envelope="$(
+            jq -c --arg h "$host" --arg version "$(fixture_version)" --argjson live "$live_json" '
+              (.hosts[$h].nodes // []) as $nodes |
+              ($nodes | map(.session)) as $registry |
+              {
+                alive: ($registry | map(select(. as $s | $live | index($s)))),
+                gone: ($registry | map(select(. as $s | ($live | index($s) | not)))),
+                added: ($live | map(select(. as $s | ($registry | index($s) | not)))),
+                cli_version: $version
+              }
+            ' "$registry"
+          )"
+          gone_count="$(printf '%s' "$envelope" | jq '.gone | length')"
+          if [ "$gone_count" -gt 0 ]; then
+            tmp_file="$(mktemp)"
+            jq -c --arg h "$host" --argjson live "$live_json" '
+              .hosts = (.hosts // {}) |
+              .hosts[$h] = {
+                nodes: ((.hosts[$h].nodes // []) | map(select(.session as $s | $live | index($s)))),
+                version: ((.hosts[$h].version // 0) + 1)
+              }
+            ' "$registry" > "$tmp_file"
+            mv "$tmp_file" "$registry"
+            chmod 600 "$registry" 2>/dev/null || true
+          fi
+          printf '%s\n' "$envelope"
+        else
+          jq -c --arg h "$host" --arg version "$(fixture_version)" '
+            (.hosts[$h].nodes // [] | map(.session)) as $registry |
+            {alive: $registry, gone: [], added: [], cli_version: $version}
+          ' "$registry"
+        fi
+        exit 0
+        ;;
+    esac
+    printf 'pocketshell tree fixture supports: get|upsert|reconcile\n' >&2
+    exit 64
     ;;
   agent)
     # Issue #703: the app now launches agents via the short server-side
@@ -453,5 +612,5 @@ case "${1:-}" in
     ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind, daemon, tree\n' >&2
 exit 64

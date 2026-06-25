@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -38,6 +39,12 @@ import java.util.logging.Logger
  */
 internal class RealSshSession(
     private val client: SSHClient,
+    /**
+     * Wall-clock ceiling for the Phase-2 exec read (#935 S4-2). Defaults to the
+     * production [EXEC_READ_TIMEOUT_MS]; tests inject a short value so the
+     * wedged-read bound can be exercised without a real 30s wait.
+     */
+    private val execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS,
 ) : SshSession {
 
     /**
@@ -65,8 +72,117 @@ internal class RealSshSession(
      */
     private val dispatcher = TransportDispatcher()
 
+    /**
+     * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
+     * transport activity — bumped on every successful keepalive reply (issue
+     * #945). The keepalive loop reads this to SKIP a ping when the link answered
+     * within the last interval (OpenSSH reset-on-server-traffic semantics), so a
+     * busy link is self-evidently alive and we never ping a channel that just
+     * round-tripped.
+     */
+    @Volatile
+    private var lastInboundActivityNanos: Long = System.nanoTime()
+
+    /**
+     * Issue #945 — the always-on, dispatcher-serialized SSH transport keepalive
+     * (the real "stays up like Terminus" fix). It is the SAFE successor to sshj's
+     * removed `KeepAliveRunner` background writer (#847): every keepalive packet
+     * is sent through [dispatcher] (`dispatcher.run`), so it is FIFO-serialized
+     * against every channel open / `-CC` write / exec and can never race a
+     * KEX/rekey boundary the way the un-ownable background thread did. On
+     * [TransportKeepAlive.DEFAULT_COUNT_MAX] consecutive misses it closes the dead
+     * transport so the existing reader-EOF / reconnect machinery surfaces the
+     * drop and recovers (the SAME single recovery entrypoint the app-level
+     * `LivenessProbe` uses — never a second reconnect writer).
+     */
+    private val keepAlive = TransportKeepAlive(
+        io = object : TransportKeepAlive.KeepAliveIo {
+            override fun isAlive(): Boolean = isConnected
+            override fun lastInboundActivityNanos(): Long = lastInboundActivityNanos
+            override suspend fun sendKeepAlive(): Boolean = this@RealSshSession.sendKeepAlive()
+            override fun onKeepAliveDead(consecutiveMisses: Int) {
+                KEEPALIVE_LOGGER.log(
+                    Level.INFO,
+                    "[$KEEPALIVE_LOG_TAG] transport keepalive declared the peer dead after " +
+                        "$consecutiveMisses consecutive misses; closing the dead transport so the " +
+                        "reconnect machinery recovers",
+                )
+                // Close the dead transport on the session scope. This drives the
+                // reader to EOF, which the tmux/reconnect layer already handles as
+                // a recoverable drop through its single reconnect entrypoint — no
+                // second reconnect writer (D28).
+                scope.launch { runCatching { close() } }
+            }
+        },
+        log = { msg -> KEEPALIVE_LOGGER.log(Level.FINE, "[$KEEPALIVE_LOG_TAG] $msg") },
+    )
+
+    init {
+        // Start the always-on transport keepalive immediately. Under D21 the app
+        // backgrounds and tmux holds state remotely, so a backgrounded transport
+        // is intentionally torn down and the keepalive loop ends with it (its IO
+        // `isAlive()` reads the live transport); the loop's value is the
+        // FOREGROUNDED-but-flaky window — congested/bufferbloat/train-Wi-Fi links
+        // and the transition windows — where it absorbs a transient gap the way
+        // Terminus does, without the `-CC` `refresh-client` contention.
+        keepAlive.start(scope)
+    }
+
     override val isConnected: Boolean
         get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
+
+    override suspend fun sendKeepAlive(): Boolean {
+        // Route the global request through the single-writer dispatcher so it is
+        // FIFO-serialized against every other transport op (the #847-safe path).
+        //
+        // OpenSSH does NOT implement the `keepalive@openssh.com` request type, so
+        // it answers with `SSH_MSG_REQUEST_FAILURE` — which sshj surfaces as a
+        // thrown `ConnectionException("Global request [...] failed")` rather than
+        // a returned packet (see ConnectionImpl.gotGlobalReqResponse). That
+        // FAILURE reply STILL proves the peer is alive — it is exactly how
+        // OpenSSH's own client treats its `ServerAliveInterval` ping. So BOTH a
+        // returned packet (REQUEST_SUCCESS) AND the "request failed" exception
+        // (REQUEST_FAILURE) count as proof of life; only a timeout (no reply) or a
+        // genuine transport-death error is a miss.
+        return runCatching {
+            dispatcher.run {
+                if (!isConnected) return@run false
+                val promise = client.connection.sendGlobalRequest(
+                    KEEPALIVE_REQUEST_NAME,
+                    /* wantReply = */ true,
+                    EMPTY_PAYLOAD,
+                )
+                val answered = try {
+                    // A returned packet (REQUEST_SUCCESS) is proof of life; a null
+                    // (timeout — no reply at all) is a miss.
+                    promise.tryRetrieve(
+                        KEEPALIVE_REPLY_TIMEOUT_MS,
+                        java.util.concurrent.TimeUnit.MILLISECONDS,
+                    ) != null
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    // The reader thread delivered an error to this promise. A
+                    // REQUEST_FAILURE response is delivered as the specific
+                    // "Global request [...] failed" ConnectionException — the
+                    // server DID answer, so the peer is ALIVE. Any OTHER error
+                    // (connection lost, MAC failure, transport torn down) is a
+                    // genuine miss.
+                    isKeepAliveServerAnswered(t)
+                }
+                if (answered) {
+                    lastInboundActivityNanos = System.nanoTime()
+                }
+                answered
+            }
+        }.getOrElse { t ->
+            if (t is CancellationException) throw t
+            // The send itself (write / dispatcher) failed, or a non-promise
+            // exception escaped — but a REQUEST_FAILURE that escaped the inner
+            // catch still proves the peer answered. Otherwise it is a miss.
+            isKeepAliveServerAnswered(t)
+        }
+    }
 
     @OptIn(InternalCoroutinesApi::class)
     override suspend fun exec(command: String): ExecResult {
@@ -107,22 +223,85 @@ internal class RealSshSession(
             }
             // Phase 2 — read stdout/stderr to EOF OUTSIDE the dispatcher so a
             // slow command never wedges the `-CC` write or other execs.
-            withContext(Dispatchers.IO) {
-                val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
-                val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
-                liveCommand.join()
-                // sshj returns null exitStatus when the server didn't send one
-                // (e.g. signal-killed). Map to -1 so the caller can still tell
-                // it wasn't a clean 0.
-                val exitCode = liveCommand.exitStatus ?: -1
-                ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+            //
+            // #935 S4-2: the blocking `readBytes()`/`join()` were UNBOUNDED — on
+            // a half-open / wedged transport (no FIN/RST) the JDK read parks
+            // forever, hanging the calling coroutine (and any caller that didn't
+            // wrap us in its own timeout — six gateways did not).
+            //
+            // The bound is a REAL wall-clock watchdog ([WallClockCeiling]), NOT a
+            // coroutine `withTimeout`/`withTimeoutOrNull` (issue #940 / the #937
+            // regression). `withTimeout` reads the delay source from the CALLER's
+            // coroutine context — under `runTest`'s virtual, auto-advancing clock
+            // (every `:shared:core-ssh:integrationTest`) the ceiling fires
+            // INSTANTLY in virtual time and interrupts a HEALTHY live sshj read,
+            // aborting it as `InterruptedException` (the 13/21 integration-suite
+            // break). The wall-clock watchdog interrupts the worker thread only
+            // after [execReadTimeoutMs] of REAL elapsed time, identically in
+            // production and under any test scheduler, so a healthy read is never
+            // cut short while a genuinely-wedged read is still reclaimed. The body
+            // runs inside `runInterruptible(Dispatchers.IO)` so the watchdog's
+            // `Thread.interrupt()` actually unparks the blocking JDK read.
+            //
+            // On a real timeout the watchdog interrupt makes the read throw; that
+            // is mapped to a clear, RETRYABLE [SshExecTimeoutException], and we
+            // then CLOSE the session (lease pool self-heals — a now-disconnected
+            // session is discarded + re-dialed on next acquire). This is the SAME
+            // close-on-timeout intent the three bespoke gateway wraps
+            // (`FolderListGateway.execBounded`, `TreeRemoteSource`,
+            // `AgentKindRemoteSource`) implement per-caller — pulled down to the
+            // `exec` boundary so EVERY caller inherits it (D22 hard-cut), now with
+            // the wall-clock mechanism #940 established for the dispatcher.
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    WallClockCeiling.runUnderWallClockCeiling(
+                        timeoutMs = execReadTimeoutMs,
+                        onTimeout = { cause -> SshExecTimeoutException(command, execReadTimeoutMs, cause) },
+                    ) {
+                        val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
+                        val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
+                        liveCommand.join()
+                        // sshj returns null exitStatus when the server didn't send
+                        // one (e.g. signal-killed). Map to -1 so the caller can
+                        // still tell it wasn't a clean 0.
+                        val exitCode = liveCommand.exitStatus ?: -1
+                        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+                    }
+                }
+            } catch (timeout: SshExecTimeoutException) {
+                EXEC_LOGGER.warning(
+                    "exec read wedged >${execReadTimeoutMs}ms (real wall-clock); closing wedged " +
+                        "session + surfacing retryable SshExecTimeoutException. cmd=${command.takeLast(48)}",
+                )
+                // CLOSE the session to tear down the transport so the lease pool
+                // discards the corpse (the watchdog already interrupted+unparked
+                // the read; this also frees the channel deterministically).
+                // NonCancellable so a cancelled/timed-out coroutine still closes.
+                withContext(NonCancellable) {
+                    runCatching { close() }
+                }
+                throw timeout
             }
         } finally {
             cancelHandle?.dispose()
             // Phase 3 — close the channel, serialised through the dispatcher
             // (channel close writes SSH_MSG_CHANNEL_CLOSE on the transport).
-            runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
-            runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+            //
+            // Run under `NonCancellable`: when the caller cancels the exec (or
+            // our own read-timeout bound unwinds), the coroutine is in the
+            // cancelled state, so a plain `dispatcher.run` here would hit
+            // `mutex.withLock`/`withContext` (cancellation points) and throw
+            // `CancellationException` BEFORE running the close block — leaving the
+            // channel teardown to race the async `scope.launch` cancel handler.
+            // Wrapping in `NonCancellable` makes the channel close run
+            // deterministically inside `exec` before it returns/throws, so the
+            // SSH_MSG_CHANNEL_CLOSE is flushed and no orphaned channel leaks (the
+            // `scope.launch` handler stays as belt-and-braces for the
+            // can't-suspend-at-all path).
+            withContext(NonCancellable) {
+                runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
+                runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+            }
         }
     }
 
@@ -767,6 +946,9 @@ internal class RealSshSession(
     }
 
     override fun close() {
+        // Issue #945: stop the transport keepalive before tearing the scope down
+        // so no keepalive op is submitted to a dispatcher that is about to close.
+        keepAlive.stop()
         scope.cancel()
         // Issue #151 + #239: `close()` is idempotent and silent by
         // contract. The v0.2.7 crash report showed the original
@@ -896,6 +1078,35 @@ internal class RealSshSession(
 
     private fun ensureConnected() {
         if (!isConnected) throw SshException("SSH session is not connected")
+    }
+
+    /**
+     * True iff [t] is the sshj-delivered response to our `keepalive@openssh.com`
+     * global request that PROVES the peer answered (issue #945).
+     *
+     * OpenSSH does not implement the request type, so it replies
+     * `SSH_MSG_REQUEST_FAILURE`, which sshj's `ConnectionImpl.gotGlobalReqResponse`
+     * delivers to the promise as `deliverError(ConnectionException("Global request
+     * [...] failed"))`. That exception means the SERVER ANSWERED — proof of life,
+     * exactly as OpenSSH's own `ServerAliveInterval` treats it. We match the
+     * stable sshj message text on the cause chain. A genuine transport death
+     * (connection lost, MAC failure, reader EOF) carries a DIFFERENT message and
+     * is therefore correctly a miss.
+     */
+    private fun isKeepAliveServerAnswered(t: Throwable): Boolean {
+        var cause: Throwable? = t
+        var depth = 0
+        while (cause != null && depth < 8) {
+            val msg = cause.message
+            if (msg != null && msg.contains("Global request", ignoreCase = true) &&
+                msg.contains("failed", ignoreCase = true)
+            ) {
+                return true
+            }
+            cause = cause.cause
+            depth += 1
+        }
+        return false
     }
 }
 
@@ -1108,6 +1319,28 @@ internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
 internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
 
 /**
+ * Wall-clock ceiling for the Phase-2 stdout/stderr read (`readBytes()` +
+ * `join()`) of a single [RealSshSession.exec] (#935 S4-2). A half-open / wedged
+ * transport leaves the blocking JDK read parked forever; this is the boundary
+ * bound that turns "the action silently never returns" into a fast, clear,
+ * RETRYABLE [SshExecTimeoutException]. On expiry the session is closed so the
+ * lease pool discards the corpse and re-dials on the next acquire.
+ *
+ * 30s is generous relative to a normal control exec (tens of ms — env edit,
+ * profile list, start-dir autocomplete, manual-kind write, watched-folder
+ * discovery, the file-viewer `mkdir`/`pwd`/`cat`) yet bounds an indefinite
+ * hang. It sits ABOVE the three bespoke per-caller wraps
+ * ([com.pocketshell.app.projects.SshFolderListGateway]'s `EXEC_READ_TIMEOUT_MS`
+ * = 3.5s, `TreeRemoteSource`, `AgentKindRemoteSource`) so those tighter,
+ * latency-sensitive enumeration bounds still fire FIRST on their hot paths and
+ * this boundary bound is the safety net for every other caller that has no wrap
+ * of its own.
+ */
+internal const val EXEC_READ_TIMEOUT_MS: Long = 30_000L
+
+private val EXEC_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".exec")
+
+/**
  * Wall-clock ceiling for the blocking byte-copy + `join()` of a single
  * attachment upload (issue #930, folds in #928 D5 W-4). A wedged channel must
  * fail fast with a clear error rather than hang forever. 60s comfortably covers
@@ -1123,6 +1356,38 @@ internal const val UPLOAD_TRANSFER_TIMEOUT_MS: Long = 60_000L
 internal const val UPLOAD_CLEANUP_TIMEOUT_MS: Long = 10_000L
 
 private val CLOSE_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".close")
+
+/**
+ * The SSH global-request name OpenSSH uses for its `ServerAliveInterval` keepalive
+ * (issue #945). The server replies with `SSH_MSG_REQUEST_FAILURE` because it does
+ * not implement this request type — and that FAILURE reply still proves the peer
+ * is alive, exactly as OpenSSH's own client treats it.
+ */
+internal const val KEEPALIVE_REQUEST_NAME: String = "keepalive@openssh.com"
+
+/**
+ * Per-keepalive reply budget (issue #945). A healthy global-request round-trip is
+ * sub-second even on a congested link; this generous ceiling means a single
+ * momentarily-slow reply is a soft miss the loop absorbs (it takes
+ * [TransportKeepAlive.DEFAULT_COUNT_MAX] consecutive misses to declare dead), not
+ * a false positive. The send itself is also bounded by the dispatcher's per-op
+ * wall-clock ceiling, so a wedged write can never park the keepalive forever.
+ */
+internal const val KEEPALIVE_REPLY_TIMEOUT_MS: Long = 5_000L
+
+/** Empty payload for the [KEEPALIVE_REQUEST_NAME] global request (issue #945). */
+private val EMPTY_PAYLOAD: ByteArray = ByteArray(0)
+
+/**
+ * Logcat-grep tag for the transport keepalive (issue #945) — declaring a dead
+ * peer and the per-tick diagnostics. Routed through `java.util.logging` for the
+ * same reason the other [RealSshSession] tags are: no Android-only dependency
+ * from this shared module.
+ */
+internal const val KEEPALIVE_LOG_TAG: String = "issue945-keepalive"
+
+private val KEEPALIVE_LOGGER: Logger =
+    Logger.getLogger(RealSshSession::class.java.name + ".keepalive")
 
 /**
  * Logcat-grep tag for `RealSshSession.tail()` swallowing a recoverable

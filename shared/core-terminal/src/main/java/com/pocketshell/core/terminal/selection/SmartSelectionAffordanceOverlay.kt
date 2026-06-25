@@ -13,6 +13,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.MeasureResult
+import androidx.compose.ui.layout.MeasureScope
+import androidx.compose.ui.unit.Constraints
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -130,12 +133,11 @@ fun SmartSelectionAffordanceOverlay(
             }
         },
     ) { _, constraints ->
-        // Inert sized box matching the available space. drawBehind requires
-        // non-zero bounds to actually paint.
-        layout(
-            constraints.maxWidth.coerceAtLeast(0),
-            constraints.maxHeight.coerceAtLeast(0),
-        ) {}
+        // Inert draw-only box sized to the terminal pane (drawBehind needs
+        // non-zero bounds to paint) — but robust to the pager/lookahead's
+        // intermittent UNBOUNDED-height measure pass (the v0.4.17
+        // `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
+        layoutOverlayBounded(constraints)
     }
 }
 
@@ -200,10 +202,10 @@ public fun FilePathOverlay(
             }
         },
     ) { _, constraints ->
-        layout(
-            constraints.maxWidth.coerceAtLeast(0),
-            constraints.maxHeight.coerceAtLeast(0),
-        ) {}
+        // Issue: a draw-only overlay sized to the pane — but robust to the
+        // pager/lookahead's intermittent UNBOUNDED-height measure pass (the
+        // v0.4.17 `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
+        layoutOverlayBounded(constraints)
     }
 }
 
@@ -347,10 +349,10 @@ public fun AgentPaneAffordanceOverlay(
             }
         },
     ) { _, constraints ->
-        layout(
-            constraints.maxWidth.coerceAtLeast(0),
-            constraints.maxHeight.coerceAtLeast(0),
-        ) {}
+        // Issue: a draw-only overlay sized to the pane — but robust to the
+        // pager/lookahead's intermittent UNBOUNDED-height measure pass (the
+        // v0.4.17 `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
+        layoutOverlayBounded(constraints)
     }
 }
 
@@ -421,11 +423,49 @@ public fun EngineCommandOverlay(
             }
         },
     ) { _, constraints ->
-        layout(
-            constraints.maxWidth.coerceAtLeast(0),
-            constraints.maxHeight.coerceAtLeast(0),
-        ) {}
+        // Issue: a draw-only overlay sized to the pane — but robust to the
+        // pager/lookahead's intermittent UNBOUNDED-height measure pass (the
+        // v0.4.17 `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
+        layoutOverlayBounded(constraints)
     }
+}
+
+/**
+ * Lay out a draw-only terminal affordance overlay at the available size — but
+ * NEVER at an unbounded dimension.
+ *
+ * These overlays ([SmartSelectionAffordanceOverlay], [FilePathOverlay],
+ * [AgentPaneAffordanceOverlay], [EngineCommandOverlay]) are inert `drawBehind`
+ * boxes that just need to fill the terminal pane so their hairlines paint. Each
+ * previously called `layout(maxWidth.coerceAtLeast(0), maxHeight.coerceAtLeast(0))`,
+ * which is fine under a normal bounded measure — but the overlay sits inside the
+ * terminal pane, which is itself inside a [androidx.compose.foundation.pager.Pager]
+ * (`TmuxTerminalPager`). The pager / lookahead runs intermittent measure passes
+ * with an **unbounded** (`Constraints.Infinity`, i.e. `Int.MAX_VALUE`) maximum
+ * dimension. `coerceAtLeast(0)` leaves that `Int.MAX_VALUE` intact, so
+ * `layout(width, Int.MAX_VALUE)` threw
+ * `IllegalStateException: Size(<w> x 2147483647) is out of range. Each dimension
+ * must be between 0 and 16777215.` — the v0.4.17 RELEASE-BLOCKING crash that
+ * tore down the whole terminal/picker journey (issue #958, CI run 28184338389).
+ *
+ * When a dimension is unbounded there is no real space to fill, so we fall back
+ * to the constraint's minimum (0 for a fully-loose overlay measure). A draw-only
+ * overlay contributing a 0 dimension on a transient unbounded pass is correct —
+ * it has nothing to paint there — and on the real bounded pass it still fills the
+ * pane exactly as before.
+ */
+private fun MeasureScope.layoutOverlayBounded(constraints: Constraints): MeasureResult {
+    val width = if (constraints.hasBoundedWidth) {
+        constraints.maxWidth
+    } else {
+        constraints.minWidth
+    }.coerceAtLeast(0)
+    val height = if (constraints.hasBoundedHeight) {
+        constraints.maxHeight
+    } else {
+        constraints.minHeight
+    }.coerceAtLeast(0)
+    return layout(width, height) {}
 }
 
 internal data class SmartSelectionAffordanceSegment(

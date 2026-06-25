@@ -160,4 +160,172 @@ class MarkdownParserTest {
         assertFalse("URL tail must not leak as text", plain.trim().startsWith(")"))
         assertTrue(plain.contains("here"))
     }
+
+    // ---- Issue #921: GFM pipe tables ----
+
+    /**
+     * Reproduce-first (D33/G10): a GitHub-flavored pipe table — header row +
+     * `|---|---|` delimiter + body rows — must parse to a [MarkdownBlock.Table],
+     * NOT a [MarkdownBlock.Paragraph] of raw pipe text. Before the fix the
+     * parser had no table branch, so this same source parsed as a single
+     * paragraph whose text still contained the literal `|` and `---` delimiter —
+     * this assertion was red on base.
+     */
+    @Test
+    fun `gfm pipe table parses as a table block, not a raw paragraph`() {
+        val src = """
+            | Name | Score |
+            |------|-------|
+            | foo  | 12    |
+            | bar  | 34    |
+        """.trimIndent()
+        val blocks = MarkdownParser.parse(src)
+        // The bug: parsed as a paragraph carrying the raw `|---|` delimiter text.
+        assertFalse(
+            "table source must NOT parse as a raw paragraph",
+            blocks.any {
+                it is MarkdownBlock.Paragraph &&
+                    (it.spans.filterIsInstance<InlineSpan.Text>().any { s -> s.text.contains("---") } ||
+                        it.spans.filterIsInstance<InlineSpan.Text>().any { s -> s.text.contains("|") })
+            },
+        )
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        // Header has two columns.
+        assertEquals(2, table.header.size)
+        assertEquals("Name", (table.header[0].single() as InlineSpan.Text).text)
+        assertEquals("Score", (table.header[1].single() as InlineSpan.Text).text)
+        // Two body rows, each with two cells.
+        assertEquals(2, table.rows.size)
+        assertEquals("foo", (table.rows[0][0].single() as InlineSpan.Text).text)
+        assertEquals("12", (table.rows[0][1].single() as InlineSpan.Text).text)
+        assertEquals("bar", (table.rows[1][0].single() as InlineSpan.Text).text)
+        assertEquals("34", (table.rows[1][1].single() as InlineSpan.Text).text)
+    }
+
+    @Test
+    fun `table delimiter row is detected with and without outer pipes`() {
+        assertTrue(MarkdownParser.isTableDelimiterRow("|---|---|"))
+        assertTrue(MarkdownParser.isTableDelimiterRow("---|---"))
+        assertTrue(MarkdownParser.isTableDelimiterRow("| :--- | ---: | :--: |"))
+        assertTrue(MarkdownParser.isTableDelimiterRow("|-|"))
+        // Not a delimiter row: a header / data row of words.
+        assertFalse(MarkdownParser.isTableDelimiterRow("| Name | Score |"))
+        // Not a delimiter row: no dashes at all.
+        assertFalse(MarkdownParser.isTableDelimiterRow("| : | : |"))
+        // Plain text with no pipe is not a delimiter row.
+        assertFalse(MarkdownParser.isTableDelimiterRow("just text"))
+    }
+
+    @Test
+    fun `delimiter colons set per-column alignment`() {
+        val src = """
+            | L | C | R | N |
+            | :--- | :--: | ---: | --- |
+            | a | b | c | d |
+        """.trimIndent()
+        val table = MarkdownParser.parse(src).filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(
+            listOf(
+                MarkdownBlock.Table.Alignment.LEFT,
+                MarkdownBlock.Table.Alignment.CENTER,
+                MarkdownBlock.Table.Alignment.RIGHT,
+                MarkdownBlock.Table.Alignment.NONE,
+            ),
+            table.alignments,
+        )
+    }
+
+    @Test
+    fun `inline markup inside table cells is parsed`() {
+        val src = """
+            | Field | Value |
+            |-------|-------|
+            | **bold** | `code` |
+        """.trimIndent()
+        val table = MarkdownParser.parse(src).filterIsInstance<MarkdownBlock.Table>().single()
+        val boldCell = table.rows[0][0]
+        assertTrue(boldCell.filterIsInstance<InlineSpan.Text>().any { it.bold && it.text == "bold" })
+        val codeCell = table.rows[0][1]
+        assertEquals("code", codeCell.filterIsInstance<InlineSpan.Code>().single().text)
+    }
+
+    @Test
+    fun `a pipe line without a delimiter row stays a paragraph`() {
+        // A lone "| a | b |" with no `|---|` row underneath is NOT a table.
+        val blocks = MarkdownParser.parse("| a | b |\nnext line")
+        assertTrue(blocks.all { it !is MarkdownBlock.Table })
+        assertTrue(blocks.any { it is MarkdownBlock.Paragraph })
+    }
+
+    @Test
+    fun `table ends at a blank line and following content parses separately`() {
+        val src = """
+            | A | B |
+            |---|---|
+            | 1 | 2 |
+
+            After the table.
+        """.trimIndent()
+        val blocks = MarkdownParser.parse(src)
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(1, table.rows.size)
+        val para = blocks.filterIsInstance<MarkdownBlock.Paragraph>().single()
+        assertEquals("After the table.", (para.spans.single() as InlineSpan.Text).text)
+    }
+
+    @Test
+    fun `escaped pipe inside a cell is literal, not a column separator`() {
+        val src = """
+            | Expr | Note |
+            |------|------|
+            | a \| b | or |
+        """.trimIndent()
+        val table = MarkdownParser.parse(src).filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(2, table.rows[0].size)
+        assertEquals("a | b", (table.rows[0][0].single() as InlineSpan.Text).text)
+    }
+
+    /**
+     * Regression (issue #921 review): a `|`-containing PROSE line immediately
+     * followed by a `---` thematic break must NOT be misparsed as a table. A
+     * single `---` is a valid 1-cell delimiter row, so the bare delimiter check
+     * swallowed the horizontal rule. The GFM guard is that the delimiter row's
+     * cell count must EQUAL the header row's cell count — `"foo | bar"` has 2
+     * columns, `"---"` has 1, so it is not a table.
+     */
+    @Test
+    fun `pipe prose line above a thematic break is a paragraph plus rule, not a table`() {
+        val blocks = MarkdownParser.parse("foo | bar\n---\nnext para")
+        assertTrue("must not be a table", blocks.none { it is MarkdownBlock.Table })
+        assertEquals(
+            listOf("Paragraph", "HorizontalRule", "Paragraph"),
+            blocks.map { it::class.simpleName },
+        )
+        assertEquals(
+            "foo | bar",
+            ((blocks[0] as MarkdownBlock.Paragraph).spans.single() as InlineSpan.Text).text,
+        )
+    }
+
+    @Test
+    fun `pipe heading line above a closing thematic break is not a table`() {
+        val blocks = MarkdownParser.parse("Heading text | more\n---")
+        assertTrue("must not be a table", blocks.none { it is MarkdownBlock.Table })
+        assertEquals(
+            listOf("Paragraph", "HorizontalRule"),
+            blocks.map { it::class.simpleName },
+        )
+    }
+
+    /**
+     * The column-count guard must also reject a delimiter row whose cell count
+     * differs from the header for any other reason (a genuinely malformed table
+     * stays prose rather than rendering a lopsided grid).
+     */
+    @Test
+    fun `delimiter row with a different column count than the header is not a table`() {
+        // Header has 2 columns, delimiter has 3 — not a table.
+        val blocks = MarkdownParser.parse("| a | b |\n|---|---|---|\n| 1 | 2 |")
+        assertTrue("mismatched column count must not parse as a table", blocks.none { it is MarkdownBlock.Table })
+    }
 }

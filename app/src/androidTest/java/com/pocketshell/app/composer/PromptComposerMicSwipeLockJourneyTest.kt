@@ -161,6 +161,76 @@ class PromptComposerMicSwipeLockJourneyTest {
         compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
     }
 
+    /**
+     * Issue #585 (6th reopen): the deterministic, sheet-drag-PROOF hands-free
+     * lock path. The swipe-up gesture competes with the ModalBottomSheet's
+     * velocity-driven drag-to-dismiss — that arbitration broke on the
+     * maintainer's real device every round while passing the emulator. A single
+     * tap on the explicit Lock control cannot be stolen by the sheet drag, so it
+     * is the durable way to "release the finger and keep recording". This test
+     * is the regression that fails on base (no Lock control exists) and passes
+     * with the fix.
+     *
+     * Reproduction note: the COMPOSER_LOCK_RECORDING_TAG control does not exist
+     * on the unfixed code, so `onNodeWithTag(...).performClick()` below throws
+     * (assert-on-empty-node) → the test is RED on base, GREEN with the fix.
+     */
+    @Test
+    fun tapLockControlLocksRecordingHandsFree() {
+        val mic = FakeMicCapture()
+        val viewModel = newViewModel(mic)
+        renderComposer(viewModel)
+
+        // Start recording with a plain tap (the regular start path).
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            viewModel.uiState.value.recording == RecordingState.Recording
+        }
+        compose.waitForIdle()
+
+        // While recording-but-not-locked: the hands-free hint is shown and the
+        // Lock control is present; the persistent locked indicator is NOT.
+        assertFalse(viewModel.uiState.value.recordingLocked)
+        compose.onNodeWithTag(COMPOSER_LOCK_HINT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertDoesNotExist()
+
+        // Tap the deterministic Lock control — a tap, so the finger is already
+        // off the screen. Recording must lock and KEEP capturing.
+        compose.onNodeWithTag(COMPOSER_LOCK_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_LOCK_RECORDING_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            viewModel.uiState.value.recordingLocked
+        }
+        compose.waitForIdle()
+
+        // Hands-free: the capture is still live (never stopped) and locked.
+        assertEquals("Lock must not stop or restart capture", 1, mic.startCount)
+        assertEquals("Lock must not stop capture", 0, mic.stopCount)
+        assertEquals(RecordingState.Recording, viewModel.uiState.value.recording)
+        assertTrue(viewModel.uiState.value.recordingLocked)
+
+        // Locked state reads clean: the persistent lock indicator is shown, and
+        // the pre-lock hint + Lock control are gone (locked is the end state).
+        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_LOCK_HINT_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_LOCK_RECORDING_TAG).assertDoesNotExist()
+        WalkthroughScreenshotArtifacts.capture("issue-585-lock-button-locked")
+
+        // The locked recording can still be stopped/cancelled/sent.
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
+
+        // Discard cancels only the recording, without closing the composer.
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            viewModel.uiState.value.recording == RecordingState.Idle &&
+                !viewModel.uiState.value.recordingLocked
+        }
+        assertEquals("Discard should stop the locked capture once", 1, mic.stopCount)
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
+    }
+
     @Test
     fun plainTapStartsRecordingWithoutLocking() {
         val mic = FakeMicCapture()

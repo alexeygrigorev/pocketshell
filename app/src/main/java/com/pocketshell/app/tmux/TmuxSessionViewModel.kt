@@ -1895,6 +1895,17 @@ public class TmuxSessionViewModel @Inject constructor(
     // [AGENT_EXIT_CONFIRMATIONS] consecutive nulls do we treat the agent as
     // genuinely exited and reconcile it away.
     private val paneAgentNullDetections: MutableMap<String, Int> = ConcurrentHashMap()
+    // Issue #942 (black-screen B2): the wall-clock (elapsedRealtime) of the last
+    // `%output` chunk observed for a pane. A remembered/seeded agent whose grep
+    // detection comes back EMPTY but whose `-CC` channel is still actively
+    // streaming output is WEDGED-but-alive (the #470/#835 capture-behind-a-busy-
+    // agent symptom), not exited — the empty grep raced the busy channel. Such a
+    // `Resolved(null)` must NOT be counted toward [AGENT_EXIT_CONFIRMATIONS] (which
+    // tears the Conversation row down to the raw black Terminal). #897 protected
+    // the `Unavailable` (probe-threw) branch; this protects the still-streaming
+    // `Resolved(null)` branch. A genuinely-exited agent stops emitting output, so
+    // its empty grep arrives with NO recent activity and tears down correctly.
+    private val paneLastOutputAtMs: MutableMap<String, Long> = ConcurrentHashMap()
     // Issue #793: per-pane conversation-load watchdog. Flips a never-completing
     // "Loading conversation…" state to Failed so the tab can't spin forever.
     private val conversationLoadWatchdogJobs: MutableMap<String, Job> = ConcurrentHashMap()
@@ -4497,6 +4508,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -4604,6 +4616,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -8333,6 +8346,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
             paneAgentNullDetections.remove(paneId)
+            paneLastOutputAtMs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
@@ -8420,6 +8434,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun recordVisiblePaneOutput(event: ControlEvent.Output) {
+        // Issue #942: stamp the pane's last live-output wall-clock so an empty
+        // grep detection can tell a still-streaming (wedged-but-alive) channel
+        // apart from a genuinely-exited agent (no output) before it counts the
+        // empty detection toward agent-exit confirmation.
+        paneLastOutputAtMs[event.paneId] = SystemClock.elapsedRealtime()
         logFirstPaneOutput(event)
     }
 
@@ -8873,6 +8892,29 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #941 (black-screen B1) test seam: invoke the production switch-reveal
+     * gate [awaitActivePaneSeededOrLoading] directly against the supplied client,
+     * building a runtime guard for the current generation/target. A passthrough —
+     * no test-only behavior. Lets a JVM regression test prove the gate heals a
+     * PARTIAL-black active pane (the switch-to-black symptom) without driving the
+     * full connect coroutine state machine. Returns the gate's reveal decision.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun awaitActivePaneSeededOrLoadingForTest(client: TmuxClient): Boolean {
+        val target = activeTarget
+        val guard = if (target != null) {
+            RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+        } else {
+            null
+        }
+        return awaitActivePaneSeededOrLoading(guard)
+    }
+
+    /**
      * Issue #722 (characterization test seam): arm [armConnectedBlankWatchdog]
      * directly against the supplied guard. A passthrough — no production logic.
      */
@@ -9096,12 +9138,51 @@ public class TmuxSessionViewModel @Inject constructor(
     ): Boolean {
         val client = clientRef ?: return true
         var attempt = 0
+        var partialBlankHealed = false
         while (true) {
             if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return true
             if (client.disconnected.value) return true
             val activePane = activeVisiblePane() ?: return true
-            if (!activePane.terminalState.visibleScreenIsBlank()) return true
-            // Active pane is blank: try to (re-)seed it before revealing.
+            val blank = activePane.terminalState.visibleScreenIsBlank()
+            val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+            if (!blank && !partialBlank) return true
+            // Issue #941 (black-screen B1): a plain session switch can reveal a
+            // PARTIAL-black pane (one live line, the rest of the prior viewport
+            // gone). That reads "not blank", so the pre-#941 gate passed it and the
+            // partial-black pane was revealed as Connected and never reseeded (the
+            // maintainer's "switched and it was black" symptom). Heal it here too —
+            // `seedPaneFromCapture` does a full clear+repaint, so it restores the
+            // FULL viewport from tmux's authoritative grid.
+            //
+            // Over-heal guard: a partial-black read is a HEURISTIC and a real
+            // one-line prompt looks identical to "one live line, rest black". So
+            // for partial-black we do EXACTLY ONE heal capture, then REVEAL — never
+            // loop while it persists (a real prompt legitimately stays "partial",
+            // and re-capturing it just re-paints the same content). Only a FULLY
+            // blank pane keeps the bounded retry loop (a degraded link's empty
+            // capture genuinely needs another attempt). This prevents reseed-thrash
+            // and a spurious "Attaching…" overlay on a real blank prompt.
+            if (!blank && partialBlank) {
+                if (partialBlankHealed) return true
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-reveal-gate-active-pane-partial-blank pane=${activePane.paneId} " +
+                        "session=${activeTarget?.sessionName} -> one heal capture then reveal",
+                )
+                seedPaneFromCapture(
+                    client = client,
+                    pane = activePane,
+                    refreshGuard = refreshGuard,
+                    recordMilestone = false,
+                    maxAttempts = 1,
+                )
+                partialBlankHealed = true
+                // Reveal regardless of the post-heal partial-black read (a real
+                // small prompt is legitimately partial); the capture restored
+                // whatever tmux's grid holds.
+                return true
+            }
+            // Active pane is FULLY blank: try to (re-)seed it before revealing.
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-reveal-gate-active-pane-blank pane=${activePane.paneId} " +
@@ -9172,6 +9253,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
                     // A frame landed (seed or live %output) — drop the loading
                     // overlay and let the Connected surface show the content.
+                    //
+                    // Issue #941 (black-screen B1): the watchdog INTENTIONALLY stays
+                    // FULLY-blank-only here. A partial-black active pane (one live
+                    // line) is healed by the switch-reveal gate BEFORE this watchdog
+                    // is even armed ([awaitActivePaneSeededOrLoading]), and a
+                    // send-overpaint partial-black is healed by the post-send heal
+                    // ([scheduleSendOverpaintHeal]). Extending this post-reveal net to
+                    // partial-black would over-heal a legitimately small single-line
+                    // pane (a real one-line prompt that landed after reveal reads
+                    // partial-black), reseed-thrashing it on every arming — so the
+                    // watchdog keeps its narrow fully-blank contract.
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
                     return@launch
                 }
@@ -9558,6 +9650,33 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * Only seeds when there is no existing conversation row for the pane
      * (a fresh attach), so it never clobbers live state mid-session.
+     *
+     * Issue #819 (Slice A2 — re-anchor, don't trust the remembered source):
+     * the seed used to restore `remembered.detection` BLIND and render it
+     * `Live` immediately. That `detection` carries a `sourcePath`, and the
+     * conversation source is selected by mtime among same-cwd same-kind
+     * candidates — so when a sibling / sub-agent / second window/worktree
+     * Codex rollout shared the cwd, the remembered `sourcePath` could be the
+     * WRONG session's rollout, captured during a prior mis-pick. Rendering it
+     * `Live` before live re-detection re-bound the route-true source showed the
+     * Conversation tab a DIFFERENT transcript than the route-named Terminal —
+     * the reported `ai-shipping-labs` header vs `git-pocketshell-desktop-codex`
+     * divergence. The route-true source can only be re-confirmed by the live
+     * `detectRecordedSessionForPane` `/proc/<pid>/fd` round-trip
+     * ([AgentDetector.detect]'s owned-then-refuse-to-guess pin, #819 Slice A1).
+     *
+     * So the seed now restores ONLY the remembered KIND + the user's tab choice
+     * as a RESOLVING placeholder ([rememberedAgentPlaceholder] = true,
+     * `detection = null`, [ConversationLoadState.Loading]) — never the stale
+     * `sourcePath`. The Conversation tab still appears instantly on reattach
+     * (no black-Terminal flash, the #495 benefit preserved), but it shows
+     * "Loading conversation…" until live detection binds the route's OWN source,
+     * instead of flashing a sibling's transcript. The placeholder is held and
+     * re-confirmed across a transient post-reattach null (a CONFIRMED-prior agent
+     * window — the #554 no-flap guarantee, via [shouldDeferAgentDowngrade]); only
+     * after [AGENT_EXIT_CONFIRMATIONS] consecutive nulls is it torn down by
+     * [clearAgentDetectionForPane] (the agent genuinely exited). This NEVER tears
+     * the pane down to a raw shell on the first null (no #554 flap regression).
      */
     private fun seedAgentConversationFromMemory(pane: TmuxPaneState) {
         val target = activeTarget ?: return
@@ -9572,7 +9691,11 @@ public class TmuxSessionViewModel @Inject constructor(
         setAgentConversation(
             pane.paneId,
             AgentConversationUiState(
-                detection = remembered.detection,
+                // Issue #819 (A2): do NOT carry remembered.detection.sourcePath
+                // — it may be a stale/sibling source from a prior mis-pick. Seed
+                // detection-less; live detectRecordedSessionForPane re-anchors
+                // the route-true source via the /proc/<pid>/fd pin (A1).
+                detection = null,
                 events = emptyList(),
                 selectedTab = if (remembered.wasOnConversation) {
                     SessionTab.Conversation
@@ -9580,8 +9703,21 @@ public class TmuxSessionViewModel @Inject constructor(
                     SessionTab.Terminal
                 },
                 syncStatus = AgentConversationSyncStatus.Live,
+                // Issue #819 (A2): hold "Loading conversation…" — a resolving
+                // placeholder, not the stale transcript — until live detection
+                // binds the real source.
+                loadState = ConversationLoadState.Loading,
+                // Issue #819 (A2): mark this as the remembered-agent placeholder
+                // so a transient post-reattach null is held + re-confirmed (a
+                // KNOWN agent, the #554 no-flap guarantee) and a confirmed exit
+                // tears it down instead of stranding it on "Loading…".
+                rememberedAgentPlaceholder = true,
             ),
         )
+        // Issue #819 (A2): arm the load watchdog so a never-arriving live
+        // re-detection resolves the placeholder to a clear terminal state
+        // instead of spinning forever (mirrors seedPresumedAgentPlaceholder).
+        armConversationLoadWatchdog(pane.paneId)
     }
 
     /**
@@ -9616,11 +9752,17 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         if (isShell) {
             // Drop any auto-seeded placeholder that raced ahead of this verdict.
+            // Issue #819 (A2): a remembered-agent resolving placeholder for a
+            // session the durable tree now confirms is a SHELL is a STALE
+            // reattach seed (the window's agent exited and was replaced by a
+            // shell since memory was recorded) — drop it too, so a confirmed
+            // shell never lingers on the #819 "Loading conversation…" resolving
+            // placeholder.
             val shellPaneIds = paneRows.values
                 .filter { it.sessionId.trim() == key }
                 .map { it.paneId }
             for (paneId in shellPaneIds) {
-                if (isAutoSeededPlaceholderUp(paneId)) {
+                if (isAutoSeededPlaceholderUp(paneId) || isRememberedAgentPlaceholderUp(paneId)) {
                     conversationLoadWatchdogJobs.remove(paneId)?.cancel()
                     paneAgentNullDetections.remove(paneId)
                     clearAgentDetectionForPane(paneId)
@@ -10030,6 +10172,22 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun handleNullAgentDetection(pane: TmuxPaneState, guard: RuntimeRefreshGuard): Boolean {
         val paneId = pane.paneId
+        // Issue #942 (black-screen B2, reopen-class): an empty grep
+        // (`Resolved(null)`) on a channel that is STILL actively streaming
+        // output is a WEDGED-but-alive channel (the capture/grep raced behind a
+        // busy agent — the #470/#835 symptom), not an agent that exited. Counting
+        // it toward [AGENT_EXIT_CONFIRMATIONS] is how a remembered Conversation
+        // collapsed to the raw black Terminal after 2× empty detections (#874 D4,
+        // verified live on v0.4.16). #897 protected the `Unavailable` branch; this
+        // guards the still-streaming `Resolved(null)` branch. We only protect a
+        // pane that actually has agent UI to lose — a genuine shell pane (no
+        // remembered/seeded agent, no live detection) is unaffected — and a
+        // genuinely-exited agent stops emitting output, so its empty grep arrives
+        // with NO recent activity and tears down correctly (no over-protection).
+        if (isChannelWedgedButAlive(paneId) && hasProtectableAgentUi(paneId)) {
+            scheduleAgentDetectionRecheck(pane, guard)
+            return false
+        }
         if (shouldDeferAgentDowngrade(paneId)) {
             val nulls = (paneAgentNullDetections[paneId] ?: 0) + 1
             paneAgentNullDetections[paneId] = nulls
@@ -10085,7 +10243,11 @@ public class TmuxSessionViewModel @Inject constructor(
             scheduleAgentDetectionRecheck(pane, guard)
             return false
         }
-        if (row?.autoSeededPlaceholder == true) {
+        // Issue #819 (A2): a remembered-agent resolving placeholder (detection
+        // still null while the route-true source is being re-bound) is a
+        // KNOWN-prior agent — a degraded probe must keep retrying it, not strand
+        // it on "Loading…", exactly as for the #878 auto-seed below.
+        if (row?.autoSeededPlaceholder == true || row?.rememberedAgentPlaceholder == true) {
             scheduleAgentDetectionRecheck(pane, guard)
             return false
         }
@@ -10100,6 +10262,17 @@ public class TmuxSessionViewModel @Inject constructor(
      * detection. In that state a transient null after a reconnect is almost
      * always a detection-not-yet-warm race, not a genuine agent exit, so we
      * hold the agent UI and re-confirm before tearing it down.
+     *
+     * Issue #819 (Slice A2): the #495 reattach seed now restores the remembered
+     * window as a detection-LESS resolving placeholder
+     * ([AgentConversationUiState.rememberedAgentPlaceholder] = true) instead of
+     * carrying the (possibly stale) remembered source. That placeholder is just
+     * as much a confirmed-prior agent that a transient post-reattach null must
+     * NOT tear down, so the "still showing the seeded agent UI" condition below
+     * holds for BOTH a real detection AND a remembered resolving placeholder.
+     * Without this the A2 seed would re-introduce the #554 flap (a remembered
+     * agent dropped to a raw shell on the first null because its `detection` is
+     * now null until the live re-bind lands).
      */
     private fun shouldDeferAgentDowngrade(paneId: String): Boolean {
         val target = activeTarget ?: return false
@@ -10113,8 +10286,10 @@ public class TmuxSessionViewModel @Inject constructor(
         ) ?: return false
         // Only defer while the seeded agent UI is actually still showing; once
         // detection has confirmed an exit and the row is gone, there is
-        // nothing to protect.
-        return _agentConversations.value[paneId]?.detection != null
+        // nothing to protect. A remembered resolving placeholder (#819 A2)
+        // counts as "still showing" even though its detection is null.
+        val row = _agentConversations.value[paneId] ?: return false
+        return row.detection != null || row.rememberedAgentPlaceholder
     }
 
     /**
@@ -10129,6 +10304,52 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun isAutoSeededPlaceholderUp(paneId: String): Boolean {
         val row = _agentConversations.value[paneId] ?: return false
         return row.autoSeededPlaceholder && row.detection == null
+    }
+
+    /**
+     * Issue #942 (black-screen B2): true when [paneId]'s `-CC` channel produced
+     * a `%output` chunk within the last [CHANNEL_WEDGED_RECENT_OUTPUT_MS] — i.e.
+     * the channel is still actively STREAMING. An empty grep detection
+     * (`Resolved(null)`) on such a channel is the wedged-but-alive
+     * capture-behind-a-busy-agent race (#470/#835), NOT an agent exit, so it must
+     * not be counted toward [AGENT_EXIT_CONFIRMATIONS]. A genuinely-exited agent
+     * stops emitting output, so its empty grep lands with no recent activity and
+     * this returns false (the row tears down correctly — no over-protection).
+     * False when the pane has never emitted output (no entry) or its last output
+     * is older than the window.
+     */
+    private fun isChannelWedgedButAlive(paneId: String): Boolean {
+        val lastOutputAtMs = paneLastOutputAtMs[paneId] ?: return false
+        return SystemClock.elapsedRealtime() - lastOutputAtMs < CHANNEL_WEDGED_RECENT_OUTPUT_MS
+    }
+
+    /**
+     * Issue #942: true when [paneId] currently has agent Conversation UI that an
+     * empty/transient detection could TEAR DOWN to the raw black Terminal — a
+     * live detection, a remembered-agent resolving placeholder (#819 A2), an
+     * auto-seeded detecting placeholder (#878), or a remembered window status the
+     * #495 reattach seed protects (#554). The wedged-channel guard only fires for
+     * such panes; a genuine shell pane (none of these) has nothing to protect, so
+     * its null detection proceeds through the normal path unchanged.
+     */
+    private fun hasProtectableAgentUi(paneId: String): Boolean {
+        val row = _agentConversations.value[paneId]
+        if (row != null && (row.detection != null || row.rememberedAgentPlaceholder || row.autoSeededPlaceholder)) {
+            return true
+        }
+        return shouldDeferAgentDowngrade(paneId)
+    }
+
+    /**
+     * Issue #819 (A2): true when a REMEMBERED-agent resolving placeholder is
+     * currently up for [paneId] — the #495 reattach seed, now detection-less,
+     * holding "Loading conversation…" while live `detectRecordedSessionForPane`
+     * re-anchors the route-true source. False once a real detection lands (the
+     * flag is cleared) or the row is gone.
+     */
+    private fun isRememberedAgentPlaceholderUp(paneId: String): Boolean {
+        val row = _agentConversations.value[paneId] ?: return false
+        return row.rememberedAgentPlaceholder && row.detection == null
     }
 
     /**
@@ -10184,6 +10405,19 @@ public class TmuxSessionViewModel @Inject constructor(
                 // own teardown; it is NOT a #815 yank (no user-chosen tab is
                 // being changed — the user never picked this view).
                 current.autoSeededPlaceholder -> {
+                    rowDropped = true
+                    null
+                }
+                // Issue #819 (A2): a REMEMBERED-agent resolving placeholder (the
+                // #495 reattach seed, now detection-less) whose live re-detection
+                // came back null AFTER the #554 hold/re-confirm window means the
+                // agent genuinely exited — drop it so it does not strand on
+                // "Loading conversation…". Like the auto-seed teardown above, this
+                // is NOT a #815 yank (no user-chosen tab is being changed). The
+                // transient post-reattach null was already absorbed by
+                // shouldDeferAgentDowngrade's AGENT_EXIT_CONFIRMATIONS hold, so by
+                // the time we reach here the exit is confirmed.
+                current.rememberedAgentPlaceholder -> {
                     rowDropped = true
                     null
                 }
@@ -10906,6 +11140,64 @@ public class TmuxSessionViewModel @Inject constructor(
             awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
             client.sendCommand("send-keys -t $paneId Enter")
                 .throwIfTmuxError("submit pasted agent input")
+            // Issue #941 (black-screen B1): the maintainer's "I sent a message and
+            // everything became black" symptom. After the submit Enter, a full-screen
+            // agent TUI repaints — it can `clear`+redraw and emit a `%output` overpaint
+            // that leaves the active pane PARTIAL-black (a single live status/spinner
+            // line, the rest of the prior viewport gone). The reattach/manual-Redraw
+            // heals already restore a partial-black pane; a SEND-triggered overpaint had
+            // NO heal, so the pane stayed black until the user manually redrew. Schedule
+            // a one-shot, guarded active-pane heal that fires ONLY if the pane settles
+            // partial-black/blank after the overpaint.
+            scheduleSendOverpaintHeal(client, paneId)
+        }
+    }
+
+    /**
+     * Issue #941 (black-screen B1): after a send's submit Enter, the agent's
+     * `%output` overpaint can leave the active pane partial-black. Wait one settle
+     * tick for the overpaint to land, then — ONLY if the active pane is blank /
+     * partial-black — do the UNCONDITIONAL active-pane full-viewport restore
+     * ([reseedActivePaneForReattach], a `capture-pane` clear+repaint). Guarded by a
+     * [RuntimeRefreshGuard] keyed to the current generation + target + client so a
+     * late heal can never paint a switched-away session, and scoped to the pane the
+     * user is actually looking at (the active visible pane), since only that pane's
+     * overpaint is the reported "everything went black".
+     *
+     * One-shot, no loop: a real one-line agent prompt looks partial-black too, and
+     * re-capturing it just re-paints the same authoritative content, so there is no
+     * reseed-thrash. The heal is a no-op when the overpaint left a normally-painted
+     * pane (the common case — a multi-line agent response), so a healthy send costs
+     * nothing beyond the cheap blank/partial-blank pre-check.
+     */
+    private fun scheduleSendOverpaintHeal(client: TmuxClient, paneId: String) {
+        val target = activeTarget ?: return
+        val healGeneration = connectGeneration
+        bridgeScope.launch {
+            // Let the post-submit agent overpaint land before judging the pane.
+            delay(SEND_OVERPAINT_HEAL_SETTLE_MS)
+            if (clientRef !== client) return@launch
+            if (client.disconnected.value) return@launch
+            val activePane = activeVisiblePane() ?: return@launch
+            // Heal only the pane the send targeted while it is still the active pane
+            // (the reported "sent a message → everything black" is the focused pane).
+            if (activePane.paneId != paneId) return@launch
+            val blank = activePane.terminalState.visibleScreenIsBlank()
+            val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
+            if (!blank && !partialBlank) return@launch
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-send-overpaint-active-pane-heal pane=${activePane.paneId} " +
+                    "window=${activePane.windowId} session=${target.sessionName} " +
+                    "blank=$blank partialBlank=$partialBlank",
+            )
+            reseedActivePaneForReattach(
+                RuntimeRefreshGuard(
+                    generation = healGeneration,
+                    target = target,
+                    client = client,
+                ),
+            )
         }
     }
 
@@ -11824,6 +12116,40 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #942 test seam: drive the production `%output` activity recorder for
+     * [paneId] (the path the per-pane output collector calls on every live
+     * `%output` chunk), stamping the pane as a STILL-STREAMING (wedged-but-alive)
+     * channel. Lets a JVM test put a remembered/seeded agent's channel into the
+     * wedged-but-alive state synthetically — without standing up a real `-CC`
+     * stream — before injecting the empty `Resolved(null)` detection that #942
+     * must not count toward agent-exit confirmation.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun recordPaneOutputActivityForTest(paneId: String) {
+        recordVisiblePaneOutput(ControlEvent.Output(paneId, ByteArray(1)))
+    }
+
+    /**
+     * Issue #942 test seam: clear [paneId]'s recorded `%output` activity so the
+     * channel reads as IDLE (a genuinely-exited agent stops emitting output).
+     * Lets a JVM test prove the genuine-exit case still tears the row down — the
+     * wedged-channel guard must NOT over-protect a channel that went quiet.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearPaneOutputActivityForTest(paneId: String) {
+        paneLastOutputAtMs.remove(paneId)
+    }
+
+    /**
+     * Issue #942 test seam: true when [paneId]'s channel currently reads as
+     * wedged-but-alive (recent `%output`). Lets a JVM test assert the signal
+     * itself flips with activity vs idleness, independent of the routing.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isChannelWedgedButAliveForTest(paneId: String): Boolean =
+        isChannelWedgedButAlive(paneId)
+
+    /**
      * Issue #897 test seam: drive the degraded/unavailable detection branch
      * directly. Unlike [handleNullAgentDetectionForTest], this path represents
      * an untrustworthy probe and must never confirm agent exit.
@@ -11861,6 +12187,21 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun seedPresumedAgentPlaceholderForTest(paneId: String) {
         val pane = paneRows[paneId] ?: return
         seedPresumedAgentPlaceholder(pane)
+    }
+
+    /**
+     * Issue #819 (A2) test seam: drive [seedAgentConversationFromMemory]
+     * directly for the row registered under [paneId]. Mirrors the pane-add
+     * call in [applyParsedPanes] so a test can assert the reattach seed restores
+     * the remembered window as a RESOLVING placeholder (detection-less,
+     * [AgentConversationUiState.rememberedAgentPlaceholder] = true) — NOT the
+     * remembered (possibly stale/sibling) `detection.sourcePath` rendered Live —
+     * without standing up the SSH/JSONL detection round-trip.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun seedAgentConversationFromMemoryForTest(paneId: String) {
+        val pane = paneRows[paneId] ?: return
+        seedAgentConversationFromMemory(pane)
     }
 
     /**
@@ -13409,6 +13750,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -13525,6 +13867,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -13669,6 +14012,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
+        paneLastOutputAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -14842,6 +15186,15 @@ internal const val CONNECTED_BLANK_WATCHDOG_TICK_MS: Long = 500L
 internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
 
 /**
+ * Issue #941 (black-screen B1): after a send's submit Enter, wait this long for
+ * the agent's `%output` overpaint to land before judging whether the active pane
+ * settled partial-black/blank and needs the one-shot send-overpaint heal. Short
+ * enough that the heal restores a black pane promptly, long enough that a normal
+ * multi-line agent response has painted (so the heal correctly no-ops).
+ */
+internal const val SEND_OVERPAINT_HEAL_SETTLE_MS: Long = 350L
+
+/**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line
  * (e.g. `0,2`) into a [TmuxPaneCursor]. Returns null when the reply is
  * missing, malformed, or carries negative coordinates — callers fall back to
@@ -15231,6 +15584,20 @@ internal const val AGENT_EXIT_CONFIRMATIONS: Int = 2
 
 /** Delay before the issue #554 agent-exit confirmation re-detection. */
 internal const val AGENT_EXIT_RECHECK_DELAY_MS: Long = 1_200L
+
+/**
+ * Issue #942 (black-screen B2): how recently a pane must have produced `%output`
+ * for its channel to be treated as WEDGED-but-alive (still streaming) when an
+ * empty grep detection (`Resolved(null)`) lands. Within this window an empty
+ * detection is the capture-behind-a-busy-agent race (#470/#835), not an agent
+ * exit, so it is NOT counted toward [AGENT_EXIT_CONFIRMATIONS]. Sized to comfortably
+ * span a busy agent's brief inter-chunk gaps plus the detection round-trip, while
+ * staying short enough that a genuinely-exited agent (which stops emitting output)
+ * clears the window before its empty grep arrives, so a real exit still tears the
+ * Conversation row down. Two consecutive recheck cycles
+ * ([AGENT_EXIT_RECHECK_DELAY_MS]) fit inside it.
+ */
+internal const val CHANNEL_WEDGED_RECENT_OUTPUT_MS: Long = 3_000L
 
 /**
  * Issue #793: how long the Conversation tab spins on "Loading conversation…"

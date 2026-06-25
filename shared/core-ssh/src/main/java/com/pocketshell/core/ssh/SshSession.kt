@@ -199,6 +199,32 @@ public interface SshSession : AutoCloseable {
     ): RemoteListing =
         throw NotImplementedError("listDirectory is only implemented by RealSshSession")
 
+    /**
+     * Send ONE `keepalive@openssh.com` SSH transport keepalive global request
+     * and await its reply (issue #945 — the Terminus-parity transport keepalive).
+     *
+     * Returns `true` on ANY reply — including the mandatory
+     * `SSH_MSG_REQUEST_FAILURE` an OpenSSH server sends for the (intentionally
+     * unimplemented) `keepalive@openssh.com` request type, which STILL proves the
+     * peer is alive, exactly as OpenSSH's own `ServerAliveInterval` treats it.
+     * Returns `false` on a transport error / timeout / no reply (the peer is
+     * dead or the link is down).
+     *
+     * The production [RealSshSession] routes this through the single-writer
+     * [TransportDispatcher] (`dispatcher.run { ... }`), so the keepalive is just
+     * another FIFO-serialized op — it CANNOT race a KEX/rekey boundary or a
+     * channel open the way sshj's removed background `KeepAliveRunner` did (the
+     * #847 corruption). This is the safe successor to that removed writer.
+     *
+     * Has a default body that throws [NotImplementedError] so the many bespoke
+     * per-test [SshSession] fakes don't all have to override it; only
+     * [RealSshSession] and the keepalive loop drive it.
+     *
+     * This is a blocking call wrapped to play well with coroutines.
+     */
+    public suspend fun sendKeepAlive(): Boolean =
+        throw NotImplementedError("sendKeepAlive is only implemented by RealSshSession")
+
     /** Disconnect and free all resources. Idempotent. */
     override fun close()
 

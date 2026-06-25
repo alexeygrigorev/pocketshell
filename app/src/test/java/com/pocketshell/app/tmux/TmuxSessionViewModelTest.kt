@@ -74,6 +74,7 @@ import net.schmizz.sshj.transport.TransportException
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -7103,16 +7104,34 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
 
-        // Conversation tab is available immediately on the new pane id,
-        // without waiting for live re-detection.
+        // Issue #819 (A2): the Conversation tab is available immediately on the
+        // new pane id (a row exists on the remembered tab), but the seed now
+        // restores a RESOLVING placeholder — NOT the remembered (possibly
+        // stale/sibling) detection rendered Live. The screen surfaces this via
+        // the `presumedAgent` "Loading conversation…" placeholder path (a
+        // detection-less row whose pane is not a confirmed shell), so the #495
+        // tab-availability benefit is preserved without flashing a stale source.
         assertNull("old pane id is gone after reattach", vm.agentConversations.value["%0"])
         val restored = vm.agentConversations.value["%7"]
         assertNotNull("agent status restored immediately on the new pane", restored)
-        assertEquals(AgentKind.ClaudeCode, restored!!.detection?.agent)
         assertEquals(
-            "the Conversation tab is gated on agentForWindow being non-null",
-            AgentKind.ClaudeCode,
-            vm.agentForWindow("@0"),
+            "the remembered window is restored on the Conversation tab the user was on",
+            SessionTab.Conversation,
+            restored!!.selectedTab,
+        )
+        assertNull(
+            "#819 (A2): the seed must NOT carry the remembered (possibly stale) " +
+                "source — live detection re-anchors the route-true source",
+            restored.detection,
+        )
+        assertTrue(
+            "#819 (A2): the reattach seed is a remembered-agent resolving placeholder",
+            restored.rememberedAgentPlaceholder,
+        )
+        assertEquals(
+            "#819 (A2): the resolving placeholder holds Loading until live detection binds",
+            ConversationLoadState.Loading,
+            restored.loadState,
         )
     }
 
@@ -7134,13 +7153,22 @@ class TmuxSessionViewModelTest {
             "process-scoped memory must restore agent status for a fresh VM before detection",
             restored,
         )
-        assertEquals(AgentKind.ClaudeCode, restored!!.detection?.agent)
         assertEquals(
             "the user's Conversation tab choice survives VM recreation",
             SessionTab.Conversation,
-            restored.selectedTab,
+            restored!!.selectedTab,
         )
-        assertEquals(AgentKind.ClaudeCode, recreatedVm.agentForWindow("@0"))
+        // Issue #819 (A2): a cross-VM restore must also NOT trust the remembered
+        // source blind — it seeds the resolving placeholder and re-anchors the
+        // route-true source on live re-detection in the fresh VM.
+        assertNull(
+            "#819 (A2): the cross-VM seed must not carry the remembered source",
+            restored.detection,
+        )
+        assertTrue(
+            "#819 (A2): the cross-VM reattach seed is a remembered-agent resolving placeholder",
+            restored.rememberedAgentPlaceholder,
+        )
     }
 
     @Test
@@ -7178,13 +7206,336 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         val restored = vm.agentConversations.value["%7"]!!
-        assertEquals(AgentKind.ClaudeCode, restored.detection?.agent)
+        // Issue #819 (A2): the seed restores the remembered TAB (Terminal here)
+        // as a resolving placeholder — not the remembered (possibly stale)
+        // source — and live detection re-anchors the route-true source.
+        assertNull(
+            "#819 (A2): the seed must not carry the remembered source",
+            restored.detection,
+        )
+        assertTrue(
+            "#819 (A2): the reattach seed is a remembered-agent resolving placeholder",
+            restored.rememberedAgentPlaceholder,
+        )
         assertEquals(
             "Conversation tab available but Terminal stays selected",
             SessionTab.Terminal,
             restored.selectedTab,
         )
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Issue #819 (Slice A2): the #495 reattach memory-seed must RE-ANCHOR the
+    // remembered conversation source against live re-detection — it must NOT
+    // render the remembered `detection.sourcePath` BLIND as Live.
+    //
+    // The bug (maintainer dogfood): the Conversation tab showed a DIFFERENT
+    // Codex transcript than the route-true Terminal — the `ai-shipping-labs`
+    // header over a `git-pocketshell-desktop-codex` transcript — because two
+    // same-cwd same-kind (Codex) sessions (a sub-agent / second window / second
+    // worktree) share a cwd and the source is picked by mtime, so a remembered
+    // detection captured during a prior mis-pick carried the SIBLING's rollout.
+    // The seed restored that stale source and rendered it Live before the live
+    // `/proc/<pid>/fd` round-trip (Slice A1) re-bound the route-true source.
+    //
+    // RED on base: the seed carries `remembered.detection.sourcePath` (the stale
+    // sibling source) as a Live row — so `restored.detection!!.sourcePath`
+    // equals the sibling source the Terminal is NOT attached to.
+    // GREEN with A2: the seed restores a detection-LESS resolving placeholder;
+    // live re-detection (the route's OWN fd-pinned source) binds the route-true
+    // source, so Conversation == Terminal route.
+    //
+    // G2 class coverage: sub-agent/nested, two-windows, two-worktrees all reduce
+    // to "remembered source != route-true source"; plus the missing-data
+    // (remembered window whose agent has since EXITED) case, and the #554 no-flap
+    // hold (a transient post-reattach null must NOT tear the pane to a raw shell).
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun codexDetection(sourcePath: String, sessionId: String): AgentDetection =
+        AgentDetection(
+            agent = AgentKind.Codex,
+            sourcePath = sourcePath,
+            sessionId = sessionId,
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+    @Test
+    fun codexReattachSeedDoesNotRenderRememberedSiblingSourceAsLive() = runTest(scheduler) {
+        // The reported scenario: a Codex window the user was reading in
+        // Conversation. The remembered detection was captured during a prior
+        // same-cwd mis-pick, so it carries the SIBLING/orchestrator rollout
+        // (`git-pocketshell-desktop-codex`), NOT the route's own session
+        // (`ai-shipping-labs`).
+        val siblingRollout = "/home/u/.codex/sessions/git-pocketshell-desktop-codex.jsonl"
+        val routeTrueRollout = "/home/u/.codex/sessions/ai-shipping-labs.jsonl"
+
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        // The remembered detection points at the SIBLING rollout (the stale
+        // mis-pick). Recording it + opening Conversation arms agentSessionMemory.
+        vm.startAgentConversationForTest(
+            "%0",
+            codexDetection(siblingRollout, "git-pocketshell-desktop-codex"),
+        )
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        // Reconnect: a NEW pane id under the SAME window @0; the seed fires.
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%7", "@0", "$0", "shell", paneIndex = 0,
+                    cwd = "/home/u/git/pocketshell", paneTty = "/dev/pts/9",
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        val seeded = vm.agentConversations.value["%7"]!!
+        // The LOAD-BEARING assertion (G6): the seed must NOT render the stale
+        // sibling source. On base the seed carries remembered.detection, so
+        // `seeded.detection!!.sourcePath == siblingRollout` (RED).
+        assertNull(
+            "#819 (A2): the reattach seed must NOT render the remembered " +
+                "(stale sibling) Codex source — it holds resolving until live " +
+                "re-detection binds the route-true source",
+            seeded.detection,
+        )
+        assertNotEquals(
+            "#819 (A2): the stale sibling rollout must NOT be the active source",
+            siblingRollout,
+            seeded.detection?.sourcePath,
+        )
+        assertTrue(seeded.rememberedAgentPlaceholder)
+        assertEquals(SessionTab.Conversation, seeded.selectedTab)
+
+        // Live re-detection (the route's OWN fd-pinned source via Slice A1) lands
+        // and binds the route-true rollout. The Conversation now matches the
+        // route-named Terminal.
+        vm.markAgentTailLiveForTest("%7", codexDetection(routeTrueRollout, "ai-shipping-labs"))
+        runCurrent()
+
+        val bound = vm.agentConversations.value["%7"]!!
+        assertEquals(
+            "#819 (A2): after live re-detection the Conversation is bound to the " +
+                "ROUTE-TRUE source the Terminal is attached to",
+            routeTrueRollout,
+            bound.detection!!.sourcePath,
+        )
+        assertEquals("ai-shipping-labs", bound.detection!!.sessionId)
+        assertEquals(
+            "the remembered Conversation tab is preserved across the re-anchor",
+            SessionTab.Conversation,
+            bound.selectedTab,
+        )
+        assertFalse(
+            "the resolving-placeholder flag clears once the route-true source binds",
+            bound.rememberedAgentPlaceholder,
+        )
+    }
+
+    @Test
+    fun codexReattachSeedReanchorsAcrossSubAgentTwoWindowAndTwoWorktreeSiblings() =
+        runTest(scheduler) {
+            // G2 class coverage: the three same-cwd same-kind collision shapes the
+            // maintainer can hit (a sub-agent/orchestrator, a second tmux window,
+            // a second git worktree) all reduce to "the remembered source is a
+            // sibling rollout, the route-true source is the pane's own". For each,
+            // the seed must refuse the remembered source and the live re-bind must
+            // restore the route-true one.
+            data class Case(
+                val name: String,
+                val siblingSource: String,
+                val routeTrueSource: String,
+            )
+            val cases = listOf(
+                Case(
+                    "sub-agent/orchestrator out-flushing the pane's own rollout",
+                    "/home/u/.codex/sessions/orchestrator-subagent.jsonl",
+                    "/home/u/.codex/sessions/pane-own-session.jsonl",
+                ),
+                Case(
+                    "two tmux windows in one project dir",
+                    "/home/u/.codex/sessions/window-b.jsonl",
+                    "/home/u/.codex/sessions/window-a.jsonl",
+                ),
+                Case(
+                    "two git worktrees of one repo sharing the codex sessions dir",
+                    "/home/u/.codex/sessions/worktree-feature.jsonl",
+                    "/home/u/.codex/sessions/worktree-main.jsonl",
+                ),
+            )
+
+            for ((index, case) in cases.withIndex()) {
+                val windowId = "@$index"
+                val oldPane = "%${index * 2}"
+                val newPane = "%${index * 2 + 1}"
+                val vm = newVm()
+                vm.connectWithPaneForTest(paneId = oldPane, windowId = windowId)
+                vm.startAgentConversationForTest(
+                    oldPane,
+                    codexDetection(case.siblingSource, "sibling-$index"),
+                )
+                vm.selectSessionTab(oldPane, SessionTab.Conversation)
+                runCurrent()
+
+                vm.applyParsedPanesForTest(
+                    listOf(
+                        TmuxSessionViewModel.ParsedPane(
+                            newPane, windowId, "$0", "shell", paneIndex = 0,
+                            cwd = "/home/u/git/pocketshell", paneTty = "/dev/pts/$index",
+                            sessionName = "work",
+                        ),
+                    ),
+                )
+                runCurrent()
+
+                val seeded = vm.agentConversations.value[newPane]!!
+                assertNull(
+                    "#819 (A2) [${case.name}]: seed must not carry the sibling source",
+                    seeded.detection,
+                )
+                assertNotEquals(
+                    "#819 (A2) [${case.name}]: sibling source must not be active",
+                    case.siblingSource,
+                    seeded.detection?.sourcePath,
+                )
+
+                vm.markAgentTailLiveForTest(
+                    newPane,
+                    codexDetection(case.routeTrueSource, "route-true-$index"),
+                )
+                runCurrent()
+
+                val bound = vm.agentConversations.value[newPane]!!
+                assertEquals(
+                    "#819 (A2) [${case.name}]: live re-bind anchors the route-true source",
+                    case.routeTrueSource,
+                    bound.detection!!.sourcePath,
+                )
+            }
+        }
+
+    @Test
+    fun codexReattachSeedHoldsResolvingPlaceholderThroughTransientNullThenTearsDownOnConfirmedExit() =
+        runTest(scheduler) {
+            // #554 no-flap guarantee AND the missing-data (agent-exited) case.
+            // The A2 seed is detection-less, so the #554 hold can no longer key
+            // off `detection != null`. A transient post-reattach null must be
+            // HELD + re-confirmed (the window was a KNOWN agent), and only a
+            // CONFIRMED exit (AGENT_EXIT_CONFIRMATIONS consecutive nulls) tears
+            // the placeholder down — never a flap to a raw shell on the first null.
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+            vm.startAgentConversationForTest(
+                "%0",
+                codexDetection("/home/u/.codex/sessions/remembered.jsonl", "remembered"),
+            )
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7", "@0", "$0", "shell", paneIndex = 0,
+                        cwd = "/home/u/git/pocketshell", paneTty = "/dev/pts/9",
+                        sessionName = "work",
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertTrue(
+                "precondition: the reattach seed is a remembered-agent resolving placeholder",
+                vm.agentConversations.value["%7"]!!.rememberedAgentPlaceholder,
+            )
+
+            // First live re-detection comes back NULL (the agent's log/process is
+            // not yet observable on the fresh attach). The #554 hold must keep the
+            // placeholder — NOT drop the pane to a raw shell.
+            val droppedOnFirstNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertFalse(
+                "#554/#819 (A2): a transient first null must NOT tear down the " +
+                    "remembered resolving placeholder",
+                droppedOnFirstNull,
+            )
+            assertNotNull(
+                "#819 (A2): the resolving placeholder is retained across the first null",
+                vm.agentConversations.value["%7"],
+            )
+
+            // After AGENT_EXIT_CONFIRMATIONS consecutive nulls the exit is
+            // confirmed; the placeholder is torn down (the agent genuinely exited
+            // — the missing-data case), never left stranded on "Loading…".
+            var dropped = false
+            repeat(8) {
+                if (!dropped) {
+                    dropped = vm.handleNullAgentDetectionForTest("%7")
+                    runCurrent()
+                }
+            }
+            assertTrue(
+                "#819 (A2): a CONFIRMED exit tears down the remembered placeholder",
+                dropped,
+            )
+            assertNull(
+                "#819 (A2): the placeholder is dropped on confirmed exit — never " +
+                    "stranded on 'Loading…'",
+                vm.agentConversations.value["%7"],
+            )
+        }
+
+    @Test
+    fun codexReattachSeedSeam_seedsResolvingPlaceholderNotRememberedSource() =
+        runTest(scheduler) {
+            // Direct seam coverage of seedAgentConversationFromMemory itself (no
+            // live-detection round-trip in the way), proving the seed in isolation
+            // restores a resolving placeholder rather than the remembered source.
+            val memory = AgentSessionMemory()
+            val vm = newVm(agentSessionMemory = memory)
+            vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+            runCurrent()
+            // Arm memory for window @0 with a Codex sibling source.
+            memory.remember(
+                hostId = 42L,
+                sessionName = "work",
+                windowId = "@0",
+                detection = codexDetection(
+                    "/home/u/.codex/sessions/sibling.jsonl",
+                    "sibling",
+                ),
+                wasOnConversation = true,
+            )
+            // Drop the existing row so the seed's "no existing row" gate passes,
+            // then drive the seed seam directly.
+            vm.clearAgentDetectionForPaneForTest("%0")
+            // clearAgentDetectionForPane forgets memory; re-arm it after the clear.
+            memory.remember(
+                hostId = 42L,
+                sessionName = "work",
+                windowId = "@0",
+                detection = codexDetection(
+                    "/home/u/.codex/sessions/sibling.jsonl",
+                    "sibling",
+                ),
+                wasOnConversation = true,
+            )
+            runCurrent()
+            vm.seedAgentConversationFromMemoryForTest("%0")
+            runCurrent()
+
+            val seeded = vm.agentConversations.value["%0"]!!
+            assertNull(
+                "#819 (A2): the seed seam restores a resolving placeholder, not " +
+                    "the remembered source",
+                seeded.detection,
+            )
+            assertTrue(seeded.rememberedAgentPlaceholder)
+            assertEquals(ConversationLoadState.Loading, seeded.loadState)
+            assertEquals(SessionTab.Conversation, seeded.selectedTab)
+        }
 
     // ─── Issue #818: configurable open-time default tab + the #815 line ───
     //
@@ -7636,8 +7987,16 @@ class TmuxSessionViewModelTest {
     @Test
     fun autoSeedDoesNotOverwriteRememberedConversationRowNoYank() = runTest(scheduler) {
         // AC2 (#815 no-yank): a window whose user previously had a Conversation
-        // row must reattach with the live agent detection restored, NOT replaced
-        // by a fresh detection-less auto-seed placeholder. seed-from-memory wins.
+        // row must reattach on the REMEMBERED Conversation tab — NOT replaced by
+        // a fresh #878 auto-seed placeholder. seed-from-memory wins (it runs
+        // first and creates the row, so seedPresumedAgentPlaceholder no-ops).
+        //
+        // Issue #819 (A2): the remembered row is now restored as a REMEMBERED-
+        // agent resolving placeholder (rememberedAgentPlaceholder = true,
+        // detection-less) — NOT the remembered detection rendered Live (which
+        // could re-show a stale/sibling source). It is still distinct from the
+        // #878 AUTO-seed (autoSeededPlaceholder = false), so the no-yank line
+        // holds: the remembered Conversation choice survives.
         val vm = newVm()
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.startAgentConversationForTest("%0", newClaudeDetection())
@@ -7655,13 +8014,18 @@ class TmuxSessionViewModelTest {
             SessionTab.Conversation,
             restored.selectedTab,
         )
-        assertEquals(
-            "#878: seed-from-memory restored the live detection, not a detection-less placeholder",
-            AgentKind.ClaudeCode,
-            restored.detection?.agent,
+        assertNull(
+            "#819 (A2): the reattach seed restores a resolving placeholder, not " +
+                "the remembered (possibly stale) source rendered Live",
+            restored.detection,
+        )
+        assertTrue(
+            "#819 (A2): the remembered row is a remembered-agent resolving placeholder",
+            restored.rememberedAgentPlaceholder,
         )
         assertFalse(
-            "#878: a restored remembered row is never an auto-seeded placeholder",
+            "#878: a restored remembered row is the remembered-agent placeholder, " +
+                "NOT the #878 auto-seed placeholder",
             restored.autoSeededPlaceholder,
         )
     }
@@ -7919,26 +8283,33 @@ class TmuxSessionViewModelTest {
             listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
         )
         runCurrent()
-        assertEquals(
-            "precondition: agent UI restored immediately on reattach",
-            AgentKind.ClaudeCode,
-            vm.agentConversations.value["%7"]?.detection?.agent,
+        // Issue #819 (A2): the reattach seed is a detection-less remembered-agent
+        // resolving placeholder (the agent UI is available, but the route-true
+        // source is bound by live re-detection, not the remembered one).
+        assertTrue(
+            "precondition: remembered-agent resolving placeholder restored on reattach",
+            vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
         )
 
         // First live-detection null right after the reattach: DEFER, do not
-        // forget. The seeded agent UI must survive.
+        // forget. The seeded agent UI must survive. This is the #554 no-flap
+        // guarantee — A2 preserves it for the detection-less placeholder via
+        // shouldDeferAgentDowngrade keying off rememberedAgentPlaceholder.
         val downgraded = vm.handleNullAgentDetectionForTest("%7")
         runCurrent()
         assertFalse("first transient null must be deferred, not a downgrade", downgraded)
-        assertEquals(
+        assertNotNull(
             "the seeded agent UI must survive a single transient null",
-            AgentKind.ClaudeCode,
-            vm.agentConversations.value["%7"]?.detection?.agent,
+            vm.agentConversations.value["%7"],
+        )
+        assertTrue(
+            "the remembered-agent resolving placeholder survives the transient null",
+            vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
         )
         assertEquals(
-            "the Conversation tab stays available for the window",
-            AgentKind.ClaudeCode,
-            vm.agentForWindow("@0"),
+            "the Conversation tab stays selected for the window",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%7"]?.selectedTab,
         )
     }
 
@@ -7972,6 +8343,10 @@ class TmuxSessionViewModelTest {
             )
             runCurrent()
 
+            // Issue #819 (A2): the reattach seed is a detection-less remembered-
+            // agent resolving placeholder. A degraded probe must keep retrying
+            // it (#897) — it must NOT be treated as an agent exit, and the
+            // remembered placeholder stays visible on the Conversation tab.
             repeat(AGENT_EXIT_CONFIRMATIONS) {
                 val downgraded = vm.handleUnavailableAgentDetectionForTest("%7")
                 runCurrent()
@@ -7982,11 +8357,9 @@ class TmuxSessionViewModelTest {
                 val row = vm.agentConversations.value["%7"]
                 assertNotNull("#897: remembered ${detection.agent} row stays visible", row)
                 assertEquals(SessionTab.Conversation, row!!.selectedTab)
-                assertEquals(detection.agent, row.detection?.agent)
-                assertEquals(
-                    "#897: the Conversation tab remains available for the window",
-                    detection.agent,
-                    vm.agentForWindow(windowId),
+                assertTrue(
+                    "#897/#819 (A2): the remembered-agent resolving placeholder survives the degraded probe",
+                    row.rememberedAgentPlaceholder,
                 )
             }
 
@@ -7996,12 +8369,163 @@ class TmuxSessionViewModelTest {
                 "#897: degraded probes must not consume the clean-null exit confirmation budget",
                 firstCleanNull,
             )
-            assertEquals(detection.agent, vm.agentConversations.value["%7"]?.detection?.agent)
+            assertTrue(
+                "#819 (A2): the remembered placeholder survives the first clean null",
+                vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
+            )
 
             val secondCleanNull = vm.handleNullAgentDetectionForTest("%7")
             runCurrent()
             assertTrue("clean nulls still confirm a genuine ${detection.agent} exit", secondCleanNull)
             assertNull(vm.agentConversations.value["%7"])
+            assertNull(vm.agentForWindow(windowId))
+            vm.clearForTest()
+        }
+    }
+
+    /**
+     * Issue #942 (black-screen B2, reopen-class D31): a remembered Conversation
+     * row collapsed to the raw black Terminal after 2× consecutive
+     * successful-but-EMPTY (`Resolved(null)`) detections on a wedged-but-alive
+     * channel — the capture/grep raced behind a busy agent (#470/#835) and read
+     * "no agent" while the agent was very much alive and still streaming output.
+     * #897 protected only the `Unavailable` (probe-threw) branch; the empty-grep
+     * `Resolved(null)` branch still counted toward [AGENT_EXIT_CONFIRMATIONS] and
+     * tore the row down. The maintainer's 2026-06-24 Claude `faq-assistant` black
+     * capture.
+     *
+     * RED (no fix): each empty null on the streaming channel counts toward exit;
+     * the second confirms and the remembered Conversation row is cleared.
+     * GREEN (fix): the still-streaming channel (recent `%output`) marks the empty
+     * detection as wedged-but-alive, it does NOT count toward exit confirmation,
+     * and the remembered Conversation row is preserved across both nulls.
+     *
+     * Class-cover: Claude, Codex AND OpenCode kinds.
+     */
+    @Test
+    fun emptyDetectionOnWedgedButAliveChannelDoesNotCollapseRememberedConversation() = runTest(scheduler) {
+        val detections = listOf(
+            newClaudeDetection(),
+            newCodexDetection(),
+            newOpenCodeDetection(),
+        )
+
+        detections.forEachIndexed { index, detection ->
+            val windowId = "@$index"
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = windowId, sessionName = "wedged-$index")
+            vm.startAgentConversationForTest("%0", detection)
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            // Reattach: the pane comes back as a remembered-agent resolving
+            // placeholder (the #495/#819 A2 seed) — the exact remembered
+            // Conversation state the maintainer had open when it went black.
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7",
+                        windowId,
+                        "$0",
+                        "shell",
+                        paneIndex = 0,
+                        sessionName = "wedged-$index",
+                    ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                "#819 (A2): the remembered ${detection.agent} placeholder is up before the empty detections",
+                vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
+            )
+
+            // The `-CC` channel is WEDGED-but-ALIVE: it is still streaming
+            // `%output` for this pane (a busy agent), so the grep raced an empty
+            // read. Inject 2× empty `Resolved(null)` while output keeps arriving.
+            repeat(AGENT_EXIT_CONFIRMATIONS) {
+                vm.recordPaneOutputActivityForTest("%7")
+                assertTrue(
+                    "#942: a freshly-streaming channel reads wedged-but-alive",
+                    vm.isChannelWedgedButAliveForTest("%7"),
+                )
+                val downgraded = vm.handleNullAgentDetectionForTest("%7")
+                runCurrent()
+                assertFalse(
+                    "#942: an empty grep on a streaming (wedged-but-alive) ${detection.agent} channel must NOT confirm agent exit",
+                    downgraded,
+                )
+                assertTrue(
+                    "#942: the remembered ${detection.agent} Conversation row survives the empty detection (no black Terminal)",
+                    vm.agentConversations.value["%7"]?.rememberedAgentPlaceholder == true,
+                )
+            }
+
+            vm.clearForTest()
+        }
+    }
+
+    /**
+     * Issue #942: the wedged-channel guard must NOT over-protect — a GENUINE
+     * agent exit stops emitting output, so its empty `Resolved(null)` arrives on
+     * a now-IDLE channel and must still tear the Conversation row down after
+     * [AGENT_EXIT_CONFIRMATIONS] consecutive nulls. Class-cover Claude/Codex/
+     * OpenCode so a kind-specific over-protection regression is caught.
+     */
+    @Test
+    fun emptyDetectionOnIdleChannelStillTearsDownAGenuinelyExitedAgent() = runTest(scheduler) {
+        val detections = listOf(
+            newClaudeDetection(),
+            newCodexDetection(),
+            newOpenCodeDetection(),
+        )
+
+        detections.forEachIndexed { index, detection ->
+            val windowId = "@$index"
+            val vm = newVm()
+            vm.connectWithPaneForTest(paneId = "%0", windowId = windowId, sessionName = "exited-$index")
+            vm.startAgentConversationForTest("%0", detection)
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        "%7",
+                        windowId,
+                        "$0",
+                        "shell",
+                        paneIndex = 0,
+                        sessionName = "exited-$index",
+                    ),
+                ),
+            )
+            runCurrent()
+
+            // The agent exited: the channel went IDLE (no `%output`). The empty
+            // grep is now a TRUE "no agent" verdict, not a wedged race.
+            vm.clearPaneOutputActivityForTest("%7")
+            assertFalse(
+                "#942: an idle channel must not read wedged-but-alive",
+                vm.isChannelWedgedButAliveForTest("%7"),
+            )
+
+            val firstNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertFalse(
+                "#554: the first clean null defers (confirmation window) for ${detection.agent}",
+                firstNull,
+            )
+
+            val secondNull = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+            assertTrue(
+                "#942: a real ${detection.agent} exit on an idle channel still tears the row down (no over-protection)",
+                secondNull,
+            )
+            assertNull(
+                "#942: the genuinely-exited ${detection.agent} Conversation row is gone",
+                vm.agentConversations.value["%7"],
+            )
             assertNull(vm.agentForWindow(windowId))
             vm.clearForTest()
         }

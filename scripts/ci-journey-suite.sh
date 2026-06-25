@@ -570,6 +570,19 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
+  # ADDED (#859 Slice B): the typed-card RENDERER REGISTRY proof. The session
+  # feed is now a generic typed-card list dispatched through
+  # SessionCardRenderers (no `when (type)` in the feed). This connected Compose
+  # test renders a HETEROGENEOUS feed (checklist + the new `note` type + a
+  # genuinely unknown type) through the registry and asserts: the checklist
+  # still renders + ticks (no regression), the `note` card renders + marks-read
+  # via the registry (new type, zero feed code change), and an unknown type
+  # degrades to the graceful "unsupported card" row. It is a PURE Compose test —
+  # NO Docker fixture, NO SSH/tmux, NO toxiproxy, NO 2222/2226 port — so it
+  # needs no tests.yml service change, and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi())). Lives under
+  # com.pocketshell.app.cards.
+  "com.pocketshell.app.cards.SessionCardFeedRegistryTest"
   # ADDED (#750, 3rd occurrence — D31 durable-fix gate): the tmux non-Connected
   # SINGLE-INDICATOR regression guard. The maintainer's "two loading indicators
   # on the reconnect/reattach screen" symptom has now shipped THREE times because
@@ -779,6 +792,24 @@ JOURNEY_CLASSES=(
   # cache seed (first state is Loading); GREEN after. Lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
+  # ADDED (#839, epic #821 workstream C — the #837 durable-tree daemon journey):
+  # the END-TO-END durable-tree proof on a REAL device + REAL daemon. #837 was
+  # approved on a JVM FakeTreeDaemon proxy; this drives the PRODUCTION
+  # FolderListViewModel + a REAL TreeRemoteSource against the `agents-daemon`
+  # fixture (port 2239) whose `pocketshell` is the genuine Python package, so
+  # `tree get|upsert|reconcile` PERSIST a host-side JSON registry that survives an
+  # app kill + relaunch. The journey collapses a folder + holds an order, KILLS +
+  # RELAUNCHES the app (a fresh VM + a NEW TreeRemoteSource), asserts the
+  # cold-start hydrate renders the held order/collapse INSTANTLY (folder stays
+  # collapsed), then a resume reconcile prunes a gone session as a DELTA against
+  # the LIVE `tmuxctl list` and a refresh picks up an added one. RED on a broken
+  # durable path (the test's pre-condition guard fails if the daemon doesn't
+  # persist); GREEN with the real daemon. The emulator-journey workflow now brings
+  # up the 2239 fixture (+ a real-tree persist sanity check), so this does NOT
+  # self-skip on CI. The always-runnable JVM backstop is
+  # FolderListViewModelTreeDurabilityTest (per-push Unit job). It lives under
+  # com.pocketshell.app.projects, so it carries its FQCN directly.
+  "com.pocketshell.app.projects.FolderListDurableTreeDaemonDockerTest"
   # ADDED (#869): the composer-Send ACK-GATE on-device submit JOURNEY — the
   # load-bearing real-agent proof the #869 reviewer required (BLOCKED-G4). The
   # maintainer's symptom: "most of the time when I click Send it's not really
@@ -850,6 +881,12 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#successTransferShowsDismissibleBanner"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
+  # ADDED (#921, D32 G9): rendered Markdown shows GFM pipe tables as laid-out
+  # cells, not raw `|---|---|` delimiter text. Drives the REAL FileViewerScaffold
+  # with a benchmark/report `.md` and HARD-asserts the table surface is present
+  # and the delimiter row is NOT shown as literal text. PURE Compose (no Docker /
+  # SSH / tmux / port — runs on the already-booted AVD), no self-skip.
+  "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"
   # ADDED (#885, D32 G9): the post-update "Host ready" success sheet must show
   # ONLY Continue — the "Open Usage" CTA (#117) was removed (hard cut, D22).
   # This connected test drives the REAL HostBootstrapSheet in its Success state
@@ -883,6 +920,59 @@ JOURNEY_CLASSES=(
   # assumeTrue / assumeFalse(isRunningOnCi()) on the load-bearing assertions —
   # process.md F3 / D33). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"
+
+  # ===========================================================================
+  # Issue #949 (epic #859 Slice A — host→app card push, Phase-1 verify-gone,
+  # D33). Kept in its OWN block to minimize merge friction with the sibling
+  # blocks above.
+  #
+  # Phase-1 (the host CLI `pocketshell push checklist|get|check|status` + the
+  # app's SessionCardsRemoteSource + the checklist chip / bottom-sheet) shipped
+  # code-complete on `main` but WITHOUT an end-to-end emulator+Docker acceptance
+  # journey, so the real warm-session card-push path was UNPROVEN (D33). This
+  # journey closes that gap and gate-wires it per-push so the transport cannot
+  # silently regress.
+  #
+  # It exercises the REAL path, not a unit proxy: a host (the deterministic
+  # agents fixture) runs `pocketshell push checklist --session <s> --item …`
+  # over a real SSH session to write the per-session card store; the PRODUCTION
+  # SessionCardsRemoteSource.getCards reads it back over the SAME warm session
+  # (D21) and parses a ChecklistCard; the PRODUCTION checklist chip +
+  # ChecklistCardsContent render the real feed and the test asserts the card +
+  # its items ACTUALLY appear; tapping an item drives the PRODUCTION
+  # setChecklistItemChecked tick exec, and re-reading the host (`push status` +
+  # getCards) confirms the tick ROUND-TRIPPED (untick too). The
+  # readPathBroken_wrongSessionName_yieldsEmptyFeed_redGuard case is the
+  # inverted RED→GREEN guard (D32 G10) that pins the load-bearing
+  # "card-reaches-the-feed" assertions. The fixture `pocketshell push` verb is
+  # now faithful to cards.py (item ids <slug>-<index>, full-replace on re-push,
+  # the JSON `get` contract the app reads, unknown-id error). It uses ONLY the
+  # deterministic agents:2222 fixture (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222,
+  # or the pool-allocated port under `--pool`) that tests.yml already brings up
+  # with `up -d --build` (so CI gets the new `push` verb, not a stale image) —
+  # no new Docker service/port, no toxiproxy — and does NOT self-skip on CI. It
+  # lives under com.pocketshell.app.cards, so it carries its FQCN directly.
+  "com.pocketshell.app.cards.SessionChecklistPushJourneyDockerTest"
+  # ADDED (#947): the host-version-mismatch banner's one-tap Update button — the
+  # UI gate (#641/#567/#657/G9) for a maintainer-reported UI control. The
+  # maintainer asked for an Update button on the FolderList host-version banner
+  # (the arrow in the issue screenshot) so the host `pocketshell` upgrade runs
+  # over the warm session instead of copy-paste. This connected proof composes the
+  # PRODUCTION CliVersionMismatchBanner (internal, no proxy/stand-in) in all THREE
+  # states — Idle (Update + Dismiss), Running (spinner replaces the buttons, no
+  # double-run), Failure (error line + Retry + Dismiss, no stuck spinner) — pinned
+  # to the bottom edge like its real placement, and HARD-asserts viewport
+  # CONTAINMENT (assertNodeFullyWithinRoot, the #657/F1 helper — NOT a bare
+  # assertIsDisplayed, which a control pushed off the right edge by the long
+  # version message would still satisfy) plus reachability (enabled + clickable)
+  # of the Update + Dismiss controls. Each state writes a full-device screenshot
+  # (the maintainer's arrow-target acceptance: Update next to Dismiss). It uses NO
+  # Docker fixture, NO SSH/tmux/port (pure Compose UI test on the booted AVD) and
+  # does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
+  # load-bearing assertions — process.md F3 / D33). It lives under
+  # com.pocketshell.app.projects, not the proof prefix, so it carries its
+  # fully-qualified name directly.
+  "com.pocketshell.app.projects.CliVersionMismatchBannerUpdateButtonTest"
 )
 
 echo "=========================================================="
@@ -1485,6 +1575,53 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# v0.4.17 RELEASE-BLOCKER: the terminal affordance-overlay UNBOUNDED-height
+# measure crash (CI run 28184338389, reproduced 4/4). The draw-only overlays
+# (SmartSelectionAffordanceOverlay / FilePathOverlay / AgentPaneAffordanceOverlay
+# / EngineCommandOverlay) laid out at the raw `constraints.maxHeight` — fine
+# under a normal bounded measure, but the overlay sits inside the terminal pane,
+# itself inside the `TmuxTerminalPager` (Pager), whose lookahead/measure pass
+# runs with an UNBOUNDED (`Int.MAX_VALUE`) max height. That overflowed `layout()`
+# → `IllegalStateException: Size(1070 x 2147483647) is out of range`, which tore
+# down the whole back-to-picker / multi-session-switch journey. This proof
+# composes EACH of the four PRODUCTION overlays under EXACTLY that crash
+# constraint (`Constraints(maxWidth=1070, maxHeight=Infinity)`) and HARD-asserts
+# every one lays out at a FINITE height (class coverage, no self-skip). RED on
+# the un-fixed overlays (the activity dies with the out-of-range crash); GREEN
+# after the `layoutOverlayBounded` clamp. Uses NO Docker fixture (in-process
+# Compose UI test). It lives under com.pocketshell.core.terminal.selection.
+CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS="com.pocketshell.core.terminal.selection.TerminalOverlayUnboundedMeasureCrashTest"
+OVERLAY_UNBOUNDED_STATUS="PASS"
+
+run_core_terminal_overlay_unbounded() {
+  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS" \
+    --stacktrace
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  OVERLAY_UNBOUNDED_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping overlay-unbounded-measure proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL OVERLAY-UNBOUNDED-MEASURE PROOF: $CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS (attempt 1)"
+  echo "=========================================================="
+  overlay_unbounded_start=$SECONDS
+  if run_core_terminal_overlay_unbounded; then
+    echo "OVERLAY_UNBOUNDED_PASS: passed on attempt 1 (elapsed $((SECONDS - overlay_unbounded_start))s)"
+  else
+    echo ">>> OVERLAY-UNBOUNDED-MEASURE PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_overlay_unbounded; then
+      echo "OVERLAY_UNBOUNDED_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "OVERLAY_UNBOUNDED_FAILED: overlay-unbounded-measure proof failed twice"
+      OVERLAY_UNBOUNDED_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -1497,13 +1634,13 @@ SUITE_ELAPSED=$((SECONDS - SUITE_START))
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
       && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
-      && "$REATTACH_REPAINT_STATUS" == "PASS" ]]; then
+      && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
         && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
-        && "$REATTACH_REPAINT_STATUS" != "FAIL" ]]; then
+        && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -1549,6 +1686,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
   echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
+  echo
+  echo "Core-terminal v0.4.17 overlay-unbounded-measure crash proof (\`shared:core-terminal\`): **$OVERLAY_UNBOUNDED_STATUS**"
+  echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -1591,7 +1731,8 @@ echo "=========================================================="
   # here, otherwise an append-burst-only regression falls through to the grep's
   # else-branch and is mislabeled as an infra abort, burying the real cause.
   if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
-        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
+        || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" \
+        || "$REATTACH_REPAINT_STATUS" == "FAIL" || "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
     echo
     echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
     for c in "${FAILED_CLASSES[@]}"; do
@@ -1608,6 +1749,12 @@ echo "=========================================================="
     fi
     if [[ "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
       echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\` (#871 agent-pane link-affordance off-main proof)"
+    fi
+    if [[ "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\` (#879 reattach-repaint proof)"
+    fi
+    if [[ "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
+      echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\` (v0.4.17 overlay-unbounded-measure crash proof)"
     fi
   fi
 } > "$SUMMARY"

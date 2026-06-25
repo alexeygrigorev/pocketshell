@@ -232,6 +232,9 @@ fun FolderListScreen(
     // `pocketshell tree` payload on every host open — surfaced as a dismissible
     // update prompt (NOT a slow blocking on-open `--version` wait).
     val cliVersionMismatch by viewModel.cliVersionMismatch.collectAsState()
+    // Issue #947: progress of the banner's one-tap Update action (host upgrade
+    // over the warm session). Drives the Update button's spinner + failure line.
+    val cliVersionUpdateState by viewModel.cliVersionUpdateState.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
     val claudeProfiles by viewModel.claudeProfiles.collectAsState()
     val codexProfiles by viewModel.codexProfiles.collectAsState()
@@ -441,6 +444,8 @@ fun FolderListScreen(
         cliVersionMismatch?.let { mismatch ->
             CliVersionMismatchBanner(
                 message = PayloadVersionCheck.outdatedHostPrompt(mismatch),
+                updateState = cliVersionUpdateState,
+                onUpdate = viewModel::runHostPocketshellUpgrade,
                 onDismiss = viewModel::dismissCliVersionMismatch,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1378,14 +1383,22 @@ private fun FolderActionFailureBanner(
  * on-open `--version` exec). The [message] carries the version delta + the
  * copy-paste update command.
  */
+// Issue #947: `internal` (not `private`) so the connected UI-gate androidTest
+// (`CliVersionMismatchBannerUpdateButtonTest`) can compose the PRODUCTION banner
+// in its real Idle/Running/Failure states and assert viewport CONTAINMENT of the
+// Update + Dismiss controls (the #641/#657/#780 real-component model).
 @Composable
-private fun CliVersionMismatchBanner(
+internal fun CliVersionMismatchBanner(
     message: String,
+    updateState: FolderListViewModel.CliVersionUpdateState,
+    onUpdate: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val color = PocketShellColors.Accent
-    Row(
+    val running = updateState is FolderListViewModel.CliVersionUpdateState.Running
+    val failure = updateState as? FolderListViewModel.CliVersionUpdateState.Failure
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface, PocketShellShapes.medium)
@@ -1393,21 +1406,66 @@ private fun CliVersionMismatchBanner(
             .border(1.dp, color.copy(alpha = 0.4f), PocketShellShapes.medium)
             .padding(horizontal = 14.dp, vertical = 10.dp)
             .testTag(FOLDER_LIST_CLI_VERSION_BANNER_TAG),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = message,
             color = PocketShellColors.Text,
             style = PocketShellType.bodyDense,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxWidth(),
         )
-        PocketShellButton(
-            text = "Dismiss",
-            onClick = onDismiss,
-            modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_DISMISS_TAG),
-            variant = ButtonVariant.Text,
-            compact = true,
-        )
+        // Issue #947: the upgrade failure line (installer stderr / timeout /
+        // no-installer), shown above the action row so the user can read it and
+        // then Retry or Dismiss — the spinner never sticks.
+        failure?.let { fail ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = fail.message,
+                color = PocketShellColors.Red,
+                style = PocketShellType.bodyDense,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FOLDER_LIST_CLI_VERSION_UPDATE_ERROR_TAG),
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End,
+        ) {
+            if (running) {
+                // Issue #947: running spinner — Update is in flight; the action
+                // buttons are replaced so a second tap can't double-run.
+                LoadingIndicator.Spinner(
+                    size = SpinnerSize.Small,
+                    modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_UPDATE_SPINNER_TAG),
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Updating…",
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyDense,
+                )
+            } else {
+                PocketShellButton(
+                    // Issue #947: a no-op upgrade re-raises a failure, so offer
+                    // "Retry" once the first attempt failed.
+                    text = if (failure != null) "Retry" else "Update",
+                    onClick = onUpdate,
+                    modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_UPDATE_TAG),
+                    variant = ButtonVariant.Primary,
+                    compact = true,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                PocketShellButton(
+                    text = "Dismiss",
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_DISMISS_TAG),
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                )
+            }
+        }
     }
 }
 
@@ -2820,6 +2878,10 @@ const val FOLDER_LIST_FLAT_IDLE_SECTION_TAG: String = "folder-list:flat:section:
 // Issue #885: the passive host-CLI-version update prompt banner + its dismiss.
 const val FOLDER_LIST_CLI_VERSION_BANNER_TAG: String = "folder-list:cli-version-banner"
 const val FOLDER_LIST_CLI_VERSION_DISMISS_TAG: String = "folder-list:cli-version-dismiss"
+// Issue #947: the one-tap Update button on that banner + its running spinner.
+const val FOLDER_LIST_CLI_VERSION_UPDATE_TAG: String = "folder-list:cli-version-update"
+const val FOLDER_LIST_CLI_VERSION_UPDATE_SPINNER_TAG: String = "folder-list:cli-version-update-spinner"
+const val FOLDER_LIST_CLI_VERSION_UPDATE_ERROR_TAG: String = "folder-list:cli-version-update-error"
 
 // Stable LazyColumn item keys for the flat-view section rows (#489). The host
 // header band moved into the app bar (#522 item 1), so there is no in-list

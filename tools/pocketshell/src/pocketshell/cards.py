@@ -361,6 +361,62 @@ register_card_type(
 
 
 # ---------------------------------------------------------------------------
+# note card type (#859 Slice B — proves the registry is genuinely generic)
+# ---------------------------------------------------------------------------
+#
+# A ``note`` is a non-interactive message the agent hands the human ("deploy
+# finished", "found a flaky test"). Its only interaction is mark-as-read, so the
+# agent can tell from ``push status`` whether the human has seen it. Registering
+# it is exactly one ``register_card_type`` call + a ``push note`` verb — no new
+# transport, no change to the store/read/write/upsert path. That is the whole
+# point of the registry: a second real type is additive.
+
+# Default note card id used when ``--id`` is omitted (one default note per
+# session unless the agent names them — mirrors DEFAULT_CHECKLIST_ID).
+DEFAULT_NOTE_ID = "note"
+
+
+def _note_build_body(*, text: str, **_: Any) -> dict[str, Any]:
+    """Build the note ``body`` — ``{"text": <message>}``."""
+    return {"text": text}
+
+
+def _note_initial_state(_body: dict[str, Any]) -> dict[str, Any]:
+    """A fresh note is unread."""
+    return {"read": False, "read_at": None}
+
+
+def _note_apply_interaction(
+    body: dict[str, Any],
+    state: dict[str, Any],
+    interaction: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Mark a note read/unread.
+
+    ``interaction = {"read": bool}``. ``read`` defaults to True (mark read).
+    ``read_at`` records when it was first read (cleared on unread) so the agent
+    can see acknowledgement timing via ``push status``.
+    """
+    read = bool(interaction.get("read", True))
+    return {"read": read, "read_at": _now_iso() if read else None}
+
+
+def _note_summarise(body: dict[str, Any], state: dict[str, Any]) -> str:
+    return "note: read" if state.get("read") else "note: unread"
+
+
+register_card_type(
+    CardType(
+        name="note",
+        build_body=_note_build_body,
+        initial_state=_note_initial_state,
+        apply_interaction=_note_apply_interaction,
+        summarise=_note_summarise,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Store read/write
 # ---------------------------------------------------------------------------
 
@@ -652,6 +708,74 @@ def register_push_card_commands(push_group: click.Group) -> None:
                 target,
                 card_id,
                 {"item": item_id, "done": done},
+                paths=resolve_paths(),
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc))
+        handler = get_card_type(card.get("type", ""))
+        body = card.get("body", {}) if isinstance(card.get("body"), Mapping) else {}
+        state = card.get("state", {}) if isinstance(card.get("state"), Mapping) else {}
+        summary = handler.summarise(dict(body), dict(state)) if handler else ""
+        click.echo(f"{card_id}: {summary}")
+
+    @push_group.command("note")
+    @click.option("--title", "title", default=None, help="Human title for the note card.")
+    @click.option(
+        "--id",
+        "card_id",
+        default=DEFAULT_NOTE_ID,
+        help=f"Card id (default {DEFAULT_NOTE_ID!r}; one default note per session).",
+    )
+    @click.option(
+        "--text",
+        "text",
+        default=None,
+        help="The note body. Alternative to piping the message on stdin.",
+    )
+    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    def push_note(
+        title: Optional[str],
+        card_id: str,
+        text: Optional[str],
+        session: Optional[str],
+    ) -> None:
+        """Create/replace the session's note card from --text or piped stdin.
+
+        A note is a non-interactive message the human marks read (``push read``).
+        The session is auto-detected from ``$TMUX`` (override with ``--session``).
+        A re-push fully replaces the card of that id (hard-cut, D22).
+        """
+        target = _require_session(session)
+        if text is not None and text.strip():
+            body_text = text.strip()
+        else:
+            stdin_text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+            body_text = stdin_text.strip()
+        if not body_text:
+            raise click.ClickException(
+                "empty note: pass --text or pipe the message on stdin."
+            )
+        card = build_card(
+            card_type="note",
+            card_id=card_id,
+            title=title,
+            build_kwargs={"text": body_text},
+        )
+        path = upsert_card(target, card, paths=resolve_paths())
+        click.echo(f"note {card_id!r} -> session {target!r} ({path})")
+
+    @push_group.command("read")
+    @click.option("--id", "card_id", required=True, help="The note card id.")
+    @click.option("--read/--unread", "read", default=True, help="Mark read (default) or unread.")
+    @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
+    def push_read(card_id: str, read: bool, session: Optional[str]) -> None:
+        """Set a note's read state (this is what the app's "mark read" calls)."""
+        target = _require_session(session)
+        try:
+            card = apply_interaction(
+                target,
+                card_id,
+                {"read": read},
                 paths=resolve_paths(),
             )
         except ValueError as exc:

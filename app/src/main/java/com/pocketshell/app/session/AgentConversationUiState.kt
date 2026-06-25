@@ -113,6 +113,33 @@ public data class AgentConversationUiState(
      * detection lands, since the row is then a genuine agent row.
      */
     val autoSeededPlaceholder: Boolean = false,
+    /**
+     * Issue #819 (Slice A2): true when this detection-less placeholder row was
+     * seeded from [com.pocketshell.app.tmux.AgentSessionMemory] for a window
+     * that was KNOWN to host an agent before a reconnect (the #495 reattach
+     * seed), and is holding "resolving" while live re-detection re-anchors the
+     * route-true transcript source.
+     *
+     * The #495 seed used to restore the remembered [AgentDetection] BLIND —
+     * carrying its `sourcePath` — and render it `Live` immediately, before live
+     * re-detection confirmed the source was still the route's own session. When
+     * that remembered source had been captured during a prior same-cwd same-kind
+     * mis-pick (a sibling / sub-agent / second window/worktree Codex rollout),
+     * the Conversation tab rendered the WRONG transcript under a route-true
+     * Terminal until the live `/proc/<pid>/fd` round-trip landed (#819). So the
+     * seed now restores only the remembered KIND + the user's tab choice as a
+     * resolving placeholder, never the stale source, and live
+     * `detectRecordedSessionForPane` binds the real source.
+     *
+     * Like [autoSeededPlaceholder] this is the auto-seed's own teardown marker
+     * for [com.pocketshell.app.tmux.TmuxSessionViewModel] `clearAgentDetectionForPane`
+     * (drop on a confirmed exit, do not strand on "Loading…"), but unlike it the
+     * window is a CONFIRMED-prior agent, so a transient null after reattach is
+     * held and re-confirmed for `AGENT_EXIT_CONFIRMATIONS` (the #554 no-flap
+     * guarantee) before teardown. Cleared (to false) the moment a real detection
+     * lands, since the row is then a genuine agent row.
+     */
+    val rememberedAgentPlaceholder: Boolean = false,
 )
 
 /**

@@ -3768,6 +3768,110 @@ class DesignRenders {
         }
     }
 
+    /**
+     * Issue #859 Slice B: the typed-card session feed sheet — a heterogeneous
+     * card list rendered through the renderer registry (checklist + the new
+     * `note` type + a graceful "unsupported card" fallback for an unknown type).
+     *
+     * NOTE: the production composables live app-side
+     * (`app/.../cards/SessionCardRenderers.kt` + `SessionChecklistUi.kt`), which
+     * the ui-kit render harness cannot see (no app→ui-kit reverse dependency).
+     * This case faithfully reproduces those rows with ui-kit primitives as the
+     * fast first DESIGN check; the REAL composables are exercised by the
+     * connected Compose test `SessionCardFeedRegistryTest` (gated in
+     * `scripts/ci-journey-suite.sh`). Use the emulator run for acceptance.
+     */
+    @Test
+    fun sessionCardFeed() = render("session-card-feed") {
+        Surface(color = PocketShellColors.Surface) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "Cards",
+                    color = PocketShellColors.Text,
+                    fontWeight = FontWeight.SemiBold,
+                    style = PocketShellType.bodyDense,
+                )
+                // Checklist card row (ChecklistCardRenderer).
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PocketShellColors.SurfaceElev)
+                        .padding(8.dp),
+                ) {
+                    Text(
+                        text = "Deploy",
+                        color = PocketShellColors.Text,
+                        fontWeight = FontWeight.SemiBold,
+                        style = PocketShellType.bodyDense,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                    sessionCardCheckRow("Build", checked = true)
+                    sessionCardCheckRow("Ship", checked = false)
+                }
+                // Note card row (NoteCardRenderer) — mark-as-read affordance.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PocketShellColors.SurfaceElev)
+                        .padding(8.dp),
+                ) {
+                    Text(
+                        text = "Heads up",
+                        color = PocketShellColors.Text,
+                        fontWeight = FontWeight.SemiBold,
+                        style = PocketShellType.bodyDense,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                    sessionCardCheckRow("Deploy finished — review the logs", checked = false)
+                }
+                // Unknown type fallback (UnknownCardRenderer).
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PocketShellColors.SurfaceElev)
+                        .padding(8.dp),
+                ) {
+                    Text(
+                        text = "Approve?",
+                        color = PocketShellColors.Text,
+                        fontWeight = FontWeight.SemiBold,
+                        style = PocketShellType.bodyDense,
+                    )
+                    Text(
+                        text = "Unsupported card (approval) — update the app to view it.",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun sessionCardCheckRow(text: String, checked: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(checked = checked, onCheckedChange = {})
+            Text(
+                text = text,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+            )
+        }
+    }
+
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {

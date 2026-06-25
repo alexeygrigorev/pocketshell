@@ -242,6 +242,46 @@ class FileViewerScaffoldTest {
     }
 
     /**
+     * Issue #921: a GitHub-flavored pipe table in rendered Markdown mode shows
+     * laid-out table cells, NOT the raw `|---|---|` delimiter text. Before the
+     * fix the whole table parsed as a raw paragraph, so the literal delimiter
+     * row "|------|-------|" appeared on screen as text.
+     */
+    @Test
+    fun markdownRenderedPipeTableShowsCellsNotRawDelimiter() {
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    hostName = "agents",
+                    state = FileViewerUiState.TextContent(
+                        displayPath = "/tmp/report.md",
+                        content = "# Benchmark\n\n" +
+                            "| Model | Score |\n" +
+                            "|-------|-------|\n" +
+                            "| gpt-4 | 92 |\n" +
+                            "| haiku | 81 |\n",
+                        sizeBytes = 90,
+                    ),
+                    readingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
+                    onBack = {},
+                    onRetry = {},
+                )
+            }
+        }
+        // The rendered table surface is present and visible.
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_MARKDOWN_TABLE_TAG)
+        // The header + body cells render as their own text nodes.
+        compose.onNodeWithText("Model").assertIsDisplayed()
+        compose.onNodeWithText("Score").assertIsDisplayed()
+        compose.onNodeWithText("gpt-4").assertIsDisplayed()
+        compose.onNodeWithText("92").assertIsDisplayed()
+        compose.onNodeWithText("haiku").assertIsDisplayed()
+        // The raw delimiter row must NOT appear as literal text.
+        compose.onNodeWithText("|-------|-------|").assertDoesNotExist()
+        compose.onNodeWithText("| Model | Score |").assertDoesNotExist()
+    }
+
+    /**
      * Build a minimal valid PCM WAV of [millis] of silence (16-bit mono, 8 kHz)
      * so MediaPlayer can prepare it without a codec — enough to exercise the
      * panel's control surface in a unit-scope Compose test.

@@ -35,6 +35,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -89,6 +90,15 @@ class BackgroundGraceReconnectE2eTest {
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
     private var diagnostics: RecordingDiagnosticSink? = null
+
+    // Issue #743 de-flake: observe the LOCAL `-CC` control-client reader exit so
+    // the post-grace foreground can be gated on the local detach genuinely
+    // completing (see [waitForPostGraceLocalDetachSettled]). `tmux_client_reader_exit`
+    // is emitted by the core TmuxClient when its reader thread exits — a stronger
+    // "local detach settled" signal than the REMOTE client-count poll alone, which
+    // can read 0 before the local VM coroutine + the conflating-StateFlow driver
+    // collector have drained `Backgrounded`.
+    private var tmuxDiagnostics: RecordingTmuxDiagnosticSink? = null
     private val timings = mutableListOf<String>()
 
     @Before
@@ -100,6 +110,7 @@ class BackgroundGraceReconnectE2eTest {
         // measured cycle. The pref/override clears that the app reads AT LAUNCH
         // moved into [seedBeforeLaunch] so they precede the rule's launch.
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        tmuxDiagnostics = RecordingTmuxDiagnosticSink().also { TmuxClientDiagnostics.install(it) }
     }
 
     /**
@@ -135,6 +146,8 @@ class BackgroundGraceReconnectE2eTest {
         BackgroundGraceTestOverride.setForTest(null)
         diagnostics?.close()
         diagnostics = null
+        tmuxDiagnostics?.close()
+        tmuxDiagnostics = null
         clearLastSessionPrefs()
         clearBackgroundGraceSetting()
         if (::fixtureKey.isInitialized) {
@@ -185,6 +198,24 @@ class BackgroundGraceReconnectE2eTest {
         }
         waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
         waitForClientCountAtMost(0, "post-grace detached")
+        // Issue #743 de-flake: the headline `quickAppSwitch…` flake on a contended
+        // swiftshader box is a deterministic conflation race, NOT a slow render. The
+        // post-grace foreground reattach (`foreground_reattach`) is fired by the
+        // ConnectionEffectDriver ONLY on the controller edge
+        // `current is Reconnecting && previous is Backgrounded`, and the driver collects
+        // a CONFLATING StateFlow. If the test submits `Foreground` (moveToState RESUMED)
+        // before the driver's collector has resumed past `Backgrounded`, the
+        // `Backgrounded -> Reconnecting` edge is conflated away and `foreground_reattach`
+        // NEVER fires -> the test wedges on `waitForDiagnostic("foreground_reattach")`.
+        //
+        // The REMOTE client-count poll above can read 0 before the LOCAL `-CC` reader
+        // has exited and the driver collector has drained `Backgrounded`, so it is not a
+        // sufficient gate. Wait here for the LOCAL detach to genuinely complete (the
+        // core TmuxClient reader thread exiting) + an idle pump, restoring the
+        // production-faithful ordering (real grace is 30-60s, so the controller/driver
+        // is long-settled into `Backgrounded` before any real foreground). HARD-fails if
+        // the local detach never lands — it does not mask a regression.
+        waitForPostGraceLocalDetachSettled("post-grace detached")
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         waitForDiagnostic("background_grace_foreground", "post-grace foreground") {
             it.fields["withinGrace"] == false
@@ -247,44 +278,141 @@ class BackgroundGraceReconnectE2eTest {
         writeTimings()
     }
 
+    /**
+     * Issue #743 de-flake: a plain WALL-CLOCK poll loop, DECOUPLED from the Compose
+     * idling resource.
+     *
+     * `compose.waitUntil` only evaluates its predicate after Compose reaches idle
+     * (it pumps the looper "until idle" between polls). Under heavy software-GL
+     * contention on a loaded box + a continuously-recomposing app, Compose rarely
+     * idles, so the predicate is checked only sporadically and the wait can burn its
+     * entire budget WITHOUT ever observing a signal that already landed — exactly the
+     * `ComposeTimeoutException after 90000ms` wedge reproduced on base at
+     * `attachSeededTmuxSession` (the #470 family the issue predicted). This loop
+     * evaluates `condition()` directly each 100ms iteration regardless of Compose
+     * idle, so a render/state that DID land is seen the moment it lands.
+     *
+     * Still HARD-fails with the labelled stuck condition if the signal never arrives,
+     * so a real regression surfaces (it does not weaken any assertion).
+     */
+    private fun pollUntil(
+        timeoutMs: Long,
+        label: String,
+        // Issue #743: optionally drain queued main-thread work each iteration via the
+        // BOUNDED `waitForIdleSync` (it returns once the queue drains, so it cannot
+        // hang on a never-idle app the way Compose's unbounded `waitForIdle()` can).
+        // This lets a state read via `onActivity` (VM connection status) observe a
+        // value that landed on the main thread. NOTE: Compose-FRAME-dependent UI
+        // signals — recomposition presence, the Termux `TerminalView` interop child
+        // placement, the emulator transcript — use [waitForRender] instead, which
+        // actually drives frames; this idle-decoupled loop is for the remote/sink/VM
+        // reads that the never-idle-Compose wedge (round 2) would otherwise starve.
+        pumpMainLooper: Boolean = true,
+        condition: () -> Boolean,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (runCatching { condition() }.getOrDefault(false)) return
+            if (pumpMainLooper) {
+                runCatching { InstrumentationRegistry.getInstrumentation().waitForIdleSync() }
+            }
+            SystemClock.sleep(100)
+        }
+        // Final post-deadline evaluation so a signal that landed in the last sleep
+        // window is not lost to an off-by-one.
+        check(runCatching { condition() }.getOrDefault(false)) {
+            "timed out after ${timeoutMs}ms waiting for: $label"
+        }
+    }
+
+    /**
+     * Issue #743: read a semantics node count tolerantly — return the TRUE count when
+     * the tree is readable, and treat the transient "No compose hierarchies found" ISE
+     * (thrown while the compose root is momentarily absent under cold compose / a
+     * navigation transition — the #470 family) as 0. Returns the real count whenever a
+     * root exists, so it never masks a genuinely-present node.
+     */
+    private fun tolerantNodeCountWithTag(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().size
+        }.getOrDefault(0)
+
+    private fun tolerantNodeCountWithText(text: String): Int =
+        runCatching {
+            compose.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().size
+        }.getOrDefault(0)
+
+    /**
+     * Issue #743: a UI-render wait that DRIVES Compose frames (via `compose.waitUntil`,
+     * which pumps the looper to idle between polls) so a Compose-frame-dependent
+     * signal — recomposition of a presence node, and crucially the Termux `TerminalView`
+     * AndroidView interop child being PLACED + laid out into the resumed activity — can
+     * actually advance. The reliably-attaching EmulatorDockerSshSmokeTest uses the same
+     * frame-driving wait; a purely idle-DECOUPLED wall-clock poll never advances the
+     * interop placement and wedges at "terminal view attached" even though tmux is ready.
+     *
+     * The `condition` is wrapped in `runCatching` so the transient "No compose
+     * hierarchies found" ISE (the #470 family, thrown while the compose root is
+     * momentarily absent under cold compose / a navigation transition) is treated as
+     * "keep waiting" rather than escaping. On timeout it re-checks once and HARD-fails
+     * with the labelled stuck condition, so a real regression still surfaces.
+     */
+    private fun waitForRender(timeoutMs: Long, label: String, condition: () -> Boolean) {
+        runCatching {
+            compose.waitUntil(timeoutMillis = timeoutMs) {
+                runCatching { condition() }.getOrDefault(false)
+            }
+        }
+        check(runCatching { condition() }.getOrDefault(false)) {
+            "timed out after ${timeoutMs}ms waiting for: $label"
+        }
+    }
+
     private fun attachSeededTmuxSession(hostRowTag: String) {
-        // Issue #788: cold-compose-aware presence budget + tolerate the transient
-        // "No compose hierarchies found" ISE on the first frames under
-        // createAndroidComposeRule (MainActivity cold compose can take ~28s on a
-        // contended swiftshader emulator). Early-exits the instant the row appears.
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
-            runCatching {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }.getOrDefault(false)
+        // Issue #788 + #743: cold-compose-aware presence budget on a FRAME-DRIVING wait
+        // ([waitForRender]) so the awaited node's recomposition actually advances. The
+        // wait early-exits the instant the node appears and tolerates the transient
+        // "No compose hierarchies found" ISE under cold compose (the #470 family).
+        waitForRender(TerminalTestTimeouts.screenRenderPresenceTimeoutMs(), "host row '$hostRowTag' present") {
+            tolerantNodeCountWithTag(hostRowTag) > 0
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
-            runCatching {
-                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }.getOrDefault(false)
+        waitForRender(TerminalTestTimeouts.screenRenderPresenceTimeoutMs(), "session row '$SESSION_NAME' present") {
+            tolerantNodeCountWithText(SESSION_NAME) > 0
         }
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
-        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForRender(TerminalTestTimeouts.screenRenderPresenceTimeoutMs(), "session screen present") {
+            tolerantNodeCountWithTag(TMUX_SESSION_SCREEN_TAG) > 0
+        }
         waitForTerminalViewAttached()
     }
 
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 30_000) {
-            var attached = false
-            compose.activityRule.scenario.onActivity { activity ->
-                val view = activity.window.decorView.findTerminalView()
-                attached = view?.currentSession != null && view.mEmulator != null
-            }
-            attached
+        // Issue #743 de-flake: the Termux TerminalView is an AndroidView interop child
+        // whose PLACEMENT into the resumed activity REQUIRES Compose frames to run — so
+        // this wait MUST drive frames ([waitForRender], not the idle-decoupled
+        // [pollUntil]); an idle-decoupled poll observes tmux "panes ready" yet never
+        // sees the interop child because no frame placed it (the round-4 / #470 stall).
+        // The old hardcoded 30s was NOT CI/contention-aware — reuse the #788 cold-compose
+        // presence budget (90s local / 150s CI), which EARLY-EXITS the instant the view
+        // attaches, so a fast emulator pays nothing. Stays under the 300s
+        // ci-journey-suite.sh watchdog.
+        waitForRender(TerminalTestTimeouts.screenRenderPresenceTimeoutMs(), "terminal view attached") {
+            terminalViewAttached()
         }
     }
 
+    private fun terminalViewAttached(): Boolean {
+        var attached = false
+        compose.activityRule.scenario.onActivity { activity ->
+            val view = activity.window.decorView.findTerminalView()
+            attached = view?.currentSession != null && view.mEmulator != null
+        }
+        return attached
+    }
+
     private fun waitForConnected(label: String) {
-        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+        pollUntil(CONNECTED_TIMEOUT_MS, "Connected after $label") {
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
         }
         assertTrue(
@@ -309,8 +437,13 @@ class BackgroundGraceReconnectE2eTest {
         timeoutMillis: Long = TerminalTestTimeouts.terminalVisibilityTimeoutMs(),
         predicate: (String) -> Boolean,
     ): String {
+        // Issue #743 de-flake: the visible transcript comes from the Termux
+        // TerminalView's emulator screen, which only advances as Compose frames drive
+        // the interop child — so this MUST be a frame-driving wait ([waitForRender]),
+        // not the idle-decoupled [pollUntil]. Early-exits the instant the predicate
+        // matches; reads the live transcript via `onActivity` each iteration.
         var last = ""
-        compose.waitUntil(timeoutMillis = timeoutMillis) {
+        waitForRender(timeoutMillis, "visible terminal for $label") {
             last = visibleTerminalText()
             last.isNotBlank() && predicate(last)
         }
@@ -501,6 +634,52 @@ class BackgroundGraceReconnectE2eTest {
             SystemClock.sleep(100)
         }
         error("expected at least $min tmux clients for $label, got $lastCount; raw=`$lastRaw`")
+    }
+
+    /**
+     * Issue #743 de-flake: gate the post-grace foreground on the LOCAL `-CC`
+     * control-client detach genuinely completing, so the conflating-StateFlow
+     * driver collector has drained `Backgrounded` before `Foreground` is
+     * submitted (see the call site for the conflation explanation).
+     *
+     * The clean background teardown ([TmuxSessionViewModel.closeCurrentConnectionAndJoin],
+     * launched by the driver's Backgrounded effect) closes the local `-CC` client,
+     * whose reader thread then exits and emits `tmux_client_reader_exit` via
+     * [TmuxClientDiagnostics]. Waiting for that event proves the LOCAL detach
+     * actually finished — a stronger signal than the REMOTE client-count poll,
+     * which can read 0 while the local coroutine + driver collector are still in
+     * flight.
+     *
+     * After the local detach lands, pump both the instrumentation idle loop and a
+     * short settle so any pending Main-loop turns (the driver collector resuming on
+     * `Backgrounded`, the `previous = Backgrounded` assignment) have drained before
+     * the foreground submit.
+     *
+     * HARD-fails if the local detach never lands — it does NOT mask a regression; a
+     * foreground that genuinely fails to reattach still times out on the downstream
+     * `waitForDiagnostic("foreground_reattach")`.
+     */
+    private fun waitForPostGraceLocalDetachSettled(label: String) {
+        val sink = tmuxDiagnostics
+            ?: error("tmux diagnostics sink not installed for $label")
+        val deadline = SystemClock.elapsedRealtime() + LOCAL_DETACH_SETTLE_TIMEOUT_MS
+        var sawReaderExit = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (sink.eventsNamed("tmux_client_reader_exit").isNotEmpty()) {
+                sawReaderExit = true
+                break
+            }
+            SystemClock.sleep(50)
+        }
+        check(sawReaderExit) {
+            "expected the local -CC reader to exit (tmux_client_reader_exit) during " +
+                "$label before foregrounding; tmux events=${sink.events}"
+        }
+        // Drain pending Main-loop turns so the conflating driver collector has
+        // resumed past `Backgrounded` before the foreground submit.
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(LOCAL_DETACH_SETTLE_PUMP_MS)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
     }
 
     private suspend fun waitForClientCountAtMost(max: Int, label: String) {
@@ -696,8 +875,28 @@ class BackgroundGraceReconnectE2eTest {
         const val POST_GRACE_MS: Long = 500L
         const val SIX_SECOND_APP_SWITCH_MS: Long = 6_000L
         const val WATCH_NO_RECONNECT_MS: Long = 1_200L
-        const val DIAGNOSTIC_TIMEOUT_MS: Long = 8_000L
-        const val CLIENT_COUNT_TIMEOUT_MS: Long = 8_000L
+
+        // Issue #743 de-flake: the flat 8s budgets were a secondary contended-box
+        // flake source. Each remote `tmux list-clients` probe opens a FRESH SSH
+        // connection (see [listClientsRaw]); on a contended swiftshader box that
+        // single connect can take several seconds, and the diagnostic round-trips
+        // (e.g. the post-grace teardown chain) are equally slowed. These loops
+        // EARLY-EXIT on the deterministic signal, so a fast box pays nothing — only
+        // a contended/CI box consumes the headroom. They stay well under the 300s
+        // per-test `ci-journey-suite.sh` watchdog and are sequential (the first
+        // wedged step fails immediately, so they cannot stack toward 300s).
+        val DIAGNOSTIC_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
+        val CLIENT_COUNT_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
+
+        // Issue #743 de-flake: budget for the local `-CC` reader exit to land after
+        // the driver-owned background teardown is launched (see
+        // [waitForPostGraceLocalDetachSettled]). Early-exits on the
+        // `tmux_client_reader_exit` signal, so a fast box pays nothing.
+        val LOCAL_DETACH_SETTLE_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
+        const val LOCAL_DETACH_SETTLE_PUMP_MS: Long = 250L
 
         val CONNECTED_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 15_000L

@@ -55,4 +55,42 @@ class MarkdownParserOldBehaviorProofTest {
         val link = MarkdownParser.parseInline(md).filterIsInstance<InlineSpan.Link>().single()
         assertEquals("https://en.wikipedia.org/wiki/Foo_(bar)", link.url)
     }
+
+    /**
+     * Failing-on-old PROOF for issue #921. The pre-fix parser had no table
+     * branch, so a GFM pipe table fell through to the paragraph collector and
+     * the raw `|---|---|` delimiter row was joined into the visible paragraph
+     * text (`oldParagraphJoin` reconstructs that). The shipped parser instead
+     * emits a [MarkdownBlock.Table] and never leaks the delimiter as text.
+     */
+    private val tableSource =
+        "| Name | Score |\n|------|-------|\n| foo | 12 |\n| bar | 34 |"
+
+    /** Replicates the pre-fix paragraph join: soft-wrap lines joined by spaces. */
+    private fun oldParagraphJoin(src: String): String =
+        src.split("\n").joinToString(" ") { it.trim() }
+
+    @Test
+    fun `old parser leaked the raw pipe-table delimiter as paragraph text, new parser renders a table`() {
+        // Old: the whole table — including the `|------|-------|` delimiter row —
+        // would render as one raw paragraph string.
+        val oldText = oldParagraphJoin(tableSource)
+        assertTrue(
+            "the pre-fix paragraph join must contain the raw `|---|` delimiter",
+            oldText.contains("|------|-------|"),
+        )
+
+        // New: a real Table block, and NO paragraph carries the raw delimiter.
+        val blocks = MarkdownParser.parse(tableSource)
+        val table = blocks.filterIsInstance<MarkdownBlock.Table>().single()
+        assertEquals(2, table.header.size)
+        assertEquals(2, table.rows.size)
+        assertTrue(
+            "no paragraph may carry the raw `|---|` delimiter text after the fix",
+            blocks.none {
+                it is MarkdownBlock.Paragraph &&
+                    it.spans.filterIsInstance<InlineSpan.Text>().any { s -> s.text.contains("---") }
+            },
+        )
+    }
 }

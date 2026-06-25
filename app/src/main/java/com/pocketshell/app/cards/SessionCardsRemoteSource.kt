@@ -49,6 +49,23 @@ public class SessionCardsRemoteSource @Inject constructor() {
         val text: String,
     )
 
+    /**
+     * Issue #859 Slice B: a non-interactive note the agent hands the human.
+     * Its only interaction is mark-as-read; the second registered card type,
+     * proving the renderer registry is genuinely generic (a new type is a
+     * renderer + a parser arm, not a feed rewrite).
+     */
+    public data class NoteCard(
+        override val id: String,
+        override val title: String?,
+        override val createdAt: String?,
+        override val updatedAt: String?,
+        val text: String,
+        val read: Boolean,
+    ) : SessionCard {
+        override val type: String = TYPE_NOTE
+    }
+
     public data class UnknownCard(
         override val id: String,
         override val type: String,
@@ -113,6 +130,35 @@ public class SessionCardsRemoteSource @Inject constructor() {
         }
     }
 
+    /**
+     * Mark a note read/unread over the warm session (D21). Returns `true` only
+     * when the host CLI acknowledges the change. Mirrors
+     * [setChecklistItemChecked]: the registry's second interactive write-back.
+     */
+    public suspend fun setNoteRead(
+        session: SshSession,
+        tmuxSessionName: String,
+        cardId: String,
+        read: Boolean,
+    ): Boolean {
+        val target = tmuxSessionName.trim()
+        if (target.isEmpty() || cardId.isBlank()) return false
+        val readFlag = if (read) "--read" else "--unread"
+        return try {
+            val result = session.exec(
+                PocketshellCommand.wrap(
+                    "push read --id ${shellQuote(cardId)} " +
+                        "$readFlag --session ${shellQuote(target)}",
+                ),
+            )
+            result.exitCode == 0
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     internal fun parseFeed(stdout: String): Feed {
         val trimmed = stdout.trim().ifBlank { return Feed.Empty }
         val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return Feed.Empty
@@ -133,6 +179,12 @@ public class SessionCardsRemoteSource @Inject constructor() {
             val updatedAt = row.optString("updated_at", "").takeIf { it.isNotBlank() }
             out += when (type) {
                 TYPE_CHECKLIST -> row.toChecklistCard(
+                    id = id,
+                    title = title,
+                    createdAt = createdAt,
+                    updatedAt = updatedAt,
+                )
+                TYPE_NOTE -> row.toNoteCard(
                     id = id,
                     title = title,
                     createdAt = createdAt,
@@ -174,6 +226,26 @@ public class SessionCardsRemoteSource @Inject constructor() {
         )
     }
 
+    private fun JSONObject.toNoteCard(
+        id: String,
+        title: String?,
+        createdAt: String?,
+        updatedAt: String?,
+    ): NoteCard {
+        val body = optJSONObject("body")
+        val state = optJSONObject("state")
+        val text = body?.optString("text", "").orEmpty()
+        val read = state?.optBoolean("read", false) ?: false
+        return NoteCard(
+            id = id,
+            title = title,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            text = text,
+            read = read,
+        )
+    }
+
     private fun JSONArray?.toChecklistItems(): List<ChecklistItem> {
         if (this == null) return emptyList()
         val out = ArrayList<ChecklistItem>(length())
@@ -201,5 +273,6 @@ public class SessionCardsRemoteSource @Inject constructor() {
 
     public companion object {
         public const val TYPE_CHECKLIST: String = "checklist"
+        public const val TYPE_NOTE: String = "note"
     }
 }

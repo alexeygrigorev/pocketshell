@@ -27,6 +27,12 @@ internal object MarkdownParser {
     private val BLOCKQUOTE = Regex("^\\s{0,3}>\\s?(.*)$")
 
     /**
+     * A GFM table delimiter cell: dashes with an optional leading/trailing `:`
+     * for alignment (e.g. `:---`, `---:`, `:--:`, `---`). At least one dash.
+     */
+    private val TABLE_DELIMITER_CELL = Regex("^:?-+:?$")
+
+    /**
      * Thematic break (`---`, `***`, `___`) detected with a plain character scan
      * — never a backreference regex. A backref like `([-*_])(?:\s*\1){2,}`
      * makes the JDK engine recurse per repetition and overflows the stack on a
@@ -128,6 +134,35 @@ internal object MarkdownParser {
                 continue
             }
 
+            // GFM pipe table — a header row plus a delimiter row, then body rows
+            // (issue #921). Only a header line immediately followed by a valid
+            // delimiter row whose column count EQUALS the header's begins a
+            // table; otherwise the `|` text is a normal paragraph. The
+            // column-count match is the GFM guard that keeps a prose line with a
+            // pipe above a `---` thematic break (a 1-cell delimiter) from being
+            // swallowed as a table (issue #921 review).
+            if (line.contains('|') && i + 1 < lines.size && isTableDelimiterRow(lines[i + 1]) &&
+                splitTableRow(lines[i + 1]).size == splitTableRow(line).size
+            ) {
+                val alignments = parseDelimiterAlignments(lines[i + 1])
+                val header = splitTableRow(line)
+                i += 2 // past header + delimiter
+                val rows = mutableListOf<List<List<InlineSpan>>>()
+                while (i < lines.size) {
+                    val rowLine = lines[i]
+                    // A table ends at a blank line or any line without a pipe.
+                    if (rowLine.isBlank() || !rowLine.contains('|')) break
+                    rows += splitTableRow(rowLine).map { parseInline(it) }
+                    i++
+                }
+                blocks += MarkdownBlock.Table(
+                    header = header.map { parseInline(it) },
+                    alignments = alignments,
+                    rows = rows,
+                )
+                continue
+            }
+
             // List (ordered or unordered) — consume consecutive item lines.
             if (UL_ITEM.matchEntire(line) != null || OL_ITEM.matchEntire(line) != null) {
                 val items = mutableListOf<MarkdownBlock.ListBlock.Item>()
@@ -171,7 +206,14 @@ internal object MarkdownParser {
                     ATX.matchEntire(next) != null ||
                     BLOCKQUOTE.matchEntire(next) != null ||
                     UL_ITEM.matchEntire(next) != null ||
-                    OL_ITEM.matchEntire(next) != null
+                    OL_ITEM.matchEntire(next) != null ||
+                    // A table header starting here (pipe line followed by a
+                    // matching-width delimiter row) ends the paragraph so the
+                    // table parses. The column-count match mirrors the table
+                    // branch's GFM guard so a `---` rule below a pipe prose line
+                    // does not falsely split the paragraph.
+                    (next.contains('|') && i + 1 < lines.size && isTableDelimiterRow(lines[i + 1]) &&
+                        splitTableRow(lines[i + 1]).size == splitTableRow(next).size)
                 ) {
                     break
                 }
@@ -186,6 +228,65 @@ internal object MarkdownParser {
     private fun indentLevel(leading: String): Int {
         val width = leading.fold(0) { acc, c -> acc + if (c == '\t') 4 else 1 }
         return (width / 2).coerceAtMost(4)
+    }
+
+    /**
+     * Whether [line] is a valid GFM table delimiter row: at least one cell, and
+     * every `|`-separated cell is dashes with optional alignment colons. The
+     * leading/trailing pipes are optional, so we split tolerantly first.
+     */
+    fun isTableDelimiterRow(line: String): Boolean {
+        val cells = splitTableRow(line)
+        if (cells.isEmpty()) return false
+        return cells.all { it.isNotEmpty() && TABLE_DELIMITER_CELL.matches(it) }
+    }
+
+    /** Per-column alignment parsed from the delimiter row's `:` markers. */
+    private fun parseDelimiterAlignments(line: String): List<MarkdownBlock.Table.Alignment> =
+        splitTableRow(line).map { cell ->
+            val left = cell.startsWith(':')
+            val right = cell.endsWith(':')
+            when {
+                left && right -> MarkdownBlock.Table.Alignment.CENTER
+                right -> MarkdownBlock.Table.Alignment.RIGHT
+                left -> MarkdownBlock.Table.Alignment.LEFT
+                else -> MarkdownBlock.Table.Alignment.NONE
+            }
+        }
+
+    /**
+     * Split one table row into trimmed cell strings. Leading/trailing pipes are
+     * stripped, and a backslash-escaped `\|` inside a cell is kept literal (it
+     * is not a column separator). Empty leading/trailing cells from the outer
+     * pipes are dropped; interior empty cells are preserved.
+     */
+    fun splitTableRow(line: String): List<String> {
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                c == '\\' && i + 1 < line.length && line[i + 1] == '|' -> {
+                    current.append('|') // escaped pipe — literal
+                    i += 2
+                }
+                c == '|' -> {
+                    cells += current.toString().trim()
+                    current.clear()
+                    i++
+                }
+                else -> {
+                    current.append(c)
+                    i++
+                }
+            }
+        }
+        cells += current.toString().trim()
+        // Drop the empty cells produced by an outer leading/trailing pipe.
+        if (cells.isNotEmpty() && cells.first().isEmpty()) cells.removeAt(0)
+        if (cells.isNotEmpty() && cells.last().isEmpty()) cells.removeAt(cells.size - 1)
+        return cells
     }
 
     /**

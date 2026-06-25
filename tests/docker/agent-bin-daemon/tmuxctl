@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+# Daemon-fixture `tmuxctl` (issue #839).
+#
+# The standard `agents` fixture's `tmuxctl list` (tests/docker/agent-bin/tmuxctl)
+# prints a STATIC canned table so the deterministic session-list parser tests see
+# a stable shape. That is wrong for THIS fixture: the durable-tree journey
+# (#839) drives the REAL `pocketshell tree reconcile` daemon code, which execs
+# `tmuxctl list` and DIFFS its output against the persisted registry to compute
+# the `{alive, gone, added}` deltas. A static list could never show a session
+# the test just KILLED as `gone`, nor a session it just CREATED as `added`.
+#
+# So this `tmuxctl list` reflects the LIVE tmux server: it renders the same
+# fixed-width `IDX  SESSION  CREATED` table the daemon's `_parse_session_names`
+# parses, one row per live `tmux list-sessions` session. `create-detached`
+# mirrors the standard fixture (a plain detached `tmux new-session -A -d`), and
+# the side-effect-free `create-detached --help` capability probe still exits 0.
+
+if [ "${1:-}" = "list" ] || [ "${1:-}" = "ls" ] || [ "${1:-}" = "l" ]; then
+  printf 'IDX  SESSION               CREATED\n'
+  # Enumerate the LIVE tmux sessions. `#{session_created}` is an epoch second;
+  # format it to the same `YYYY-MM-DD HH:MM:SS` shape the canned table used.
+  # A tmux with no server / no sessions exits non-zero on list-sessions, which we
+  # swallow so an empty live server prints just the header (zero data rows) and
+  # still exits 0 — the daemon then sees "no live sessions" (not an enumeration
+  # FAILURE, which would suppress pruning).
+  idx=0
+  tmux list-sessions -F '#{session_name} #{session_created}' 2>/dev/null \
+    | while IFS=' ' read -r name created; do
+        idx=$((idx + 1))
+        if [ -n "$created" ]; then
+          created_fmt="$(date -u -d "@${created}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+            || date -u -r "${created}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+            || printf '1970-01-01 00:00:00')"
+        else
+          created_fmt='1970-01-01 00:00:00'
+        fi
+        printf '%-4s %-21s %s\n' "$idx" "$name" "$created_fmt"
+      done
+  exit 0
+fi
+
+if [ "${1:-}" = "create-detached" ]; then
+  shift
+  case "${1:-}" in
+    --help | -h)
+      printf 'Usage: tmuxctl create-detached SESSION_NAME [COMMAND]... [--cwd DIR] [--mem CAP]\n'
+      exit 0
+      ;;
+  esac
+  session=""
+  cwd=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c | --cwd)
+        cwd="${2:-}"
+        shift 2 || shift
+        ;;
+      --mem)
+        shift 2 || shift
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        if [ -z "${session}" ]; then
+          session="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [ -z "${session}" ]; then
+    printf 'create-detached: session name required\n' >&2
+    exit 64
+  fi
+  if [ -n "${cwd}" ]; then
+    tmux new-session -A -d -s "${session}" -c "${cwd}"
+  else
+    tmux new-session -A -d -s "${session}"
+  fi
+  exit 0
+fi
+
+printf 'tmuxctl daemon fixture supports: list, create-detached\n' >&2
+exit 64

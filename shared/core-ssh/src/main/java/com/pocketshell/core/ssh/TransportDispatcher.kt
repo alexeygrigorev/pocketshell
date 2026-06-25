@@ -7,9 +7,7 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadFactory
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -74,8 +72,8 @@ import java.util.concurrent.atomic.AtomicLong
  *    surfaces a [TransportClosedException] once teardown has run) WITHOUT
  *    freezing the connection or leaking the thread.
  *
- *    The ceiling is driven by a REAL wall-clock watchdog ([WATCHDOG]), NOT by
- *    coroutine `withTimeout` (issue #940). `withTimeout` reads the delay source
+ *    The ceiling is driven by a REAL wall-clock watchdog ([WallClockCeiling]),
+ *    NOT by coroutine `withTimeout` (issue #940). `withTimeout` reads the delay source
  *    from the CALLER's coroutine context — under `runTest`'s virtual,
  *    auto-advancing test clock that fires the ceiling INSTANTLY in virtual time
  *    while the real sshj op is still legitimately in progress on the executor
@@ -164,49 +162,27 @@ internal class TransportDispatcher(
 
     /**
      * Run [block] on the CURRENT (dispatch) thread under a real wall-clock
-     * ceiling (issue #940). A [WATCHDOG] task is scheduled to interrupt THIS
-     * thread after [perOpTimeoutMs] of real elapsed time; it is cancelled the
-     * instant [block] returns. If the watchdog fired (the op wedged past the
-     * ceiling), the interrupt is converted into a [TransportOpTimeoutException]
-     * and the thread's interrupt status is CLEARED so it can never leak onto the
-     * next op reusing this single dispatch thread (the #937 interrupt-leak
-     * invariant, now driven by the wall clock instead of the caller's coroutine
-     * clock).
+     * ceiling (issue #940). Delegates to the shared
+     * `WallClockCeiling.runUnderWallClockCeiling`, which schedules an interrupt
+     * on THIS thread after [perOpTimeoutMs] of real elapsed time, cancels it the
+     * instant [block] returns, converts a watchdog-fired interrupt into a
+     * [TransportOpTimeoutException] (regardless of which blocking call the
+     * interrupt landed in — sshj wraps it as a `ConnectionException`, a raw JDK
+     * read/write throws `InterruptedException`), and CLEARS the thread's
+     * interrupt status so it can never leak onto the next op reusing this single
+     * dispatch thread (the #937 interrupt-leak invariant, driven by the wall
+     * clock not the caller's coroutine clock).
      *
      * MUST be called from inside [runInterruptible] so the surrounding coroutine
      * machinery does not also try to interrupt the thread; the watchdog is the
      * sole source of interruption here.
      */
-    private fun <T> runUnderWallClockCeiling(block: () -> T): T {
-        val target = Thread.currentThread()
-        val firedByWatchdog = AtomicBoolean(false)
-        val watchdog = WATCHDOG.schedule(
-            {
-                firedByWatchdog.set(true)
-                target.interrupt()
-            },
-            perOpTimeoutMs,
-            TimeUnit.MILLISECONDS,
+    private fun <T> runUnderWallClockCeiling(block: () -> T): T =
+        WallClockCeiling.runUnderWallClockCeiling(
+            timeoutMs = perOpTimeoutMs,
+            onTimeout = { cause -> TransportOpTimeoutException(perOpTimeoutMs, cause) },
+            block = block,
         )
-        try {
-            return block()
-        } catch (t: Throwable) {
-            // If the watchdog interrupted a wedged op, surface the bounded
-            // timeout regardless of which blocking call the interrupt landed in
-            // (sshj wraps an InterruptedException as a ConnectionException, a
-            // raw JDK blocking read/write throws InterruptedException directly).
-            if (firedByWatchdog.get()) {
-                throw TransportOpTimeoutException(perOpTimeoutMs, t)
-            }
-            throw t
-        } finally {
-            watchdog.cancel(false)
-            // Clear any interrupt status the watchdog set so it can never leak
-            // onto the next op reusing this dispatch thread. Safe even when the
-            // watchdog never fired (no-op then).
-            Thread.interrupted()
-        }
-    }
 
     /**
      * Blocking variant of [run] for the non-suspending `AutoCloseable` /
@@ -257,21 +233,6 @@ internal class TransportDispatcher(
     private companion object {
         /** Per-process dispatcher id, for thread-name uniqueness in logs. */
         private val SEQ = AtomicLong(0)
-
-        /**
-         * Shared real wall-clock watchdog (issue #940). A single daemon
-         * scheduler across all dispatchers schedules a per-op interrupt that
-         * fires after [perOpTimeoutMs] of REAL elapsed time — decoupled from the
-         * caller's coroutine delay source so the ceiling behaves identically in
-         * production and under `runTest`'s virtual clock. Each scheduled task is
-         * cancelled the instant its op returns, so a healthy fast op leaves no
-         * pending timer; the scheduler is therefore effectively idle between
-         * wedges. Daemon so it never holds the JVM open.
-         */
-        private val WATCHDOG: ScheduledExecutorService =
-            Executors.newSingleThreadScheduledExecutor { r ->
-                Thread(r, "ps-ssh-dispatch-watchdog").apply { isDaemon = true }
-            }
 
         /**
          * Default per-op ceiling (issue #937 / S4-1). 8s comfortably exceeds

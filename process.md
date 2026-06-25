@@ -1158,6 +1158,42 @@ not run the full test suite. Unit, Docker integration, and emulator smoke checks
 belong to the separate Tests workflow and the orchestrator's pre-tag
 verification gate.
 
+### Release-candidate branch + CI-driven validation (preferred)
+
+Emulator validation runs on **GitHub Actions**, not the single local AVD. The
+local `scripts/*` emulator runs stay as the fast inner dev loop, but the
+**gate of record is CI** — this removes the single-AVD contention bottleneck
+(the #1 parallelism limiter) and the contended-box swiftshader flake class
+(#743): every PR and every release validation gets its own ephemeral emulator
+on a runner, so any number can run independently in parallel.
+
+Cut a release on a dedicated **release-candidate branch**, not directly on
+`main`:
+
+1. Branch `rc/<version>` from the current `origin/main` (the release commit
+   base). The orchestrator (or a dedicated release-owner agent) owns this
+   branch through the cut.
+2. Apply the version bump (`versionName`/`versionCode`) on `rc/<version>`. Any
+   last-mile **stabilization fixes** found during validation land on
+   `rc/<version>` through the normal implementer/reviewer loop (PRs targeting
+   the RC), so the RC accumulates exactly what ships.
+3. Run validation **on CI against the RC ref**: the per-PR `Tests` required
+   checks plus the **Release Emulator Validation** workflow
+   (`release-emulator-validation.yml`, `--ref rc/<version>`) and the nightly
+   fault suite on the RC head. No local AVD required.
+4. **Tag from the green RC tip.** The tag is a label on the validated RC commit;
+   push it with the guarded helper once CI is green and the visual audit is
+   inspected.
+5. **Merge `rc/<version>` back to `main`** via a protected PR so the version
+   bump and every stabilization fix made during the cut return to `main`. Then
+   fast-forward local `main`.
+
+This keeps `main` clean during stabilization, makes the release artifact a
+reviewed branch (never a detached HEAD or a throwaway worktree), and lets all
+validation run independently on Actions. The stable-`main` rule still holds: the
+tagged RC commit is reviewed, CI-green, and merged back — it is not a
+development branch and is not rebased from a tag.
+
 Release build steps:
 
 1. Before starting an intermediate or normal release, check GitHub Actions for

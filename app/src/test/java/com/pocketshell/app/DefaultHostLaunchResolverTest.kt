@@ -212,6 +212,80 @@ class DefaultHostLaunchResolverTest {
             dest,
         )
     }
+
+    // ----------------------------------------------------------------
+    // Issue #859 (Slice D): agent-card-feed deep-link destination resolution
+    // (host-identity by hostname, falling back to home on no/ambiguous match).
+    // ----------------------------------------------------------------
+
+    @Test
+    fun `agent-card feed resolves to the matching host session`() = runTest {
+        val keyPath = temp.newFile("feed_id").absolutePath
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = keyPath))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "Hetzner",
+                hostname = "rmthz.example.com",
+                port = 2222,
+                username = "alexey",
+                keyId = keyId,
+            ),
+        )
+
+        val dest = resolveAgentCardFeedDestination(
+            request = AgentCardFeedRequest(session = "claude-main", host = "rmthz.example.com"),
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+        )
+
+        assertEquals(
+            AppDestination.TmuxSession(
+                hostId = hostId,
+                hostName = "Hetzner",
+                hostname = "rmthz.example.com",
+                port = 2222,
+                username = "alexey",
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = "claude-main",
+            ),
+            dest,
+        )
+    }
+
+    @Test
+    fun `agent-card feed with ambiguous host falls back to home`() = runTest {
+        val keyPath = temp.newFile("amb_id").absolutePath
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = keyPath))
+        db.hostDao().insert(HostEntity(name = "A", hostname = "a.example.com", username = "me", keyId = keyId))
+        db.hostDao().insert(HostEntity(name = "B", hostname = "b.example.com", username = "me", keyId = keyId))
+
+        // Empty push host + two hosts -> ambiguous -> null (home), never the wrong host.
+        val dest = resolveAgentCardFeedDestination(
+            request = AgentCardFeedRequest(session = "work", host = ""),
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+        )
+        assertNull(dest)
+    }
+
+    @Test
+    fun `agent-card feed with passphrase key does not auto-open`() = runTest {
+        val keyPath = temp.newFile("pp_id").absolutePath
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyPath, hasPassphrase = true),
+        )
+        db.hostDao().insert(
+            HostEntity(name = "Box", hostname = "box.example.com", username = "me", keyId = keyId),
+        )
+
+        val dest = resolveAgentCardFeedDestination(
+            request = AgentCardFeedRequest(session = "work", host = "box.example.com"),
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+        )
+        assertNull(dest)
+    }
 }
 
 /**

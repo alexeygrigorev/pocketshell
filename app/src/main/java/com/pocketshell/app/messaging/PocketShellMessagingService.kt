@@ -25,15 +25,35 @@ import com.google.firebase.messaging.RemoteMessage
  *
  * ## De-dup
  *
- * The push carries the server-side `reset_key` (#619 don't-renotify);
- * [PushDedupStore] suppresses a key that already notified, so an FCM retry of
- * the same reset never double-notifies.
+ * The push carries a server-side de-dup key (the `usage_reset` `reset_key`,
+ * #619; the `agent_card` `card_key`, #859); [PushDedupStore] suppresses a key
+ * that already notified, so an FCM retry of the same event never
+ * double-notifies.
+ *
+ * ## Push types
+ *
+ * The receive path dispatches on the data message's `type` (hard-cut D22 — each
+ * type is a parallel sibling, not a fork of another):
+ * - `usage_reset` (#690) → [ResetPushNotifications], deep-links to Usage.
+ * - `agent_card` (#859) → [AgentCardPushNotifications], deep-links to the
+ *   card's session feed.
  */
 public class PocketShellMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
+        when (message.data[ResetPushPayload.KEY_TYPE]?.trim()) {
+            ResetPushPayload.TYPE_USAGE_RESET -> handleUsageReset(message)
+            AgentCardPushPayload.TYPE_AGENT_CARD -> handleAgentCard(message)
+            else -> Log.d(
+                TAG,
+                "Ignoring unknown push (type=${message.data[ResetPushPayload.KEY_TYPE]})",
+            )
+        }
+    }
+
+    private fun handleUsageReset(message: RemoteMessage) {
         val payload = ResetPushPayload.fromData(message.data) ?: run {
-            Log.d(TAG, "Ignoring non-reset push (type=${message.data[ResetPushPayload.KEY_TYPE]})")
+            Log.d(TAG, "Dropping malformed usage_reset push (no reset_key)")
             return
         }
         val dedup = PushDedupStore(applicationContext)
@@ -46,6 +66,22 @@ public class PocketShellMessagingService : FirebaseMessagingService() {
             title = payload.title,
             body = payload.body,
             resetKey = payload.resetKey,
+        )
+    }
+
+    private fun handleAgentCard(message: RemoteMessage) {
+        val payload = AgentCardPushPayload.fromData(message.data) ?: run {
+            Log.d(TAG, "Dropping malformed agent_card push (no session)")
+            return
+        }
+        val dedup = PushDedupStore(applicationContext)
+        if (!dedup.markNotifiedIfNew(payload.cardKey)) {
+            Log.d(TAG, "Agent card already notified for key=${payload.cardKey}; suppressing")
+            return
+        }
+        AgentCardPushNotifications.show(
+            context = applicationContext,
+            payload = payload,
         )
     }
 

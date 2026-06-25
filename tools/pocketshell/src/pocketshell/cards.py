@@ -632,7 +632,17 @@ def register_push_card_commands(push_group: click.Group) -> None:
             build_kwargs={"items": parsed},
             preset_checked=preset_checked,
         )
-        path = upsert_card(target, card, paths=resolve_paths())
+        card_paths = resolve_paths()
+        path = upsert_card(target, card, paths=card_paths)
+        # Slice D (#859): fire a best-effort FCM push so the phone surfaces a
+        # heads-up notification opening this session's card feed. Fail-soft —
+        # imported lazily so a host without the push deps still pushes the card.
+        try:
+            from pocketshell.agent_card_push import notify_card_pushed
+
+            notify_card_pushed(target, card, card_paths=card_paths)
+        except Exception:
+            pass
         click.echo(
             f"checklist {card_id!r} ({len(parsed)} items) -> session {target!r} ({path})"
         )

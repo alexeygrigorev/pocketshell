@@ -111,6 +111,7 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
+import com.pocketshell.core.tmux.TmuxServerDeadException
 import com.pocketshell.core.tmux.TmuxSessionNotFoundException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -2801,6 +2802,19 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun lastCreateIfMissingForTest(): Boolean = lastCreateIfMissing
 
+    /**
+     * Issue #998: the most recent [probeServerLiveness] flag passed to
+     * [createTmuxClient]. Exposed for tests because the test client-factory
+     * override keeps its 3-arg shape (so it never sees the flag); this
+     * side-channel lets a test assert the reconnect path requested the
+     * server-death probe (`true`) while the explicit-new path did not (`false`).
+     */
+    @Volatile
+    private var lastProbeServerLiveness: Boolean = false
+
+    @androidx.annotation.VisibleForTesting
+    internal fun lastProbeServerLivenessForTest(): Boolean = lastProbeServerLiveness
+
     private fun createTmuxClient(
         session: SshSession,
         sessionName: String,
@@ -2809,14 +2823,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // genuine cold-restore path passes false so a session killed elsewhere
         // is not resurrected; every create/reconnect/switch path keeps true.
         createIfMissing: Boolean = true,
+        // Issue #998: probe whether the tmux SERVER is alive before `new-session
+        // -A`. True only on a reattach to an expected-existing session (a
+        // reconnect / lifecycle / network-reconnect): a dead server then throws
+        // [TmuxServerDeadException] so we drop to the list instead of silently
+        // booting a fresh empty server. The explicit user "new session" intent
+        // passes false — a brand-new session legitimately wants a fresh server.
+        probeServerLiveness: Boolean = false,
     ): TmuxClient {
         lastCreateIfMissing = createIfMissing
+        lastProbeServerLiveness = probeServerLiveness
         return tmuxClientFactoryOverride?.invoke(session, sessionName, startDirectory)
             ?: tmuxClientFactory.create(
                 session,
                 sessionName = sessionName,
                 startDirectory = startDirectory,
                 createIfMissing = createIfMissing,
+                probeServerLiveness = probeServerLiveness,
             )
     }
 
@@ -5358,6 +5381,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.sessionName,
                 target.startDirectory,
                 createIfMissing = createIfMissingForTrigger(trigger),
+                // Issue #998: a reconnect/lifecycle/network reattach expects the
+                // server to already be running, so probe for server-death and
+                // refuse the silent `new-session -A` resurrection if it is gone.
+                probeServerLiveness = trigger.isReconnectTrigger,
             )
             activeTarget = target
             refreshReconnectAvailability()
@@ -5585,7 +5612,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // reconnect would just re-run the same gone-session attach. Surface
             // "that session ended" and drop the user to the list instead of
             // resurrecting it.
-            if (t is TmuxSessionNotFoundException) {
+            if (t is TmuxServerDeadException) {
+                // Issue #998: the remote tmux SERVER is gone (host reboot / OOM /
+                // kill-server). Every session vanished. Do NOT route this through
+                // the auto-reconnect ladder — `new-session -A` would boot a fresh
+                // empty server and silently resurrect a blank "Connected" session
+                // (the data-loss-looking bug). Surface "the server restarted —
+                // all sessions ended" and drop to the host/session list.
+                failServerDied(target, attempt, startedAtMs, t)
+            } else if (t is TmuxSessionNotFoundException) {
                 failSessionEnded(target, attempt, startedAtMs, t)
             } else {
                 failConnectAttempt(
@@ -5647,6 +5682,61 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         setConnectionState(
             ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
+        )
+        _sessionEnded.tryEmit(target.sessionName)
+    }
+
+    /**
+     * Issue #998: terminal handling for a reattach that found the remote tmux
+     * SERVER gone (host reboot / OOM / `kill-server`). Sibling of
+     * [failSessionEnded] — the difference is the *scope* of the loss: a dead
+     * server means EVERY session vanished, not one. Like [failSessionEnded] this
+     * does NOT preserve a reconnect target, does NOT auto-reconnect, and does NOT
+     * `new-session -A`-resurrect (which on a dead server boots a brand-new empty
+     * server — exactly the silent-resurrection bug). We tear the half-open
+     * connection down, evict the runtime lease, surface a server-death
+     * [ConnectionState.Unreachable] message, and emit the one-shot [sessionEnded]
+     * event so the Screen drops to the host/session list (which already renders
+     * the empty `no server running` state correctly) and clears the persisted
+     * last-session snapshot.
+     */
+    private suspend fun failServerDied(
+        target: ConnectionTarget,
+        attempt: Int,
+        startedAtMs: Long,
+        cause: TmuxServerDeadException,
+    ) {
+        lastConnectFailureCause = cause
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-server-died host=${target.host} session=${target.sessionName} " +
+                "${targetLogFields(target)} attempt=$attempt — server gone, dropping to list, not recreating",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "reconnect_server_died",
+            "attempt" to attempt,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "cause" to cause.javaClass.simpleName,
+            "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+        )
+        withContext(NonCancellable) {
+            closeCurrentConnectionAndJoin(
+                cacheEviction = RuntimeCacheEviction.TargetRuntime(target.toRuntimeKey()),
+            )
+        }
+        activeAttachMilestone = null
+        activeTarget = null
+        connectingTarget = null
+        refreshReconnectAvailability()
+        setConnectionState(
+            ConnectionState.Unreachable(
+                "The tmux server on ${target.hostName} restarted — all sessions ended.",
+            ),
         )
         _sessionEnded.tryEmit(target.sessionName)
     }
@@ -6584,6 +6674,8 @@ public class TmuxSessionViewModel @Inject constructor(
             when (current.javaClass.simpleName) {
                 "UserAuthException" -> return "authentication failed"
                 "UnknownHostException" -> return "host could not be resolved"
+                // Issue #998: server-death — all sessions ended, recreate one.
+                "TmuxServerDeadException" -> return "the tmux server restarted — all sessions ended"
             }
             if (current.message?.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true) == true) {
                 return "private key file not found"
@@ -7777,6 +7869,12 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.ReaderEof,
             TmuxDisconnectReason.ReaderException,
             TmuxDisconnectReason.CommandTimeout,
+            // Issue #998: a mid-session `%exit server exited` should kick the
+            // reconnect path — NOT to silently resurrect, but because that path
+            // now runs the server-liveness preflight that detects the dead server
+            // and routes to failServerDied (drop to the list). Auto-reconnecting
+            // here is what gives us the chance to classify and recover gracefully.
+            TmuxDisconnectReason.ServerExited,
             -> true
             TmuxDisconnectReason.ExplicitClose,
             TmuxDisconnectReason.ExplicitDetach,
@@ -7794,6 +7892,7 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
             TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
             TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
         // The user/host/port comes from the target; for the degenerate target-less
@@ -7816,6 +7915,7 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
             TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
             TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
         return "$prefix from ${target.user}@${target.host}:${target.port}; reconnecting."
@@ -16933,6 +17033,13 @@ private const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
 private val NON_RETRYABLE_FAILURE_CLASS_NAMES: Set<String> = setOf(
     "UserAuthException",
     "UnknownHostException",
+    // Issue #998: a dead tmux server will not come back by retrying the same
+    // attach — every retry would re-detect `no server running` (or worse, on a
+    // host whose tmux DID come back up, silently `new-session -A` a fresh empty
+    // server). So the auto-reconnect ladder must STOP on server-death rather
+    // than burn its 4 rungs; the user lands on the list (failServerDied already
+    // emitted `sessionEnded`) and recreates a session explicitly.
+    "TmuxServerDeadException",
 )
 
 /**

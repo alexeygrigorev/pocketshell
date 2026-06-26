@@ -264,6 +264,247 @@ class TmuxClientTest {
         }
     }
 
+    // ---- Issue #998: server-death (vs session-gone vs transport-blip) ----
+
+    @Test
+    fun `reattach preflight to a DEAD SERVER throws TmuxServerDeadException, never recreates`() = runBlocking {
+        // The reconnect/reattach path sets probeServerLiveness=true. tmux
+        // `has-session` against a dead server exits non-zero with
+        // `no server running on <socket>`. That must surface as server-death —
+        // NOT as a generic connect, and NOT via the silent `new-session -A`
+        // resurrection that would boot a brand-new empty server.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = {
+                ExecResult(
+                    stdout = "",
+                    stderr = "no server running on /tmp/tmux-1000/default",
+                    exitCode = 1,
+                )
+            },
+        )
+        val client = RealTmuxClient(
+            session,
+            scope,
+            sessionName = "work",
+            createIfMissing = true,
+            probeServerLiveness = true,
+        )
+        try {
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            assertTrue(
+                "expected TmuxServerDeadException, got $thrown",
+                thrown is TmuxServerDeadException,
+            )
+            // It is NOT misclassified as the single-session-gone case.
+            assertFalse(
+                "server-death must NOT be a TmuxSessionNotFoundException",
+                thrown is TmuxSessionNotFoundException,
+            )
+            // The preflight ran the has-session probe...
+            assertEquals(
+                listOf("tmux has-session -t 'work'"),
+                session.execCommands.toList(),
+            )
+            // ...and NEVER wrote a `new-session` line, so a dead server cannot be
+            // silently resurrected into a blank session.
+            assertTrue(
+                "no creating command should be written, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `reattach preflight to an ALIVE server with a gone session still reattaches (recreates that one session)`() = runBlocking {
+        // Server alive (`can't find session: work`, exit 1) on the reattach path
+        // is the #666 case, NOT #998: the server is up, so `new-session -A`
+        // recreating that one session is the correct reconnect behaviour. We must
+        // NOT throw server-death here, and we MUST attach.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = {
+                ExecResult(stdout = "", stderr = "can't find session: work", exitCode = 1)
+            },
+        )
+        val client = RealTmuxClient(
+            session,
+            scope,
+            sessionName = "work",
+            createIfMissing = true,
+            probeServerLiveness = true,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                listOf("tmux has-session -t 'work'"),
+                session.execCommands.toList(),
+            )
+            // A live server still attaches with the normal control-mode spawn.
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `reattach preflight to a LIVE session reattaches normally (transport blip)`() = runBlocking {
+        // The ordinary transport-blip reconnect: server alive, session alive
+        // (`has-session` exits 0). Must reattach with `new-session -A`, no
+        // server-death.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
+        )
+        val client = RealTmuxClient(
+            session,
+            scope,
+            sessionName = "work",
+            createIfMissing = true,
+            probeServerLiveness = true,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                listOf("tmux has-session -t 'work'"),
+                session.execCommands.toList(),
+            )
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `attach-only cold restore to a DEAD SERVER reports server-death, not session-gone`() = runBlocking {
+        // Even the #666 attach-only cold-restore path must distinguish a dead
+        // SERVER (every session gone) from one gone SESSION: server-death
+        // dominates so the caller can surface the right copy and reconcile the
+        // whole tree, not just the one session.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = {
+                ExecResult(
+                    stdout = "",
+                    stderr = "no server running on /tmp/tmux-1000/default",
+                    exitCode = 1,
+                )
+            },
+        )
+        val client = RealTmuxClient(session, scope, sessionName = "work", createIfMissing = false)
+        try {
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            assertTrue(
+                "expected TmuxServerDeadException on a dead server, got $thrown",
+                thrown is TmuxServerDeadException,
+            )
+            assertTrue(
+                "no creating command on a dead server, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `default explicit-new connect never probes server liveness (fresh server allowed)`() = runBlocking {
+        // The explicit user "new session" intent (createIfMissing=true,
+        // probeServerLiveness=false) must NOT preflight at all — a brand-new
+        // session legitimately wants a fresh server if none is running. This is
+        // the boundary that keeps #998's probe off the create path.
+        val shell = FakeShell()
+        val session = FakeSession(shell) // exec not stubbed -> must never be called
+        val client = RealTmuxClient(session, scope, sessionName = "work")
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertTrue("explicit-new must not preflight", session.execCommands.isEmpty())
+            assertEquals(
+                "tmux -CC new-session -A -s 'work'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `in-band exit server exited classifies the drop as ServerExited, not ReaderEof`() = runBlocking {
+        // A mid-session server death: tmux emits `%exit server exited` before the
+        // control channel EOFs. The reader-exit classifier must report this as
+        // ServerExited (server-death), categorically distinct from the ordinary
+        // ReaderEof a transport blip produces. This is the in-band discriminator
+        // the reconnect path then preflight-confirms.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            // The server announces shutdown, then the channel closes.
+            shell.feed("%exit server exited\n")
+            shell.closeStdoutPipe()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                while (!client.disconnected.value) { yield(); delay(10) }
+            }
+            assertEquals(
+                TmuxDisconnectReason.ServerExited,
+                client.disconnectEvent.value?.reason,
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `plain client exit without server-exited reason stays an ordinary EOF`() = runBlocking {
+        // A bare `%exit` (this client detaching, server still up) must NOT be
+        // mistaken for server-death — only `%exit server exited` is server-death.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.feed("%exit\n")
+            shell.closeStdoutPipe()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                while (!client.disconnected.value) { yield(); delay(10) }
+            }
+            assertEquals(
+                TmuxDisconnectReason.ReaderEof,
+                client.disconnectEvent.value?.reason,
+            )
+        } finally {
+            client.close()
+        }
+    }
+
     @Test
     fun `events flow surfaces structured notifications from tmux stdout`() = runBlocking {
         val shell = FakeShell()

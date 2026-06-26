@@ -64,12 +64,20 @@ public class TmuxClientFactory(
         sessionName: String = DEFAULT_SESSION_NAME,
         startDirectory: String? = null,
         createIfMissing: Boolean = true,
+        // Issue #998: when this is a reattach to an expected-existing session (a
+        // reconnect / lifecycle / network-reconnect), pass `true` so
+        // [TmuxClient.connect] probes whether the tmux SERVER is still alive and
+        // throws [TmuxServerDeadException] for `no server running` instead of
+        // silently resurrecting an empty server via `new-session -A`. The
+        // default `false` preserves the explicit user "new session" intent.
+        probeServerLiveness: Boolean = false,
     ): TmuxClient = RealTmuxClient(
         session = session,
         scope = scope,
         sessionName = sessionName,
         startDirectory = startDirectory,
         createIfMissing = createIfMissing,
+        probeServerLiveness = probeServerLiveness,
     )
 
     private companion object {

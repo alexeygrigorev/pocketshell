@@ -133,6 +133,15 @@ JOURNEY_CLASSES=(
   # self-skip on CI.
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
+  # Issue #998: a remote tmux SERVER death (host reboot / OOM / `kill-server`)
+  # must NOT be silently resurrected via `new-session -A` into a blank
+  # "Connected" session. This journey attaches, `tmux kill-server`s the whole
+  # server (every session vanishes), lets the EOF drive the auto-reconnect, and
+  # asserts the reattach drops to the host list — NOT a resurrected empty
+  # session — and the server stays DEAD (no `new-session -A` resurrection). It
+  # runs on the deterministic agents:2222 fixture (no toxiproxy) and does NOT
+  # self-skip on CI, so the server-death class regression cannot silently return.
+  "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   # Issue #754 (slice 1c-iv-c): this class is the per-PR-CI deterministic regression
   # catcher for the within-grace "Attaching…" reconnect bug. It now (a) forbids the

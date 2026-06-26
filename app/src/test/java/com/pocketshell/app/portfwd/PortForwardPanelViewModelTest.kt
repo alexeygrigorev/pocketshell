@@ -891,7 +891,16 @@ class PortForwardPanelViewModelTest {
         val connector = QueueConnector(
             listOf(Result.success(firstSession), Result.success(recoveredSession)),
         )
-        val forwardingController = newForwardingController(connector)
+        // Issue #980: the forced reconnect is now driven SOLELY by the
+        // controller's hardened TerminalNetworkObserver.changes subscription
+        // (the service's raw force-tear callback was deleted). Emit a real
+        // validated-handoff change through that flow to trigger the rebuild.
+        val networkChanges =
+            kotlinx.coroutines.flow.MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+        val forwardingController = newForwardingController(
+            connector = connector,
+            validatedNetworkChanges = networkChanges,
+        )
         val viewModel = newViewModel(
             connector = connector,
             forwardingController = forwardingController,
@@ -911,15 +920,15 @@ class PortForwardPanelViewModelTest {
             assertFalse("panel dismissal must not close the controller-owned SSH session", firstSession.closed)
 
             firstSession.simulateDeadForwardButStillConnected()
-            val service = Robolectric.buildService(ForwardingService::class.java).get()
-            service.controller = forwardingController
-            service.handleDefaultNetworkLost()
-            service.handleDefaultNetworkAvailable()
+            // A real validated default-network handoff reaches the controller's
+            // hardened subscription, which forces a rebuild on every active host
+            // even after the panel is gone.
+            assertTrue(networkChanges.tryEmit(Any()))
             advanceTimeBy(1_100L)
             runCurrent()
 
             assertEquals(
-                "service network recovery must reach the controller-owned supervisor after the panel is gone",
+                "a validated-handoff network change must reach the controller-owned supervisor after the panel is gone",
                 listOf("dev", "dev"),
                 connector.hosts,
             )
@@ -1585,12 +1594,15 @@ class PortForwardPanelViewModelTest {
     private fun newForwardingController(
         connector: PortForwardConnector,
         portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
+        validatedNetworkChanges: kotlinx.coroutines.flow.Flow<*> =
+            kotlinx.coroutines.flow.emptyFlow<Any?>(),
     ): ForwardingController =
         ForwardingController(
             appContext = context,
             connector = connector,
             portRemappingDao = portRemappingDao,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            validatedNetworkChanges = validatedNetworkChanges,
         )
 
     private class FakeConnector(

@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
+import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import net.schmizz.sshj.transport.TransportException
@@ -566,8 +567,15 @@ internal class RealSshSession(
     ): SshPortForward {
         ensureConnected()
         return try {
+            // Issue #980: the forward opens/closes one direct-tcpip channel per
+            // accepted local connection — transport-mutating packets that MUST go
+            // through the single-writer dispatcher (the #847-safe path the
+            // keepalive / `-CC` / exec writes use), never straight off the raw
+            // client from the accept loop / copy threads. We hand the forward a
+            // dispatcher-backed channel factory instead of the SSHClient so it
+            // physically cannot become a second un-serialised writer.
             RealSshPortForward(
-                client = client,
+                channels = dispatcherBackedChannelTransport(),
                 remoteHost = remoteHost,
                 remotePort = remotePort,
                 localPort = localPort,
@@ -579,6 +587,21 @@ internal class RealSshSession(
             )
         }
     }
+
+    /**
+     * Build the dispatcher-backed [PortForwardChannelTransport] for a forward
+     * on THIS session's transport (issue #980). The channel open + close run
+     * through [dispatcher], serialised against every other transport writer, so
+     * the forward can never become the #847 second writer. The serialisation
+     * logic lives in [DispatcherBackedChannelTransport] so it is unit-testable
+     * without a live SSH transport; here we only bind the real sshj open/close.
+     */
+    private fun dispatcherBackedChannelTransport(): PortForwardChannelTransport =
+        DispatcherBackedChannelTransport(
+            dispatcher = dispatcher,
+            open = { remoteHost, remotePort -> client.newDirectConnection(remoteHost, remotePort) },
+            close = { channel -> channel.close() },
+        )
 
     override fun startShell(): SshShell {
         ensureConnected()

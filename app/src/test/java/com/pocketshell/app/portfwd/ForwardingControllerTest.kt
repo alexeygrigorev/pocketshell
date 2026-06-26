@@ -516,35 +516,123 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `service forces reconnect only after observed default network loss`() {
-        val controller = ForwardingController(context)
-        val normalCalls = java.util.concurrent.atomic.AtomicInteger(0)
+    fun `service registers no raw default-network callback so it cannot force-tear a live transport on stable-wifi jitter`() {
+        // Issue #980 (defect 2) — regression proof.
+        //
+        // The ForwardingService used to register its OWN raw
+        // `registerDefaultNetworkCallback` that called forceReconnectNow() on ANY
+        // raw onLost→onAvailable pair — including a same-AP band-steer / mesh-node
+        // roam / momentary RF re-association the link survives — force-closing a
+        // transport the keepalive window said was still alive (the #974
+        // stable-wifi self-inflicted drop). It bypassed the same-SSID-reassoc
+        // hardening (TerminalNetworkObserver.hasSameNetworkIdentityAs, #875) the
+        // rest of the app uses.
+        //
+        // The fix (hard-cut, D22): the service registers NO network callback at
+        // all — network-driven reconnect is owned SOLELY by ForwardingController's
+        // hardened TerminalNetworkObserver.changes subscription. This asserts the
+        // service holds no raw network path, so a raw stable-wifi blip can never
+        // reach forceReconnectNow through the service.
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as android.net.ConnectivityManager
+        val shadowCm = Shadows.shadowOf(cm)
+        val callbacksBefore = shadowCm.networkCallbacks.toSet()
+
+        // buildService(...).get() returns the service WITHOUT running onCreate
+        // (so we don't trigger Hilt injection in this non-Hilt test app); we wire
+        // the controller manually, exactly like the sibling notification tests.
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.controller = ForwardingController(context)
+        // Drive the START path that USED to register the raw default-network
+        // callback (the deleted `registerNetworkCallback()` call lived here).
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java).setAction(ForwardingService.ACTION_START),
+            0,
+            0,
+        )
+
+        val callbacksAfter = shadowCm.networkCallbacks.toSet()
+        assertEquals(
+            "ForwardingService must register NO raw default-network callback (#980): " +
+                "network-driven reconnect is owned solely by the controller's hardened " +
+                "TerminalNetworkObserver.changes signal, so a same-AP reassoc cannot " +
+                "force-tear a live transport on stable wifi",
+            callbacksBefore,
+            callbacksAfter,
+        )
+    }
+
+    @Test
+    fun `a raw stable-wifi reassoc routed through the hardened observer does NOT force-reconnect, but a real handoff does`() {
+        // Issue #980 (defect 2) — class coverage: the ONLY network path that can
+        // reach forceReconnectNow is the controller's hardened
+        // TerminalNetworkObserver.changes subscription, which suppresses the
+        // same-SSID/same-handle reassoc (#875) and only emits on a REAL validated
+        // default-network handoff. This drives the REAL TerminalNetworkObserver
+        // detector pipeline (not a marker) so the suppression is exercised end to
+        // end: a same-pure-WIFI-transport reassoc is suppressed (no force), while a
+        // genuine WIFI→CELLULAR handoff forces a rebuild.
+        val observer = com.pocketshell.app.connectivity.TerminalNetworkObserver(context)
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = observer.changes,
+        )
+        idleMainLooper()
         val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
         controller.registerActiveHost(
             hostId = 1,
             hostName = "alpha",
-            reconnectHook = { normalCalls.incrementAndGet() },
             forceReconnectHook = { forceCalls.incrementAndGet() },
         )
-        val service = Robolectric.buildService(ForwardingService::class.java).get()
-        service.controller = controller
 
-        service.handleDefaultNetworkAvailable()
-        assertEquals(
-            "initial onAvailable during callback registration must not churn a healthy tunnel",
-            1,
-            normalCalls.get(),
+        // Seed a validated pure-WIFI network as the baseline.
+        observer.emitSyntheticSnapshotForTest(
+            com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                networkHandle = "wifi-1",
+                transports = setOf("WIFI"),
+            ),
+            reason = "baseline",
         )
-        assertEquals(0, forceCalls.get())
+        idleMainLooper()
+        forceCalls.set(0)
 
-        service.handleDefaultNetworkLost()
-        service.handleDefaultNetworkAvailable()
-        assertEquals(1, normalCalls.get())
+        // A same-SSID band-steer / mesh reassoc mints a NEW handle but the same
+        // pure-WIFI transport set — the #875 hardening must SUPPRESS it, so no
+        // force-reconnect reaches the supervisor (the stable-wifi false handoff).
+        observer.emitSyntheticSnapshotForTest(
+            com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                networkHandle = "wifi-2-reassoc",
+                transports = setOf("WIFI"),
+            ),
+            reason = "same-ssid-reassoc",
+        )
+        idleMainLooper()
         assertEquals(
-            "onAvailable after an observed loss must force rebuild stale connected transports",
+            "a same-AP pure-WIFI reassociation must NOT force-tear the forward transport " +
+                "(#980/#875 — this is the stable-wifi self-inflicted drop)",
+            0,
+            forceCalls.get(),
+        )
+
+        // A genuine cross-transport handoff (WIFI→CELLULAR) is a real change the
+        // forward transport cannot survive — it MUST force a rebuild.
+        observer.emitSyntheticSnapshotForTest(
+            com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                networkHandle = "cell-1",
+                transports = setOf("CELLULAR"),
+            ),
+            reason = "wifi-to-cellular-handoff",
+        )
+        idleMainLooper()
+        assertEquals(
+            "a genuine WIFI→CELLULAR handoff must force a reconnect on the forward transport",
             1,
             forceCalls.get(),
         )
+
+        observer.close()
     }
 
     @Test

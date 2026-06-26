@@ -1,6 +1,5 @@
 package com.pocketshell.core.ssh
 
-import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import java.io.IOException
 import java.io.InputStream
@@ -24,11 +23,25 @@ import java.util.concurrent.atomic.AtomicLong
  * [DirectConnection] (direct-tcpip channel) per accepted client, copying bytes
  * in both directions through counting streams.
  *
+ * ## Single-writer transport safety (issue #980)
+ *
+ * Each accepted local connection opens a `direct-tcpip` channel, and each
+ * EOF/teardown closes it. Both are transport-mutating SSH packets that advance
+ * the encoder sequence counter — they MUST NOT race the dispatcher-serialised
+ * keepalive / `-CC` / exec writes on the same transport, or the #847
+ * `Connection corrupted` desync resurfaces. This class therefore never holds the
+ * raw [net.schmizz.sshj.SSHClient]: it opens and closes every channel through a
+ * [PortForwardChannelTransport], which funnels the channel-lifecycle packets
+ * through the connection's single-writer [TransportDispatcher]. The local-socket
+ * `accept()` and the byte copy loops stay off-dispatcher (they touch only the
+ * local socket and the already-decrypted channel streams); only the SSH-side
+ * open/close packets serialise.
+ *
  * Internal to `core-ssh` — callers obtain instances via
  * [SshSession.openLocalPortForward].
  */
 internal class RealSshPortForward(
-    private val client: SSHClient,
+    private val channels: PortForwardChannelTransport,
     override val remoteHost: String,
     override val remotePort: Int,
     override val localPort: Int,
@@ -97,7 +110,10 @@ internal class RealSshPortForward(
         // visible *here* (we can log + close the local socket). Once open, we
         // hand off to two daemon copy threads — one per direction.
         val channel: DirectConnection = try {
-            client.newDirectConnection(remoteHost, remotePort)
+            // Serialised through the single-writer dispatcher (#980): the
+            // channel-open packet can never interleave with the keepalive / a
+            // `-CC` write / another exec open on the same transport.
+            channels.openChannel(remoteHost, remotePort)
         } catch (t: Throwable) {
             // Couldn't open the channel — drop the local connection. Don't
             // crash the accept loop; another connection might succeed.
@@ -185,7 +201,10 @@ internal class RealSshPortForward(
 
     private fun closePair(local: Socket, channel: DirectConnection) {
         runCatching { local.close() }
-        runCatching { channel.close() }
+        // Serialise the channel-close packet through the single-writer
+        // dispatcher (#980) — a raw `channel.close()` here would be a SECOND
+        // un-ownable writer racing the keepalive, exactly the #847 desync.
+        channels.closeChannel(channel)
     }
 
     override fun close() {

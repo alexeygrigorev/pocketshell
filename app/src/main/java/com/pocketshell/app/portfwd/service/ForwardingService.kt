@@ -8,8 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.ConnectivityManager
-import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -52,12 +50,28 @@ import kotlinx.coroutines.launch
  *    user-visible notification (so the OS doesn't kill us)
  *  - Mirror connection / tunnel state from [ForwardingController] into
  *    the notification text so the user sees host name + tunnel count
- *  - Register a network-availability callback and call
- *    [ForwardingController.reconnectNow] on network recovery, so the
- *    controller-owned [com.pocketshell.core.portfwd.AutoForwarderSupervisor]
- *    skips its exponential-backoff sleep
  *  - Stop itself when [ForwardingController.flowOfActiveHostCount]
  *    drops to zero (all hosts disabled their auto-forward toggle)
+ *
+ * ## Network-change handling is NOT the service's job (issue #980)
+ *
+ * The service deliberately does NOT register its own network callback.
+ * Before #980 it registered a raw `ConnectivityManager.registerDefaultNetworkCallback`
+ * that called [ForwardingController.forceReconnectNow] on ANY raw
+ * `onLost`→`onAvailable` pair — including a same-AP band-steer / mesh-node
+ * roam / momentary RF re-association the link actually survives. That
+ * force-closed a transport whose keepalive window said it was still alive,
+ * a self-inflicted drop on stable wifi (the #974 signature) — and it
+ * bypassed the same-SSID-reassoc hardening
+ * ([com.pocketshell.app.connectivity.TerminalNetworkObserver]'s
+ * `hasSameNetworkIdentityAs`, #875) that the rest of the app uses.
+ *
+ * Network-driven reconnect for the forwarding feature is owned SOLELY by
+ * [ForwardingController], which subscribes to the hardened, debounced
+ * `TerminalNetworkObserver.changes` signal and forces a rebuild only on a
+ * REAL validated default-network handoff. Hard-cut (D22): the service's
+ * private raw callback is deleted, not gated behind a flag — there is one
+ * hardened network path, not two competing ones.
  */
 @AndroidEntryPoint
 class ForwardingService : Service() {
@@ -67,9 +81,6 @@ class ForwardingService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var observeJob: Job? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    @Volatile
-    private var defaultNetworkWasLost = false
     private var hasStartedForeground = false
 
     companion object {
@@ -189,7 +200,6 @@ class ForwardingService : Service() {
                 promoteToForegroundIfNeeded(initialNotification())
                 if (observeJob == null || observeJob?.isActive != true) {
                     startObserving()
-                    registerNetworkCallback()
                 }
             }
         }
@@ -206,7 +216,6 @@ class ForwardingService : Service() {
     override fun onDestroy() {
         observeJob?.cancel()
         observeJob = null
-        unregisterNetworkCallback()
         scope.cancel()
         super.onDestroy()
     }
@@ -264,69 +273,9 @@ class ForwardingService : Service() {
         }
     }
 
-    private fun registerNetworkCallback() {
-        if (networkCallback != null) return
-        defaultNetworkWasLost = false
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            ?: return
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                handleDefaultNetworkAvailable()
-            }
-
-            override fun onLost(network: Network) {
-                handleDefaultNetworkLost()
-            }
-        }
-        try {
-            cm.registerDefaultNetworkCallback(cb)
-            networkCallback = cb
-        } catch (_: SecurityException) {
-            // Some restricted profiles disallow registering network
-            // callbacks. Reconnect-on-network-recovery becomes a
-            // best-effort feature in that case; the underlying
-            // supervisor still retries on its own backoff schedule.
-        }
-    }
-
-    private fun unregisterNetworkCallback() {
-        val cb = networkCallback ?: return
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        try {
-            cm?.unregisterNetworkCallback(cb)
-        } catch (_: IllegalArgumentException) {
-            // Already unregistered (e.g. service was stop/started
-            // quickly). Safe to ignore.
-        }
-        networkCallback = null
-        defaultNetworkWasLost = false
-    }
-
-    @androidx.annotation.VisibleForTesting
-    internal fun handleDefaultNetworkAvailable() {
-        // Network came back. Nudge the supervisor(s) so any in-flight
-        // backoff sleep cancels and a reconnect attempt happens
-        // immediately. If we observed an actual default-network loss
-        // first, force a transport rebuild: sshj can leave the old
-        // session looking "connected" after Android swaps networks,
-        // while the forwards are already dead.
-        if (defaultNetworkWasLost) {
-            defaultNetworkWasLost = false
-            controller.forceReconnectNow()
-        } else {
-            controller.reconnectNow()
-        }
-    }
-
-    @androidx.annotation.VisibleForTesting
-    internal fun handleDefaultNetworkLost() {
-        defaultNetworkWasLost = true
-    }
-
     private fun stopForwarding() {
         observeJob?.cancel()
         observeJob = null
-        unregisterNetworkCallback()
         // STOP_FOREGROUND_REMOVE makes the notification disappear
         // immediately. The constant has been stable since API 24.
         stopForeground(STOP_FOREGROUND_REMOVE)

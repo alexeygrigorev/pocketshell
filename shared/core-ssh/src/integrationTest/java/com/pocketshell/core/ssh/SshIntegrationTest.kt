@@ -613,6 +613,134 @@ class SshIntegrationTest {
     }
 
     @Test
+    fun portForwardChannelChurnConcurrentWithKeepAliveDoesNotCorruptTransport() {
+        // Issue #980 — end-to-end backstop for the port-forward single-writer fix.
+        //
+        // Before #980 `RealSshPortForward` opened one direct-tcpip channel per
+        // accepted local connection by calling `client.newDirectConnection(...)`
+        // STRAIGHT off the accept loop, and closed it off the copy threads —
+        // raw transport-mutating packets racing the dispatcher-serialised
+        // keepalive on the SAME transport. That second un-ownable writer is the
+        // #847 desync the dispatcher rewrite spent a whole epic to remove. A
+        // burst of accepted connections (a fresh-reconnect scan-and-forward
+        // storm) churned these un-serialised opens/closes, so the transport could
+        // desync and the server log `Connection corrupted`.
+        //
+        // This drives exactly that shape against the real sshd: a live forward to
+        // the container's own sshd port, a storm of short local TCP connections
+        // each opening+closing a direct-tcpip channel, concurrently with the
+        // always-on keepalive and exec churn, then asserts the sshd log NEVER
+        // shows a corruption signature and a final round-trip still succeeds. With
+        // the #980 fix the channel open + close funnel through the single-writer
+        // dispatcher, so there is one writer again.
+        runBlocking {
+            val session = SshConnection.connect(
+                host = container!!.host,
+                port = sshPort,
+                user = "testuser",
+                key = SshKey.Path(privateKeyFile),
+                passphrase = null,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow()
+
+            val logMarkStartLen = container!!.logs.length
+            val connectionsDriven = AtomicInteger(0)
+            session.use { s ->
+                // Forward a local loopback port to the container's own sshd port
+                // (22 inside the container) — any TCP service the container speaks
+                // works; we only need a real remote endpoint the direct-tcpip
+                // channel can connect to so the open/close packets hit the wire.
+                val forward = s.openLocalPortForward(
+                    remoteHost = "127.0.0.1",
+                    remotePort = CONTAINER_SSH_PORT,
+                    localPort = 0.let {
+                        // Reserve a free local port, then release it for the forward.
+                        java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+                            .use { sock -> sock.localPort }
+                    },
+                )
+                forward.use { fwd ->
+                    coroutineScope {
+                        val holdMs = 30_000L
+                        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs)
+
+                        // (1) The scan-and-forward storm: many short local TCP
+                        // connections, each opening then immediately closing a
+                        // direct-tcpip channel — the un-serialised open/close
+                        // churn that base raced against the keepalive.
+                        val storm = (0 until 6).map {
+                            async(Dispatchers.IO) {
+                                while (isActive && System.nanoTime() < deadline) {
+                                    runCatching {
+                                        java.net.Socket(
+                                            java.net.InetAddress.getByName("127.0.0.1"),
+                                            fwd.localPort,
+                                        ).use { client ->
+                                            // Write a tiny payload + read one byte so
+                                            // the channel actually carries data before
+                                            // we close it (drives open + use + close).
+                                            client.soTimeout = 1_000
+                                            runCatching {
+                                                client.getOutputStream().write("x".toByteArray())
+                                                client.getOutputStream().flush()
+                                                client.getInputStream().read()
+                                            }
+                                        }
+                                        connectionsDriven.incrementAndGet()
+                                    }
+                                    delay(15)
+                                }
+                            }
+                        }
+                        // (2) Concurrent exec churn on the SAME transport — the
+                        // corruption amplifier (the keepalive is already running
+                        // on every RealSshSession by construction).
+                        val execChurn = (0 until 2).map {
+                            async(Dispatchers.IO) {
+                                while (isActive && System.nanoTime() < deadline) {
+                                    runCatching { s.exec("true") }
+                                    delay(40)
+                                }
+                            }
+                        }
+
+                        while (System.nanoTime() < deadline) {
+                            assertTrue(
+                                "session must stay connected across the port-forward " +
+                                    "churn hold (#980)",
+                                s.isConnected,
+                            )
+                            delay(2_000)
+                        }
+                        storm.forEach { it.cancel() }
+                        execChurn.forEach { it.cancel() }
+                    }
+                }
+
+                assertEquals(
+                    "a final exec must round-trip after the port-forward churn hold " +
+                        "(#980 — transport not corrupted)",
+                    0,
+                    s.exec("true").exitCode,
+                )
+            }
+
+            val newLogs = container!!.logs.substring(
+                minOf(logMarkStartLen, container!!.logs.length),
+            )
+            for (signature in CORRUPTION_SIGNATURES) {
+                assertFalse(
+                    "sshd log must NOT contain `$signature` after a port-forward " +
+                        "channel-churn hold (#980 single-writer regression); " +
+                        "connections driven=${connectionsDriven.get()}; " +
+                        "offending sshd log:\n$newLogs",
+                    newLogs.contains(signature, ignoreCase = true),
+                )
+            }
+        }
+    }
+
+    @Test
     fun closeDisconnectsTheSession() = runTest {
         val session = SshConnection.connect(
             host = container!!.host,

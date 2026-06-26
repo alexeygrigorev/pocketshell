@@ -1344,10 +1344,60 @@ internal class RealTmuxClient(
                 throw exception
             }
             writeJob.cancel()
+            // Issue #979: a structural (`FatalClose`) command whose `%begin/%end`
+            // reply is delayed past the budget must NOT, by itself, tear down the
+            // SSH shell channel when the transport is otherwise ALIVE. The 10s
+            // idle / 30s ceiling timeout is NOT proof the transport is dead — on a
+            // stable-but-momentarily-busy wifi link a `select-window`/`kill-window`
+            // reply can park behind a `%output` burst (the #886 streaming class)
+            // while the link is fine. Closing `shell?.close()` here escalates a
+            // slow control-mode reply into a hard SSH transport disconnect — the
+            // self-inflicted "No live SSH session" drop on stable wifi (#974).
+            //
+            // Consult the single transport-liveness oracle (#986/#964):
+            // `isTransportProvenAliveWithinKeepAliveWindow()` is true iff the
+            // always-on keepalive has observed INBOUND server bytes within its
+            // ride-through window — i.e. the transport is PROVABLY alive right now.
+            // The line for THIS command was written (`writeCompleted` is true on
+            // this arm; a never-written command was reclassified to FatalClose
+            // above and closed because the bytes never reached tmux), so an
+            // unanswered structural command on a proven-alive link is "the answer
+            // is slow," not "the transport is dead." Account for the orphaned block
+            // (so a late `%begin/%end` drains as stale rather than mis-correlating
+            // the FIFO by one) and throw a recoverable exception WITHOUT closing the
+            // SSH shell. The transport-death oracle (keepalive / LivenessProbe)
+            // stays the sole authority for closing the SSH session — a control-mode
+            // command timeout never gets to kill a link the keepalive is still
+            // proving alive.
+            //
+            // When the transport is NOT proven alive (no recent inbound activity —
+            // a genuinely dead/half-open link), the timeout IS evidence of death,
+            // so the original FatalClose teardown still runs: the genuine-death
+            // recovery path is preserved.
+            val transportProvenAlive = session.isTransportProvenAliveWithinKeepAliveWindow()
+            if (transportProvenAlive) {
+                Log.w(
+                    ISSUE_244_DIAG_TAG,
+                    "tmux-command-fatal-timeout-rode-through kind=$kind timeoutMs=$commandTimeoutMs " +
+                        "transportProvenAlive=true (not closing SSH shell — #979)",
+                )
+                recordFatalTimeoutRodeThrough(kind = kind)
+                deferred.completeExceptionally(exception)
+                synchronized(responseCorrelationLock) {
+                    // The line was written; if tmux still owes us a `%begin/%end`
+                    // for it, count that block as stale so the reader discards it
+                    // instead of binding it to the next command (FIFO desync).
+                    val waitingForBegin = pendingCmd.commandNumber < 0L
+                    if (pendingQueue.remove(pendingCmd) && waitingForBegin) {
+                        staleResponseBlocksToIgnore += 1
+                    }
+                }
+                throw exception
+            }
             deferred.completeExceptionally(exception)
             Log.w(
                 ISSUE_244_DIAG_TAG,
-                "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs",
+                "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs transportProvenAlive=false",
             )
             synchronized(responseCorrelationLock) {
                 pendingQueue.remove(pendingCmd)
@@ -1783,6 +1833,25 @@ internal class RealTmuxClient(
                 "timeoutMode" to timeoutMode.logName,
                 "timeoutMs" to commandTimeoutMs,
                 "writeCompleted" to writeCompleted,
+            ),
+        )
+    }
+
+    /**
+     * Issue #979: a `FatalClose` command timed out, but the transport-liveness
+     * oracle (#986/#964) proves the SSH link is still alive, so we did NOT close
+     * the SSH shell — the slow reply rode through. Recorded so the reviewer can
+     * tell a self-inflicted-drop-avoided event apart from a genuine command
+     * timeout that DID tear the channel down.
+     */
+    private fun recordFatalTimeoutRodeThrough(kind: String) {
+        TmuxClientDiagnostics.record(
+            "tmux_client_fatal_timeout_rode_through",
+            commonDiagnosticFields() + mapOf(
+                "session" to sessionName,
+                "commandKind" to kind,
+                "timeoutMs" to commandTimeoutMs,
+                "transportProvenAlive" to true,
             ),
         )
     }

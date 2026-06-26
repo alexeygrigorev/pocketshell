@@ -1521,6 +1521,207 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `FatalClose select-window timeout on a PROVEN-ALIVE transport does NOT close the SSH shell (issue 979)`() =
+        runBlocking {
+            // Issue #979 / #974: a structural (`FatalClose`) control-mode command
+            // — here `select-window`, the exact production command from the
+            // connection/switch path (ConnectionPortAdapters.kt:223) — whose
+            // `%begin/%end` reply is parked behind an output burst times out. On
+            // the BASE code this calls `closeInternal` -> `shell?.close()`, which
+            // tears down the SSH shell channel and surfaces downstream as the
+            // self-inflicted "No live SSH session" drop on stable wifi.
+            //
+            // The fix: when the transport-liveness oracle (#986/#964) proves the
+            // SSH link is still alive (keepalive saw inbound bytes inside its
+            // ride-through window), a stalled structural reply is "the answer is
+            // slow," NOT "the transport is dead" — so the SSH shell must STAY OPEN
+            // and the command fails with a recoverable exception. The transport's
+            // own keepalive/probe remains the sole authority for closing the link.
+            //
+            // RED on base: `shell.closed` is true here (the SSH channel was torn
+            // down by the command timeout). GREEN with the fix: `shell.closed`
+            // stays false and a follow-up command still rides the same channel.
+            val shell = FakeShell()
+            // PROVEN-ALIVE link: the keepalive is still seeing inbound server bytes.
+            val session = FakeSession(shell, transportProvenAlive = true)
+            val timeoutGate = DeterministicCommandTimeoutGate()
+            val client = RealTmuxClient(
+                session,
+                scope,
+                commandTimeoutMs = 100L,
+                commandTimeoutGate = timeoutGate,
+            )
+            val diagnosticEvents = Collections.synchronizedList(
+                mutableListOf<Pair<String, Map<String, Any?>>>(),
+            )
+            installDiagnosticsForClient(
+                client,
+                setOf(
+                    "tmux_client_command_timeout",
+                    "tmux_client_reader_exit",
+                    "tmux_client_fatal_timeout_rode_through",
+                ),
+                diagnosticEvents,
+            )
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                val sent = scope.async {
+                    runCatching { client.sendCommand("select-window -t @3") }
+                }
+                // Wait for the command bytes to land (write completed) before
+                // firing the deterministic timeout, so the timeout observes
+                // writeCompleted = true (the FatalClose-after-write path).
+                withTimeout(2_000) {
+                    while (shell.stdinAsString() != "select-window -t @3\n") { yield(); delay(10) }
+                }
+                timeoutGate.fireNextTimeout()
+                val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+
+                // The command itself still fails (the caller is told the reply
+                // never came) — but with a recoverable exception, NOT a teardown.
+                assertTrue("expected the stalled command to fail", outcome.isFailure)
+                val ex = outcome.exceptionOrNull()!!
+                assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+                assertTrue(
+                    "timeout message must identify the command kind",
+                    ex.message?.contains("tmux command `select-window` timed out") == true,
+                )
+
+                // THE LOAD-BEARING ASSERTION (#979): the SSH shell channel must
+                // survive — a stalled structural reply on a proven-alive link must
+                // NOT self-inflict an SSH transport disconnect.
+                assertFalse(
+                    "FatalClose timeout on a PROVEN-ALIVE transport must NOT close " +
+                        "the SSH shell (issue #979 self-inflicted drop)",
+                    shell.closed,
+                )
+                assertFalse(
+                    "the disconnected latch must NOT trip — the link is still alive",
+                    client.disconnected.value,
+                )
+
+                // The ride-through is recorded (so the avoided-drop is observable),
+                // and NO reader-exit / teardown diagnostic fired.
+                assertTrue(
+                    "expected a fatal-timeout-rode-through diagnostic",
+                    diagnosticEvents.any { it.first == "tmux_client_fatal_timeout_rode_through" },
+                )
+                val rodeThrough = diagnosticEvents.first {
+                    it.first == "tmux_client_fatal_timeout_rode_through"
+                }.second
+                assertEquals("select-window", rodeThrough["commandKind"])
+                assertEquals(true, rodeThrough["transportProvenAlive"])
+                assertTrue(
+                    "a rode-through timeout must NOT emit a reader exit (no teardown)",
+                    diagnosticEvents.none { it.first == "tmux_client_reader_exit" },
+                )
+
+                // The stalled select-window's reply was written, so tmux still
+                // owes us its `%begin/%end` block — it just arrived LATE (after the
+                // timeout fired). The ride-through accounted for it as a stale
+                // block, so the reader must DISCARD this late block instead of
+                // mis-binding it to the next command (FIFO desync). Feed it now.
+                shell.feed(
+                    "%begin 1700000000 50 0\n" +
+                        "%end 1700000000 50 0\n",
+                )
+
+                // The channel is still usable: a follow-up command rides the SAME
+                // shell and completes normally — proof the SSH transport survived
+                // AND the FIFO stayed consistent (the late stale block did not
+                // steal this command's response).
+                shell.resetStdin()
+                val followUp = scope.async { client.sendCommand("list-windows") }
+                withTimeout(2_000) {
+                    while (shell.stdinAsString() != "list-windows\n") { yield(); delay(10) }
+                }
+                shell.feed(
+                    "%begin 1700000000 99 0\n" +
+                        "@3 win-three\n" +
+                        "%end 1700000000 99 0\n",
+                )
+                val followUpResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { followUp.await() }
+                assertFalse("follow-up command must succeed on the surviving channel", followUpResponse.isError)
+                assertEquals(listOf("@3 win-three"), followUpResponse.output)
+                assertFalse("follow-up must not have closed the shell", shell.closed)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `FatalClose select-window timeout on a DEAD transport still closes the SSH shell (issue 979 genuine-death preserved)`() =
+        runBlocking {
+            // Issue #979 counterpart: the genuine-death recovery path is preserved.
+            // When the transport-liveness oracle reports the link is NOT proven
+            // alive (no recent inbound activity — a genuinely dead/half-open
+            // link), a structural command timeout IS evidence the transport is
+            // dead, so the original FatalClose teardown still runs and closes the
+            // SSH shell so the reconnect ladder can recover. Same FatalClose
+            // command as the ride-through test, only the liveness signal differs.
+            val shell = FakeShell()
+            // NOT proven alive — the keepalive has seen no inbound bytes.
+            val session = FakeSession(shell, transportProvenAlive = false)
+            val timeoutGate = DeterministicCommandTimeoutGate()
+            val client = RealTmuxClient(
+                session,
+                scope,
+                commandTimeoutMs = 100L,
+                commandTimeoutGate = timeoutGate,
+            )
+            val diagnosticEvents = Collections.synchronizedList(
+                mutableListOf<Pair<String, Map<String, Any?>>>(),
+            )
+            installDiagnosticsForClient(
+                client,
+                setOf("tmux_client_reader_exit", "tmux_client_fatal_timeout_rode_through"),
+                diagnosticEvents,
+            )
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                val sent = scope.async {
+                    runCatching { client.sendCommand("select-window -t @3") }
+                }
+                withTimeout(2_000) {
+                    while (shell.stdinAsString() != "select-window -t @3\n") { yield(); delay(10) }
+                }
+                timeoutGate.fireNextTimeout()
+                val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+
+                assertTrue("expected timeout failure", outcome.isFailure)
+                assertTrue(
+                    "a dead-transport FatalClose timeout MUST close the SSH shell " +
+                        "(genuine-death recovery path preserved, issue #979)",
+                    shell.closed,
+                )
+                assertTrue("the disconnected latch must trip on a dead transport", client.disconnected.value)
+                assertEquals(
+                    TmuxDisconnectReason.CommandTimeout,
+                    client.disconnectEvent.value?.reason,
+                )
+                assertTrue(
+                    "a dead-transport timeout must NOT record a ride-through",
+                    diagnosticEvents.none { it.first == "tmux_client_fatal_timeout_rode_through" },
+                )
+                val exit = waitForDiagnosticEvent(diagnosticEvents, "tmux_client_reader_exit")
+                assertEquals("command_timeout", exit["disconnectCause"])
+                assertEquals("select-window", exit["commandKind"])
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
     fun `best-effort capture timeout drains late response without disconnecting`() = runBlocking {
         assertBestEffortTimeoutDrainsLateResponse(
             command = "capture-pane -p -e -S -200 -t %0",
@@ -2276,6 +2477,14 @@ class TmuxClientTest {
         // attach-only restore path. Tests that exercise it supply a stub; the
         // default keeps every other test (which never preflights) unchanged.
         private val execHandler: (suspend (String) -> ExecResult)? = null,
+        // Issue #979: the transport-liveness oracle (#986/#964). The default
+        // `false` mirrors a link with NO recent inbound activity — so a
+        // FatalClose command timeout STILL closes the SSH shell (the genuine
+        // dead-transport path). Set `true` to simulate a stable wifi link the
+        // keepalive is still proving alive: a stalled structural reply must then
+        // ride through WITHOUT killing the SSH channel.
+        @Volatile
+        var transportProvenAlive: Boolean = false,
     ) : SshSession {
         @Volatile
         private var closed = false
@@ -2284,6 +2493,9 @@ class TmuxClientTest {
             Collections.synchronizedList(mutableListOf())
 
         override val isConnected: Boolean get() = !closed
+
+        override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean =
+            transportProvenAlive
 
         override suspend fun exec(command: String): ExecResult {
             execCommands.add(command)

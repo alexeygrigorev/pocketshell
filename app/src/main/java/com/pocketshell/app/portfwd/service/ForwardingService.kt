@@ -8,8 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.ConnectivityManager
-import android.net.Network
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -17,10 +15,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
+import com.pocketshell.app.portfwd.DefaultDispatcher
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,12 +52,28 @@ import kotlinx.coroutines.launch
  *    user-visible notification (so the OS doesn't kill us)
  *  - Mirror connection / tunnel state from [ForwardingController] into
  *    the notification text so the user sees host name + tunnel count
- *  - Register a network-availability callback and call
- *    [ForwardingController.reconnectNow] on network recovery, so the
- *    controller-owned [com.pocketshell.core.portfwd.AutoForwarderSupervisor]
- *    skips its exponential-backoff sleep
  *  - Stop itself when [ForwardingController.flowOfActiveHostCount]
  *    drops to zero (all hosts disabled their auto-forward toggle)
+ *
+ * ## Network-change handling is NOT the service's job (issue #980)
+ *
+ * The service deliberately does NOT register its own network callback.
+ * Before #980 it registered a raw `ConnectivityManager.registerDefaultNetworkCallback`
+ * that called [ForwardingController.forceReconnectNow] on ANY raw
+ * `onLost`→`onAvailable` pair — including a same-AP band-steer / mesh-node
+ * roam / momentary RF re-association the link actually survives. That
+ * force-closed a transport whose keepalive window said it was still alive,
+ * a self-inflicted drop on stable wifi (the #974 signature) — and it
+ * bypassed the same-SSID-reassoc hardening
+ * ([com.pocketshell.app.connectivity.TerminalNetworkObserver]'s
+ * `hasSameNetworkIdentityAs`, #875) that the rest of the app uses.
+ *
+ * Network-driven reconnect for the forwarding feature is owned SOLELY by
+ * [ForwardingController], which subscribes to the hardened, debounced
+ * `TerminalNetworkObserver.changes` signal and forces a rebuild only on a
+ * REAL validated default-network handoff. Hard-cut (D22): the service's
+ * private raw callback is deleted, not gated behind a flag — there is one
+ * hardened network path, not two competing ones.
  */
 @AndroidEntryPoint
 class ForwardingService : Service() {
@@ -65,12 +81,55 @@ class ForwardingService : Service() {
     @Inject
     lateinit var controller: ForwardingController
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Dispatcher backing the notification-observe coroutine ([startObserving]).
+     *
+     * Injected (not a bare `Dispatchers.Default`) so a test can confine the
+     * observe loop to its own [kotlinx.coroutines.test.TestDispatcher] — one it
+     * cancels in `@After` — instead of leaking a real `Dispatchers.Default`
+     * background coroutine that outlives the test and dereferences the
+     * already-torn-down Robolectric Application in [updateNotification] (issue
+     * #994: the intermittent full-suite `UncaughtExceptionsBeforeTest` NPE).
+     *
+     * Hilt field injection runs for this `@AndroidEntryPoint` service before
+     * `onCreate`, so by the time [onStartCommand] builds [scope] the injected
+     * dispatcher is in place. The `Dispatchers.Default` default keeps a
+     * non-Hilt-graph instantiation (a plain `new ForwardingService()` in a unit
+     * test that does not exercise the observe loop) working without a crash.
+     */
+    @Inject
+    @DefaultDispatcher
+    @JvmField
+    @androidx.annotation.VisibleForTesting
+    var observeDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+    // Built lazily off [observeDispatcher] on first use ([startObserving]) so the
+    // injected dispatcher (set by Hilt field injection before onStartCommand, or
+    // by a test before it drives onStartCommand) backs the scope. `lazy` rather
+    // than building it in onCreate because the generated `Hilt_ForwardingService`
+    // onCreate requires a @HiltAndroidApp Application — a plain Robolectric unit
+    // test drives onStartCommand directly without onCreate, so scope creation must
+    // not depend on onCreate having run. Cancelled in [onDestroy].
+    private val scopeDelegate = lazy {
+        // SupervisorJob so a failure in the observe collector does not cascade.
+        CoroutineScope(SupervisorJob() + observeDispatcher)
+    }
+    private val scope: CoroutineScope by scopeDelegate
     private var observeJob: Job? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    @Volatile
-    private var defaultNetworkWasLost = false
     private var hasStartedForeground = false
+
+    /** Issue #994 test seam: the observe coroutine, so a test can assert it is
+     * active while observing and cancelled by `onDestroy()`. */
+    @get:androidx.annotation.VisibleForTesting
+    internal val observeJobForTest: Job?
+        get() = observeJob
+
+    /** Issue #994 test seam: the dispatcher the observe collector resumed on,
+     * recorded in [startObserving]. Lets a test assert the observe loop is
+     * confined to the injected dispatcher, not a leaked Dispatchers.Default. */
+    @androidx.annotation.VisibleForTesting
+    internal var lastObserveDispatcherForTest: CoroutineDispatcher? = null
+        private set
 
     companion object {
         private const val TAG = "PsForwardingService"
@@ -189,7 +248,6 @@ class ForwardingService : Service() {
                 promoteToForegroundIfNeeded(initialNotification())
                 if (observeJob == null || observeJob?.isActive != true) {
                     startObserving()
-                    registerNetworkCallback()
                 }
             }
         }
@@ -206,8 +264,10 @@ class ForwardingService : Service() {
     override fun onDestroy() {
         observeJob?.cancel()
         observeJob = null
-        unregisterNetworkCallback()
-        scope.cancel()
+        // Cancel the observe-loop scope so no coroutine outlives the service
+        // (issue #994). Guarded so we don't force-create the lazy scope just to
+        // cancel it on a service that never started observing.
+        if (scopeDelegate.isInitialized()) scope.cancel()
         super.onDestroy()
     }
 
@@ -229,6 +289,12 @@ class ForwardingService : Service() {
 
     private fun startObserving() {
         observeJob = scope.launch {
+            // Issue #994: record the dispatcher the collector actually resumed
+            // on so a JVM test can assert the observe loop is confined to the
+            // INJECTED dispatcher (not a free-running Dispatchers.Default thread
+            // that outlives the test). No production effect — read only by tests.
+            lastObserveDispatcherForTest =
+                coroutineContext[kotlinx.coroutines.CoroutineDispatcher]
             // Combine active-host count + tunnel count so a single
             // collector renders both into the notification. Dropping
             // duplicates means we don't churn the notification on
@@ -264,69 +330,9 @@ class ForwardingService : Service() {
         }
     }
 
-    private fun registerNetworkCallback() {
-        if (networkCallback != null) return
-        defaultNetworkWasLost = false
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            ?: return
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                handleDefaultNetworkAvailable()
-            }
-
-            override fun onLost(network: Network) {
-                handleDefaultNetworkLost()
-            }
-        }
-        try {
-            cm.registerDefaultNetworkCallback(cb)
-            networkCallback = cb
-        } catch (_: SecurityException) {
-            // Some restricted profiles disallow registering network
-            // callbacks. Reconnect-on-network-recovery becomes a
-            // best-effort feature in that case; the underlying
-            // supervisor still retries on its own backoff schedule.
-        }
-    }
-
-    private fun unregisterNetworkCallback() {
-        val cb = networkCallback ?: return
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        try {
-            cm?.unregisterNetworkCallback(cb)
-        } catch (_: IllegalArgumentException) {
-            // Already unregistered (e.g. service was stop/started
-            // quickly). Safe to ignore.
-        }
-        networkCallback = null
-        defaultNetworkWasLost = false
-    }
-
-    @androidx.annotation.VisibleForTesting
-    internal fun handleDefaultNetworkAvailable() {
-        // Network came back. Nudge the supervisor(s) so any in-flight
-        // backoff sleep cancels and a reconnect attempt happens
-        // immediately. If we observed an actual default-network loss
-        // first, force a transport rebuild: sshj can leave the old
-        // session looking "connected" after Android swaps networks,
-        // while the forwards are already dead.
-        if (defaultNetworkWasLost) {
-            defaultNetworkWasLost = false
-            controller.forceReconnectNow()
-        } else {
-            controller.reconnectNow()
-        }
-    }
-
-    @androidx.annotation.VisibleForTesting
-    internal fun handleDefaultNetworkLost() {
-        defaultNetworkWasLost = true
-    }
-
     private fun stopForwarding() {
         observeJob?.cancel()
         observeJob = null
-        unregisterNetworkCallback()
         // STOP_FOREGROUND_REMOVE makes the notification disappear
         // immediately. The constant has been stable since API 24.
         stopForeground(STOP_FOREGROUND_REMOVE)

@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -111,6 +112,101 @@ class SshLeaseLifetimeCharacterizationTest {
     }
 
     @Test
+    fun `switching across three hosts does not cold-redial a still-warm host`() = runTest {
+        // Issue #996 (reproduce-first, D33/G10): the lease pool's idle cap must
+        // cover a realistic multi-host working set. The maintainer's reported
+        // journey is a 3-host round-trip A->B->C->A: at the moment the user
+        // switches BACK to A, A's still-warm idle transport must NOT be trimmed
+        // out from under them and cold-redialed.
+        //
+        // RED on the PRE-FIX cap of 2: after C goes idle the pool holds three
+        // idle entries {A,B,C}; trimIdleLocked evicts the LRU (A) the instant it
+        // exceeds the cap, so switching back to A is a fresh handshake
+        // (isNewConnection == true, connectCount for A bumps).
+        //
+        // GREEN on the SHIPPED default cap (4): {A,B,C} (3) <= 4, no trim, A is
+        // reused warm (isNewConnection == false, no extra handshake for A).
+        //
+        // The load-bearing, behavior-true assertions (G6) are BOTH the
+        // per-host counting-connector handshake count AND isNewConnection ==
+        // false — isNewConnection alone could be satisfied by a proxy.
+        val connector = MultiHostCountingConnector()
+        val manager = leaseManager(
+            connector,
+            idleTtlMillis = 60_000,
+            maxIdleLeases = SshLeaseManager.DEFAULT_MAX_IDLE_LEASES,
+        )
+
+        // Open + immediately release each host (each goes idle, warm, TTL armed).
+        manager.acquire(TARGET_A).getOrThrow().release() // A idle
+        manager.acquire(TARGET_B).getOrThrow().release() // B idle
+        manager.acquire(TARGET_C).getOrThrow().release() // C idle -> trims A pre-fix
+        runCurrent()
+
+        assertEquals("three distinct hosts -> three cold dials so far", 3, connector.totalConnects)
+        val aConnectsBefore = connector.connectsFor(TARGET_A.leaseKey)
+        assertEquals("host A dialed exactly once on its first open", 1, aConnectsBefore)
+
+        // Switch back to A. A was warm three steps ago and the network never
+        // dropped: this must be a warm reuse, not a self-inflicted cold redial.
+        val a2 = manager.acquire(TARGET_A).getOrThrow()
+        assertFalse(
+            "host A must reuse its still-warm lease on switch-back, not cold-redial",
+            a2.isNewConnection,
+        )
+        assertEquals(
+            "no extra handshake for a still-warm host on switch-back",
+            aConnectsBefore,
+            connector.connectsFor(TARGET_A.leaseKey),
+        )
+        a2.release()
+    }
+
+    @Test
+    fun `the idle cap still trims the lru once the working set exceeds it`() = runTest {
+        // Issue #996: raising the cap must NOT make the pool unbounded — the
+        // existing LRU + TTL trim must still be the ceiling. With the shipped
+        // default cap of 4, opening a FIFTH idle host pushes the idle set to 5,
+        // exceeding the cap, so the LRU (the first-idled host) is IdleTrimmed and
+        // a switch-back to it IS a genuine cold redial. Proves the bound holds.
+        val connector = MultiHostCountingConnector()
+        val manager = leaseManager(
+            connector,
+            idleTtlMillis = 60_000,
+            maxIdleLeases = SshLeaseManager.DEFAULT_MAX_IDLE_LEASES,
+        )
+
+        val trimmedKeys = mutableListOf<SshLeaseKey>()
+        val collector = launch {
+            manager.stateEvents.collect { event ->
+                if (event.closeReason == SshLeaseCloseReason.IdleTrimmed) {
+                    trimmedKeys += event.key
+                }
+            }
+        }
+        runCurrent()
+
+        // Five distinct hosts, each opened then released (idled), in order.
+        val hosts = listOf(TARGET_A, TARGET_B, TARGET_C, TARGET_D, TARGET_E)
+        hosts.forEach { manager.acquire(it).getOrThrow().release() }
+        runCurrent()
+
+        // The cap is 4; the 5th idle host trips the trim, evicting the LRU (A,
+        // the first-idled). Exactly one host is trimmed and it is the oldest.
+        assertEquals("exactly one host is trimmed once the cap is exceeded", 1, trimmedKeys.size)
+        assertEquals("the LRU (first-idled) host is the one trimmed", TARGET_A.leaseKey, trimmedKeys.single())
+
+        // Switching back to the trimmed LRU host IS a genuine cold redial: the
+        // cap correctly bounds the pool.
+        val a2 = manager.acquire(TARGET_A).getOrThrow()
+        assertTrue("the trimmed LRU host cold-redials on switch-back", a2.isNewConnection)
+        assertEquals("the trimmed host dials a second time", 2, connector.connectsFor(TARGET_A.leaseKey))
+        a2.release()
+
+        collector.cancel()
+    }
+
+    @Test
     fun `the default idle ttl keeps a released lease warm for sixty seconds`() = runTest {
         // The warm window is exactly DEFAULT_IDLE_TTL_MILLIS = 60s (the value the
         // target architecture wants to make THE single grace clock — collapsing
@@ -168,6 +264,27 @@ class SshLeaseLifetimeCharacterizationTest {
         }
     }
 
+    /**
+     * Issue #996: a connector that mints a fresh [FakeSshSession] per dial and
+     * counts dials PER lease key, so a multi-host journey can assert exactly
+     * which host got cold-redialed (vs reused warm). Distinct from
+     * [QueueLeaseConnector] (single-host, global queue) — here every host has an
+     * independent transport and an independent connect counter.
+     */
+    private class MultiHostCountingConnector : SshLeaseConnector {
+        private val countsByKey: MutableMap<SshLeaseKey, Int> = mutableMapOf()
+        var totalConnects: Int = 0
+            private set
+
+        fun connectsFor(key: SshLeaseKey): Int = countsByKey[key] ?: 0
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            countsByKey[target.leaseKey] = (countsByKey[target.leaseKey] ?: 0) + 1
+            totalConnects += 1
+            return Result.success(FakeSshSession())
+        }
+    }
+
     private class FakeSshSession : SshSession {
         var closed: Boolean = false
         var connected: Boolean = true
@@ -219,5 +336,22 @@ class SshLeaseLifetimeCharacterizationTest {
             ),
             key = SshKey.Path(File("/tmp/key-a")),
         )
+
+        // Issue #996: distinct per-host targets for the multi-host journey.
+        private fun targetForHost(host: String): SshLeaseTarget = SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = host,
+                port = 2222,
+                user = "testuser",
+                credentialId = "/tmp/key-$host",
+            ),
+            key = SshKey.Path(File("/tmp/key-$host")),
+        )
+
+        val TARGET_A: SshLeaseTarget = targetForHost("hostA")
+        val TARGET_B: SshLeaseTarget = targetForHost("hostB")
+        val TARGET_C: SshLeaseTarget = targetForHost("hostC")
+        val TARGET_D: SshLeaseTarget = targetForHost("hostD")
+        val TARGET_E: SshLeaseTarget = targetForHost("hostE")
     }
 }

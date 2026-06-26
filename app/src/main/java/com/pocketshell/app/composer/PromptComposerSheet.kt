@@ -1138,7 +1138,15 @@ internal fun SheetContent(
         // up. Surfaced the moment the host reports the SSH/tmux link is
         // degraded/lost, BEFORE the user taps Send, so a send into a dead link
         // is never a silent blind wait.
-        if (state.connectionDegraded) {
+        //
+        // Issue #971/#987 (Option A): once there is a queued outbound prompt
+        // waiting, the OutboundQueueBanner already carries the SINGLE coherent
+        // "Will send when reconnected." status. Showing this standalone
+        // "Connection lost — Send will retry once reconnected." banner on top of
+        // it is the exact duplicated/contradictory stack the maintainer reported
+        // on #987 — so suppress it whenever the queue banner is present. With no
+        // queued prompt the standalone indicator still warns BEFORE the first Send.
+        if (state.connectionDegraded && outboundQueueItems.isEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1389,7 +1397,18 @@ public fun PromptComposerSendDispatcher(
                 viewModel.markSendDelivered(request)
                 currentOnDelivered()
             } else {
-                viewModel.restoreFailedSend(request)
+                // Issue #971/#987 (maintainer decision — Option A): a failed /
+                // timed-out send on a degraded link is a connection drop, not a
+                // permanent rejection. The host `onSend` cannot distinguish the
+                // two (it returns only false/timeout), so treat it as the common
+                // drop case: keep the prompt QUEUED and auto-send it on reconnect
+                // (the #900 flush wired in TmuxSessionScreen) instead of returning
+                // it to the composer for a manual resend. This removes the
+                // contradictory "send again or discard" vs "will retry" stacking
+                // the maintainer reported on #987. markOutboundSendDeferred falls
+                // back to a composer-restore only when there is no durable queue
+                // row, so the prompt is never silently lost.
+                viewModel.markOutboundSendDeferred(request)
             }
         }
     }
@@ -3057,7 +3076,10 @@ internal fun outboundQueueSubline(items: List<OutboundItem>): String {
 }
 
 internal fun outboundQueueStateLabel(item: OutboundItem): String = when (item.state) {
-    OutboundState.Queued -> "Queued"
+    // Issue #971/#987 (Option A): a queued row is waiting to auto-send on
+    // reconnect — show the SINGLE coherent status, not a bare "Queued" that
+    // reads as a mysterious stuck item next to the connection chrome.
+    OutboundState.Queued -> PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE
     OutboundState.Uploading -> "Uploading attachments"
     OutboundState.InFlight -> "Sending"
     OutboundState.Delivered -> "Delivered"

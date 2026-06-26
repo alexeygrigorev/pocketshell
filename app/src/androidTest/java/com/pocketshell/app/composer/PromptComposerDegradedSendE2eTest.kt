@@ -39,6 +39,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -106,7 +107,9 @@ class PromptComposerDegradedSendE2eTest {
         override fun whisperLanguageHint(): String? = null
     }
 
-    private fun newViewModel(): PromptComposerViewModel = PromptComposerViewModel(
+    private fun newViewModel(
+        outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
+    ): PromptComposerViewModel = PromptComposerViewModel(
         audioRecorder = TestMicCapture(),
         whisperClientFactory = WhisperClientFactory {
             object : WhisperClient {
@@ -116,6 +119,7 @@ class PromptComposerDegradedSendE2eTest {
         },
         apiKeyStorage = TestVault(),
         voiceSettings = TestVoiceSettings(),
+        outboundQueueStore = outboundQueueStore,
     )
 
     /**
@@ -128,6 +132,8 @@ class PromptComposerDegradedSendE2eTest {
         visibleState: androidx.compose.runtime.MutableState<Boolean>,
         connectionLost: Boolean,
         onAttachFiles: (() -> Unit)? = null,
+        sendTarget: PromptComposerViewModel.SendTargetSnapshot =
+            PromptComposerViewModel.SendTargetSnapshot(),
     ) {
         compose.activityRule.scenario.onActivity { activity ->
             val dark = PocketShellColors.Background.toArgb()
@@ -152,6 +158,7 @@ class PromptComposerDegradedSendE2eTest {
                 val visible by remember { visibleState }
                 if (visible) {
                     val state by vm.uiState.collectAsState()
+                    val queue by vm.outboundQueueItems.collectAsState()
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -164,8 +171,11 @@ class PromptComposerDegradedSendE2eTest {
                             onClose = {},
                             onDraftChange = vm::onDraftChange,
                             onMicTap = {},
-                            onSend = { withEnter -> vm.requestSend(withEnter) },
+                            onSend = { withEnter -> vm.requestSend(withEnter, sendTarget) },
                             onAttachFiles = onAttachFiles,
+                            outboundQueueItems = queue,
+                            onDeleteOutboundItem = vm::discardOutboundItem,
+                            onRetryOutboundItem = vm::retryOutboundItem,
                         )
                     }
                 }
@@ -233,8 +243,9 @@ class PromptComposerDegradedSendE2eTest {
         }
         compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsNotEnabled()
-        // The draft is STILL on screen mid-flight — no optimistic empty/flicker.
-        assertEquals("restart the worker pool", vm.uiState.value.draft)
+        // Issue #971: the prompt is HANDED OFF mid-flight — the editor is cleared
+        // (single representation), so the same prompt is never shown twice.
+        assertEquals("", vm.uiState.value.draft)
         WalkthroughScreenshotArtifacts.capture("issue-745-02-sending-in-flight")
 
         // (c) the failure resolves within a BOUNDED time. We release the hung
@@ -305,9 +316,10 @@ class PromptComposerDegradedSendE2eTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertIsDisplayed()
-        assertEquals("deploy the staging branch", vm.uiState.value.draft)
+        // Issue #971: the prompt is handed off mid-flight — the editor is cleared.
+        assertEquals("", vm.uiState.value.draft)
 
-        // Host confirms delivery → draft clears AND the composer dismisses.
+        // Host confirms delivery → draft stays cleared AND the composer dismisses.
         releaseSend.complete(true)
         compose.waitUntil(timeoutMillis = 5_000) { !visible.value }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertDoesNotExist()
@@ -420,5 +432,123 @@ class PromptComposerDegradedSendE2eTest {
         assertTrue(second.text.contains(attachPath))
 
         compose.runOnUiThread { vm.discardDraft() }
+    }
+
+    @Test
+    fun issue971_inFlightShowsPromptOnceThenDropStaysQueuedAutoSendsOnReconnect() {
+        // Issue #971/#987 (G10 end-to-end reproduce-first, maintainer Option A):
+        // the maintainer's v0.4.18 + v0.4.18-drop dogfood — while a send is in
+        // flight the SAME prompt (`/clear`) showed up TWICE (editor + "1 unsent
+        // prompt — Sending" row) and on a DROP the composer stacked contradictory
+        // status (the prompt back in the editor + "Not sent… send again or
+        // discard" AND "Send will retry once reconnected"). The CANONICAL design
+        // drives the PRODUCTION [PromptComposerViewModel] + [SheetContent] +
+        // [PromptComposerSendDispatcher] with a real outbound queue store and
+        // asserts the new contract:
+        //  (a) in flight the editor is EMPTY (single representation) with Send
+        //      disabled,
+        //  (b) on a drop the prompt STAYS as ONE queued "Will send when
+        //      reconnected." row (NOT returned to the composer), with NO "Not
+        //      sent / send again or discard" error and NO duplicate
+        //      "Connection lost" banner,
+        //  (c) on reconnect the queued row AUTO-SENDS (the #900 flush) and is
+        //      pruned on delivery.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newViewModel(outboundQueueStore = queue)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        vm.onComposerTargetChanged("1/session-a")
+        val visible = mutableStateOf(true)
+        // The host's send behaviour is test-controlled: the FIRST dispatch fails
+        // (the drop), and after "reconnect" the SECOND dispatch (the auto-flush)
+        // delivers. This mirrors the production
+        // sendRequests → markSendDelivered | markOutboundSendDeferred wiring.
+        val sendCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val firstSendEntered = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Boolean>()
+        val secondSendEntered = CompletableDeferred<Unit>()
+        collectorScope.launch {
+            vm.sendRequests.collect { request ->
+                val attempt = sendCount.incrementAndGet()
+                if (attempt == 1) {
+                    firstSendEntered.complete(Unit)
+                    val delivered = withTimeoutOrNull(8_000L) { releaseFirst.await() } == true
+                    if (delivered) vm.markSendDelivered(request) else vm.markOutboundSendDeferred(request)
+                } else {
+                    secondSendEntered.complete(Unit)
+                    // The reconnect auto-flush delivers.
+                    vm.markSendDelivered(request)
+                    visible.value = false
+                }
+            }
+        }
+        // Connection is down at first (the drop scenario).
+        renderComposer(vm, visible, connectionLost = true, sendTarget = target)
+
+        // Type the prompt the maintainer reported being duplicated.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("/clear")
+        compose.waitForIdle()
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertTextContains("/clear", substring = true)
+
+        // Tap Send.
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { firstSendEntered.isCompleted }
+        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.sendInFlight }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(COMPOSER_SEND_IN_FLIGHT_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // (a) SINGLE REPRESENTATION in flight: editor EMPTY, ONE queue banner,
+        // Send disabled.
+        assertEquals("", vm.uiState.value.draft)
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("1 unsent prompt", substring = true).assertIsDisplayed()
+        assertEquals(listOf("/clear"), vm.outboundQueueItems.value.map { it.cleanText })
+        assertEquals(1, vm.outboundQueueItems.value.size)
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsNotEnabled()
+        WalkthroughScreenshotArtifacts.capture("issue-971-01-in-flight-single-representation")
+
+        // The send fails because the connection dropped.
+        releaseFirst.complete(false)
+        compose.waitUntil(timeoutMillis = 5_000) { !vm.uiState.value.sendInFlight }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(COMPOSER_SEND_IN_FLIGHT_TAG)
+                .fetchSemanticsNodes().isEmpty()
+        }
+
+        // (b) DROP → the prompt STAYS QUEUED, NOT returned to the composer:
+        //  - the editor is still EMPTY (no manual-resend draft),
+        //  - exactly ONE queued row remains, reading "Will send when reconnected.",
+        //  - NO "Not sent / send again or discard" error banner,
+        //  - the standalone "Connection lost" banner is SUPPRESSED (the queue
+        //    banner is the single status — no contradictory stack).
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(1, vm.outboundQueueItems.value.size)
+        assertEquals(OutboundState.Queued, vm.outboundQueueItems.value.single().state)
+        assertNull(
+            "a drop must not stamp a 'Not sent / send again or discard' error",
+            vm.uiState.value.error,
+        )
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
+        compose.onNodeWithText(
+            PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE,
+            substring = true,
+        ).assertIsDisplayed()
+        compose.onNodeWithText("send again or discard").assertDoesNotExist()
+        compose.onNodeWithTag(COMPOSER_CONNECTION_LOST_TAG).assertDoesNotExist()
+        WalkthroughScreenshotArtifacts.capture("issue-971-02-drop-single-status-stays-queued")
+
+        // (c) RECONNECT → the queued row auto-sends via the #900 flush and is
+        // pruned on delivery. (The production TmuxSessionScreen calls
+        // requeueStaleOutboundInFlight + retryNextOutboundItem on each refresh;
+        // we drive the flush directly here.)
+        compose.runOnUiThread { vm.setConnectionDegraded(false) }
+        compose.runOnUiThread { vm.retryNextOutboundItem() }
+        compose.waitUntil(timeoutMillis = 5_000) { secondSendEntered.isCompleted }
+        compose.waitUntil(timeoutMillis = 5_000) { !visible.value }
+        assertEquals(2, sendCount.get())
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+        assertEquals("", vm.uiState.value.draft)
+        WalkthroughScreenshotArtifacts.capture("issue-971-03-reconnect-auto-sent-queue-cleared")
     }
 }

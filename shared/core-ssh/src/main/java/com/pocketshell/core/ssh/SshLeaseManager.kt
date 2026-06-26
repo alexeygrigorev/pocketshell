@@ -645,7 +645,24 @@ public class SshLeaseManager(
 
     public companion object {
         public const val DEFAULT_IDLE_TTL_MILLIS: Long = 60_000L
-        public const val DEFAULT_MAX_IDLE_LEASES: Int = 2
+
+        /**
+         * Issue #996: maximum number of zero-ref (warm/idle) transports the pool
+         * keeps open at once before [trimIdleLocked] evicts the LRU.
+         *
+         * Raised from 2 to 4. At 2, a 3-host round-trip (A->B->C->A) trimmed
+         * host A's still-warm transport in the very gesture the user switched
+         * BACK to it — a self-inflicted COLD redial (fresh handshake +
+         * `Connecting` overlay) on a stable network. 4 covers a comfortable
+         * 3-host active working set plus one in-flight, so a switch-back reuses
+         * the warm lease instead of cold-redialing. The existing LRU + 60s-TTL
+         * trim ([trimIdleLocked] / [DEFAULT_IDLE_TTL_MILLIS]) is RETAINED as the
+         * ceiling: a burst beyond the cap still evicts the LRU, and a truly
+         * abandoned host still closes after the TTL — the pool can never grow
+         * unbounded. The maintainer may tune this number later for a larger
+         * working set (cap = working-set + 1).
+         */
+        public const val DEFAULT_MAX_IDLE_LEASES: Int = 4
 
         /**
          * Issue #687: default hard cap on a single owned cold connect/handshake.

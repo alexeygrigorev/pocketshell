@@ -3599,6 +3599,218 @@ class TmuxSessionViewModelTest {
         assertEquals(0, connector.connectCount)
     }
 
+    // ---- Issue #981: network handoff rides through while the transport is proven alive ----
+
+    @Test
+    fun issue981ValidatedNetworkFlipDoesNotTearDownTransportProvenAliveLink() = runTest(scheduler) {
+        // Issue #981 reproduce-first (red on base): a REAL validated default-network
+        // identity flip (WIFI→CELLULAR) arrives while the live SSH transport is
+        // provably alive (its keepalive saw inbound bytes within the ride-through
+        // window — the #974 stable-wifi case where -CC traffic keeps the link warm).
+        // The reactive handoff path must NOT tear down + redial the healthy socket.
+        // On base (no liveness gate) this asserts Reconnecting + 1 connect and FAILS;
+        // with the fix it rides through (Connected, zero connects).
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        // A live session whose transport keepalive proves the link is alive.
+        val session = FakeSshSession().apply { transportProvenAlive = true }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        advanceUntilIdle()
+        assertTrue(
+            "precondition: the link is the proven-alive transport the gate must ride through",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "transient-wifi-cellular-flip-on-stable-wifi",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "a validated network flip while the transport is PROVEN ALIVE must ride through, " +
+                "not tear down the healthy socket (#981 / #974 stable-wifi drop)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "no redial may be scheduled while the old transport is provably alive",
+            0,
+            connector.connectCount,
+        )
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+        assertNotEquals(
+            "the proactive-handoff redial intent must NOT fire on a proven-alive link",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+    }
+
+    @Test
+    fun issue981ValidatedNetworkFlipStillReconnectsWhenTransportIsDead() = runTest(scheduler) {
+        // Issue #981 class-coverage (G2): the gate must NOT mask a GENUINE handoff.
+        // Same WIFI→CELLULAR flip, but the transport keepalive has aged out (the old
+        // socket is really dead) → the path must STILL reconnect, exactly as before.
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        // A live session whose transport keepalive has stopped proving liveness.
+        val session = FakeSshSession().apply { transportProvenAlive = false }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        runCurrent()
+        assertFalse(
+            "precondition: the dead transport must NOT report proven-alive",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "genuine-wifi-cellular-handoff-dead-link",
+            ),
+        )
+        runCurrent()
+
+        assertEquals(
+            "a genuine handoff on a DEAD link must still proactively reconnect (gate must not mask recovery)",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+    }
+
+    @Test
+    fun issue981SameIdentityReassocStillSuppressedRegardlessOfTransportLiveness() = runTest(scheduler) {
+        // Issue #981 class-coverage: a same-identity reassoc (#875 pure-{WIFI} roam)
+        // is still suppressed by hasSameNetworkIdentityAs BEFORE the liveness gate,
+        // so the new gate does not change that path — proven-alive or not.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val session = FakeSshSession().apply { transportProvenAlive = false }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        advanceUntilIdle()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("wifi"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "same-identity-reassoc",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "a same-identity reassoc is suppressed upstream (#875) and never reaches the redial",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    @Test
+    fun issue981ReducerSuppressesProvenAliveButSchedulesDeadLinkFlip() = runTest(scheduler) {
+        // Issue #981 reducer-level proof: the decision classifier itself returns
+        // SuppressNetworkTransportProvenAlive when proven alive and
+        // ScheduleNetworkReconnect when the link is dead, using the explicit seam.
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        // Proven alive → ride through.
+        vm.forceTransportProvenAliveForTest = true
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "flip-while-proven-alive"),
+        )
+        runCurrent()
+        assertTrue(
+            "proven-alive flip rides through (no Reconnecting band)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+
+        // Aged out (dead) → reconnect.
+        vm.forceTransportProvenAliveForTest = false
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "flip-while-dead", sequence = 2L),
+        )
+        runCurrent()
+        assertEquals(
+            "once the keepalive is dead the same flip must schedule the proactive reconnect",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+
+        vm.forceTransportProvenAliveForTest = null
+    }
+
     @Test
     fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)

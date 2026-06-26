@@ -216,6 +216,144 @@ class StableWifiNoSpuriousReconnectE2eTest {
         writeTimings()
     }
 
+    /**
+     * ISSUE #981 — a REAL validated WIFI→CELLULAR identity flip (which DOES emit,
+     * past the #875 identity suppression) on a STABLE wifi while the live SSH
+     * transport is provably alive must NOT tear down + redial the healthy socket
+     * (the #974 stable-wifi drop). This is the gap the #875 proof above leaves:
+     * it deliberately does NOT drive the emitted WIFI→CELLULAR handoff to
+     * completion against a live transport. Here we DO — a transient default-network
+     * validation flip while the keepalive is still proving the link alive — and
+     * assert ZERO reconnect on the FULL on-device path (observer detector → App
+     * `changes` collector → VM network hook → `reduceNetworkChanged`).
+     *
+     * The transport-proven-alive state is pinned SYNTHETICALLY via
+     * [TmuxSessionViewModel.forceTransportProvenAliveForTest] (the #780 model — a
+     * HARD inject, no `assumeTrue` skip) so the load-bearing assertion runs on the
+     * CI swiftshader AVD too, modelling a live `-CC` link whose keepalive saw
+     * inbound bytes within the ride-through window.
+     *
+     * On BASE (no #981 liveness gate) the emitted WIFI→CELLULAR change →
+     * `scheduleNetworkReconnect` records `network_reconnect_start` + raises the
+     * Reconnecting band → the ZERO-reconnect assertions FAIL (RED). With the gate
+     * the proven-alive transport is ridden through → no diagnostics, no band,
+     * viewport painted, session stays Connected (GREEN).
+     */
+    @Test
+    fun realValidatedHandoffWhileTransportProvenAliveDoesNotReconnect() = runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        // Let the attach FULLY settle (the transient "Attaching…" switching overlay
+        // is part of the initial attach, not a reconnect) so the "stable wifi"
+        // precondition genuinely holds before we drive the flip.
+        waitForNoSwitchingOverlay("pre-flip attach settle")
+        captureViewport("issue981-01-attached")
+        diagnostics!!.clear()
+
+        // Pin the live transport as PROVEN ALIVE (the #974 case: a real -CC link
+        // whose keepalive saw inbound bytes within the ride-through window). HARD
+        // synthetic inject (#780) — no skip — so the gate is exercised on CI too.
+        currentViewModel().forceTransportProvenAliveForTest = true
+        try {
+            val observer = terminalNetworkObserver()
+            // Seed a baseline pure-WIFI identity so the next snapshot is a genuine
+            // transport-CHANGING flip (different identity → emits past #875).
+            observer.emitSyntheticSnapshotForTest(
+                TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+                reason = "issue981-baseline-wifi",
+            )
+
+            // THE FLIP: a real WIFI→CELLULAR validated identity change. This DOES
+            // emit (different transports → not identity-identical) and reaches the VM
+            // network hook — exactly the transient stable-wifi validation flip from
+            // #974. The #981 liveness gate must ride it through.
+            val flipStart = SystemClock.elapsedRealtime()
+            val emitted = observer.emitSyntheticSnapshotForTest(
+                TerminalNetworkSnapshot.Validated(networkHandle = "cell-X", transports = setOf("CELLULAR")),
+                reason = "issue981-transient-wifi-cellular-flip",
+            )
+            recordTiming("issue981_flip_emit_ms", SystemClock.elapsedRealtime() - flipStart)
+
+            // Sanity: the flip genuinely EMITTED (past #875). If it were suppressed
+            // upstream this proof would be vacuous (G6) — assert it actually reached
+            // the VM hook so the gate, not the detector, is what rides it through.
+            assertNotNull(
+                "the WIFI→CELLULAR flip must EMIT (different identity, past #875) so the " +
+                    "#981 liveness gate — not the detector — is what suppresses the redial",
+                emitted,
+            )
+
+            // Watch the AUTHORITATIVE redial signal across the whole window: the redial
+            // path records `network_reconnect_start` the instant it tears down + redials
+            // (it fires on BASE the moment the emitted flip reaches the VM hook). The
+            // teardown also bumps the connect-attempt counter. A transient "Attaching…"
+            // recomposition is NOT the symptom (no socket was torn down) — the redial
+            // diagnostic + connect attempt are, so those are the load-bearing watch.
+            watchNoReconnectDiagnostics("during proven-alive handoff", WATCH_NO_RECONNECT_MS)
+
+            // LOAD-BEARING #1 (the always-available authoritative proof): ZERO redial
+            // diagnostics. `network_reconnect_start` is the loud signal the redial path
+            // records — it fires on BASE and is absent with the gate.
+            assertNoReconnectDiagnostics("after proven-alive handoff")
+            // LOAD-BEARING #2 (positive control, G6 — the gate actually FIRED, not a
+            // vacuous pass): the suppress decision was recorded with the proven-alive
+            // cause. This proves the #981 gate — not the detector — rode it through.
+            val suppressedAlive = diagnostics!!.eventsNamed("network_reconnect_skip")
+                .filter { it.fields["cause"] == "transport_proven_alive" }
+            assertTrue(
+                "expected the #981 liveness gate to record a transport_proven_alive " +
+                    "suppress for the emitted WIFI→CELLULAR flip (proves the gate fired, " +
+                    "not a vacuous pass); skips=${diagnostics!!.eventsNamed("network_reconnect_skip")}",
+                suppressedAlive.isNotEmpty(),
+            )
+            // LOAD-BEARING #3: the session settles back to a steady Connected state with
+            // the viewport painted and NO lingering reconnect band — the user is never
+            // left in a Reconnecting/Disconnected state by the flip.
+            waitForConnected("after proven-alive handoff")
+            waitForVisibleTerminal("after handoff terminal") { it.contains(READY_MARKER) }
+            waitForNoSwitchingOverlay("after proven-alive handoff settle")
+            assertNoVisibleReconnect("after proven-alive handoff")
+            captureViewport("issue981-02-after-proven-alive-handoff")
+        } finally {
+            currentViewModel().forceTransportProvenAliveForTest = null
+        }
+
+        writeTimings()
+    }
+
+    private fun currentViewModel(): TmuxSessionViewModel {
+        lateinit var vm: TmuxSessionViewModel
+        compose.activityRule.scenario.onActivity { activity ->
+            vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+        }
+        return vm
+    }
+
+    /**
+     * Wait until the transient "Attaching…" switching-loading overlay is gone — it
+     * appears as part of the initial attach settle and is NOT a reconnect. Gating on
+     * its absence establishes the genuine "stable wifi" precondition before driving
+     * the #981 flip.
+     */
+    private fun waitForNoSwitchingOverlay(label: String) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }.getOrDefault(false)
+        }
+        assertEquals(
+            "expected the attach to fully settle (no 'Attaching…' overlay) before $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+    }
+
     private fun terminalNetworkObserver(): TerminalNetworkObserver {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         return EntryPointAccessors
@@ -355,6 +493,22 @@ class StableWifiNoSpuriousReconnectE2eTest {
         val deadline = SystemClock.elapsedRealtime() + durationMs
         while (SystemClock.elapsedRealtime() < deadline) {
             assertNoVisibleReconnect(label)
+            SystemClock.sleep(100)
+        }
+    }
+
+    /**
+     * Issue #981: watch the AUTHORITATIVE redial diagnostics across the window. The
+     * teardown+redial path records `network_reconnect_start` the instant it fires
+     * (on BASE, the moment the emitted flip reaches the VM hook). A stable session
+     * riding the flip through records NONE — this is the load-bearing no-reconnect
+     * watch (a transient "Attaching…" recomposition with no socket teardown is not
+     * the #974 symptom; the redial diagnostic is).
+     */
+    private fun watchNoReconnectDiagnostics(label: String, durationMs: Long) {
+        val deadline = SystemClock.elapsedRealtime() + durationMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            assertNoReconnectDiagnostics(label)
             SystemClock.sleep(100)
         }
     }

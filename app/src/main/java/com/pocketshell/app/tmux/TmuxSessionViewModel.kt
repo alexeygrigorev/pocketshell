@@ -4276,16 +4276,26 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: connectingTarget
         // EPIC #792 Slice E: feed the AUTHORITATIVE controller the #548 validated-handoff
         // signal it suppresses on (computed identically to the inline reducer).
+        //
+        // Issue #981: the controller flips Live → Reconnecting on a validated handoff,
+        // which drives the RevealStateMachine → the "Attaching…" overlay. That is a
+        // USER-VISIBLE disconnect glitch even when the inline reducer rides the flip
+        // through. So the controller signal MUST honor the SAME liveness gate: when the
+        // old transport is proven alive we report NO handoff to the controller, keeping
+        // it Live (no overlay), in lockstep with [reduceNetworkChanged].
+        val realValidatedHandoff = change.previousValidated?.let { previous ->
+            !previous.hasSameNetworkIdentityAs(change.current)
+        } ?: false
         connectionManager.observeNetworkChanged(
-            validatedHandoff = change.previousValidated?.let { previous ->
-                !previous.hasSameNetworkIdentityAs(change.current)
-            } ?: false,
+            validatedHandoff = realValidatedHandoff && !isTransportKeepAliveProvenAliveRecently(),
         )
         when (reduceConnection(ConnectionEvent.NetworkChanged(change))) {
             ConnectionDecision.SuppressNetworkNotValidated ->
                 if (target != null) suppressNetworkNotValidated(change, target)
             ConnectionDecision.SuppressNetworkCoalesced ->
                 if (target != null) suppressNetworkCoalesced(change, target)
+            ConnectionDecision.SuppressNetworkTransportProvenAlive ->
+                if (target != null) suppressNetworkTransportProvenAlive(change, target)
             ConnectionDecision.ScheduleNetworkReconnect ->
                 if (target != null) scheduleNetworkReconnect(change, target)
             else -> Unit
@@ -4421,6 +4431,73 @@ public class TmuxSessionViewModel @Inject constructor(
                 "hostId" to target.hostId,
                 "generation" to lifecycleCoalesce.generation,
                 "classification" to "lifecycle_network_replay",
+                "deferredFromBackground" to change.deferredFromBackground,
+            )
+        }
+    }
+
+    /**
+     * Issue #981: the [ConnectionDecision.SuppressNetworkTransportProvenAlive]
+     * body. A real validated identity change WAS observed (we are past the
+     * `realValidatedIdentityChange` gate), but the live transport's keepalive
+     * has seen inbound bytes within its ride-through window, so the old socket
+     * is provably alive and a teardown+redial here would be the #974 spurious
+     * stable-wifi drop. We ride it through (no `unregisterCurrentClient` / no
+     * `scheduleAutoReconnect`) and emit the device trail showing WHY, mirroring
+     * [suppressNetworkNotValidated]. `realValidatedIdentityChange` is always
+     * `true` here (only a real handoff reaches this gate).
+     */
+    private fun suppressNetworkTransportProvenAlive(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        val previousValidated = change.previousValidated
+        run {
+            Log.i(
+                ISSUE_548_NETWORK_TAG,
+                "tmux-network-proactive-reconnect-skip reason=$reason " +
+                    "cause=transport-proven-alive " +
+                    "previousValidated=${previousValidated?.logValue ?: "none"} " +
+                    "current=${change.current.logValue} " +
+                    targetLogFields(target),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "network_reconnect_skip",
+                "source" to "network_observer",
+                "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+                "reason" to reason,
+                "cause" to "transport_proven_alive",
+                "classification" to "network_handoff_transport_alive",
+                "reconnect" to false,
+                "realValidatedIdentityChange" to true,
+                "sequence" to change.sequence,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "generation" to connectGeneration,
+                "attempt" to activeAttachMilestone?.attempt,
+                "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
+                "deferredFromBackground" to change.deferredFromBackground,
+                *change.networkDiagnosticFields(),
+                *shortAppSwitchReconnectFields(
+                    trigger = TmuxConnectTrigger.NetworkReconnect,
+                    target = target,
+                    sourceCandidate = "network_observer",
+                ),
+            )
+            ReconnectCauseTrail.record(
+                stage = "network_reconnect_decision",
+                outcome = "suppress",
+                cause = "transport_proven_alive",
+                trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+                "sequence" to change.sequence,
+                "hostId" to target.hostId,
+                "generation" to connectGeneration,
+                "classification" to "network_handoff_transport_alive",
                 "deferredFromBackground" to change.deferredFromBackground,
             )
         }
@@ -15443,6 +15520,19 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Suppress: coalesced with an in-flight lifecycle reattach (#548). */
         data object SuppressNetworkCoalesced : ConnectionDecision
 
+        /**
+         * Suppress: a real validated identity change WAS observed, but the live
+         * transport is provably alive within the keepalive ride-through window
+         * (#981). A new default-network identity does NOT mean the old socket
+         * died — if the keepalive has seen inbound bytes recently the link is
+         * healthy, so tearing it down + redialing is a spurious disconnect (the
+         * #974 stable-wifi drop). Mirrors the #964 probe deferral so both redial
+         * triggers honor ONE coherent liveness budget. A genuinely dead link
+         * ages out of the keepalive window, this gate stops suppressing, and
+         * recovery proceeds via the next change or the keepalive's own close.
+         */
+        data object SuppressNetworkTransportProvenAlive : ConnectionDecision
+
         // --- TransportDropped (passive disconnect) ---
         /**
          * The screen stopped for an in-app navigation to a DIFFERENT session
@@ -15510,6 +15600,19 @@ public class TmuxSessionViewModel @Inject constructor(
             sameSessionIdentity(lifecycleCoalesce.target, target)
         ) {
             return ConnectionDecision.SuppressNetworkCoalesced
+        }
+        // Issue #981: a real validated default-network identity change does NOT
+        // prove the old SSH socket died. If the transport keepalive has seen
+        // inbound bytes within its ride-through window the link is provably
+        // alive, so a teardown+redial here is a SPURIOUS disconnect — the #974
+        // stable-wifi drop, where a transient WIFI↔CELLULAR validation flip on
+        // an otherwise-healthy link tore down a live socket. Mirror the #964
+        // probe deferral and ride it through. A genuinely dead link stops
+        // bumping inbound activity, ages out of the window, this gate stops
+        // suppressing, and the next change (or the keepalive's own dead-close)
+        // recovers it.
+        if (isTransportKeepAliveProvenAliveRecently()) {
+            return ConnectionDecision.SuppressNetworkTransportProvenAlive
         }
         return ConnectionDecision.ScheduleNetworkReconnect
     }

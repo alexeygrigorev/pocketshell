@@ -542,6 +542,15 @@ JOURNEY_CLASSES=(
   # on base (the reassoc emits a handoff → the live session reconnects); GREEN after the
   # Angle-C fix. Uses ONLY the deterministic agents:2222 fixture tests.yml already brings
   # up (no toxiproxy, no workflow change) and does NOT self-skip on CI.
+  #
+  # ALSO COVERS (#981): the class now carries
+  # realValidatedHandoffWhileTransportProvenAliveDoesNotReconnect — a REAL validated
+  # WIFI→CELLULAR identity flip (which DOES emit past #875) on a STABLE wifi while the
+  # live SSH transport is provably alive (forceTransportProvenAliveForTest pinned, the
+  # #780 synthetic-inject model — no self-skip) must NOT tear down + redial the healthy
+  # socket (the #974 stable-wifi drop). RED on base (the emitted flip → scheduleNetwork-
+  # Reconnect raises the Reconnecting band); GREEN once the #981 liveness gate rides the
+  # proven-alive transport through. Same deterministic agents:2222 fixture; runs on CI.
   "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
   # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
   # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it

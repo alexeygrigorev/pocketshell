@@ -193,15 +193,18 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         diagnostics!!.clear()
         val attemptsAfterAttach = TMUX_CONNECT_ATTEMPTS.get()
 
-        // ---- THE #964 SLOW-BUT-LIVE WINDOW ----
+        // ---- THE #982/#984 SLOW-BUT-LIVE WINDOW (spans >2 probe budgets) ----
         // Arm the slow `-CC` channel: the probe's refresh-client ping reports DEAD
         // (a momentarily congested control channel), while the agents:2222 SSH
         // TRANSPORT stays genuinely live, so the always-on keepalive keeps proving
-        // the link alive. Hold it just PAST one shortened probe budget so the probe
-        // REACHES its failure threshold (base redials here), then CLEAR it so the
-        // next probe answers — modelling a slow link that un-congests (the #964
-        // case), NOT a permanently wedged channel (#822, which the #964 fix
-        // correctly still escalates after its bounded deferral).
+        // the link alive the WHOLE time (ride-through window 60s ≫ the 12s hold).
+        // Hold it across MORE THAN TWO shortened probe budgets — the gap the deleted
+        // maxKeepAliveDeferrals=1 time ceiling could not cross without escalating
+        // (#982/#984). The new contract DEFERS UNCONDITIONALLY while the keepalive
+        // proves alive → ZERO reconnect. Then CLEAR it so the next probe answers —
+        // a slow link that un-congests, NOT a permanently wedged channel (#822,
+        // which the new contract still escalates via the keepalive death signal or
+        // the 180s absolute backstop).
         val stallStart = SystemClock.elapsedRealtime()
         currentViewModel().forceLivenessProbeDeadForTest = true
         recordTiming("stable_slow_cc_armed_at_ms", stallStart - attachStart)
@@ -571,29 +574,28 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         // Shorten the keepalive INTERVAL so a real keepalive reply lands every
         // couple of seconds (keeping the transport's inbound-activity timestamp
         // fresh), but keep countMax HIGH so the derived ride-through WINDOW
-        // (intervalMs × countMax = 2s × 15 = 30s, the window the #964 deferral
+        // (intervalMs × countMax = 2s × 30 = 60s, the window the #982/#984 deferral
         // guard `isTransportProvenAliveWithinKeepAliveWindow` checks) stays
-        // COMFORTABLY LONGER than the slow-CC hold (10s). This guarantees the
+        // COMFORTABLY LONGER than the slow-CC hold (12s). This guarantees the
         // keepalive is continuously "proving the transport alive" for the whole
         // slow window even if a couple of replies are momentarily delayed — so the
-        // #964 deferral guard always has a fresh live signal to defer to. (A short
-        // 6s window would expire mid-hold and the probe would stop deferring — a
-        // false RED.)
+        // #982/#984 deferral guard always has a fresh live signal to defer to. The
+        // window MUST exceed SLOW_CC_HOLD_MS or it would expire mid-hold and the
+        // probe would stop deferring — a false RED.
         const val KEEPALIVE_INTERVAL_MS: Long = 2_000L
-        const val KEEPALIVE_COUNT_MAX: Int = 15
+        const val KEEPALIVE_COUNT_MAX: Int = 30
 
-        // Hold the slow `-CC` window so it brackets EXACTLY ONE shortened probe
-        // threshold hit:
-        //   - PAST one budget (~4.5s) so the threshold is reached — BASE redials
-        //     here (RED), and the #964 fix takes its single bounded DEFERRAL; but
-        //   - UNDER two budgets (~9s) so a SECOND threshold hit never lands inside
-        //     the dead window — which would make the #964 fix correctly ESCALATE
-        //     the #822 wedge path (a genuinely-stuck `-CC` channel), a FALSE red for
-        //     THIS slow-but-live scenario.
-        // 6.5s sits squarely in the (4.5s, 9s) window with ~2s margin on each side,
-        // robust against AVD scheduling jitter. After clearing, the next real probe
-        // answers (the channel was never down) and the deferral run resets.
-        const val SLOW_CC_HOLD_MS: Long = 6_500L
+        // #982/#984: hold the slow `-CC` window so it spans MORE THAN TWO shortened
+        // probe budgets — the structural gap the deleted maxKeepAliveDeferrals=1
+        // time ceiling could not cross without escalating at ~96s (audit #984 §5,
+        // the #970 gate's old SLOW_CC_HOLD_MS=6.5s sat inside ONE budget and so
+        // never reached the escalation branch). With the keepalive PROVEN ALIVE the
+        // whole time (ride-through window 60s ≫ 12s), the new contract DEFERS
+        // UNCONDITIONALLY across every budget — ZERO reconnect.
+        //   - PROBE_RAW_BUDGET_MS = 3 × 1.5s = 4.5s, so 12s spans ~2.7 budgets.
+        // RED at the old time-ceiling (it escalates after ~2 budgets ≈ 9s, inside
+        // the 12s hold → a reconnect fires); GREEN with the time-ceiling removed.
+        const val SLOW_CC_HOLD_MS: Long = 12_000L
         const val POST_RECOVER_WATCH_MS: Long = 4_000L
 
         // Realistic-link (toxiproxy) variant knobs.

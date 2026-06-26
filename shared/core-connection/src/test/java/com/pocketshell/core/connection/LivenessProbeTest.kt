@@ -422,8 +422,8 @@ class LivenessProbeTest {
         }
 
     // ---------------------------------------------------------------------
-    // Issue #964 / #822 — spurious reconnect on slow-but-live wifi, WITHOUT
-    // regressing the wedged-`-CC` recovery (reproduce-first, D33/G10).
+    // Issue #964 / #982 / #984 / #822 — spurious reconnect on slow-but-live wifi,
+    // WITHOUT regressing the wedged-`-CC` recovery (reproduce-first, D33/G10).
     //
     // Two foreground liveness mechanisms run together on DIFFERENT channels: the
     // transport keepalive (#945, TransportKeepAlive) pings the SSH TRANSPORT
@@ -432,17 +432,19 @@ class LivenessProbeTest {
     // live-but-slow link the `-CC` probe declared dead at ~48s and force-redialed
     // a FINE link BEFORE the keepalive's ~90s could prove the transport alive.
     //
-    // The fix THREADS THE NEEDLE rather than a blanket keepalive veto (which would
-    // re-open #822): a healthy keepalive lets the probe DEFER a redial for up to
-    // [maxKeepAliveDeferrals] failure runs — absorbing the slow-but-live blip —
-    // BUT if the `-CC` channel keeps not answering across that bound while the
-    // keepalive stays healthy, that is a genuinely WEDGED `-CC` on a live transport
-    // (#822) and the probe ESCALATES anyway. These pin the whole class:
+    // The #982/#984 fix DEFERS TO THE KEEPALIVE'S OWN DEATH SIGNAL with NO time
+    // ceiling while it proves the transport alive (the deleted maxKeepAliveDeferrals
+    // ~96s ceiling WAS the #974 stable-wifi false positive). Escalation is the
+    // keepalive flipping false, OR a single high absolute wedge backstop (180s) for
+    // the rare keepalive-healthy-forever wedge. These pin the whole class:
     //   (1) live-slow: `-CC` fails one run then RECOVERS while keepalive alive →
     //       NO redial (the #964 fix). RED on base, GREEN after.
-    //   (2) wedged-`-CC` + healthy keepalive (#822): `-CC` NEVER answers, keepalive
-    //       always alive → recovery STILL fires (after the deferral bound). #822
-    //       NOT regressed by the #964 deferral.
+    //   (2a) wedged-`-CC` + keepalive DEAD (#822 dominant): escalate within budget.
+    //   (2b) wedged-`-CC` + keepalive HEALTHY FOREVER: defer with NO time ceiling,
+    //        then escalate ONLY at the absolute wedge budget. #822 not suppressed,
+    //        no #974 false positive.
+    //   (2c) defer-forever across MANY budgets while keepalive alive (the #970
+    //        gate's pure mirror — the gap the old ceiling could not span).
     //   (3) genuinely-dead transport: `-CC` fails AND keepalive sees nothing →
     //       redial within the raw budget (no infinite hang).
     //   (4) slow→dead transition: defer while keepalive alive, then redial the
@@ -495,49 +497,146 @@ class LivenessProbeTest {
         }
 
     /**
-     * #964 / #822 — the load-bearing threading proof. A genuinely WEDGED `-CC`
-     * channel (refresh-client NEVER answers) while the transport keepalive stays
-     * HEALTHY the whole time (`transportProvenAliveRecently = true` forever). This
-     * is the #822 failure mode: the SSH transport is fine but the tmux control
-     * channel is stuck. A blanket "keepalive alive ⇒ never redial" would leave it
-     * wedged forever; the bounded deferral MUST still escalate recovery here.
-     *
-     * The probe rides through [maxKeepAliveDeferrals] failure runs (the #964
-     * slow-but-live tolerance), then — because the `-CC` is STILL silent with the
-     * keepalive still healthy — declares the drop so the wedged session recovers.
+     * #822 sub-case (a) — the DOMINANT real wedge: a half-open wifi drop wedges the
+     * `-CC` channel AND kills the transport keepalive together. The new #982/#984
+     * contract defers to the keepalive's OWN death signal, so the instant
+     * `transportProvenAliveRecently` flips FALSE the probe escalates within the
+     * keepalive budget. This is the path that recovers the maintainer's real #822.
      */
     @Test
-    fun `issue 822 wedged control channel with healthy keepalive still recovers (not regressed)`() =
+    fun `issue 822 wedged control channel with dead keepalive escalates within the keepalive budget`() =
         runTest(StandardTestDispatcher()) {
-            val io = FakeProbeIo(transportProvenAliveRecently = true)
-            // `-CC` never answers; keepalive proves the transport alive the whole
-            // time. enqueue enough misses to cover (maxDeferrals + 1) failure runs.
-            val runsNeeded = LivenessProbe.DEFAULT_MAX_KEEPALIVE_DEFERRALS + 1
-            repeat(LivenessProbe.DEFAULT_FAILURE_THRESHOLD * runsNeeded + 4) { io.enqueue(false) }
+            // `-CC` never answers AND the keepalive sees nothing either (a half-open
+            // drop killed both channels) — transportProvenAliveRecently = false.
+            val io = FakeProbeIo(transportProvenAliveRecently = false)
+            repeat(LivenessProbe.DEFAULT_FAILURE_THRESHOLD + 4) { io.enqueue(false) }
             val probe =
                 LivenessProbe(
                     io,
                     intervalMs = 100,
                     perProbeTimeoutMs = 1_000,
                     failureThreshold = LivenessProbe.DEFAULT_FAILURE_THRESHOLD,
-                    maxKeepAliveDeferrals = LivenessProbe.DEFAULT_MAX_KEEPALIVE_DEFERRALS,
                 )
             probe.start(this)
 
-            // Advance through all the deferral runs PLUS the escalation run.
-            advanceTimeBy(
-                LivenessProbe.DEFAULT_FAILURE_THRESHOLD.toLong() * runsNeeded * 100 + 500,
-            )
+            // ONE failure run is enough — the keepalive death authority is false, so
+            // escalation fires at the threshold (no time ceiling needed).
+            advanceTimeBy(LivenessProbe.DEFAULT_FAILURE_THRESHOLD.toLong() * 100 + 100)
             runCurrent()
             probe.stop()
             runCurrent()
 
             assertTrue(
-                "a WEDGED `-CC` channel on a still-healthy transport (#822) must STILL " +
-                    "recover after the bounded keepalive deferral — a blanket keepalive " +
-                    "veto would re-open #822 (declared count=${io.onProbeFailedCount})",
+                "a wedged `-CC` channel whose keepalive ALSO died (#822, the dominant " +
+                    "real case) must escalate within the keepalive budget once " +
+                    "transportProvenAliveRecently flips false (count=${io.onProbeFailedCount})",
                 io.onProbeFailedCount >= 1,
             )
+        }
+
+    /**
+     * #822 sub-case (b) — the RARE wedge the absolute backstop exists for: the `-CC`
+     * channel is genuinely WEDGED but the transport keepalive stays HEALTHY FOREVER
+     * (`transportProvenAliveRecently = true` the whole time). Under the new
+     * #982/#984 contract there is NO time ceiling while the keepalive proves the
+     * transport alive — the ONLY escalation is the high [absoluteWedgeBudgetMs]
+     * backstop. The probe must DEFER until that absolute budget, then escalate so the
+     * truly-stuck channel still recovers (a blanket keepalive veto would re-open
+     * #822). This pins BOTH the no-time-ceiling-defer AND the absolute-wedge escalate.
+     */
+    @Test
+    fun `issue 822 wedged control channel with healthy keepalive defers until the absolute wedge budget then escalates`() =
+        runTest(StandardTestDispatcher()) {
+            val io = FakeProbeIo(transportProvenAliveRecently = true)
+            // `-CC` never answers; keepalive proves the transport alive the whole
+            // time. Shorten the absolute wedge budget so the virtual clock can reach
+            // it deterministically (production is 180s; the contract is identical).
+            repeat(200) { io.enqueue(false) }
+            val absoluteWedgeMs = 2_000L
+            val probe =
+                LivenessProbe(
+                    io,
+                    intervalMs = 100,
+                    perProbeTimeoutMs = 1_000,
+                    failureThreshold = LivenessProbe.DEFAULT_FAILURE_THRESHOLD,
+                    absoluteWedgeBudgetMs = absoluteWedgeMs,
+                )
+            probe.start(this)
+
+            // BEFORE the absolute wedge budget elapses: the keepalive proves the link
+            // alive, so the probe must DEFER unconditionally — NO escalation, even
+            // though it has failed many full threshold runs. (The deleted
+            // maxKeepAliveDeferrals would have escalated at ~96s here — the #974 bug.)
+            advanceTimeBy(absoluteWedgeMs - 400)
+            runCurrent()
+            assertEquals(
+                "while the keepalive proves the link alive and BEFORE the absolute wedge " +
+                    "budget, a wedged `-CC` must NOT escalate (no fixed time ceiling — " +
+                    "the deleted #982/#984 false positive)",
+                0,
+                io.onProbeFailedCount,
+            )
+
+            // AFTER the absolute wedge budget: the `-CC` has been failing continuously
+            // past absoluteWedgeBudgetMs, so the backstop escalates even though the
+            // keepalive still claims alive — the rare truly-wedged channel recovers.
+            advanceTimeBy(
+                absoluteWedgeMs + LivenessProbe.DEFAULT_FAILURE_THRESHOLD.toLong() * 100 + 200,
+            )
+            runCurrent()
+            probe.stop()
+            runCurrent()
+            assertTrue(
+                "a `-CC` channel WEDGED continuously past the absolute wedge budget must " +
+                    "STILL escalate even with the keepalive healthy forever (#822 not " +
+                    "suppressed; count=${io.onProbeFailedCount})",
+                io.onProbeFailedCount >= 1,
+            )
+        }
+
+    /**
+     * #982/#984 the headline no-time-ceiling proof (the #970 gate's pure
+     * virtual-clock mirror): the `-CC` channel is wedged for FAR longer than two
+     * production probe budgets (the gap the old `maxKeepAliveDeferrals=1` ceiling
+     * could not span without escalating at ~96s) while the keepalive proves the link
+     * alive throughout and the absolute wedge budget is generous. The probe must
+     * DEFER FOREVER — ZERO escalations. RED with the old time-ceiling, GREEN now.
+     */
+    @Test
+    fun `issue 982 defers forever across many probe budgets while keepalive proves alive (no time ceiling)`() =
+        runTest(StandardTestDispatcher()) {
+            val io = FakeProbeIo(transportProvenAliveRecently = true)
+            repeat(500) { io.enqueue(false) } // `-CC` never answers
+            // Absolute wedge budget WELL beyond the window we advance, so only the
+            // keepalive-alive defer-forever behaviour is under test here.
+            val probe =
+                LivenessProbe(
+                    io,
+                    intervalMs = 100,
+                    perProbeTimeoutMs = 1_000,
+                    failureThreshold = LivenessProbe.DEFAULT_FAILURE_THRESHOLD,
+                    absoluteWedgeBudgetMs = 10_000_000L,
+                )
+            probe.start(this)
+
+            // Span MANY full threshold runs (≫ 2 budgets — the structural gap the
+            // #970 deterministic gate now also covers at production scale).
+            val budgets = 8
+            advanceTimeBy(
+                LivenessProbe.DEFAULT_FAILURE_THRESHOLD.toLong() * budgets * 100 + 500,
+            )
+            runCurrent()
+
+            assertEquals(
+                "while the keepalive proves the link alive, the probe must DEFER " +
+                    "across an UNBOUNDED number of `-CC` failure runs — ZERO escalation, " +
+                    "no fixed time ceiling (#982/#984). The deleted maxKeepAliveDeferrals " +
+                    "would have escalated after the first ~2 runs (count=${io.onProbeFailedCount})",
+                0,
+                io.onProbeFailedCount,
+            )
+            assertTrue("the probe keeps probing while deferring", io.probeCount >= budgets)
+            probe.stop()
         }
 
     /**
@@ -595,10 +694,10 @@ class LivenessProbeTest {
                     intervalMs = 100,
                     perProbeTimeoutMs = 1_000,
                     failureThreshold = LivenessProbe.DEFAULT_FAILURE_THRESHOLD,
-                    // Use a high deferral bound so phase 1 stays in the DEFER state
-                    // (this test isolates the keepalive-gave-up trigger, NOT the
-                    // wedge-escalation bound which the #822 test above pins).
-                    maxKeepAliveDeferrals = 100,
+                    // A high absolute wedge budget keeps phase 1 in the pure DEFER
+                    // state (no time-ceiling escalation while the keepalive is alive),
+                    // so this test isolates the keepalive-gave-up trigger.
+                    absoluteWedgeBudgetMs = 10_000_000L,
                 )
             probe.start(this)
 

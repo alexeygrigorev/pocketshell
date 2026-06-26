@@ -115,10 +115,6 @@ class SilentDropSyntheticSeamJourneyE2eTest {
             intervalMs = PROBE_INTERVAL_MS,
             perProbeTimeoutMs = PROBE_TIMEOUT_MS,
             failureThreshold = PROBE_FAILURE_THRESHOLD,
-            // #964: keep the keepalive-deferral bound generous on the shortened
-            // window so the slow-but-live ride-through is observable AND the wedge
-            // escalation is reachable within the test windows below.
-            maxKeepAliveDeferrals = KEEPALIVE_MAX_DEFERRALS,
         )
     }
 
@@ -275,22 +271,28 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                 !indicatorDuringSlowLive,
             )
 
-            // ---- 2) WEDGED `-CC` + healthy keepalive SUSTAINED (#822) → recover ----
-            // Now the `-CC` channel stays WEDGED (dead) with the keepalive STILL
-            // proving the transport alive the whole time. A blanket keepalive veto
-            // would leave this wedged forever; the bounded deferral must escalate.
+            // ---- 2) WEDGED `-CC` + keepalive FLIPS DEAD (#822/#982/#984) → recover --
+            // The dominant real #822: a half-open wifi drop wedges the `-CC` channel
+            // AND kills the transport keepalive together. Under the #982/#984 contract
+            // the probe defers to the keepalive's OWN death signal — so the indicator
+            // surfaces the instant the keepalive flips FALSE (no fixed time ceiling).
+            // (The rare "transport-keepalive-healthy-FOREVER but `-CC`-wedged" sub-case
+            // is bounded separately by the 180s absoluteWedgeBudgetMs backstop, proven
+            // deterministically in the pure virtual-clock LivenessProbeTest — a 180s
+            // emulator hold would be wasteful and flaky here.)
             val wedgeStart = SystemClock.elapsedRealtime()
-            vm.forceTransportProvenAliveForTest = true
             vm.forceLivenessProbeDeadForTest = true
+            vm.forceTransportProvenAliveForTest = false
             val detectedWedge = waitForConnectionLostIndicator(DROP_DETECT_WINDOW_MS)
             recordTiming(
-                "wedged_cc_healthy_keepalive_detected_ms",
+                "wedged_cc_keepalive_dead_detected_ms",
                 if (detectedWedge) SystemClock.elapsedRealtime() - wedgeStart else -1L,
             )
             assertTrue(
-                "Expected the indicator to surface for a SUSTAINED wedged `-CC` channel " +
-                    "even though the keepalive keeps proving the transport alive (#822 " +
-                    "must NOT be suppressed by the #964 deferral). " +
+                "Expected the indicator to surface for a wedged `-CC` channel once the " +
+                    "keepalive ALSO gives up (transportProvenAliveRecently=false — the " +
+                    "dominant real #822). The probe defers to the keepalive death " +
+                    "authority and escalates immediately when it flips false. " +
                     "status=${currentConnectionStatus()}",
                 detectedWedge,
             )
@@ -609,16 +611,11 @@ class SilentDropSyntheticSeamJourneyE2eTest {
         const val PROBE_TIMEOUT_MS: Long = 2_000L
         const val PROBE_FAILURE_THRESHOLD: Int = 1
 
-        // #964: keepalive-deferral bound on the shortened window. With threshold=1
-        // each "failure run" is one probe (~1s), so 2 deferrals ≈ 2 failed probes
-        // ridden through before the wedge escalates on the 3rd — comfortably within
-        // SLOW_LIVE_BRIEF_WINDOW_MS for the ride-through and DROP_DETECT_WINDOW_MS
-        // for the wedge escalation.
-        const val KEEPALIVE_MAX_DEFERRALS: Int = 2
-
-        // #964 phase-1: how long the `-CC` stays dead during the slow-but-live blip
-        // before it recovers. ~one probe interval — under the deferral bound — so
-        // the probe rides it through without escalating.
+        // #982/#984 phase-1: how long the `-CC` stays dead during the slow-but-live
+        // blip before it recovers. Under the new contract the probe DEFERS to the
+        // keepalive UNCONDITIONALLY while it proves the transport alive (no deferral
+        // count), so the only requirement is the `-CC` recovers before the 180s
+        // absolute-wedge backstop — trivially satisfied by this brief window.
         const val SLOW_LIVE_BRIEF_WINDOW_MS: Long = 1_500L
 
         // Detection budget on the shortened window (interval + threshold*timeout =

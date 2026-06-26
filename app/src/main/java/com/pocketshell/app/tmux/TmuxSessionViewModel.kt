@@ -5245,7 +5245,18 @@ public class TmuxSessionViewModel @Inject constructor(
             // black AT reveal; this net catches a pane that paints fine then LATER
             // goes black-with-fragments (a drop-induced stale grid on a live
             // transport — the #966 shape the blank oracle structurally misses).
-            armActivePaneStaleRenderWatchdog(blankReseedGuard)
+            //
+            // Issue #973 (v0.4.18 regression): arm it ONLY when the active pane
+            // genuinely painted at reveal ([activePaneSeeded]). A still-blank
+            // reveal is OWNED by [armConnectedBlankWatchdog] above — arming the
+            // stale-render net there too would race the same blank pane with a
+            // SECOND `capture-pane` loop (the #693/#661 never-reveal-black guard
+            // counts an exact bound; the stray captures broke that invariant) and
+            // the stale-render oracle ([visibleScreenDivergesFromCapture]) cannot
+            // even fire on a blank pane. When the blank watchdog later recovers a
+            // frame it arms the stale-render net itself, so the #966 lifetime net
+            // is preserved for that path without the blank-pane double-capture.
+            if (activePaneSeeded) armActivePaneStaleRenderWatchdog(blankReseedGuard)
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -5645,7 +5656,14 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #966/#967: arm the steady-state stale-render watchdog on the
             // fast-switch reveal path too, so a pane that later goes
             // black-with-fragments on this runtime is healed against tmux's grid.
-            armActivePaneStaleRenderWatchdog(fastSwitchRevealGuard)
+            //
+            // Issue #973 (v0.4.18 regression): gate on [activePaneSeeded] — a
+            // still-blank fast-switch reveal is owned by the blank watchdog armed
+            // just above; arming the stale-render net on a blank pane would race a
+            // second `capture-pane` loop and break the #693/#661 never-reveal-black
+            // capture-count invariant. The blank watchdog arms this net once it
+            // recovers a frame.
+            if (activePaneSeeded) armActivePaneStaleRenderWatchdog(fastSwitchRevealGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
@@ -9497,6 +9515,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     // partial-black), reseed-thrashing it on every arming — so the
                     // watchdog keeps its narrow fully-blank contract.
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #973: the pane that was blank AT reveal has now
+                    // produced a frame, so hand off the #966 lifetime net here —
+                    // the reveal sites skip arming the stale-render watchdog while
+                    // the pane is still blank (it would race this blank watchdog on
+                    // the same pane). Now that a frame landed, arm it so a LATER
+                    // stale render on this runtime is still healed.
+                    armActivePaneStaleRenderWatchdog(refreshGuard)
                     return@launch
                 }
                 Log.i(
@@ -9507,6 +9532,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 reseedBlankVisiblePanes(refreshGuard)
                 if (!activePane.terminalState.visibleScreenIsBlank()) {
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #973: frame landed after a reseed — hand off the #966
+                    // stale-render lifetime net (see the early-exit case above).
+                    armActivePaneStaleRenderWatchdog(refreshGuard)
                     return@launch
                 }
                 tick += 1

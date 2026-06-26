@@ -213,6 +213,240 @@ class KeepAliveIntegrationTest {
     }
 
     @Test
+    fun liveShellDataProvesTheTransportAliveWithoutAKeepAliveReply() = runTest {
+        // Issue #974 (reproduce-first, the bug the maintainer hit on stable Wi-Fi):
+        // live `-CC`/shell data flowing over the transport MUST count as proof of
+        // life — exactly what the keepalive contract docstring promises ("any bytes
+        // from the server"). Before #974, lastInboundActivityNanos was bumped ONLY
+        // on a keepalive REPLY, so streaming shell output did NOT reset the keepalive
+        // miss counter: a few delayed/missed 30s replies on an otherwise-live link
+        // tore it down while data was still flowing.
+        //
+        // This drives the REAL RealSshSession against a real OpenSSH server: open a
+        // shell, push commands so the server streams decoded bytes back, drain them,
+        // and assert the session's raw inbound-activity timestamp ADVANCED across the
+        // read — WITHOUT ever sending a keepalive. RED on base (data never bumps the
+        // field); GREEN with the fix.
+        connectDirect().use { session ->
+            val real = session as RealSshSession
+            assertTrue("session should be connected", session.isConnected)
+
+            session.startShell().use { shell ->
+                // Capture the activity timestamp BEFORE any data and let it age a
+                // little so an advance is unambiguous (not the same nanosecond).
+                Thread.sleep(50)
+                val beforeNanos = real.lastInboundActivityNanosForTest()
+
+                // Push a command and DRAIN the server's streamed reply (the decoded
+                // `-CC`/shell bytes). No keepalive is sent anywhere in this block.
+                shell.stdin.write("echo ps974-live-data\n".toByteArray(Charsets.UTF_8))
+                shell.stdin.flush()
+
+                val sawData = AtomicBoolean(false)
+                val reader = thread(isDaemon = true) {
+                    val buf = ByteArray(4096)
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+                    while (System.nanoTime() < deadline) {
+                        if (shell.stdout.available() > 0) {
+                            val n = runCatching { shell.stdout.read(buf) }.getOrDefault(-1)
+                            if (n < 0) break
+                            if (n > 0) sawData.set(true)
+                        } else {
+                            Thread.sleep(20)
+                        }
+                    }
+                }
+                runBlocking { waitUntil(8_000) { sawData.get() } }
+                reader.join(2_000)
+
+                assertTrue(
+                    "the server must have streamed shell bytes back (test precondition)",
+                    sawData.get(),
+                )
+                val afterNanos = real.lastInboundActivityNanosForTest()
+                assertTrue(
+                    "live shell/`-CC` data must bump the inbound-activity timestamp " +
+                        "(honour the keepalive contract — 'any bytes from the server'). " +
+                        "before=$beforeNanos after=$afterNanos. RED on base: only a " +
+                        "keepalive REPLY bumped it, so streaming data did not prove the " +
+                        "transport alive (#974).",
+                    afterNanos > beforeNanos,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun keepAliveRidesThroughStarvedRepliesWhileShellDataFlows() {
+        // Issue #974 (the durable teardown-prevention gate — the exact stable-Wi-Fi
+        // signature #964/#970 missed): a link where the keepalive REPLY is starved
+        // (delayed/dropped past the ride-through window) but the `-CC` reader is
+        // STILL delivering bytes must NOT be declared dead. The #970 gate only
+        // injected sub-budget stalls and never this "replies starved WHILE data
+        // flows" case.
+        //
+        // We drive a synthetic TransportKeepAlive whose sendKeepAlive() ALWAYS
+        // misses (replies starved), isAlive() reads the real session, and
+        // lastInboundActivityNanos() reads the REAL session's inbound-activity
+        // timestamp (bumped by the live shell reader, the #974 fix). A background
+        // writer keeps pushing shell commands so the server keeps streaming bytes.
+        // GREEN with the fix: the loop's reset-on-inbound shortcut sees fresh data
+        // every interval, so despite EVERY ping missing, the peer is NEVER declared
+        // dead. RED on base: data never bumps the timestamp, so the loop pings,
+        // every ping misses, and it declares dead within countMax x interval.
+        val session = connectDirect()
+        val real = session as RealSshSession
+        val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val deadDeclared = AtomicBoolean(false)
+        val pingsMissed = AtomicInteger(0)
+        try {
+            session.startShell().use { shell ->
+                val holdMs = 12_000L
+                val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs)
+
+                // Background: keep the server streaming bytes back, and DRAIN them
+                // (the read is what bumps the real inbound-activity timestamp).
+                val writer = ioScope.launch {
+                    while (isActive && System.nanoTime() < deadline) {
+                        runCatching {
+                            shell.stdin.write("echo ps974-tick\n".toByteArray(Charsets.UTF_8))
+                            shell.stdin.flush()
+                        }
+                        delay(300)
+                    }
+                }
+                val reader = ioScope.launch {
+                    val buf = ByteArray(4096)
+                    while (isActive && System.nanoTime() < deadline) {
+                        if (shell.stdout.available() > 0) {
+                            if (runCatching { shell.stdout.read(buf) }.getOrDefault(-1) < 0) break
+                        } else {
+                            delay(20)
+                        }
+                    }
+                }
+
+                // The synthetic keepalive: interval 1s, countMax 3 -> ~3s budget, so
+                // 12s of held link is 4x the budget. Replies are ALWAYS starved.
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        // The load-bearing wire: read the REAL session's
+                        // inbound-activity timestamp. With the #974 fix the live
+                        // shell reader bumps it; on base it stays stuck at construction.
+                        override fun lastInboundActivityNanos(): Long =
+                            real.lastInboundActivityNanosForTest()
+                        override suspend fun sendKeepAlive(): Boolean {
+                            // Replies are STARVED on this otherwise-live link.
+                            pingsMissed.incrementAndGet()
+                            return false
+                        }
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclared.set(true)
+                        }
+                    },
+                    intervalMs = 1_000L,
+                    countMax = 3,
+                )
+                keepAlive.start(ioScope)
+
+                // Hold the link with data flowing + replies starved for > 4x budget.
+                Thread.sleep(holdMs)
+
+                writer.cancel()
+                reader.cancel()
+                keepAlive.stop()
+
+                assertTrue(
+                    "the session must still be connected after riding through starved " +
+                        "keepalive replies WHILE shell data flowed",
+                    session.isConnected,
+                )
+                assertFalse(
+                    "a link with live `-CC`/shell data flowing must NOT be declared dead " +
+                        "just because the keepalive REPLY is starved — the streaming data " +
+                        "proves the transport alive (the keepalive's reset-on-inbound " +
+                        "shortcut). RED on base: data never bumped the timestamp so the " +
+                        "loop pinged, every ping missed, and it declared dead. (#974)",
+                    deadDeclared.get(),
+                )
+            }
+        } finally {
+            ioScope.cancel()
+            runCatching { session.close() }
+        }
+    }
+
+    @Test
+    fun genuinelyDeadHalfOpenPeerWithNoDataIsStillDeclaredDeadWithDataBumpHonoured() {
+        // Issue #974 class-coverage (the dual of the ride-through case — the fix must
+        // NOT make a truly-dead link look alive forever). A HALF-OPEN dead peer: no
+        // FIN, no inbound bytes, no keepalive reply. With the #974 inbound-activity
+        // bump in place, the synthetic loop's lastInboundActivityNanos() reads the
+        // REAL session's timestamp — which STAYS STALE because no server bytes arrive
+        // once the link is starved — so the reset-on-inbound shortcut does NOT fire,
+        // the loop pings, every ping misses, and the peer IS declared dead within
+        // countMax x interval. Proves the data-bump did not mask a genuine death.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            val real = session as RealSshSession
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val deadDeclaredAtNanos = AtomicLong(0L)
+            try {
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        // Read the REAL session timestamp (the #974 fix wiring). With
+                        // the link starved, NO inbound bytes arrive, so this stays
+                        // stale — the loop must still reach the dead-peer reaction.
+                        override fun lastInboundActivityNanos(): Long =
+                            real.lastInboundActivityNanosForTest()
+                        override suspend fun sendKeepAlive(): Boolean = session.sendKeepAlive()
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclaredAtNanos.compareAndSet(0L, System.nanoTime())
+                        }
+                    },
+                    intervalMs = 2_000L,
+                    countMax = 3,
+                )
+                keepAlive.start(ioScope)
+
+                runBlocking {
+                    assertTrue(
+                        "session healthy before the cut",
+                        waitUntil(8_000) { session.sendKeepAlive() },
+                    )
+                }
+
+                // Permanent HALF-OPEN starve: NO data, NO reply, NO FIN.
+                val cutAtNanos = System.nanoTime()
+                relay.pause()
+
+                runBlocking { waitUntil(40_000) { deadDeclaredAtNanos.get() != 0L } }
+                assertTrue(
+                    "a genuinely dead half-open peer (no data, no reply) must STILL be " +
+                        "declared dead even with the #974 inbound-activity bump in place — " +
+                        "the fix must not make a truly-dead link look alive forever",
+                    deadDeclaredAtNanos.get() != 0L,
+                )
+                val detectMs = TimeUnit.NANOSECONDS.toMillis(deadDeclaredAtNanos.get() - cutAtNanos)
+                assertTrue(
+                    "dead-peer detection ($detectMs ms) must land within a generous budget " +
+                        "ceiling (3 misses x (interval 2s + reply timeout 5s) ~21s worst case).",
+                    detectMs in 0..35_000,
+                )
+                keepAlive.stop()
+            } finally {
+                ioScope.cancel()
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
     fun transientGapShorterThanBudgetIsRiddenThrough() {
         // RIDE-THROUGH (the Terminus behaviour, the red->green core): pause the
         // link for a window SHORTER than the keepalive budget, then resume. The

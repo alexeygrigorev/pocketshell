@@ -163,7 +163,19 @@ class TmuxSessionViewModelTest {
         hostDao: HostDao? = null,
         agentRepository: AgentConversationRepository = AgentConversationRepository(),
         agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
-            com.pocketshell.app.agents.AgentKindRemoteSource(),
+            // Issue #1001 (CI-flake fix): pin the daemon-RPC bounded-exec
+            // dispatcher to the SHARED virtual-clock scheduler. In production it
+            // is `Dispatchers.IO` (a real background thread, so the wedge-prone
+            // SSH read never parks a caller). Under `runTest(scheduler)` that real
+            // thread races the test scheduler: `runCurrent()` returns before the
+            // off-thread `classify` exec completes, so the foreign-detection
+            // chain's `detection != null` assertion sometimes observed a not-yet-
+            // resolved bind (the b1Masked* ~1/3 release-variant flake). Confining
+            // the exec to a `StandardTestDispatcher` on the shared scheduler makes
+            // `runCurrent()` await the bind deterministically.
+            com.pocketshell.app.agents.AgentKindRemoteSource().apply {
+                setExecDispatcherForTest(StandardTestDispatcher(scheduler))
+            },
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -8377,24 +8389,38 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         // Simulate the one-shot guess having cached "no agent" before the agent
-        // launched (the stale guess the dedup bug never re-evaluated).
+        // launched (the stale guess the dedup bug never re-evaluated). Re-seeding
+        // the cache after the connect-path probe models the stale verdict the
+        // dedup bug never re-evaluated; capture the daemon round-trip count as a
+        // baseline so we can prove the re-probe forces a FRESH query past it.
         vm.seedForeignGuessCacheForTest("$0")
         assertTrue(
             "#975 (B1′): precondition — the stale one-shot guess is cached",
             vm.foreignGuessIsCachedForTest("$0"),
         )
+        val classifyCountBeforeReProbe = session.classifyExecCount
 
         // A re-probe of the confirmed-shell pane (same unchanged input) must BUST
         // the cache BEFORE the dedup early-return, so the daemon re-evaluates.
+        // Issue #1001: with the detection exec now confined to the shared test
+        // scheduler, `runCurrent()` deterministically drains the re-probe job to
+        // completion — including the FRESH daemon classify the bust enabled. The
+        // load-bearing proof of the B1′ fix is therefore that the cache-bust
+        // forced a NEW daemon round-trip (classifyExecCount incremented past the
+        // baseline), not that the cache stays empty (which only ever held because
+        // the race left the re-probe unfinished — exactly the #1001 flake this
+        // change removes).
         vm.startAgentDetectionForPaneForTest("%0")
         runCurrent()
 
-        assertFalse(
+        assertEquals(
             "#975 (B1′): re-probing a confirmed-shell pane busts the stale foreign " +
-                "guess cache (the cache-bust now precedes the dedup early-return) — " +
-                "RED on base where the early-return skipped the bust and the stale " +
-                "guess persisted",
-            vm.foreignGuessIsCachedForTest("$0"),
+                "guess cache BEFORE the dedup early-return, so the daemon is " +
+                "re-queried exactly once more — RED on base where the early-return " +
+                "skipped the bust and the stale seeded guess suppressed any " +
+                "re-evaluation (the daemon round-trip count stayed at the baseline)",
+            classifyCountBeforeReProbe + 1,
+            session.classifyExecCount,
         )
     }
 
@@ -15908,12 +15934,20 @@ class TmuxSessionViewModelTest {
     ) : SshSession {
         override val isConnected: Boolean = true
 
+        // Issue #1001: count `agents kind` daemon classify round-trips so the B1′
+        // dedup-ordering test can assert the cache-bust forced a FRESH daemon
+        // re-evaluation deterministically — instead of relying on the (now-fixed)
+        // race that left the re-probe unfinished when `runCurrent()` returned.
+        var classifyExecCount: Int = 0
+            private set
+
         override suspend fun exec(command: String): ExecResult {
             val stdout = when {
                 // The host-side `pocketshell agents kind` daemon classify. The
                 // request pipes a `{"panes":[{"pane_id":"%N", ...}]}` snapshot; we
                 // echo each requested pane id back with [classifyAgentKind].
                 command.contains("agents kind") -> {
+                    classifyExecCount++
                     val paneIds = PANE_ID_RE.findAll(command).map { it.groupValues[1] }.toList()
                     buildString {
                         append("{\"results\":[")

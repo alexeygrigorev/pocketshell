@@ -1395,6 +1395,27 @@ public fun TmuxSessionScreen(
                 moreExpanded = false
                 viewModel.redrawActivePane()
             },
+            onReconnect = {
+                // Issue #993: close the menu, then force an immediate reconnect of THIS
+                // session in place via the VM's single [TmuxSessionViewModel.reconnect]
+                // /TransportEffects entrypoint — the SAME path a session switch uses to
+                // recover a dropped session, so the user no longer has to switch away and
+                // back. `reconnect()` returns false only when there is no target (the
+                // `reconnectEnabled` gate already suppresses that), so the Toast confirms
+                // the reconnect was actually kicked off (visible feedback, no silent
+                // no-op). The terminal then shows the normal "Reconnecting…" band, and on
+                // success the #900 outbound queue auto-flushes the pending message.
+                moreExpanded = false
+                val started = viewModel.reconnect()
+                Toast.makeText(
+                    context,
+                    if (started) "Reconnecting…" else "Nothing to reconnect to",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            },
+            // Issue #993: only actionable when there IS a target to reconnect to AND a
+            // connect/reconnect is not already in flight — see [reconnectKebabEnabled].
+            reconnectEnabled = reconnectKebabEnabled(canReconnect, status),
         )
     }
 
@@ -3652,6 +3673,31 @@ internal class OutboundQueueAutoFlushController {
 }
 
 /**
+ * Issue #993: whether the kebab's "Reconnect" item is actionable right now.
+ *
+ * The manual reconnect escape hatch is the half-measure for a dropped session whose
+ * auto-reconnect didn't fire. It is only meaningful when:
+ *  - there IS a known target to reconnect to ([canReconnect] — the same gate the
+ *    in-session Reconnect band uses, so a tap never silently no-ops), AND
+ *  - a connect/reconnect is NOT already in flight (Connecting/Switching/Reconnecting),
+ *    so the tap is never a redundant re-dial that would yank an already-recovering
+ *    session.
+ *
+ * A `Connected` (possibly stale) or `Failed`/`Idle` session with a target stays
+ * enabled — that is exactly the maintainer's "it dropped but the app still thinks it's
+ * connected / it's sitting on Failed and nothing recovers it" case the button exists for.
+ * Pure so the wiring is a unit-testable predicate rather than an inline boolean (G9).
+ */
+internal fun reconnectKebabEnabled(
+    canReconnect: Boolean,
+    status: ConnectionStatus,
+): Boolean =
+    canReconnect &&
+        status !is ConnectionStatus.Connecting &&
+        status !is ConnectionStatus.Switching &&
+        status !is ConnectionStatus.Reconnecting
+
+/**
  * Issue #750: the single-indicator gate for the top under-header
  * [ReconnectingProgressRow] progress line.
  *
@@ -4179,6 +4225,15 @@ internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"
  * detach / new lease) — the manual escape hatch from a black/partial-black terminal.
  */
 internal const val TMUX_REDRAW_BUTTON_TAG = "tmux:session:redraw-button"
+/**
+ * Issue #993: stable test tag for the kebab's "Reconnect" item. Tapping it forces an
+ * immediate reconnect of the CURRENT session in place (reusing the VM's single
+ * [TmuxSessionViewModel.reconnect] / `TransportEffects.onManualReconnect` entrypoint) so
+ * the user does NOT have to switch to another session and back to recover a dropped
+ * session. On reconnect the #900 outbound queue auto-flushes the pending message. A
+ * deliberate HALF-MEASURE escape hatch until auto-reconnect is bulletproof (#928).
+ */
+internal const val TMUX_RECONNECT_BUTTON_TAG = "tmux:session:reconnect-button"
 /**
  * Issue #497: stable test tags for the kebab's "Open file…" item and the
  * path-entry dialog it opens, so instrumentation can drive
@@ -5720,6 +5775,15 @@ internal fun TmuxMoreMenu(
     // terminal. Defaulted so existing direct callers / tests of TmuxMoreMenu stay
     // source-compatible.
     onRedraw: () -> Unit = {},
+    // Issue #993: "Reconnect" — force an immediate reconnect of the CURRENT session in
+    // place (the manual escape hatch when auto-reconnect doesn't fire). Defaulted so
+    // existing direct callers / tests of TmuxMoreMenu stay source-compatible.
+    onReconnect: () -> Unit = {},
+    // Issue #993: gate the "Reconnect" item — disabled while there is no target to
+    // reconnect to OR a connect/reconnect is already in flight, so a tap is never a
+    // silent no-op nor a redundant re-dial. Defaulted true so existing callers/tests
+    // stay source-compatible.
+    reconnectEnabled: Boolean = true,
 ) {
     DropdownMenu(
         expanded = expanded,
@@ -5770,6 +5834,18 @@ internal fun TmuxMoreMenu(
             text = { Text("Redraw") },
             onClick = onRedraw,
             modifier = Modifier.testTag(TMUX_REDRAW_BUTTON_TAG),
+        )
+        // Issue #993: manual escape hatch from a dropped session whose auto-reconnect
+        // didn't fire — force an immediate reconnect of THIS session in place (no
+        // session-switch dance), reusing the VM's single TransportEffects reconnect
+        // entrypoint. On reconnect the #900 outbound queue auto-flushes the pending
+        // message. Disabled (greyed) when there is no target or a reconnect is already
+        // in flight so the tap is never a silent no-op / redundant re-dial.
+        DropdownMenuItem(
+            text = { Text("Reconnect") },
+            onClick = onReconnect,
+            enabled = reconnectEnabled,
+            modifier = Modifier.testTag(TMUX_RECONNECT_BUTTON_TAG),
         )
 
         // --- Sessions: move between / create sessions on this host. ---

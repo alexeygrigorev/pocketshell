@@ -387,6 +387,20 @@ JOURNEY_CLASSES=(
   # fixture the happy banner-in-remote fixture masked (G10). Deterministic agents:2222 only
   # (rich frame injected LOCALLY, no toxiproxy), no CI self-skip — belongs in this subset.
   "$FQCN_PREFIX.RedrawNonDestructiveNearBlankCaptureE2eTest"
+  # ADDED (#993 — the manual "Reconnect" kebab escape hatch): the maintainer dogfooded a
+  # session that DROPPED while he was sending a message, with no in-session way to recover
+  # (the connection manager doesn't auto-reconnect a single dropped session reliably yet) —
+  # the old workaround was switch to ANOTHER session and back. This journey attaches a live
+  # session, DROPS it via the clean-passive-disconnect seam (the same EOF body a real reader
+  # EOF drives, no toxiproxy), confirms a USER-VISIBLE connection-lost band, then OPENS the
+  # kebab and TAPS the stable-tagged Reconnect item. RED on base (no kebab Reconnect item →
+  # the [TMUX_RECONNECT_BUTTON_TAG] node doesn't exist → the tap can't recover the session);
+  # GREEN with the fix (the item drives the VM's single reconnect entrypoint → the SAME
+  # session recovers to Connected IN PLACE over a FRESH `-CC` client, no switch dance, and a
+  # post-reconnect send round-trips — the precondition the #900 outbound-queue auto-flush
+  # needs). Uses ONLY the deterministic agents:2222 fixture and does NOT self-skip on CI, so
+  # it belongs in this per-push subset.
+  "$FQCN_PREFIX.ReconnectKebabInPlaceJourneyE2eTest"
   # ADDED (#966/#967 — the DISCRIMINATING render-death-on-a-LIVE-transport journey): the
   # maintainer dogfooded a connected Claude session that went BLACK with only stray
   # FRAGMENTS (a lone cursor, a "3", a scattered status line) while the transport stayed

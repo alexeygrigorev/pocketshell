@@ -496,6 +496,64 @@ public class AgentConversationRepository internal constructor(
     }
 
     /**
+     * Issue #975 (B1, classify-miss): resolve the Conversation source for a pane
+     * WITHOUT a known kind, by trusting a LIVE transcript scoped to the pane's
+     * cwd. This is the trustworthy-live-agent-evidence fallback for a
+     * CONFIRMED-SHELL session whose host agent-kind daemon returned `unknown`
+     * (NOT `none`) — the node-wrapped / quiet `claude` the cgroup-v2/`/proc`
+     * classify cannot see, while its `*.jsonl` transcript is plainly present in
+     * the cwd-encoded log dir. The daemon `unknown` verdict means "we could not
+     * read the scope", which is exactly the masked-agent state; a fresh,
+     * recent transcript in the cwd is then strong enough evidence to bind the
+     * agent and clear the stale recorded-shell verdict (so the Conversation
+     * toggle returns — #962 recurrence).
+     *
+     * It enumerates ALL kinds' candidates for the cwd in ONE exec (the SAME
+     * [detectionCommand] the kind-fixed path uses), picks the MOST-RECENT
+     * candidate's kind, and runs the SAME [selectRecordedCandidate] discipline
+     * for that kind (Codex `/proc/<pid>/fd` owned-rollout binding included). A
+     * genuine shell with no recent agent transcript enumerates NOTHING → returns
+     * null → no flap (the #894 invariant holds: only a real live transcript
+     * binds, so a plain shell never resurrects a Conversation surface). The 2h
+     * `-mmin -120` freshness window in [detectionCommand] is what makes the
+     * transcript "live" rather than a stale leftover.
+     *
+     * This is deliberately a SCOPED fallback — it runs ONLY when the daemon said
+     * `unknown` for a recorded-shell pane (the masked-agent case), never as a
+     * blanket kind guesser (the deleted output-parsing detector stays deleted —
+     * D22). The KIND still comes from the transcript that genuinely exists, not
+     * from output parsing.
+     */
+    suspend fun detectLiveTranscriptForPane(
+        session: SshSession,
+        cwd: String,
+        paneTty: String,
+        paneCommand: String,
+    ): AgentDetection? {
+        val normalizedCwd = cwd.trim().ifBlank { return null }
+        val normalizedTty = paneTty.trim().ifBlank { return null }
+        val candidates = session.exec(detectionCommand(normalizedCwd))
+            .stdout
+            .lineSequence()
+            .mapNotNull(::parseCandidate)
+            .toList()
+        if (candidates.isEmpty()) return null
+        // Pick the kind of the MOST-RECENT candidate scoped to this cwd — the
+        // transcript that is actually live now. Resolve that single kind through
+        // the SAME selection discipline (the kind is taken FROM the present
+        // transcript, never guessed by output parsing).
+        val recordedKind = candidates.maxByOrNull { it.modifiedAtMillis }?.agent ?: return null
+        return selectRecordedCandidate(
+            session = session,
+            normalizedCwd = normalizedCwd,
+            normalizedTty = normalizedTty,
+            paneCommand = paneCommand,
+            recordedKind = recordedKind,
+            candidates = candidates.filter { it.agent == recordedKind },
+        )
+    }
+
+    /**
      * Epic #821 slice #3 (#825) / Issue #828: shared selection step for a
      * recorded session, given the already-enumerated [candidates] of the
      * recorded kind. Split out so BOTH the standalone

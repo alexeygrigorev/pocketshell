@@ -22,8 +22,12 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -90,6 +94,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
@@ -157,6 +162,8 @@ class TmuxSessionViewModelTest {
         folderListGateway: FolderListGateway? = null,
         hostDao: HostDao? = null,
         agentRepository: AgentConversationRepository = AgentConversationRepository(),
+        agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
+            com.pocketshell.app.agents.AgentKindRemoteSource(),
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -168,6 +175,7 @@ class TmuxSessionViewModelTest {
             sshLeaseManager = sshLeaseManager,
             sessionLifecycleSignals = sessionLifecycleSignals,
             agentRepository = agentRepository,
+            agentKindRemoteSource = agentKindRemoteSource,
         ).also {
             // Issue #576 (Slice A of #792): pin the structural-reconcile
             // dispatcher to Main (the MainDispatcherRule's
@@ -8166,6 +8174,351 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─────────────────────── Issue #975 — REAL-PATH classify-miss ───────────
+    // The maintainer hit a LIVE Claude session showing ONLY "Terminal" — no
+    // Conversation toggle — because the session was recorded `@ps_agent_kind=shell`
+    // with a node-wrapped/quiet `claude` started inside it, and the host
+    // agent-kind daemon's cgroup-v2/`/proc` classify returns `unknown` (it cannot
+    // see the masked process) → no detection binds → the confirmed-shell verdict
+    // never clears → the toggle is gone for the session's life (#962 recurrence).
+    //
+    // These drive the REAL detection chain (resolveForeignKindGuess →
+    // AgentKindRemoteSource.classify → AgentConversationRepository) through a fake
+    // SSH session that models the masked-live-agent host: the `agents kind` daemon
+    // exec returns `unknown` (scope=null) while a fresh `*.jsonl` transcript is
+    // genuinely present in the cwd. This is the #780 synthetic-state-injection at
+    // the host seam — NOT a `markAgentTailLiveForTest` injection (which #962 used
+    // and which CANNOT exercise the failing classify-miss). The end-to-end Docker
+    // proof is `ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest`.
+
+    @Test
+    fun b1MaskedLiveClaudeInRecordedShellBindsDetectionViaTranscriptDespiteUnknownClassify() =
+        runTest(scheduler) {
+            // B1: daemon classify = `unknown` (masked agent) + a live Claude
+            // transcript in the cwd → the foreign resolver binds Claude detection
+            // (the trustworthy-live-agent-evidence fallback). On base (no fix) the
+            // foreign resolver returns null on a null kind guess, so NO detection
+            // binds and the toggle stays gone — RED. With the fix the transcript
+            // fallback binds → GREEN.
+            val now = System.currentTimeMillis() / 1000
+            val session = MaskedAgentSshSession(
+                // The daemon could not read the scope → `unknown`, NOT `none`.
+                classifyAgentKind = "unknown",
+                // …but a live Claude transcript is plainly present in the cwd.
+                detectionOutput =
+                    "claude|$now|/workspace/proj|" +
+                        "/home/testuser/.claude/projects/-workspace-proj/live.jsonl",
+            )
+            val vm = newVm()
+            vm.connectWithRichPaneForTest(
+                paneId = "%0",
+                windowId = "@0",
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/7",
+                panePid = 4242L,
+                session = session,
+            )
+            runCurrent()
+            // The durable tree recorded this session `@ps_agent_kind=shell`.
+            vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+            runCurrent()
+            assertTrue(
+                "#975 precondition: the recorded-shell pane is published confirmed-shell",
+                "%0" in vm.confirmedShellPaneIds.value,
+            )
+
+            val detection = vm.resolveForeignSessionDetectionForTest("%0", session)
+            runCurrent()
+
+            assertNotNull(
+                "#975 (B1): a CONFIRMED-SHELL pane whose daemon classify returns " +
+                    "`unknown` while a live Claude transcript is present must bind " +
+                    "the agent via the transcript-evidence fallback (RED on base — " +
+                    "the foreign resolver returned null and no detection bound)",
+                detection,
+            )
+            assertEquals(
+                "#975 (B1): the bound detection is the live Claude transcript",
+                AgentKind.ClaudeCode,
+                detection?.agent,
+            )
+        }
+
+    @Test
+    fun b1GenuineNoneShellGetsNoTranscriptFallbackNoFlap() = runTest(scheduler) {
+        // B1 no-flap control (#894): a daemon `none` verdict (a READABLE scope
+        // with no agent — a genuine shell) must NOT trigger the transcript
+        // fallback even if a STALE transcript lingers in the cwd. `none` is a
+        // confident "no agent", unlike the unreadable `unknown`. Detection stays
+        // null → the confirmed-shell verdict is preserved → the toggle correctly
+        // stays hidden.
+        val now = System.currentTimeMillis() / 1000
+        val session = MaskedAgentSshSession(
+            classifyAgentKind = "none",
+            detectionOutput =
+                "claude|$now|/workspace/proj|" +
+                    "/home/testuser/.claude/projects/-workspace-proj/stale.jsonl",
+        )
+        val vm = newVm()
+        vm.connectWithRichPaneForTest(
+            paneId = "%0",
+            windowId = "@0",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            panePid = 4242L,
+            session = session,
+        )
+        runCurrent()
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+
+        val detection = vm.resolveForeignSessionDetectionForTest("%0", session)
+        runCurrent()
+
+        assertNull(
+            "#975 (B1 no-flap): a daemon `none` (genuine readable shell) must NOT " +
+                "bind a transcript fallback — only the unreadable `unknown` does. " +
+                "Detection stays null so the confirmed-shell verdict is preserved.",
+            detection,
+        )
+    }
+
+    @Test
+    fun b1UnknownClassifyButNoTranscriptStaysNull() = runTest(scheduler) {
+        // B1 boundary: `unknown` classify but NO live transcript in the cwd → the
+        // fallback enumerates nothing → null (a genuine shell with an unreadable
+        // scope and no agent). The fallback is evidence-driven: no transcript, no
+        // bind, no flap.
+        val session = MaskedAgentSshSession(
+            classifyAgentKind = "unknown",
+            detectionOutput = "",
+        )
+        val vm = newVm()
+        vm.connectWithRichPaneForTest(
+            paneId = "%0",
+            windowId = "@0",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            panePid = 4242L,
+            session = session,
+        )
+        runCurrent()
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+
+        val detection = vm.resolveForeignSessionDetectionForTest("%0", session)
+        runCurrent()
+
+        assertNull(
+            "#975 (B1 boundary): `unknown` classify with NO transcript binds nothing",
+            detection,
+        )
+    }
+
+    @Test
+    fun b1ForeignNotConfirmedShellUnknownClassifyGetsNoTranscriptFallback() = runTest(scheduler) {
+        // B1 scope guard: the transcript fallback is for a CONFIRMED-SHELL session
+        // ONLY — we second-guess a stale recorded-shell verdict, never a clean
+        // foreign session. A foreign (not-confirmed-shell) pane whose daemon
+        // returns `unknown` keeps the existing null behaviour (the user picks the
+        // kind); it does NOT auto-bind a same-cwd transcript.
+        val now = System.currentTimeMillis() / 1000
+        val session = MaskedAgentSshSession(
+            classifyAgentKind = "unknown",
+            detectionOutput =
+                "claude|$now|/workspace/proj|" +
+                    "/home/testuser/.claude/projects/-workspace-proj/live.jsonl",
+        )
+        val vm = newVm()
+        vm.connectWithRichPaneForTest(
+            paneId = "%0",
+            windowId = "@0",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            panePid = 4242L,
+            session = session,
+        )
+        runCurrent()
+        // NOTE: no applyRecordedShellVerdict → the session is FOREIGN, not
+        // confirmed-shell.
+
+        val detection = vm.resolveForeignSessionDetectionForTest("%0", session)
+        runCurrent()
+
+        assertNull(
+            "#975 (B1 scope): a FOREIGN (not-confirmed-shell) pane with `unknown` " +
+                "classify gets NO transcript fallback — the fallback only clears a " +
+                "stale recorded-shell verdict",
+            detection,
+        )
+    }
+
+    @Test
+    fun b1PrimeDedupOrderingReProbesConfirmedShellPaneOnUnchangedInput() = runTest(scheduler) {
+        // B1′ (dedup ordering): a `claude` started INSIDE an already-detected
+        // shell pane does NOT change the `(cwd, command, tty)` triple. On base the
+        // dedup early-return PRECEDED the cache-bust, so the stale one-shot "no
+        // agent" guess persisted and the pane never re-probed. The fix busts the
+        // confirmed-shell foreign-guess cache BEFORE the dedup check, so the next
+        // probe re-evaluates. Here: seed a cached `unknown` guess, confirm it is
+        // cached, then a confirmed-shell detection re-run must have BUSTED it.
+        val session = MaskedAgentSshSession(classifyAgentKind = "unknown", detectionOutput = "")
+        val vm = newVm()
+        vm.connectWithRichPaneForTest(
+            paneId = "%0",
+            windowId = "@0",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            panePid = 4242L,
+            session = session,
+        )
+        runCurrent()
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+
+        // Simulate the one-shot guess having cached "no agent" before the agent
+        // launched (the stale guess the dedup bug never re-evaluated).
+        vm.seedForeignGuessCacheForTest("$0")
+        assertTrue(
+            "#975 (B1′): precondition — the stale one-shot guess is cached",
+            vm.foreignGuessIsCachedForTest("$0"),
+        )
+
+        // A re-probe of the confirmed-shell pane (same unchanged input) must BUST
+        // the cache BEFORE the dedup early-return, so the daemon re-evaluates.
+        vm.startAgentDetectionForPaneForTest("%0")
+        runCurrent()
+
+        assertFalse(
+            "#975 (B1′): re-probing a confirmed-shell pane busts the stale foreign " +
+                "guess cache (the cache-bust now precedes the dedup early-return) — " +
+                "RED on base where the early-return skipped the bust and the stale " +
+                "guess persisted",
+            vm.foreignGuessIsCachedForTest("$0"),
+        )
+    }
+
+    @Test
+    fun b2ReattachReStampDoesNotDropRememberedAgentPlaceholder() = runTest(scheduler) {
+        // B2 (#959 beyond-grace reattach re-stamp): on reconnect the screen
+        // re-reads `@ps_agent_kind=shell` and re-applies applyRecordedShellVerdict
+        // (isShell=true). On base that UNCONDITIONALLY dropped the just-restored
+        // remembered-agent placeholder (#819 A2), re-suppressing the Conversation
+        // toggle for a session that WAS a live agent before backgrounding — the
+        // raw black Terminal strand. The fix keeps the remembered-agent placeholder
+        // (only the fresh #878 auto-seed is dropped); detection re-confirms it.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        // A beyond-grace reattach restored the remembered-agent resolving
+        // placeholder (#819 A2 — detection-less, on Conversation).
+        vm.seedRememberedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertNotNull(
+            "#975 (B2): precondition — the remembered-agent placeholder is restored",
+            vm.agentConversations.value["%0"],
+        )
+        assertEquals(
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+
+        // The reconnect re-read re-applies the recorded-shell verdict.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+
+        assertNotNull(
+            "#975 (B2): the reattach re-stamp must NOT drop the remembered-agent " +
+                "placeholder (RED on base — applyRecordedShellVerdict tore it down " +
+                "and the Conversation toggle disappeared post-reconnect)",
+            vm.agentConversations.value["%0"],
+        )
+        assertTrue(
+            "#975 (B2): the surviving row is still the remembered-agent placeholder",
+            vm.agentConversations.value["%0"]!!.rememberedAgentPlaceholder,
+        )
+        assertEquals(
+            "#975 (B2): it is still on the Conversation surface (the toggle survives)",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+    }
+
+    @Test
+    fun b2ReattachReStampStillDropsFreshAutoSeededPlaceholder() = runTest(scheduler) {
+        // B2 adjacency (#894): the B2 fix must NOT resurrect the #894 first-open
+        // FLASH — a FRESH #878 auto-seeded placeholder (NOT a remembered agent)
+        // racing ahead of the recorded-shell read must STILL be dropped on the
+        // confirmed-shell verdict. Only the remembered-agent placeholder is spared.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // The fresh #878 auto-seed is up (autoSeededPlaceholder = true).
+        assertTrue(
+            "#894: precondition — the fresh auto-seed is up",
+            vm.agentConversations.value["%0"]?.autoSeededPlaceholder == true,
+        )
+
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+
+        assertNull(
+            "#975 (B2 adjacency / #894): a FRESH auto-seeded placeholder is STILL " +
+                "dropped on the confirmed-shell verdict (the first-open flash kill " +
+                "is preserved — only the remembered-agent placeholder is spared)",
+            vm.agentConversations.value["%0"],
+        )
+    }
+
+    /**
+     * Issue #975: connect + register a single pane carrying a real [cwd], [paneTty]
+     * and [panePid] (the foreign-detection inputs the one-shot daemon guess + the
+     * transcript fallback need), with [session] installed as the active sessionRef
+     * so the REAL detection chain runs against the fake masked-agent host.
+     */
+    private fun TmuxSessionViewModel.connectWithRichPaneForTest(
+        paneId: String,
+        windowId: String,
+        cwd: String,
+        paneTty: String,
+        panePid: Long,
+        session: SshSession,
+        sessionName: String = "work",
+    ) {
+        replaceClientForTest(
+            hostId = 42L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = sessionName,
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId,
+                    windowId,
+                    "$0",
+                    "node",
+                    paneIndex = 0,
+                    cwd = cwd,
+                    currentCommand = "node",
+                    paneTty = paneTty,
+                    panePid = panePid,
+                    sessionName = sessionName,
+                ),
+            ),
+        )
+        setSessionRefForTest(session)
+    }
+
     @Test
     fun terminalDefaultNeverSeedsPlaceholderRegardlessOfShellVerdict() = runTest(scheduler) {
         // G2 class coverage (default = Terminal, both shell and agent): when the
@@ -15531,5 +15884,77 @@ class TmuxSessionViewModelTest {
         override suspend fun delete(host: com.pocketshell.core.storage.entity.HostEntity) =
             error("not used")
         override suspend fun deleteById(id: Long) = error("not used")
+    }
+
+    /**
+     * Issue #975: an [SshSession] double modelling the MASKED-LIVE-AGENT host the
+     * maintainer hit — the agent-kind daemon's cgroup-v2/`/proc` classify returns
+     * `unknown` (or `none`) for a node-wrapped/quiet `claude`, while the agent's
+     * `*.jsonl` transcript is genuinely present in the cwd-encoded log dir. It
+     * answers exactly the two execs the foreign-detection chain issues:
+     *   - the `pocketshell agents kind` daemon classify (JSON envelope, with
+     *     [classifyAgentKind] one of `claude`/`codex`/`opencode`/`none`/`unknown`),
+     *   - the cwd-scoped candidate enumeration ([detectionCommand], `claude_dir=`),
+     *     returning [detectionOutput].
+     * This is the #780 synthetic-state injection at the host seam — it reproduces
+     * the classify-miss the real Docker fixture also produces (scope=null in a
+     * non-systemd container), exercising the REAL resolver, not a markAgentTailLive
+     * injection.
+     */
+    private class MaskedAgentSshSession(
+        private val classifyAgentKind: String,
+        private val detectionOutput: String = "",
+        private val hostWideProcessOutput: String = "",
+    ) : SshSession {
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): ExecResult {
+            val stdout = when {
+                // The host-side `pocketshell agents kind` daemon classify. The
+                // request pipes a `{"panes":[{"pane_id":"%N", ...}]}` snapshot; we
+                // echo each requested pane id back with [classifyAgentKind].
+                command.contains("agents kind") -> {
+                    val paneIds = PANE_ID_RE.findAll(command).map { it.groupValues[1] }.toList()
+                    buildString {
+                        append("{\"results\":[")
+                        paneIds.forEachIndexed { index, paneId ->
+                            if (index > 0) append(',')
+                            append("{\"pane_id\":\"").append(paneId).append("\",")
+                            append("\"agent_kind\":\"").append(classifyAgentKind).append("\",")
+                            append("\"scope\":null}")
+                        }
+                        append("]}")
+                    }
+                }
+                // The cwd-scoped candidate enumeration ([detectionCommand]).
+                command.contains("claude_dir=") -> detectionOutput
+                command.contains("ps -eo pid,ppid,tty,comm,args") -> hostWideProcessOutput
+                command.contains("ps -eo pid,tty,comm,args") -> hostWideProcessOutput
+                else -> ""
+            }
+            return ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
+        override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job = Job()
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): SshPortForward = throw NotImplementedError()
+        override fun startShell(): SshShell = throw NotImplementedError()
+        override suspend fun uploadFile(file: File, remotePath: String): String =
+            error("uploadFile not used")
+        override suspend fun uploadStream(
+            input: InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used")
+        override fun close() = Unit
+
+        private companion object {
+            val PANE_ID_RE = Regex("\"pane_id\":\"([^\"]+)\"")
+        }
     }
 }

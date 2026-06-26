@@ -42,6 +42,23 @@ internal fun startDirectoryMissingMessage(
     "Couldn't create $sessionName: start folder does not exist: " +
         startDirectory.trim().ifBlank { DEFAULT_TMUX_START_DIRECTORY }
 
+/**
+ * Issue #976: a LAUNCH (agent/shell start command) tried to create a session
+ * whose derived name already belongs to a live session on the host. The
+ * idempotent create would REUSE that session, and `send-keys -t '<name>'` would
+ * then type the launch command into the existing (possibly currently-attached)
+ * pane — the misroute the maintainer reported. We refuse rather than leak the
+ * keystrokes into the wrong pane (the #968-class "never act against the current
+ * target" invariant). The de-dupe list was empty (e.g. a #974 connection drop /
+ * still-loading session list), so the `-2`/`-3` suffix that would have produced
+ * a fresh name was skipped; surfacing this prompts a retry once the list is
+ * known.
+ */
+internal fun launchTargetCollisionMessage(sessionName: String): String =
+    "Couldn't launch a new session: '$sessionName' is already open, so the " +
+        "launch would have been typed into the existing session. Reconnect / " +
+        "let the session list finish loading, then try again."
+
 internal fun remoteStartDirectoryExistsCommand(startDirectory: String): String {
     val resolved = startDirectory.trim().ifBlank { DEFAULT_TMUX_START_DIRECTORY }
     return """

@@ -419,6 +419,188 @@ class FolderListGatewayFallbackTest {
         assertTrue(session.execCommands.any { it.contains("send-keys") })
     }
 
+    // --- Issue #976: a LAUNCH must never type into an already-open session ---
+
+    @Test
+    fun agentLaunchIntoAnAlreadyOpenSameNameSessionRefusesAndDoesNotSendKeys() = runTest {
+        // The #976 misroute: a new Codex launch in a directory that ALREADY has
+        // an open session derives the SAME path-prefix name. With an empty
+        // de-dupe list (a #974 drop / still-loading picker collapsed
+        // `existingNames` to ∅), the suffix is skipped and the idempotent create
+        // would REUSE the live session — `send-keys -t '<name>'` then types the
+        // launch line into the currently-attached pane. The gateway must probe
+        // `tmux has-session` first, see the name is taken, and REFUSE: no create,
+        // no send-keys, a surfaced error. (Red on base: base has no has-session
+        // guard, so the create no-ops and send-keys fires into the existing pane.)
+        val session = CreateSessionFake(
+            results = listOf(
+                // The session already exists on the host → has-session exits 0.
+                CreateSessionFake.Rule(match = "has-session", result = ok()),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "pocketshell agent --help", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val ex = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+            )
+        }.exceptionOrNull()
+
+        assertTrue("a colliding launch must surface an error, got $ex", ex is RuntimeException)
+        // The load-bearing assertion: the launch line was NEVER typed into the
+        // existing (current) pane.
+        assertFalse(
+            "must NOT send-keys the launch into an already-open session",
+            session.execCommands.any { it.contains("send-keys") },
+        )
+        // It must not have created/attached either — the create is skipped once
+        // the collision is detected.
+        assertFalse(
+            "must NOT run the idempotent create once a collision is detected",
+            session.execCommands.any { it.contains("create-detached") },
+        )
+        // It DID probe for the collision.
+        assertTrue(
+            "must probe has-session before launching",
+            session.execCommands.any { it.contains("has-session") },
+        )
+    }
+
+    @Test
+    fun agentLaunchWithSuffixedFreshNameCreatesAndSendsKeys() = runTest {
+        // Class-cover (b): a legitimate same-dir second session has already been
+        // given a `-2` suffix by the deriver (picker was Ready), so the name is
+        // genuinely FREE on the host. has-session exits non-zero, the create runs,
+        // and send-keys fires into the NEW session — the happy path still works.
+        val freshName = "$SESSION_NAME-2"
+        val session = CreateSessionFake(
+            results = listOf(
+                // -2 name is free → has-session exits non-zero.
+                CreateSessionFake.Rule(
+                    match = "has-session",
+                    result = ExecResult(stdout = "", stderr = "can't find session", exitCode = 1),
+                ),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "pocketshell agent --help", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        gateway.createSessionOnSession(
+            session = session,
+            sessionName = freshName,
+            cwd = CWD,
+            startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+        )
+
+        assertTrue(
+            "a fresh suffixed name must create the session",
+            session.execCommands.any { it.contains("create-detached") },
+        )
+        val sendKeys = session.execCommands.single { it.contains("send-keys") }
+        assertTrue(
+            "send-keys must target the fresh suffixed name: $sendKeys",
+            sendKeys.contains("tmux send-keys -t ${escapedInWrapper(freshName)}"),
+        )
+    }
+
+    @Test
+    fun agentLaunchIntoAFreshDistinctDirNameCreatesAndSendsKeys() = runTest {
+        // Class-cover (c): a distinct directory derives a distinct name that does
+        // not collide with any open session — has-session exits non-zero, create
+        // runs, send-keys fires. No regression for the no-collision common case.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "has-session",
+                    result = ExecResult(stdout = "", stderr = "no session", exitCode = 1),
+                ),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "pocketshell agent --help", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        gateway.createSessionOnSession(
+            session = session,
+            sessionName = "var-log",
+            cwd = "/var/log",
+            startCommand = "pocketshell agent claude --dir '/var/log'",
+        )
+
+        assertTrue(session.execCommands.any { it.contains("create-detached") })
+        assertTrue(session.execCommands.any { it.contains("send-keys") })
+    }
+
+    @Test
+    fun shellLaunchIntoAnAlreadyOpenSameNameSessionRefusesAndDoesNotSendKeys() = runTest {
+        // Class-cover: the same collision guard applies to a SHELL launch (the
+        // path-prefix name is shared by agent AND shell — #642). A shell start
+        // command into an already-open same-name session must also refuse rather
+        // than type into the existing pane.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(match = "has-session", result = ok()),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val ex = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = "htop",
+            )
+        }.exceptionOrNull()
+
+        assertTrue("a colliding shell launch must surface an error, got $ex", ex is RuntimeException)
+        assertFalse(
+            "must NOT send-keys a shell launch into an already-open session",
+            session.execCommands.any { it.contains("send-keys") },
+        )
+    }
+
+    @Test
+    fun plainRepickWithNoLaunchKeepsIdempotentAttachOrCreate() = runTest {
+        // A plain re-pick (no startCommand) must KEEP the idempotent
+        // attach-or-create semantics (#642/#429) — it does NOT probe has-session
+        // and does NOT refuse on an existing name (the collision guard is scoped
+        // to the LAUNCH case only, so the re-pick UX is unchanged).
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = null,
+        )
+
+        assertFalse(
+            "a no-launch re-pick must not probe has-session",
+            session.execCommands.any { it.contains("has-session") },
+        )
+        assertTrue(
+            "a no-launch re-pick must still run the idempotent create",
+            session.execCommands.any { it.contains("create-detached") },
+        )
+    }
+
     /**
      * A configurable fake [SshSession] for the create-session path: it records
      * every command, returns the start-directory-exists probe as success, and

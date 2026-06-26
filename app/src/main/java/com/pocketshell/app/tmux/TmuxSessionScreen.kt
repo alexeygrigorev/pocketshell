@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
@@ -1142,6 +1143,16 @@ public fun TmuxSessionScreen(
     LaunchedEffect(Unit) {
         viewModel.sessionEnded.collect { endedSessionName ->
             onSessionEnded(endedSessionName)
+        }
+    }
+
+    // Issue #976: surface a refused new-session LAUNCH (e.g. the gateway's
+    // name-collision guard) so it fails VISIBLY. The launch line was NOT typed
+    // into the current pane and no navigation happened; a toast tells the user
+    // why nothing opened so they can retry once the session list is known.
+    LaunchedEffect(Unit) {
+        viewModel.sessionCreateError.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -2298,29 +2309,47 @@ public fun TmuxSessionScreen(
                     // (the gateway/tmux has no server-side de-dupe, so a
                     // duplicate name fails the create). This mirrors the host
                     // screen, which passes `knownSessionNames(state)`.
-                    val knownNames =
-                        (sessionPickerState as? HostTmuxSessionPickerState.Ready)
-                            ?.rows
-                            ?.map { it.name }
-                            ?.toSet()
-                            .orEmpty()
-                    val newName = derivedSessionName(
-                        choice = choice,
-                        homeDirectory = conventionalRemoteHome(user),
-                        existingNames = knownNames,
-                    )
-                    viewModel.createSession(
-                        name = newName,
-                        cwd = choice.startDirectory,
-                        startCommand = choice.startCommand(
-                            newSessionClaudeProfiles,
-                            newSessionCodexProfiles,
-                        ),
-                        chosenKind = choice.sessionAgentKind,
-                        onResolved = { resolved ->
-                            onOpenTmuxSession(resolved, choice.startDirectory)
-                        },
-                    )
+                    //
+                    // Issue #976: the de-dupe ONLY works when this list is
+                    // populated. If the picker is NOT `Ready` (a #974 connection
+                    // drop / still-loading list flips it to Loading/ConnectError),
+                    // the list collapses to ∅, the `-2`/`-3` suffix is skipped,
+                    // the derived name COLLIDES with the live same-folder session,
+                    // and the launch send-keys would type into that existing pane.
+                    // So do NOT proceed with a possibly-colliding name when the
+                    // list is unknown — block with a clear message and let the
+                    // user retry once the list is `Ready`. (The gateway's
+                    // has-session guard is the server-side safety net; this avoids
+                    // even attempting the collision-prone create.)
+                    val readyPicker =
+                        sessionPickerState as? HostTmuxSessionPickerState.Ready
+                    if (readyPicker == null) {
+                        Toast.makeText(
+                            context,
+                            "Session list isn't loaded yet — reconnect or wait " +
+                                "for it to finish, then start the new session again.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    } else {
+                        val knownNames = readyPicker.rows.map { it.name }.toSet()
+                        val newName = derivedSessionName(
+                            choice = choice,
+                            homeDirectory = conventionalRemoteHome(user),
+                            existingNames = knownNames,
+                        )
+                        viewModel.createSession(
+                            name = newName,
+                            cwd = choice.startDirectory,
+                            startCommand = choice.startCommand(
+                                newSessionClaudeProfiles,
+                                newSessionCodexProfiles,
+                            ),
+                            chosenKind = choice.sessionAgentKind,
+                            onResolved = { resolved ->
+                                onOpenTmuxSession(resolved, choice.startDirectory)
+                            },
+                        )
+                    }
                 },
             )
         }

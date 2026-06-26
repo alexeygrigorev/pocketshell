@@ -219,6 +219,23 @@ class SessionNameDerivationTest {
     }
 
     @Test
+    fun emptyExistingNamesDerivesTheBareCollidingBase() {
+        // Issue #976: when the picker isn't `Ready` (a #974 drop / still-loading
+        // list) the de-dupe input collapses to ∅, so the deriver CANNOT add a
+        // `-2` suffix — it returns the bare base, which COLLIDES with the live
+        // same-folder session. This is the input that triggers the misroute; the
+        // server-side has-session guard in the gateway is what then refuses the
+        // launch instead of typing it into the existing pane.
+        val name = SessionNameDerivation.derive(
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            agentCommand = "codex",
+            existingNames = emptySet(),
+        )
+        assertEquals("git-pocketshell", name)
+    }
+
+    @Test
     fun collisionWalksUpUntilFreeSlot() {
         val name = SessionNameDerivation.derive(
             startDirectory = "/var/log",

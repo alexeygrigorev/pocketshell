@@ -6,6 +6,7 @@ import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
+import com.pocketshell.app.sessions.launchTargetCollisionMessage
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
@@ -1206,6 +1207,34 @@ class SshFolderListGateway internal constructor(
         }
         val quotedName = shellQuote(sessionName)
         val quotedCwd = shellQuote(cwd)
+        // Issue #976: routing-safety guard for a LAUNCH create (startCommand
+        // set). The create commands (`create-detached` / `new-session -A`) are
+        // intentionally idempotent — re-picking the same folder ATTACHES to the
+        // already-open same-named session rather than erroring (#642/#429). That
+        // idempotency is correct for a plain re-pick, but it is the misroute trap
+        // for an agent/shell LAUNCH: session names are a pure path-prefix shared
+        // by agent AND shell (#642), so a new Codex launch in a dir that already
+        // has an open Claude session derives the SAME name. When the picker's
+        // de-dupe list is empty (a #974 connection drop / still-loading list
+        // collapses `existingNames` to ∅, so the `-2`/`-3` suffix is skipped),
+        // the name collides, the idempotent create is a no-op REUSE of the live
+        // session, and `send-keys -t '<name>'` types the launch line straight
+        // into the currently-attached pane (the maintainer's #976 report).
+        //
+        // So before creating for a launch, probe whether the target name already
+        // exists. If it does, the launch must NOT proceed — typing into a
+        // pre-existing (possibly current) pane is exactly the #968-class misroute
+        // we refuse. Surface a clear error so the caller can re-derive against a
+        // fresh list / suffix instead of silently leaking keystrokes. A plain
+        // shell/no-launch create keeps its idempotent attach-or-create semantics.
+        if (startCommand != null) {
+            val hasSession = session.exec(
+                pathAware("tmux has-session -t $quotedName"),
+            )
+            if (hasSession.exitCode == 0) {
+                throw RuntimeException(launchTargetCollisionMessage(sessionName))
+            }
+        }
         val createResult = session.exec(
             pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
         )

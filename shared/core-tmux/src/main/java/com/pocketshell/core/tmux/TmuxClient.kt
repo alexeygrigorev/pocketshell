@@ -269,6 +269,27 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse
 
     /**
+     * Issue #989: ask the application running in [paneId] to REPAINT its full
+     * screen by sending it `C-l` (Ctrl-L) — the universal "clear and redraw" key
+     * that every well-behaved TUI (Claude/Codex, vim, less, htop, a shell) honors.
+     *
+     * This is the missing primitive behind the manual Redraw / attach reseed:
+     * before #989 those paths only ever re-CAPTURED the pane, so an idle
+     * alternate-screen agent (which never re-emits its existing frame on its own)
+     * was captured near-blank and the seed cleared the visible content to black. A
+     * `send-keys C-l` is geometry-stable (no window reflow, unlike a
+     * `refresh-client -C` size-nudge) so it cannot momentarily strip the idle
+     * frame; it simply prompts the app to emit a fresh full redraw, which the
+     * subsequent `capture-pane` then sees.
+     *
+     * Best-effort: a key that the app does not bind to redraw is harmless (the
+     * non-destructive swap keeps the last frame either way). The default
+     * implementation routes through [sendCommand] for [TmuxClient] doubles.
+     */
+    public suspend fun forceFullRepaint(paneId: String): CommandResponse =
+        sendCommand("send-keys C-l -t $paneId")
+
+    /**
      * Issue #927: milliseconds since the control-mode reader last parsed ANY
      * control event (`%begin` / `%end` / `%error` / `%output`) — the
      * "busy ≠ dead" discriminator the [probeLiveness] tolerance leans on.
@@ -1444,6 +1465,17 @@ internal class RealTmuxClient(
             timeoutMode = CommandTimeoutMode.FailOpenDrain,
         )
     }
+
+    override suspend fun forceFullRepaint(paneId: String): CommandResponse =
+        // Issue #989: a rendering-only prompt to the app to redraw. Use the
+        // FailOpenDrain mode (like `refresh-client`/`capture-pane`) so a delayed
+        // reply during an output storm fails open locally instead of being
+        // mistaken for a fatal transport drop — this MUST NOT take the FatalClose
+        // structural-command path (#979 owns that timeout behaviour).
+        sendCommandInternal(
+            "send-keys C-l -t $paneId",
+            timeoutMode = CommandTimeoutMode.FailOpenDrain,
+        )
 
     override suspend fun detachCleanly(timeoutMs: Long) {
         markReaderExitIntent(ReaderExitIntent.DetachOrReplace)

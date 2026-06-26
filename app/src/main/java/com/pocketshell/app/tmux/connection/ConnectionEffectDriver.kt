@@ -181,6 +181,17 @@ class ConnectionEffectDriver(
     // `Up`/`TransportLive` feed is NEVER suppressed (a healthy re-`Connected` must
     // always promote the controller).
     private val suppressTransportDrops: () -> Boolean = { false },
+    // Issue #972: fired AFTER the current host's lease transport comes back `Up`
+    // (a reconnect promoted the controller to Live). This is the trigger that
+    // mirrors the recorded reconnect-cause trail to `~/.pocketshell/connection-log.jsonl`
+    // on the host over the now-warm lease, so the maintainer can ATTRIBUTE the
+    // just-completed drop in the in-app file viewer (no adb). The driver does the
+    // wiring only — the host write itself (and its fail-soft contract) lives in
+    // the VM-supplied effect ([ConnectionLogHostMirror]); a no-op default keeps the
+    // observe-only test harness unchanged. Fired on EVERY accepted `Up` for the
+    // current host (the reconnect edge); the VM's effect is fail-soft + cheap, and
+    // a blank trail is a no-op, so an extra fire never perturbs the connection.
+    private val onTransportReconnected: () -> Unit = {},
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
     private val jobs = mutableListOf<Job>()
@@ -356,6 +367,12 @@ class ConnectionEffectDriver(
                 is TransportUpDown.Up ->
                     if (edge.host == controller.state.value.hostOrNull()) {
                         submitTransport(ConnectionEvent.TransportLive)
+                        // Issue #972: the transport is back warm for the current
+                        // host — mirror the recorded reconnect-cause trail to the
+                        // host log over THIS lease so the just-completed drop is
+                        // attributable in the file viewer. Fail-soft + a blank
+                        // trail no-ops, so this never perturbs the live connection.
+                        onTransportReconnected()
                     }
 
                 is TransportUpDown.Down ->

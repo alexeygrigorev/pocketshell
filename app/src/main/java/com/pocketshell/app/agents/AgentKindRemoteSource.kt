@@ -5,6 +5,7 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -37,8 +38,32 @@ import javax.inject.Inject
 public class AgentKindRemoteSource @Inject constructor() {
     private var execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS
 
+    /**
+     * Issue #1001 (CI-flake fix): the dispatcher the bounded daemon RPC exec
+     * runs on. Defaults to [Dispatchers.IO] so the potentially-wedged blocking
+     * SSH read never parks a UI/caller thread in production. A JVM unit test
+     * driving the detection chain under `runTest(scheduler)` pins this to a
+     * `StandardTestDispatcher` on the SHARED virtual-clock scheduler via
+     * [setExecDispatcherForTest], so the exec + its `withTimeoutOrNull` resolve
+     * on the test scheduler — deterministically drained by `runCurrent()` /
+     * `advanceUntilIdle()` instead of racing a real `Dispatchers.IO` background
+     * thread (the b1Masked* detection-bind race, ~1/3 release-variant failures).
+     * Production behaviour is unchanged.
+     */
+    private var execDispatcher: CoroutineDispatcher = Dispatchers.IO
+
     internal constructor(execReadTimeoutMs: Long) : this() {
         this.execReadTimeoutMs = execReadTimeoutMs
+    }
+
+    /**
+     * Issue #1001: confine the bounded-exec dispatcher to a test scheduler so a
+     * `runTest`-driven detection test awaits the daemon RPC deterministically.
+     * Test-only; never called in production.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setExecDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        execDispatcher = dispatcher
     }
 
     /**
@@ -165,7 +190,7 @@ public class AgentKindRemoteSource @Inject constructor() {
      * read.
      */
     private suspend fun SshSession.execBounded(command: String): ExecResult? =
-        withContext(Dispatchers.IO) {
+        withContext(execDispatcher) {
             val deferred = async { exec(command) }
             withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
                 ?: run {

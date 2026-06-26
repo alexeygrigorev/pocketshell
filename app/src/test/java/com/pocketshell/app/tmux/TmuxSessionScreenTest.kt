@@ -1539,4 +1539,111 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("1/session-a", "1/session-a"), requeuedTargets)
         assertEquals(emptySet<String>(), retryExclusions.last())
     }
+
+    // --- Issue #993: kebab "Reconnect" enable gate ---------------------------------
+
+    @Test
+    fun reconnectKebabEnabledForDroppedSessionWithTarget() {
+        // The maintainer's exact case: the session dropped and auto-reconnect did NOT
+        // fire — the app is sitting on Failed (or a stale Connected) WITH a target to
+        // reconnect to. The Reconnect item MUST be enabled so the user can recover in
+        // place without the switch-away-and-back dance.
+        assertTrue(
+            "Failed-with-target must enable Reconnect (the dropped-session escape hatch)",
+            reconnectKebabEnabled(
+                canReconnect = true,
+                status = TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected"),
+            ),
+        )
+        assertTrue(
+            "a (possibly stale) Connected with a target still enables a manual reconnect",
+            reconnectKebabEnabled(
+                canReconnect = true,
+                status = TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+            ),
+        )
+    }
+
+    @Test
+    fun reconnectKebabDisabledWithoutTarget() {
+        // No target to reconnect to (VM never opened / initial-connect race) — the item
+        // must be disabled so a tap is never a silent no-op (AC4).
+        listOf(
+            TmuxSessionViewModel.ConnectionStatus.Idle,
+            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+        ).forEach { status ->
+            assertEquals(
+                "no target → Reconnect disabled for $status",
+                false,
+                reconnectKebabEnabled(canReconnect = false, status = status),
+            )
+        }
+    }
+
+    @Test
+    fun kebabReconnectThenLiveWindowFlushesQueuedOutboundMessage() {
+        // Issue #993 — the maintainer's full journey, end-to-end at the screen-controller
+        // seam: a queued outbound message is pending, the session is DROPPED (not live), the
+        // user taps the kebab Reconnect (which is ENABLED in this dropped-with-target state),
+        // the session recovers (the live window flips), and the #900 outbound queue
+        // auto-flushes the pending message — WITHOUT a session switch.
+        val controller = OutboundQueueAutoFlushController()
+        val flushed = mutableListOf<String>()
+        val sessionId = "1/issue993-proof"
+
+        // 1) DROPPED state: the session is not live, a connection-lost band is up. The kebab
+        //    Reconnect item MUST be actionable so the user has an in-session escape hatch.
+        controller.onConnectionWindowChanged(sessionLive = false, targetSessionId = sessionId) {
+            error("offline must not requeue/flush")
+        }
+        assertTrue(
+            "the kebab Reconnect must be enabled while dropped-with-target (the escape hatch)",
+            reconnectKebabEnabled(
+                canReconnect = true,
+                status = TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected"),
+            ),
+        )
+        // While dropped, the queue does NOT flush (the message stays queued).
+        assertNull(
+            controller.onQueueSnapshotChanged(sessionLive = false) {
+                error("a dropped session must not flush the queue")
+            },
+        )
+        assertTrue("nothing flushed while the session is dropped", flushed.isEmpty())
+
+        // 2) Tapping the kebab Reconnect drives viewModel.reconnect() → the SAME session
+        //    recovers IN PLACE (no switch). At the screen that surfaces as `sessionLive`
+        //    flipping true for the SAME targetSessionId — NOT a different session id (the
+        //    old switch-away-and-back workaround would change the target).
+        controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = sessionId) {
+            // requeue-stale-in-flight on becoming live (no pending in-flight here).
+        }
+        val flushedId = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            assertTrue("first flush after reconnect excludes nothing", excludingIds.isEmpty())
+            flushed += "queued-1"
+            "queued-1"
+        }
+
+        assertEquals("the queued message must auto-flush after the in-place reconnect", "queued-1", flushedId)
+        assertEquals(listOf("queued-1"), flushed)
+    }
+
+    @Test
+    fun reconnectKebabDisabledWhileReconnectAlreadyInFlight() {
+        // A connect/reconnect is already running — a manual reconnect would be a
+        // redundant re-dial that yanks an already-recovering session, so the item is
+        // disabled even with a target present (AC: "sensible state mid-reconnect").
+        listOf(
+            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
+            reconnectingStatus,
+        ).forEach { status ->
+            assertEquals(
+                "in-flight → Reconnect disabled for $status",
+                false,
+                reconnectKebabEnabled(canReconnect = true, status = status),
+            )
+        }
+    }
 }

@@ -1711,6 +1711,8 @@ class DesignRenders {
                     "Detach",
                     // Issue #892: manual full-viewport reseed escape hatch.
                     "Redraw",
+                    // Issue #993: manual reconnect-in-place escape hatch.
+                    "Reconnect",
                 ),
                 "Sessions" to listOf(
                     "+ New session",

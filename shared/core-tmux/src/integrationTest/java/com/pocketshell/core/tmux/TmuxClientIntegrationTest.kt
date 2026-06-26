@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -173,6 +174,23 @@ class TmuxClientIntegrationTest {
                     // (or a generous timeout elapses), then assert on the
                     // buffer — independent of order. (#691: wired into per-push
                     // CI, so it must pin the contract, not the ordering.)
+                    // `opening` is shared between this coroutine and the
+                    // `collector` coroutine, which appends on the `-CC` reader
+                    // dispatcher. `Collections.synchronizedList` only locks
+                    // individual mutator/accessor calls — it does NOT make an
+                    // *iteration* (Kotlin's `toList()`, or `none { }`/`any { }`
+                    // which walk the backing iterator) atomic against a
+                    // concurrent `add`. Without a guard, the poll-loop predicate
+                    // below and the final snapshot can iterate the backing
+                    // ArrayList while the collector is mid-`add`, which throws
+                    // `ConcurrentModificationException` (issue #1003). Every read
+                    // here therefore takes the list's own monitor via
+                    // `synchronized(opening) { ... }`, the same monitor the
+                    // synchronized wrapper uses for `add`, so reads and writes
+                    // never interleave. We also `join()` the collector after
+                    // cancelling so no append can race the final snapshot
+                    // (`cancel()` only *requests* cancellation; the coroutine may
+                    // still be inside `opening.add` when it returns).
                     val opening = java.util.Collections.synchronizedList(
                         mutableListOf<ControlEvent>(),
                     )
@@ -184,14 +202,16 @@ class TmuxClientIntegrationTest {
                     it.connect()
                     withTimeout(10_000) {
                         while (
-                            opening.none { e -> e is ControlEvent.WindowAdd } ||
-                            opening.none { e -> e is ControlEvent.SessionsChanged }
+                            synchronized(opening) {
+                                opening.none { e -> e is ControlEvent.WindowAdd } ||
+                                    opening.none { e -> e is ControlEvent.SessionsChanged }
+                            }
                         ) {
                             delay(50)
                         }
                     }
-                    collector.cancel()
-                    val events = opening.toList()
+                    collector.cancelAndJoin()
+                    val events = synchronized(opening) { opening.toList() }
                     assertTrue(
                         "expected a WindowAdd in tmux's opening events: $events",
                         events.any { e -> e is ControlEvent.WindowAdd },

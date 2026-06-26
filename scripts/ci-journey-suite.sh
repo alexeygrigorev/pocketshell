@@ -542,6 +542,15 @@ JOURNEY_CLASSES=(
   # on base (the reassoc emits a handoff → the live session reconnects); GREEN after the
   # Angle-C fix. Uses ONLY the deterministic agents:2222 fixture tests.yml already brings
   # up (no toxiproxy, no workflow change) and does NOT self-skip on CI.
+  #
+  # ALSO COVERS (#981): the class now carries
+  # realValidatedHandoffWhileTransportProvenAliveDoesNotReconnect — a REAL validated
+  # WIFI→CELLULAR identity flip (which DOES emit past #875) on a STABLE wifi while the
+  # live SSH transport is provably alive (forceTransportProvenAliveForTest pinned, the
+  # #780 synthetic-inject model — no self-skip) must NOT tear down + redial the healthy
+  # socket (the #974 stable-wifi drop). RED on base (the emitted flip → scheduleNetwork-
+  # Reconnect raises the Reconnecting band); GREEN once the #981 liveness gate rides the
+  # proven-alive transport through. Same deterministic agents:2222 fixture; runs on CI.
   "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
   # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
   # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
@@ -629,6 +638,26 @@ JOURNEY_CLASSES=(
   # local-only flaky-reconnect evidence). Target the single @Test method by
   # FQCN#method so the CI-gated reconnect cases are NOT selected here.
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"
+  # ADDED (#874 residual black-screen, conversation-source area — sibling of
+  # #878/#894/#975, D31/D32): a presumed-agent pane RECONCILED rather than freshly
+  # added — a beyond-grace reattach (#959) or a switch-back to a REBUILT cached
+  # runtime — whose Conversation row was DROPPED (the R3-B 2-null collapse) has NO
+  # row on restore (restoreCachedRuntime only restarts rows that had a live
+  # detection, and never reconciles), so it falls to the always-mounted raw
+  # TmuxTerminalPager → the #807 black void. The fix re-seeds the #878 Conversation
+  # placeholder when the recorded-kind verdict resolves the session NOT-shell
+  # (applyRecordedShellVerdict(isShell=false), AFTER the verdict so #894's
+  # no-flash-on-shell invariant holds). This connected proof drives the production
+  # TmuxSessionViewModel against the deterministic agents:2222 fixture through the
+  # FRESH-attach path, then injects the residual-void state synthetically (#780/D33
+  # — the wedged-channel row-drop-then-restore cannot be driven deterministically
+  # on the shared AVD): drop the row, drive the not-shell verdict (the EXACT
+  # refreshCurrentSessionRecordedKind production path), and assert the Conversation
+  # placeholder is re-seeded — never the raw black Terminal void. It uses ONLY
+  # agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml already
+  # brings up, and does NOT self-skip on CI (no assumeTrue / assumeFalse). The fast
+  # JVM sibling is TmuxSessionViewModelTest.reconciledPresumedAgentWithDroppedRow*.
+  "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice"
   # ADDED (#962/#975, conversation-source area — sibling of #819/#821/#894,
   # D31/D32): a live agent (claude) started INSIDE a session recorded
   # `@ps_agent_kind=shell` must regain its Terminal <-> Conversation TOGGLE, EVEN

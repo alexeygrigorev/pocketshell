@@ -3599,6 +3599,218 @@ class TmuxSessionViewModelTest {
         assertEquals(0, connector.connectCount)
     }
 
+    // ---- Issue #981: network handoff rides through while the transport is proven alive ----
+
+    @Test
+    fun issue981ValidatedNetworkFlipDoesNotTearDownTransportProvenAliveLink() = runTest(scheduler) {
+        // Issue #981 reproduce-first (red on base): a REAL validated default-network
+        // identity flip (WIFI→CELLULAR) arrives while the live SSH transport is
+        // provably alive (its keepalive saw inbound bytes within the ride-through
+        // window — the #974 stable-wifi case where -CC traffic keeps the link warm).
+        // The reactive handoff path must NOT tear down + redial the healthy socket.
+        // On base (no liveness gate) this asserts Reconnecting + 1 connect and FAILS;
+        // with the fix it rides through (Connected, zero connects).
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        // A live session whose transport keepalive proves the link is alive.
+        val session = FakeSshSession().apply { transportProvenAlive = true }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        advanceUntilIdle()
+        assertTrue(
+            "precondition: the link is the proven-alive transport the gate must ride through",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "transient-wifi-cellular-flip-on-stable-wifi",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "a validated network flip while the transport is PROVEN ALIVE must ride through, " +
+                "not tear down the healthy socket (#981 / #974 stable-wifi drop)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "no redial may be scheduled while the old transport is provably alive",
+            0,
+            connector.connectCount,
+        )
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+        assertNotEquals(
+            "the proactive-handoff redial intent must NOT fire on a proven-alive link",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+    }
+
+    @Test
+    fun issue981ValidatedNetworkFlipStillReconnectsWhenTransportIsDead() = runTest(scheduler) {
+        // Issue #981 class-coverage (G2): the gate must NOT mask a GENUINE handoff.
+        // Same WIFI→CELLULAR flip, but the transport keepalive has aged out (the old
+        // socket is really dead) → the path must STILL reconnect, exactly as before.
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        // A live session whose transport keepalive has stopped proving liveness.
+        val session = FakeSshSession().apply { transportProvenAlive = false }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        runCurrent()
+        assertFalse(
+            "precondition: the dead transport must NOT report proven-alive",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "genuine-wifi-cellular-handoff-dead-link",
+            ),
+        )
+        runCurrent()
+
+        assertEquals(
+            "a genuine handoff on a DEAD link must still proactively reconnect (gate must not mask recovery)",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+    }
+
+    @Test
+    fun issue981SameIdentityReassocStillSuppressedRegardlessOfTransportLiveness() = runTest(scheduler) {
+        // Issue #981 class-coverage: a same-identity reassoc (#875 pure-{WIFI} roam)
+        // is still suppressed by hasSameNetworkIdentityAs BEFORE the liveness gate,
+        // so the new gate does not change that path — proven-alive or not.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val session = FakeSshSession().apply { transportProvenAlive = false }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        advanceUntilIdle()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("wifi"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "same-identity-reassoc",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "a same-identity reassoc is suppressed upstream (#875) and never reaches the redial",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+    }
+
+    @Test
+    fun issue981ReducerSuppressesProvenAliveButSchedulesDeadLinkFlip() = runTest(scheduler) {
+        // Issue #981 reducer-level proof: the decision classifier itself returns
+        // SuppressNetworkTransportProvenAlive when proven alive and
+        // ScheduleNetworkReconnect when the link is dead, using the explicit seam.
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        // Proven alive → ride through.
+        vm.forceTransportProvenAliveForTest = true
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "flip-while-proven-alive"),
+        )
+        runCurrent()
+        assertTrue(
+            "proven-alive flip rides through (no Reconnecting band)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(0, connector.connectCount)
+
+        // Aged out (dead) → reconnect.
+        vm.forceTransportProvenAliveForTest = false
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "flip-while-dead", sequence = 2L),
+        )
+        runCurrent()
+        assertEquals(
+            "once the keepalive is dead the same flip must schedule the proactive reconnect",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+
+        vm.forceTransportProvenAliveForTest = null
+    }
+
     @Test
     fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
@@ -7971,6 +8183,134 @@ class TmuxSessionViewModelTest {
     // is empty), GREEN with the verdict-driven gate.
     //
     // G2 class coverage: shell-vs-agent × default=Conversation-vs-Terminal.
+
+    // ─── Issue #874 (residual black-screen): the reconcile/cache-restore void ──
+    //
+    // #975 fixed the verdict-clearing and #989 fixed the terminal-buffer reseed,
+    // leaving one residual void: a presumed-agent pane that is RECONCILED rather
+    // than freshly added — a beyond-grace reattach (#959) or a switch-back to a
+    // REBUILT cached runtime — whose conversation row was DROPPED (the R3-B
+    // 2-null collapse on a wedged channel) has NO row on restore.
+    // `restoreCachedRuntime` only restarts rows that carried a live `detection`
+    // (`restartAgentConversationsForRestoredRuntime`'s `state.detection ?: return`),
+    // and that path never reconciles — so a presumed-agent pane with a dropped
+    // row falls through to the always-mounted raw `TmuxTerminalPager` → the #807
+    // black void.
+    //
+    // The fix re-seeds the #878 Conversation placeholder for the session's
+    // presumed-agent panes when the recorded-kind verdict resolves the session as
+    // NOT a confirmed shell (`applyRecordedShellVerdict(isShell = false)`, the
+    // single verdict-application point reached after a restore via
+    // `refreshCurrentSessionRecordedKind`). It runs AFTER the verdict so #894's
+    // no-flash-on-shell invariant holds.
+    //
+    // G10 reproduce-first: on base the verdict-application re-seed does not exist,
+    // so a dropped-row presumed-agent pane stays rowless → raw Terminal void. RED
+    // on base (row null after the verdict), GREEN with the fix (Conversation
+    // placeholder re-seeded). G2 class coverage: reconciled-presumed-agent
+    // (re-seeds), reconciled-confirmed-shell (NO placeholder, #894 no-flash),
+    // freshly-added (unchanged).
+
+    @Test
+    fun reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholder() = runTest(scheduler) {
+        // The residual #874 void: a presumed-agent pane whose row was dropped and
+        // is then restored/reconciled (no live detection to restart) gets its
+        // Conversation placeholder re-seeded when the verdict resolves NOT-shell.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // Drop the auto-seeded row to null — model the R3-B 2-null collapse on a
+        // wedged channel that wiped the conversation row before the runtime was
+        // parked (so the restored runtime carries NO row for this pane).
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+        assertNull("precondition: the presumed-agent pane has no conversation row", vm.agentConversations.value["%0"])
+
+        // The recorded-kind verdict resolves the session as NOT a confirmed shell
+        // (foreign / agent / re-classified) — the single verdict-application point
+        // reached on a restore via refreshCurrentSessionRecordedKind. On base no
+        // re-seed runs → the pane stays rowless → the raw Terminal void (#807).
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = false)
+        runCurrent()
+
+        val row = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#874: a not-shell verdict re-seeds the dropped presumed-agent pane's" +
+                " Conversation placeholder (no residual black Terminal void)",
+            row,
+        )
+        assertEquals("#874: the re-seed lands on the Conversation surface", SessionTab.Conversation, row!!.selectedTab)
+        assertNull("#874: the re-seed is detection-less (the detecting placeholder)", row.detection)
+        assertEquals("#874: the re-seed is in the Loading state", ConversationLoadState.Loading, row.loadState)
+        assertTrue("#874: the re-seed is flagged as an auto-seed", row.autoSeededPlaceholder)
+    }
+
+    @Test
+    fun confirmedShellVerdictNeverReseedsPlaceholderNoFlash() = runTest(scheduler) {
+        // #894 no-flash invariant (class coverage): a CONFIRMED-shell verdict must
+        // NOT re-seed the Conversation placeholder for a rowless pane. The #874
+        // re-seed pass runs ONLY on the not-shell branch; the shell branch still
+        // drops/keeps placeholders exactly as before (no wrong-surface flash on a
+        // genuine shell).
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+        assertNull("precondition: rowless pane", vm.agentConversations.value["%0"])
+
+        // A recorded SHELL verdict must NOT re-seed — a confirmed shell stays on
+        // the raw Terminal (correct), never flashing the Conversation placeholder.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertNull(
+            "#894: a confirmed-shell verdict never re-seeds the Conversation placeholder",
+            vm.agentConversations.value["%0"],
+        )
+        assertTrue(
+            "#894: the confirmed-shell verdict is published per-pane",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+    }
+
+    @Test
+    fun notShellVerdictDoesNotClobberLiveRowNoYank() = runTest(scheduler) {
+        // #815 no-yank invariant (class coverage): the #874 re-seed must NOT
+        // clobber a pane that ALREADY has a row (a live agent or a user-tapped
+        // choice). seedPresumedAgentPlaceholder self-gates on `containsKey`, so a
+        // not-shell verdict over a live row is a no-op.
+        val vm = newVm()
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // A live Codex binds; user is on the Terminal tab (an explicit choice the
+        // re-seed must not yank back to Conversation).
+        vm.markAgentTailLiveForTest("%0", newCodexDetection())
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        runCurrent()
+        val before = vm.agentConversations.value["%0"]!!
+        assertEquals("precondition: live Codex row on Terminal", SessionTab.Terminal, before.selectedTab)
+        assertEquals(AgentKind.Codex, before.detection?.agent)
+
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = false)
+        runCurrent()
+        val after = vm.agentConversations.value["%0"]!!
+        assertEquals(
+            "#815: the not-shell verdict re-seed does NOT yank a live row's tab",
+            SessionTab.Terminal,
+            after.selectedTab,
+        )
+        assertEquals("#815: the live detection is preserved", AgentKind.Codex, after.detection?.agent)
+    }
+
 
     @Test
     fun confirmedShellPaneSeedGateSuppressesConversationPlaceholder() = runTest(scheduler) {

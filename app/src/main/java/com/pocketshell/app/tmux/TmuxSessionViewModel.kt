@@ -10415,6 +10415,32 @@ public class TmuxSessionViewModel @Inject constructor(
                     clearAgentDetectionForPane(paneId)
                 }
             }
+        } else {
+            // Issue #874 (residual black-screen): a presumed-agent pane that is
+            // RECONCILED rather than freshly added — a beyond-grace reattach
+            // (#959) or a switch-back to a REBUILT cached runtime
+            // ([restoreCachedRuntime] restores `runtime.agentConversations`, which
+            // only carries rows that had a live `detection`; a row dropped by the
+            // R3-B 2-null collapse on a wedged channel is gone) — has NO
+            // conversation row. `seedPresumedAgentPlaceholder` fires per-pane in
+            // [applyParsedPanes], but the cache-restore path never reconciles, so
+            // its presumed-agent panes fall through to the always-mounted raw
+            // `TmuxTerminalPager` — the #807 black void.
+            //
+            // The verdict has now resolved this session as NOT a confirmed shell
+            // (foreign / agent / re-classified). Running the re-seed pass HERE —
+            // AFTER the recorded-kind verdict applies — re-establishes the
+            // Conversation "Loading…" placeholder for any presumed-agent pane that
+            // lost its row, closing the void. It is idempotent: a pane that still
+            // has a row (`containsKey`), a confirmed shell
+            // (`isConfirmedShellSession`, false here by construction), or the
+            // Terminal open-time default are all skipped inside
+            // [seedPresumedAgentPlaceholder] — so #894's no-flash-on-shell
+            // invariant holds (a confirmed shell is never re-seeded) and a live
+            // row is never clobbered (no #815 yank).
+            paneRows.values
+                .filter { it.sessionId.trim() == key }
+                .forEach { seedPresumedAgentPlaceholder(it) }
         }
         if (changed || isShell) refreshConfirmedShellPaneIds()
     }

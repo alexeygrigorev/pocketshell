@@ -638,6 +638,26 @@ JOURNEY_CLASSES=(
   # local-only flaky-reconnect evidence). Target the single @Test method by
   # FQCN#method so the CI-gated reconnect cases are NOT selected here.
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"
+  # ADDED (#874 residual black-screen, conversation-source area — sibling of
+  # #878/#894/#975, D31/D32): a presumed-agent pane RECONCILED rather than freshly
+  # added — a beyond-grace reattach (#959) or a switch-back to a REBUILT cached
+  # runtime — whose Conversation row was DROPPED (the R3-B 2-null collapse) has NO
+  # row on restore (restoreCachedRuntime only restarts rows that had a live
+  # detection, and never reconciles), so it falls to the always-mounted raw
+  # TmuxTerminalPager → the #807 black void. The fix re-seeds the #878 Conversation
+  # placeholder when the recorded-kind verdict resolves the session NOT-shell
+  # (applyRecordedShellVerdict(isShell=false), AFTER the verdict so #894's
+  # no-flash-on-shell invariant holds). This connected proof drives the production
+  # TmuxSessionViewModel against the deterministic agents:2222 fixture through the
+  # FRESH-attach path, then injects the residual-void state synthetically (#780/D33
+  # — the wedged-channel row-drop-then-restore cannot be driven deterministically
+  # on the shared AVD): drop the row, drive the not-shell verdict (the EXACT
+  # refreshCurrentSessionRecordedKind production path), and assert the Conversation
+  # placeholder is re-seeded — never the raw black Terminal void. It uses ONLY
+  # agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml already
+  # brings up, and does NOT self-skip on CI (no assumeTrue / assumeFalse). The fast
+  # JVM sibling is TmuxSessionViewModelTest.reconciledPresumedAgentWithDroppedRow*.
+  "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice"
   # ADDED (#962/#975, conversation-source area — sibling of #819/#821/#894,
   # D31/D32): a live agent (claude) started INSIDE a session recorded
   # `@ps_agent_kind=shell` must regain its Terminal <-> Conversation TOGGLE, EVEN

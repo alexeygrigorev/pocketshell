@@ -1033,6 +1033,182 @@ class AgentConversationReconnectDockerTest {
         }
     }
 
+    /**
+     * Issue #874 (residual black-screen): a presumed-agent pane that is
+     * RECONCILED rather than freshly added — a beyond-grace reattach (#959) or a
+     * switch-back to a REBUILT cached runtime — whose Conversation row was DROPPED
+     * (the R3-B 2-null collapse on a wedged channel) has NO row on restore.
+     * `restoreCachedRuntime` only restarts rows that had a live `detection`
+     * (`restartAgentConversationsForRestoredRuntime`), and the cache-restore path
+     * never reconciles — so a presumed-agent pane with a dropped row falls through
+     * to the always-mounted raw `TmuxTerminalPager` → the #807 black void.
+     *
+     * #975 fixed the verdict-clearing and #989 fixed the terminal-buffer reseed;
+     * this closes the remaining void by re-seeding the #878 Conversation
+     * placeholder when the recorded-kind verdict resolves the session as NOT a
+     * confirmed shell (`applyRecordedShellVerdict(isShell = false)`, the single
+     * verdict-application point reached after a restore via
+     * `refreshCurrentSessionRecordedKind`), AFTER the verdict so #894's
+     * no-flash-on-shell invariant holds.
+     *
+     * This drives the production [TmuxSessionViewModel] against the deterministic
+     * Docker `agents` fixture (host port 2222) through the FRESH-attach path, then
+     * injects the residual-void state synthetically (the #780/D33 model — the
+     * wedged-channel row-drop-then-restore cannot be driven deterministically on
+     * the shared AVD): drop the pane's conversation row, then drive the not-shell
+     * verdict, and assert the user-visible Conversation placeholder is re-seeded —
+     * never the raw black Terminal. The verdict seam ([applyRecordedShellVerdictForTest])
+     * is the EXACT production code path `refreshCurrentSessionRecordedKind`
+     * invokes; no synthetic stand-in for the surface logic itself.
+     */
+    @Test
+    fun reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice(): Unit = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val keyPath = writeKeyFile(key)
+        val sessionName = "issue874-void-${System.currentTimeMillis().toString().takeLast(8)}"
+        val cwd = "/home/$DEFAULT_USER"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+
+        // A presumed-agent pane: a plain shell pane attached over the real
+        // fixture (presumed-agent at the screen layer; no confirmed-shell verdict
+        // recorded). The residual-void state is then injected synthetically.
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
+                        "-c ${shellQuote(cwd)}",
+                )
+                appendLine("sleep 1")
+            },
+        )
+
+        val vm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
+        )
+        // The open-time default is Conversation (the black-screen cure) — the
+        // exact state where the residual void appears.
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        try {
+            vm.connect(
+                hostId = 874L,
+                hostName = "Issue874 Void Docker",
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                keyPath = keyPath,
+                passphrase = null,
+                sessionName = sessionName,
+            )
+            waitForStatus<TmuxSessionViewModel.ConnectionStatus.Connected>(vm, "issue874 connect")
+            val panes = waitForPanes(vm, "issue874 attach panes")
+            val windowId = panes.first().windowId
+            val paneId = panes.first { it.windowId == windowId }.paneId
+            val sessionId = panes.first { it.paneId == paneId }.sessionId
+            stamp("issue874_attached window=$windowId pane=$paneId sessionId=$sessionId")
+
+            // On open the pane got the #878 Conversation placeholder.
+            waitForCondition(
+                label = "issue874 open-time Conversation placeholder",
+                timeoutMs = 10_000,
+                describe = { "row=${vm.agentConversations.value[paneId]}" },
+                predicate = { vm.agentConversations.value[paneId]?.selectedTab == SessionTab.Conversation },
+            )
+
+            // SYNTHETIC residual-void injection (#780/D33): the R3-B 2-null
+            // collapse on a wedged channel dropped the conversation row, and the
+            // runtime was parked WITHOUT it — so on a switch-back/restore the pane
+            // has NO row and falls to the raw black Terminal.
+            vm.clearAgentDetectionForPaneForTest(paneId)
+            waitForCondition(
+                label = "issue874 row dropped (the void precondition)",
+                timeoutMs = 5_000,
+                describe = { "row=${vm.agentConversations.value[paneId]}" },
+                predicate = { vm.agentConversations.value[paneId] == null },
+            )
+            assertNull(
+                "#874 precondition: the presumed-agent pane has NO conversation row " +
+                    "(the raw-Terminal void state); pane=$paneId",
+                vm.agentConversations.value[paneId],
+            )
+
+            // The recorded-kind verdict resolves the session as NOT a confirmed
+            // shell — the EXACT production verdict-application call
+            // refreshCurrentSessionRecordedKind makes after a restore. On base no
+            // re-seed runs → the pane stays rowless → the raw black Terminal void.
+            vm.applyRecordedShellVerdictForTest(sessionId = sessionId, isShell = false)
+            waitForCondition(
+                label = "issue874 Conversation placeholder re-seeded",
+                timeoutMs = 10_000,
+                describe = { "row=${vm.agentConversations.value[paneId]} confirmedShell=${vm.confirmedShellPaneIds.value}" },
+                predicate = { vm.agentConversations.value[paneId] != null },
+            )
+
+            // CORE ASSERTION (#874): the dropped presumed-agent pane re-seeds the
+            // Conversation placeholder — the user-visible surface is the readable
+            // detecting placeholder, NEVER the residual black Terminal void.
+            val row = vm.agentConversations.value[paneId]
+            assertNotNull(
+                "#874: a not-shell verdict re-seeds the dropped presumed-agent pane's " +
+                    "Conversation placeholder (no residual black Terminal void); pane=$paneId; " +
+                    "conversations=${vm.agentConversations.value.keys}",
+                row,
+            )
+            assertEquals(
+                "#874: the re-seed lands on the Conversation surface (not the raw Terminal void)",
+                SessionTab.Conversation,
+                row!!.selectedTab,
+            )
+            assertNull(
+                "#874: the re-seed is the detection-less detecting placeholder",
+                row.detection,
+            )
+            assertEquals(
+                "#874: the re-seed is in the Loading (detecting) state",
+                ConversationLoadState.Loading,
+                row.loadState,
+            )
+            assertTrue(
+                "#874: the re-seed is flagged as an auto-seed",
+                row.autoSeededPlaceholder,
+            )
+            stamp(
+                "issue874_void_healed pane=$paneId tab=${row.selectedTab} " +
+                    "detection=${row.detection} loadState=${row.loadState}",
+            )
+
+            writeText(
+                "issue874-residual-void-summary.txt",
+                buildString {
+                    appendLine("scenario=reconciled-presumed-agent-dropped-row-reseeds-conversation-placeholder (#874)")
+                    appendLine("session_name=$sessionName")
+                    appendLine("window_id=$windowId")
+                    appendLine("pane_id=$paneId")
+                    appendLine("session_id=$sessionId")
+                    appendLine("void_precondition_row_dropped=true")
+                    appendLine("verdict_applied=not-shell (refreshCurrentSessionRecordedKind path)")
+                    appendLine("reseeded_tab=${row.selectedTab}")
+                    appendLine("reseeded_detection=${row.detection}")
+                    appendLine("reseeded_load_state=${row.loadState}")
+                    appendLine("reseeded_auto_seed=${row.autoSeededPlaceholder}")
+                    appendLine("confirmed_shell=${vm.confirmedShellPaneIds.value}")
+                    appendLine("stamps:")
+                    stamps.forEach { appendLine("  $it") }
+                },
+            )
+        } finally {
+            vm.clearForTest()
+        }
+    }
+
     private suspend inline fun <reified T : TmuxSessionViewModel.ConnectionStatus> waitForStatus(
         vm: TmuxSessionViewModel,
         label: String,

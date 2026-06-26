@@ -596,6 +596,20 @@ public class TmuxSessionViewModel @Inject constructor(
         _sessionEnded.asSharedFlow()
 
     /**
+     * Issue #976: a new-session LAUNCH that the gateway refused (e.g. the
+     * derived name collides with an already-open session, so sending the launch
+     * line would type it into the existing/current pane). The Screen collects
+     * this to surface the failure to the user instead of letting the launch
+     * silently no-op — the launch command is NEVER leaked into the current pane,
+     * and the user is told why (mirrors #968's "fail visibly, never act against
+     * the current target").
+     */
+    private val _sessionCreateError: MutableSharedFlow<String> =
+        MutableSharedFlow(extraBufferCapacity = 1)
+    public val sessionCreateError: SharedFlow<String> =
+        _sessionCreateError.asSharedFlow()
+
+    /**
      * Issue #626: called by the Screen when the unified pager settles on a
      * page. If the pane belongs to a different session, emit a
      * [sessionSwitchRequest] so the Screen triggers a warm switch.
@@ -13581,6 +13595,17 @@ public class TmuxSessionViewModel @Inject constructor(
                         ISSUE_464_KILL_TAG,
                         "create-session-failed host=${current.hostId} name=${creation.sessionName} " +
                             "err=${error.javaClass.simpleName}: ${error.message}",
+                    )
+                    // Issue #976: a refused launch (e.g. name-collision guard in
+                    // the gateway) must FAIL VISIBLY — never silently swallow it,
+                    // or the user is left wondering why nothing happened. The
+                    // launch line was NOT sent into the current pane; tell them
+                    // why so they can retry once the session list is known. We do
+                    // NOT call onResolved here, so no navigation/attach to a wrong
+                    // session occurs.
+                    _sessionCreateError.tryEmit(
+                        error.message?.takeIf { it.isNotBlank() }
+                            ?: "Couldn't create the session.",
                     )
                 },
             )

@@ -798,6 +798,86 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun detectLiveTranscriptForPaneBindsTheMostRecentKindWithoutAKnownKind() = runTest {
+        // Issue #975 (B1): the kind-agnostic transcript fallback. With NO known
+        // kind (the daemon returned `unknown`), it enumerates ALL kinds for the
+        // cwd, picks the MOST-RECENT candidate's kind, and binds its source. Here
+        // Claude is the most recent, so a Claude detection binds — this is the
+        // masked-live-agent evidence the recorded-shell verdict could not see.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/live.jsonl
+                codex|${now - 600}|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-older.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 1 pts/7 node node",
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "#975 (B1): the kind-agnostic fallback binds the most-recent live " +
+                "transcript's kind (Claude) without a known/recorded kind",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("live", detection?.sessionId)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneReturnsNullWhenNoTranscriptExists() = runTest {
+        // Issue #975 (B1 no-flap): a genuine shell with NO recent transcript in
+        // the cwd enumerates nothing → null. The fallback is evidence-driven, so a
+        // plain shell never resurrects a Conversation surface.
+        val session = FakeSshSession(detectionOutput = "")
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "bash",
+        )
+
+        assertEquals(
+            "#975 (B1 no-flap): no live transcript in the cwd binds nothing",
+            null,
+            detection,
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneReturnsNullForBlankCwdOrTty() = runTest {
+        // Boundary: blank cwd/tty cannot scope an enumeration → null, never a crash.
+        val session = FakeSshSession(
+            detectionOutput =
+                "claude|1|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/x.jsonl",
+        )
+        assertEquals(
+            null,
+            AgentConversationRepository().detectLiveTranscriptForPane(
+                session = session,
+                cwd = "   ",
+                paneTty = "/dev/pts/7",
+                paneCommand = "bash",
+            ),
+        )
+        assertEquals(
+            null,
+            AgentConversationRepository().detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "",
+                paneCommand = "bash",
+            ),
+        )
+    }
+
+    @Test
     fun recordedClaudeSessionResolvesWithoutTheHostWideProcessScan() = runTest {
         // Issue #828 (perf): the recorded-Claude path selects on the cwd-encoded
         // session-id-in-path with requireProcessMatch = false, so the host-wide

@@ -5,14 +5,15 @@ import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -22,6 +23,8 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.SeedBeforeLaunchRule
+import com.pocketshell.app.proof.clearLastSessionPrefs
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -35,75 +38,98 @@ import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #962 — a recorded `@ps_agent_kind=shell` session with NO agent correctly
- * shows NO Terminal/Conversation toggle (the #894 no-flap adjacency the fix must
- * preserve). The positive direction (a live agent in a recorded-shell session
- * regains its toggle) is owned by the deterministic JVM red→green — see the
- * coverage split below.
+ * Issue #975 (#962 recurrence) — a recorded `@ps_agent_kind=shell` session with a
+ * LIVE agent (a `claude` transcript present in the cwd) MUST regain its
+ * Terminal/Conversation toggle on the REAL path, EVEN when the host agent-kind
+ * daemon's cgroup/`/proc` classify returns `unknown` (the masked node-wrapped /
+ * quiet `claude`). And the no-agent control must STILL show NO toggle (#894
+ * no-flap adjacency).
  *
- * The maintainer's dogfood report: in an active `claude` session the top chrome
- * shows only a single "Terminal" pill — no "Conversation" toggle. Root cause
- * (research, cited): the session was recorded `@ps_agent_kind=shell` (a plain
- * shell the user/kind-picker classified as shell) with `claude` started INSIDE
- * it. The recorded-shell verdict (#894) publishes the pane confirmed-shell,
- * which collapses `presumedAgent` and never binds a live source — so BOTH inputs
- * to `tmuxSessionTabState.showsConversationTab = hasLiveDetection || presumedAgent`
- * stay false and the toggle is gone for the life of the session.
+ * The maintainer's dogfood report (v0.4.18): in an active `claude` session the top
+ * chrome shows only a single "Terminal" pill — no "Conversation" toggle. Root
+ * cause (research, cited): the session was recorded `@ps_agent_kind=shell` (a
+ * plain shell the user/kind-picker classified as shell) with `claude` started
+ * INSIDE it. The recorded-shell verdict (#894) publishes the pane confirmed-shell,
+ * which collapses `presumedAgent`; and because the daemon's classify returns
+ * `unknown` for the masked `claude`, the #962 fix never bound a live source — so
+ * BOTH inputs to
+ * `tmuxSessionTabState.showsConversationTab = hasLiveDetection || presumedAgent`
+ * stayed false and the toggle was gone for the life of the session.
  *
- * ### Coverage split (G4/D33 — the right test on the right surface)
+ * ### Real-path B1 reproduction (G10/D33 — the gap #962 left open)
  *
- * The LOAD-BEARING reproduction of the fix — a live agent detection clears the
- * confirmed-shell verdict so the toggle returns — is the DETERMINISTIC JVM
- * red→green in
- * `TmuxSessionViewModelTest.liveAgentDetectionClearsConfirmedShellSoConversationToggleReturns`
- * (+ codex / opencode + the no-flap control). That synthetic injection is
- * required because the Docker `agents` fixture cannot make the host agent-kind
- * daemon classify a process: the daemon gates on a cgroup-v2 scope that the
- * non-systemd container does not provide (`pocketshell agents kind` returns
- * `unknown`, `scope=null`), so a recorded-shell pane simply cannot bind a live
- * detection in-fixture. Per D33 the unenterable state is injected synthetically
- * and hard-asserted there, never self-skipped.
+ * #962's connected test claimed the Docker `agents` fixture "cannot bind a live
+ * detection in-fixture" because the non-systemd container's daemon returns
+ * `unknown`/`scope=null`. That is EXACTLY the B1 classify-miss the maintainer hit
+ * on-device — and the #975 fix turns it into the load-bearing real-path test: the
+ * fixture's `agents` container DOES ship a live Claude transcript at
+ * `~/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl`, and the
+ * daemon DOES return `unknown` for the pane. So a recorded-shell session whose cwd
+ * has a fresh Claude transcript reproduces the masked-live-agent state on the REAL
+ * path: on base (no #975 fix) the foreign resolver returns null on the `unknown`
+ * classify and NO toggle appears (RED); with the fix the transcript-evidence
+ * fallback binds the agent → markAgentTailLive clears the verdict → the toggle
+ * returns (GREEN). [conversationToggleReturnsForMaskedLiveClaudeInRecordedShellSession]
+ * is that real-path proof; the deterministic JVM red→green
+ * (`TmuxSessionViewModelTest.b1MaskedLiveClaudeInRecordedShellBindsDetectionViaTranscriptDespiteUnknownClassify`)
+ * is the fast sibling.
  *
- * This connected journey covers the part the REAL path reliably exercises on the
- * emulator + Docker — the **no-agent control / #894 no-flap invariant**: a session
- * recorded `@ps_agent_kind=shell` with NO agent process must show NO toggle on the
- * production `TmuxSessionScreen`. This is the active-rework adjacency the #962 fix
- * must not resurrect (a recorded shell flashing the Conversation tab), and it runs
- * unchanged in-fixture (the absence assertion needs no daemon classification). The
- * positive recorded-shell-agent-regains-toggle direction is owned by the
- * deterministic JVM red→green above (it cannot bind a live detection in-fixture).
+ * [plainShellRecordedSessionShowsNoConversationToggle] is the **no-agent control /
+ * #894 no-flap invariant**: a session recorded `@ps_agent_kind=shell` with NO
+ * agent transcript must show NO toggle — the active-rework adjacency the fix must
+ * not resurrect.
  *
- * Modeled on the full-Activity Docker harness of
- * `TmuxSessionOpencodeInputDockerTest.issue303TerminalConversationPillStaysInToolbarRow`
- * (persist host → launch MainActivity → attach to a seeded session → assert the
- * tab pill on the real `TmuxSessionScreen`).
+ * ### Harness — #788 interop-placement cure (this round)
+ *
+ * The previous round of this class used `createEmptyComposeRule()` +
+ * `ActivityScenario.launch(MainActivity)` inside the `@Test` body — the exact #788
+ * interop-placement stall: under the swiftshader AVD the Termux `TerminalView`
+ * `AndroidView` interop child is never placed, MainActivity's compose tree never
+ * registers ("No compose hierarchies found in the app"), and the hand-rolled
+ * `ActivityScenario` lands in a bad lifecycle so `tearDown` NPEs — so the test
+ * never reached its toggle assertion. This round migrates to
+ * `createAndroidComposeRule<MainActivity>()` (the rule owns the activity
+ * lifecycle, the test clock drives the SAME foreground activity the interop child
+ * is placed into) wired through a [RuleChain] in the #788 cure order:
+ * grant → seed-remote+DB → launch MainActivity. Each method's per-test remote
+ * tmux session + DB host row is seeded in the rule's `before()` phase (branched on
+ * the JUnit method name), so MainActivity reads a populated DB on cold start.
+ * See `PreExistingMultiWindowSeedE2eTest` / `Issue895SwitchWhileBlackBandJourneyE2eTest`.
  */
 @RunWith(AndroidJUnit4::class)
 class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    val compose = createAndroidComposeRule<MainActivity>()
+    private val grantPermissions = PreGrantPermissionsRule()
 
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(grantPermissions)
+        .around(SeedBeforeLaunchRule { description -> seedForMethod(description.methodName) })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private var seededKey: String? = null
+    private var seededHostRowTag: String? = null
+    private var seededSessionName: String? = null
     private val cleanupCommands = mutableListOf<String>()
     private val stamps = mutableListOf<String>()
 
     @After
     fun tearDown() {
-        launchedActivity?.close()
-        launchedActivity = null
-        if (cleanupCommands.isNotEmpty()) {
-            runBlocking {
-                runCatching {
-                    withTimeout(20_000) { execRemote(readFixtureKey(), cleanupCommands.joinToString("\n")) }
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        clearLastSessionPrefs()
+        seededKey?.let { key ->
+            if (cleanupCommands.isNotEmpty()) {
+                runBlocking {
+                    runCatching {
+                        withTimeout(20_000) { execRemote(key, cleanupCommands.joinToString("\n")) }
+                    }
                 }
             }
         }
@@ -120,30 +146,9 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
      */
     @Test
     fun plainShellRecordedSessionShowsNoConversationToggle() = runBlocking {
-        val key = readFixtureKey()
-        waitForSshFixtureReady(SshKey.Pem(key))
-        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
+        val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
 
-        val suffix = unique()
-        val sessionName = "issue962-plain-shell-$suffix"
-        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
-
-        execRemote(
-            key,
-            buildString {
-                appendLine("set -eu")
-                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
-                appendLine(
-                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
-                        "\"printf 'issue962-plain-ready\\r\\n'; exec sh\"",
-                )
-                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
-                appendLine("sleep 1")
-            },
-        )
-
-        val hostRowTag = persistHost(appContext, key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         attachToSeededSession(hostRowTag, sessionName)
         waitForTerminalSessionAttached()
         waitForVisibleTerminalText("issue962-plain-ready", VISIBLE_TIMEOUT_MS) {
@@ -165,16 +170,186 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         Unit
     }
 
+    /**
+     * Issue #975 (B1, classify-miss) — the REAL-PATH reproduction of the
+     * maintainer's bug. A session recorded `@ps_agent_kind=shell` whose cwd holds a
+     * fresh live Claude transcript (copied from the fixture's seed at
+     * `~/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl`), while
+     * the host agent-kind daemon's classify returns `unknown` for the pane (the
+     * non-systemd container has no readable cgroup scope — exactly the masked
+     * node-wrapped `claude` on-device). On base (no #975 fix) the foreign resolver
+     * returns null on the `unknown` classify so NO Conversation toggle appears
+     * (the user is stranded on the raw black agent Terminal). With the fix the
+     * transcript-evidence fallback binds the live agent → markAgentTailLive clears
+     * the recorded-shell verdict → the [TMUX_TABS_TAG] toggle returns with a
+     * "Conversation" segment.
+     */
+    @Test
+    fun conversationToggleReturnsForMaskedLiveClaudeInRecordedShellSession() = runBlocking {
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
+        val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
+
+        attachToSeededSession(hostRowTag, sessionName)
+        waitForTerminalSessionAttached()
+        waitForVisibleTerminalText("issue975-masked-ready", VISIBLE_TIMEOUT_MS) {
+            "issue975-masked-ready" in it
+        }
+        stamp("masked_claude_attached session=$sessionName")
+
+        // STEP 1 — observe the recorded-shell verdict APPLYING (the collapse
+        // point), recorded as evidence the optimistic window genuinely ends. The
+        // fresh pane shows the toggle optimistically (#878 black-screen cure)
+        // BEFORE the recorded `@ps_agent_kind=shell` verdict is read+applied; a
+        // test that merely waited for the toggle to appear would catch that
+        // optimistic window and pass even on base. The hard RED/GREEN gate is
+        // STEP 2 (a bound DETECTION, which the optimistic toggle never sets), so
+        // this observation is recorded but not fatal — with the fix B1 clears the
+        // verdict again so quickly that the confirmed-shell set may already be
+        // empty by the time the poll ticks. STEP 2 is the immune signal.
+        val vm = currentViewModel()
+        val verdictObserved = waitForConfirmedShellVerdict(vm)
+        stamp("masked_claude_confirmed_shell_verdict_observed=$verdictObserved")
+
+        // STEP 2 — LOAD-BEARING B1 SIGNAL: a LIVE transcript detection must BIND
+        // for the pane. This is the exact signal the JVM red→green asserts
+        // (`assertNotNull(detection)`): in this fixture the daemon classify returns
+        // `unknown` ({"results":[]}), so the ONLY way `detection != null` can ever
+        // be true is the #975 B1 transcript-evidence fallback. On base (no fix) the
+        // foreign resolver returns null and detection stays null for the life of
+        // the session → RED here, BEFORE the UI assertions. With the fix the
+        // fallback binds the live Claude transcript → detection non-null → GREEN.
+        // Asserting the bound DETECTION (not just the toggle UI) is what makes this
+        // immune to the optimistic-presumedAgent confound: the optimistic toggle
+        // never sets a non-null detection.
+        val detectionBound = waitForLiveDetectionBound(vm)
+        assertTrue(
+            "#975 B1 (real path): a LIVE transcript detection must bind for the " +
+                "masked-claude recorded-shell pane within ${MASKED_TOGGLE_TIMEOUT_MS}ms " +
+                "(the daemon classify is `unknown`, so only the transcript-evidence " +
+                "fallback can bind it). On base (no fix) detection stays null. " +
+                "agentConversations=${vm.agentConversations.value.mapValues { entry -> entry.value.detection?.agent }}",
+            detectionBound,
+        )
+        stamp("masked_claude_live_detection_bound")
+
+        // STEP 3 — DURABLE UI: with the live detection bound, the
+        // Terminal/Conversation toggle must (re)appear and stay. On base the
+        // confirmed-shell verdict permanently suppresses presumedAgent and the
+        // toggle is gone; with the fix markAgentTailLive →
+        // clearConfirmedShellOnLiveAgentDetection clears the verdict → the toggle
+        // returns DURABLY.
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertExists()
+        // The toggle carries a "Conversation" segment (the agent surface the user
+        // was stranded away from), not just a lone "Terminal" pill.
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithText("Conversation", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Conversation", useUnmergedTree = true).assertExists()
+        captureFullFrame("issue975-masked-claude-toggle-returns")
+        stamp("masked_claude_toggle_returned_ok")
+        Unit
+    }
+
+    // -------------------------------------------------------------- seed-before-launch
+
+    /**
+     * #788 cure: seed the per-test remote tmux session + DB host row in the
+     * RuleChain's `before()` phase (BEFORE `createAndroidComposeRule` launches
+     * MainActivity), branched on the JUnit method name so each test gets its own
+     * fixture. The host row tag + session name are stashed for the `@Test` body.
+     */
+    private suspend fun seedForMethod(methodName: String) {
+        val key = readFixtureKey()
+        seededKey = key
+        clearLastSessionPrefs()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        val sessionName = when (methodName) {
+            "conversationToggleReturnsForMaskedLiveClaudeInRecordedShellSession" ->
+                seedMaskedLiveClaudeSession(key)
+            "plainShellRecordedSessionShowsNoConversationToggle" ->
+                seedPlainShellSession(key)
+            else -> error("unexpected test method $methodName")
+        }
+        seededSessionName = sessionName
+        seededHostRowTag = persistHost(key)
+    }
+
+    private suspend fun seedPlainShellSession(key: String): String {
+        val suffix = unique()
+        val sessionName = "issue962-plain-shell-$suffix"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
+                        "\"printf 'issue962-plain-ready\\r\\n'; exec sh\"",
+                )
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("sleep 1")
+            },
+        )
+        return sessionName
+    }
+
+    private suspend fun seedMaskedLiveClaudeSession(key: String): String {
+        val suffix = unique()
+        val sessionName = "issue975-masked-claude-$suffix"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        cleanupCommands +=
+            "rm -f /home/testuser/.claude/projects/-home-testuser/" +
+                "issue975-live-claude.jsonl 2>/dev/null || true"
+        // Seed a FRESH live Claude transcript in the cwd-encoded Claude project
+        // dir for a writable cwd (`/home/testuser` → encoded `-home-testuser`), and
+        // attach the tmux session to that SAME cwd. (`/workspace` is not writable by
+        // testuser in the fixture; the encoded transcript dir is what the detector
+        // enumerates, and the cwd must be a real accessible dir for `pane.cwd` to
+        // match.) Record it `@ps_agent_kind=shell` (the durable verdict that hides
+        // the toggle). The daemon's classify returns `unknown` for this pane (no
+        // cgroup scope in the non-systemd container) — the masked-live-agent state.
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine("mkdir -p /home/testuser/.claude/projects/-home-testuser")
+                // A fresh Claude transcript (copied from the fixture's seed) inside
+                // the detector's 2h `-mmin -120` freshness window.
+                appendLine(
+                    "cp /home/testuser/.claude/projects/-workspace-pocketshell/" +
+                        "pocketshell-claude.jsonl " +
+                        "/home/testuser/.claude/projects/-home-testuser/" +
+                        "issue975-live-claude.jsonl",
+                )
+                appendLine(
+                    "touch /home/testuser/.claude/projects/-home-testuser/" +
+                        "issue975-live-claude.jsonl",
+                )
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
+                        "-c /home/testuser " +
+                        "\"printf 'issue975-masked-ready\\r\\n'; exec sh\"",
+                )
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("sleep 1")
+            },
+        )
+        return sessionName
+    }
+
     // ----------------------------------------------------------------- helpers
 
-    private suspend fun persistHost(appContext: android.content.Context, key: String): String {
-        // Clear the persisted last-session so MainActivity starts on the host
-        // list, not auto-restoring a stale (sibling/prior) TmuxSessionScreen — an
-        // auto-restore would bypass the host row and race the attach.
-        appContext.getSharedPreferences("last_session", android.content.Context.MODE_PRIVATE)
-            .edit()
-            .clear()
-            .commit()
+    private suspend fun persistHost(key: String): String {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         var hostRowTag = ""
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -206,10 +381,15 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
     }
 
     private fun attachToSeededSession(hostRowTag: String, sessionName: String) {
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        // Under createAndroidComposeRule, MainActivity cold compose can briefly
+        // expose no registered hierarchy, so probe defensively until the
+        // pre-launch seeded host row exists.
+        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
         }
         clickRobustly { compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick() }
         // Tap the session by its NAME text — it matches whether the folder list
@@ -234,13 +414,13 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
      * and dispatching the gesture. Settle to idle and retry.
      */
     private fun clickRobustly(click: () -> Unit) {
-        runCatching { launchedActivity?.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED) }
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         compose.waitForIdle()
         try {
             click()
         } catch (e: AssertionError) {
             if (e.message?.contains("Failed to inject touch input") != true) throw e
-            runCatching { launchedActivity?.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED) }
+            runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
             compose.waitForIdle()
             SystemClock.sleep(300)
             click()
@@ -263,7 +443,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
             // (focus moves to the launcher), which makes Compose touch injection
             // fail ("Failed to inject touch input"). Bring the Activity back to
             // RESUMED before each tap so the app window is foreground+touchable.
-            runCatching { launchedActivity?.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED) }
+            runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
             compose.waitForIdle()
             runCatching {
                 compose.onNodeWithText(sessionName, useUnmergedTree = true).performClick()
@@ -281,14 +461,59 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
     }
 
     private fun waitForTerminalSessionAttached() {
-        compose.waitUntil(timeoutMillis = 20_000) {
-            findTerminalView()?.currentSession?.emulator != null
+        compose.waitUntil(timeoutMillis = 30_000) {
+            var attached = false
+            compose.activityRule.scenario.onActivity { activity ->
+                val view = activity.window.decorView.findTerminalView()
+                attached = view?.currentSession?.emulator != null
+            }
+            attached
         }
+    }
+
+    private fun currentViewModel(): TmuxSessionViewModel {
+        var vm: TmuxSessionViewModel? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+        }
+        return requireNotNull(vm) { "TmuxSessionViewModel not available" }
+    }
+
+    /**
+     * Poll until the recorded `@ps_agent_kind=shell` verdict has applied (the
+     * pane's confirmed-shell set became non-empty at least once) — the moment the
+     * optimistic presumed-agent toggle collapses on base. Best-effort: returns
+     * false if never observed within the budget (with the fix, B1 may clear it
+     * before a poll tick lands; STEP 2 is the immune load-bearing signal).
+     */
+    private fun waitForConfirmedShellVerdict(vm: TmuxSessionViewModel): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + VERDICT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (vm.confirmedShellPaneIds.value.isNotEmpty()) return true
+            SystemClock.sleep(80)
+        }
+        return vm.confirmedShellPaneIds.value.isNotEmpty()
+    }
+
+    /**
+     * Poll until a LIVE transcript detection binds for any pane — the #975 B1
+     * signal. In this fixture the daemon classify is `unknown`, so a non-null
+     * `detection` can ONLY come from the transcript-evidence fallback; on base it
+     * stays null. This is the same property the JVM red→green asserts
+     * (`assertNotNull(detection)`), driven here on the real connected path.
+     */
+    private fun waitForLiveDetectionBound(vm: TmuxSessionViewModel): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + MASKED_TOGGLE_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (vm.agentConversations.value.values.any { it.detection != null }) return true
+            SystemClock.sleep(100)
+        }
+        return vm.agentConversations.value.values.any { it.detection != null }
     }
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -314,14 +539,6 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         }
         writeText("issue962-failure-$label-visible-terminal.txt", last)
         assertTrue("predicate $label timed out; visible terminal:\n$last", false)
-    }
-
-    private fun findTerminalView(): TerminalView? {
-        var found: TerminalView? = null
-        launchedActivity?.onActivity { activity ->
-            found = activity.window.decorView.findTerminalView()
-        }
-        return found
     }
 
     private fun View.findTerminalView(): TerminalView? {
@@ -406,7 +623,14 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val HOST_NAME: String = "Issue962 Agents"
         const val ATTACH_TIMEOUT_MS: Long = 30_000
+        const val HOST_ROW_TIMEOUT_MS: Long = 60_000
         const val VISIBLE_TIMEOUT_MS: Long = 20_000
         const val SHELL_NO_TOGGLE_SETTLE_MS: Long = 8_000
+        const val VERDICT_TIMEOUT_MS: Long = 20_000
+
+        // Issue #975: the masked-live-agent transcript fallback binds on the first
+        // foreign reconcile + the confirmed-shell cache-bust re-probe; allow a
+        // generous window for the toggle to return on the swiftshader AVD.
+        const val MASKED_TOGGLE_TIMEOUT_MS: Long = 25_000
     }
 }

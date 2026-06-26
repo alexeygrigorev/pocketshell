@@ -10181,6 +10181,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * shell-recorded session regains its Conversation toggle. A recorded-shell
      * read that re-marks the session is harmless: if a live agent is present the
      * next detection bind clears it again; a genuine shell stays marked (#894).
+     *
+     * Issue #975 (B2): a REMEMBERED-agent (#819 A2) resolving placeholder is NOT
+     * dropped on `isShell = true` — only the fresh auto-seeded (#878) placeholder
+     * is. A beyond-grace reattach (#959) re-stamps this verdict on every
+     * reconnect; tearing down the restored remembered-agent placeholder would
+     * re-suppress the Conversation toggle for a session that WAS a live agent.
      */
     private fun applyRecordedShellVerdict(sessionId: String, isShell: Boolean) {
         val key = sessionId.trim()
@@ -10191,18 +10197,30 @@ public class TmuxSessionViewModel @Inject constructor(
             confirmedShellSessionIds.remove(key)
         }
         if (isShell) {
-            // Drop any auto-seeded placeholder that raced ahead of this verdict.
-            // Issue #819 (A2): a remembered-agent resolving placeholder for a
-            // session the durable tree now confirms is a SHELL is a STALE
-            // reattach seed (the window's agent exited and was replaced by a
-            // shell since memory was recorded) — drop it too, so a confirmed
-            // shell never lingers on the #819 "Loading conversation…" resolving
-            // placeholder.
+            // Drop any AUTO-seeded (#878) placeholder that raced ahead of this
+            // verdict — that is a fresh first-open optimistic seed, and a
+            // confirmed shell must never linger on the wrong surface (the
+            // first-open flash kill).
+            //
+            // Issue #975 (B2, reattach re-stamp): do NOT drop a REMEMBERED-agent
+            // (#819 A2) resolving placeholder here. A beyond-grace reattach (#959)
+            // re-reads `@ps_agent_kind=shell` and re-applies this verdict on every
+            // reconnect; if it tore down the just-restored remembered-agent
+            // placeholder, it would re-suppress the Conversation toggle for a
+            // session that WAS a live agent before backgrounding — and recovery
+            // would then depend on the same fragile daemon-classify B1 shows is
+            // unproven, stranding the user on the raw black Terminal. A remembered
+            // agent is trustworthy prior live-agent evidence: keep its placeholder
+            // and let detection re-confirm it. A GENUINE shell (the agent really
+            // exited and was replaced) still tears the placeholder down — through
+            // the deferred-downgrade path (handleNullAgentDetection's
+            // AGENT_EXIT_CONFIRMATIONS consecutive nulls), which is the correct,
+            // evidence-driven teardown rather than an unconditional re-stamp.
             val shellPaneIds = paneRows.values
                 .filter { it.sessionId.trim() == key }
                 .map { it.paneId }
             for (paneId in shellPaneIds) {
-                if (isAutoSeededPlaceholderUp(paneId) || isRememberedAgentPlaceholderUp(paneId)) {
+                if (isAutoSeededPlaceholderUp(paneId)) {
                     conversationLoadWatchdogJobs.remove(paneId)?.cancel()
                     paneAgentNullDetections.remove(paneId)
                     clearAgentDetectionForPane(paneId)
@@ -10355,8 +10373,16 @@ public class TmuxSessionViewModel @Inject constructor(
      * shell) or unknown" — either way the guess has already fired and must NOT
      * be re-run on later reconciles (the one-shot discipline). [kind] holds the
      * guessed engine when the daemon classified the pane as an agent.
+     *
+     * Issue #975 (B1, classify-miss): also box the daemon's `none`-vs-`unknown`
+     * distinction ([isShell]). `none` (`isShell = true`) is a READABLE scope with
+     * no agent — a genuine shell. `unknown` (`isShell = false`, kind null) is an
+     * UNREADABLE scope — "we could not tell", which on a CONFIRMED-SHELL session
+     * with a live node-wrapped/quiet `claude` is exactly the masked-agent case.
+     * The caller uses this to gate the transcript-evidence fallback so it fires
+     * ONLY on `unknown` (never collapsing a genuine `none` shell).
      */
-    private class ForeignKindGuessEntry(val kind: AgentKind?)
+    private class ForeignKindGuessEntry(val kind: AgentKind?, val isShell: Boolean)
 
     /**
      * Epic #821 slice A2: resolve a FOREIGN session's agent kind via the
@@ -10364,23 +10390,31 @@ public class TmuxSessionViewModel @Inject constructor(
      * tmux session id so it fires AT MOST ONCE per foreign session. Returns the
      * cached guess immediately on a hit; on a miss it sends the pane's
      * `(pane_id, pane_pid)` to the daemon, caches the verdict, and returns it.
-     * A null result means the daemon did not classify the pane as an agent (a
-     * shell / unknown / no pid / tool missing) — the caller treats that as "no
-     * conversation for this pane" but does NOT re-probe.
+     * A null [ForeignKindGuessEntry.kind] means the daemon did not classify the
+     * pane as an agent (a shell / unknown / no pid / tool missing) — the caller
+     * treats that as "no conversation for this pane" but does NOT re-probe.
+     *
+     * Issue #975: returns the FULL boxed verdict (kind + `none`-vs-`unknown`) so
+     * the caller can distinguish a genuine readable shell (`none`) from an
+     * unreadable scope (`unknown`) for the masked-live-agent transcript fallback.
      */
     private suspend fun resolveForeignKindGuess(
         session: SshSession,
         sessionTarget: String,
         pane: TmuxPaneState,
-    ): AgentKind? {
+    ): ForeignKindGuessEntry {
         val key = sessionTarget.trim()
-        sessionForeignKindGuessCache[key]?.let { return it.kind }
+        sessionForeignKindGuessCache[key]?.let { return it }
         val panePid = pane.panePid.takeIf { it > 0L }
         // No pid → cannot ask the daemon. Cache the (null) verdict so we don't
         // re-probe a pane that never carries a pid, preserving the one-shot rule.
+        // No pid means we could not even ask — `unknown`, not a readable `none`.
         if (panePid == null) {
-            sessionForeignKindGuessCache.putIfAbsent(key, ForeignKindGuessEntry(null))
-            return null
+            sessionForeignKindGuessCache.putIfAbsent(
+                key,
+                ForeignKindGuessEntry(kind = null, isShell = false),
+            )
+            return sessionForeignKindGuessCache.getValue(key)
         }
         val verdict = agentKindRemoteSource.classify(
             session = session,
@@ -10391,9 +10425,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             ),
         )
-        val guessed = verdict[pane.paneId]?.kind
-        sessionForeignKindGuessCache.putIfAbsent(key, ForeignKindGuessEntry(guessed))
-        return sessionForeignKindGuessCache[key]?.kind
+        val paneVerdict = verdict[pane.paneId]
+        sessionForeignKindGuessCache.putIfAbsent(
+            key,
+            ForeignKindGuessEntry(
+                kind = paneVerdict?.kind,
+                // An ABSENT pane verdict (tool missing / daemon error / parse
+                // failure → empty map) is "we could not tell" = unknown, not a
+                // confirmed shell. Only an explicit `none` row is a readable shell.
+                isShell = paneVerdict?.isShell == true,
+            ),
+        )
+        return sessionForeignKindGuessCache.getValue(key)
     }
 
     /**
@@ -10421,18 +10464,43 @@ public class TmuxSessionViewModel @Inject constructor(
         tty: String,
         command: String,
     ): AgentDetection? {
-        val guessedKind = resolveForeignKindGuess(
+        val guess = resolveForeignKindGuess(
             session = session,
             sessionTarget = sessionTarget,
             pane = pane,
-        ) ?: return null
-        return agentRepository.detectRecordedSessionForPane(
-            session = session,
-            cwd = cwd,
-            paneTty = tty,
-            paneCommand = command,
-            recordedKind = guessedKind,
         )
+        val guessedKind = guess.kind
+        if (guessedKind != null) {
+            return agentRepository.detectRecordedSessionForPane(
+                session = session,
+                cwd = cwd,
+                paneTty = tty,
+                paneCommand = command,
+                recordedKind = guessedKind,
+            )
+        }
+        // Issue #975 (B1, classify-miss): the daemon did not name a kind. If this
+        // is a CONFIRMED-SHELL session AND the daemon's verdict was `unknown`
+        // (an UNREADABLE scope — `isShell == false`), the recorded-shell verdict
+        // is no longer trustworthy: a live node-wrapped/quiet `claude` the
+        // cgroup-v2/`/proc` classify cannot see is exactly the masked-agent case
+        // the maintainer hit (the live Claude session with NO Conversation
+        // toggle, #962 recurrence). Trust a LIVE transcript scoped to the cwd as
+        // the agent evidence: if a fresh `*.jsonl` binds, return that detection
+        // so markAgentTailLive clears the stale shell verdict and the toggle
+        // returns. A daemon `none` (readable scope, no agent — `isShell == true`)
+        // is a GENUINE shell and gets NO fallback (the #894 no-flap invariant). A
+        // foreign (not-confirmed-shell) pane with no kind guess also stays null —
+        // we only second-guess a recorded-shell verdict, never a clean foreign.
+        if (isConfirmedShellSession(sessionTarget) && !guess.isShell) {
+            return agentRepository.detectLiveTranscriptForPane(
+                session = session,
+                cwd = cwd,
+                paneTty = tty,
+                paneCommand = command,
+            )
+        }
+        return null
     }
 
     private fun startAgentDetectionForPane(
@@ -10449,16 +10517,29 @@ public class TmuxSessionViewModel @Inject constructor(
         // moved between ttys would keep its stale "no agent" verdict
         // even after the agent CLI was started on the new tty.
         val input = Triple(cwd, command, tty)
-        if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) return
+        // Issue #975 (B1′, dedup ordering): bust the one-shot foreign kind-guess
+        // cache for a CONFIRMED-SHELL pane BEFORE the dedup early-return, not
+        // after it. A `claude` started inside an already-detected shell pane does
+        // NOT change the `(cwd, command, tty)` triple (no tty change), so the
+        // dedup key matches and — with the bust ordered AFTER the early-return
+        // (the #962 ordering bug) — the cache-bust never ran and the stale "no
+        // agent" guess persisted for the life of the session, suppressing the
+        // Conversation toggle. Busting first means the next re-probe of a
+        // confirmed-shell pane always re-evaluates the daemon (and the #975 B1
+        // transcript fallback), so a live agent started in the shell can bind and
+        // clear the verdict even when the input triple is unchanged. A genuine
+        // shell re-evaluates to "no agent" again (no flap — #894).
+        refreshForeignGuessForConfirmedShellPane(pane)
+        if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) {
+            // The cache-bust above already forced the daemon to re-evaluate on
+            // the NEXT probe. A confirmed-shell pane whose input is unchanged but
+            // whose one-shot guess was just invalidated must not be left deduped
+            // on a stale in-flight job — re-probe it so the bust takes effect.
+            if (!isConfirmedShellSession(pane.sessionId)) return
+        }
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentTailGenerations.remove(pane.paneId)
         paneAgentInputs[pane.paneId] = input
-        // Issue #962: for a recorded-`shell` session, bust the one-shot foreign
-        // kind-guess cache before probing so the daemon re-evaluates and can bind
-        // an agent started INSIDE the shell (the one-shot guess may have cached
-        // "no agent" before the agent launched). On a positive bind,
-        // markAgentTailLive re-classifies the session out of confirmed-shell.
-        refreshForeignGuessForConfirmedShellPane(pane)
         val paneId = pane.paneId
         val guard = refreshGuard ?: RuntimeRefreshGuard(
             generation = connectGeneration,
@@ -12812,6 +12893,110 @@ public class TmuxSessionViewModel @Inject constructor(
         initialEvents: List<ConversationEvent> = emptyList(),
     ) {
         markAgentTailLive(paneId, detection, initialEvents)
+    }
+
+    /**
+     * Issue #975 (B1, classify-miss) test seam: drive the REAL foreign-session
+     * detection resolver against a supplied [session] for the row registered
+     * under [paneId]. This exercises the actual
+     * `resolveForeignKindGuess` → `AgentKindRemoteSource.classify` →
+     * `AgentConversationRepository.detectLiveTranscriptForPane` chain (not a
+     * synthetic `markAgentTailLive` injection), so a test using a fake SSH
+     * session whose daemon classify returns `unknown` while a live `*.jsonl`
+     * transcript is present can prove the masked-live-agent fallback binds a
+     * detection (B1) and stays null for a genuine `none` shell (the no-flap
+     * control). The pane must already be registered (e.g. via the test
+     * connect/parse helper) and its session marked confirmed-shell.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun resolveForeignSessionDetectionForTest(
+        paneId: String,
+        session: SshSession,
+    ): AgentDetection? {
+        val pane = paneRows[paneId] ?: return null
+        return resolveForeignSessionDetection(
+            session = session,
+            sessionTarget = pane.sessionId,
+            pane = pane,
+            cwd = pane.cwd,
+            tty = pane.paneTty,
+            command = pane.currentCommand,
+        )
+    }
+
+    /**
+     * Issue #975 (B1′, dedup ordering) test seam: true when a re-probe of
+     * [paneId] would re-evaluate the daemon — i.e. the one-shot foreign-kind
+     * guess cache for the pane's session is ABSENT (busted). Lets a JVM test
+     * assert that [startAgentDetectionForPane] busts the cache for a
+     * confirmed-shell pane BEFORE the dedup early-return, so a `claude` started
+     * inside an already-detected shell pane (unchanged `(cwd, command, tty)`)
+     * still forces a re-probe instead of keeping the stale "no agent" guess.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun foreignGuessIsCachedForTest(sessionId: String): Boolean =
+        sessionForeignKindGuessCache.containsKey(sessionId.trim())
+
+    /**
+     * Issue #975 (B1′) test seam: seed the one-shot foreign-kind guess cache for
+     * [sessionId] with a `unknown`-shaped (kind null) verdict, mirroring a daemon
+     * classify that already cached "no agent" before the agent launched. A
+     * subsequent [startAgentDetectionForPaneForTest] on a confirmed-shell pane of
+     * that session must BUST this entry (the B1′ ordering fix) so the daemon
+     * re-evaluates.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun seedForeignGuessCacheForTest(sessionId: String) {
+        sessionForeignKindGuessCache.putIfAbsent(
+            sessionId.trim(),
+            ForeignKindGuessEntry(kind = null, isShell = false),
+        )
+    }
+
+    /**
+     * Issue #975 (B1′) test seam: drive [startAgentDetectionForPane] for the row
+     * registered under [paneId]. With a fake [sessionRef] already set, a JVM test
+     * can assert the cache-bust ordering without a full reconcile.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun startAgentDetectionForPaneForTest(paneId: String) {
+        val pane = paneRows[paneId] ?: return
+        startAgentDetectionForPane(pane)
+    }
+
+    /**
+     * Issue #975 test seam: install [session] as the active [sessionRef] so a
+     * JVM test can drive the detection chain ([startAgentDetectionForPane] /
+     * [resolveForeignSessionDetectionForTest]) against a fake SSH session that
+     * models the masked-live-agent host (daemon classify `unknown` + a live
+     * transcript). Mirrors the production assignment in the connect/reconnect
+     * path without standing up a real SSH transport.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setSessionRefForTest(session: SshSession?) {
+        sessionRef = session
+    }
+
+    /**
+     * Issue #975 (B2, reattach re-stamp) test seam: register a REMEMBERED-agent
+     * resolving placeholder (#819 A2: detection-less,
+     * [AgentConversationUiState.rememberedAgentPlaceholder] = true) for [paneId],
+     * mirroring what [seedAgentConversationFromMemory] restores on a beyond-grace
+     * reattach. Lets a JVM test prove [applyRecordedShellVerdict] (`isShell=true`)
+     * does NOT tear it down on the reconnect re-read — the toggle survives.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun seedRememberedAgentPlaceholderForTest(paneId: String) {
+        _agentConversations.update { conversations ->
+            conversations + (paneId to AgentConversationUiState(
+                detection = null,
+                events = emptyList(),
+                selectedTab = SessionTab.Conversation,
+                syncStatus = AgentConversationSyncStatus.Live,
+                loadState = ConversationLoadState.Loading,
+                rememberedAgentPlaceholder = true,
+            ))
+        }
     }
 
     /**

@@ -72,6 +72,42 @@ class ToxiproxyControl(
     }
 
     /**
+     * Issue #970 (the realistic-wifi stability gate): a STABLE-but-JITTERY link.
+     * A steady base [latencyMs] one-way latency on BOTH directions WITH a
+     * [jitterMs] random jitter band models a physically stable wifi/mobile link
+     * that is never down but whose RTT wobbles — exactly the conditions a stable
+     * client must ride through without redialing. Unlike [addSymmetricLatency]
+     * (jitter 0 — a citable fixed RTT) this is deliberately fuzzed so the
+     * `-CC` `refresh-client` round-trip cost varies tick-to-tick the way a real
+     * jittery link does.
+     *
+     * Folded into the standard `latency_upstream` / `latency_downstream` toxic
+     * names so [clearToxics] / [reset] remove them like the canned model.
+     *
+     * NB (per #970 / the issue's toxiproxy caveat): toxiproxy `toxicity` is
+     * per-NEW-connection, so it cannot fuzz a SINGLE long-lived SSH connection's
+     * jitter the way real jitter does — but the `latency` toxic's own `jitter`
+     * attribute DOES vary the per-packet delay within an established connection,
+     * which is what this uses. The deterministic ride-through proof does NOT lean
+     * on toxiproxy at all (it uses the in-app probe/keepalive seams); this toxic
+     * is the OPT-IN realistic-link variant.
+     */
+    fun addJitterLatency(latencyMs: Int, jitterMs: Int) {
+        addToxic(
+            name = "latency_upstream",
+            type = "latency",
+            stream = "upstream",
+            attributesJson = """{"latency":$latencyMs,"jitter":$jitterMs}""",
+        )
+        addToxic(
+            name = "latency_downstream",
+            type = "latency",
+            stream = "downstream",
+            attributesJson = """{"latency":$latencyMs,"jitter":$jitterMs}""",
+        )
+    }
+
+    /**
      * Cap the downstream (server -> client) throughput with the stock toxiproxy
      * `bandwidth` toxic. [rateKbps] is the sustained rate in kilobytes/second
      * (toxiproxy's `rate` attribute). Used by the #576 Codex-redraw overflow

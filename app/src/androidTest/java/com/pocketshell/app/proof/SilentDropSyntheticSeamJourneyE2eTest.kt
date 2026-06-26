@@ -115,6 +115,10 @@ class SilentDropSyntheticSeamJourneyE2eTest {
             intervalMs = PROBE_INTERVAL_MS,
             perProbeTimeoutMs = PROBE_TIMEOUT_MS,
             failureThreshold = PROBE_FAILURE_THRESHOLD,
+            // #964: keep the keepalive-deferral bound generous on the shortened
+            // window so the slow-but-live ride-through is observable AND the wedge
+            // escalation is reachable within the test windows below.
+            maxKeepAliveDeferrals = KEEPALIVE_MAX_DEFERRALS,
         )
     }
 
@@ -202,6 +206,104 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                 "Expected a post-recovery send to round-trip through the SAME session " +
                     "(no switch dance). status=${currentConnectionStatus()}",
                 roundTripped,
+            )
+            writeTimings()
+        }
+
+    /**
+     * Issue #964 / #822 — the slow-but-live wifi journey, threaded against the
+     * wedged-`-CC` recovery (reproduce-first, end-to-end). The tmux `-CC` probe
+     * reports DEAD (the `forceLivenessProbeDeadForTest` seam) BUT the transport
+     * keepalive is still proving the link alive (the `forceTransportProvenAliveForTest`
+     * seam = a live-but-slow link). The probe must DEFER and NOT spuriously redial
+     * a fine link (#964) — yet a SUSTAINED `-CC` wedge on a still-healthy keepalive
+     * must STILL recover (#822), not be suppressed forever.
+     *
+     * Three phases, all USER-VISIBLE (D28(3)):
+     *  1. SLOW-BUT-LIVE that RECOVERS: `-CC` dead briefly with keepalive alive,
+     *     then the `-CC` answers again before the deferral bound → NO indicator
+     *     (the #964 fix; RED on base, where the probe redials at its threshold).
+     *  2. WEDGED `-CC` + healthy keepalive SUSTAINED (#822): `-CC` stays dead with
+     *     keepalive alive → the indicator MUST surface after the deferral bound,
+     *     proving a blanket keepalive veto did NOT re-open #822.
+     *  3. AUTO-RECOVERY once both faults clear.
+     *
+     * No `assumeTrue` / `assumeFalse(isRunningOnCi())` on the load-bearing
+     * assertions (D31/F3).
+     */
+    @Test
+    fun slowButLiveWifiKeepaliveRidesThroughButWedgedControlChannelStillRecovers() =
+        runBlocking<Unit> {
+            val hostRowTag = requireNotNull(seededHostRowTag)
+            attachSeededTmuxSession(hostRowTag)
+            waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+            waitForConnected("initial attach")
+
+            val key = requireNotNull(seededKey)
+            emitMarkerIntoPane(key, "LIVE-$MARKER")
+            waitForVisibleTerminal("pre-slow-live") { it.contains("LIVE-$MARKER") }
+            assertTrue(
+                "expected Connected before the slow-but-live window, " +
+                    "observed=${currentConnectionStatus()}",
+                currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+
+            val vm = currentViewModel()
+
+            // ---- 1) SLOW-BUT-LIVE that RECOVERS → probe MUST DEFER (no redial) ----
+            // `-CC` reports DEAD briefly with the keepalive proving the link alive,
+            // then the `-CC` recovers (clear the dead flag) BEFORE the deferral
+            // bound is exhausted. The probe must ride this through with NO indicator.
+            vm.forceTransportProvenAliveForTest = true
+            vm.forceLivenessProbeDeadForTest = true
+            // Hold the brief slow window (under the deferral bound), then let `-CC`
+            // answer again — the link un-congested.
+            SystemClock.sleep(SLOW_LIVE_BRIEF_WINDOW_MS)
+            vm.forceLivenessProbeDeadForTest = false
+
+            val indicatorDuringSlowLive =
+                waitForConnectionLostIndicator(SLOW_LIVE_OBSERVE_WINDOW_MS)
+            recordTiming(
+                "slow_live_indicator_while_keepalive_alive_bool",
+                if (indicatorDuringSlowLive) 1L else 0L,
+            )
+            assertTrue(
+                "Expected NO connection-lost indicator for a slow-but-live `-CC` blip " +
+                    "that recovers while the keepalive proves the link alive — it must " +
+                    "ride through, not spuriously reconnect (#964). " +
+                    "status=${currentConnectionStatus()}",
+                !indicatorDuringSlowLive,
+            )
+
+            // ---- 2) WEDGED `-CC` + healthy keepalive SUSTAINED (#822) → recover ----
+            // Now the `-CC` channel stays WEDGED (dead) with the keepalive STILL
+            // proving the transport alive the whole time. A blanket keepalive veto
+            // would leave this wedged forever; the bounded deferral must escalate.
+            val wedgeStart = SystemClock.elapsedRealtime()
+            vm.forceTransportProvenAliveForTest = true
+            vm.forceLivenessProbeDeadForTest = true
+            val detectedWedge = waitForConnectionLostIndicator(DROP_DETECT_WINDOW_MS)
+            recordTiming(
+                "wedged_cc_healthy_keepalive_detected_ms",
+                if (detectedWedge) SystemClock.elapsedRealtime() - wedgeStart else -1L,
+            )
+            assertTrue(
+                "Expected the indicator to surface for a SUSTAINED wedged `-CC` channel " +
+                    "even though the keepalive keeps proving the transport alive (#822 " +
+                    "must NOT be suppressed by the #964 deferral). " +
+                    "status=${currentConnectionStatus()}",
+                detectedWedge,
+            )
+
+            // ---- 3) AUTO-RECOVERY (clear both faults) ----
+            vm.forceTransportProvenAliveForTest = false
+            vm.forceLivenessProbeDeadForTest = false
+            val recovered = waitForSessionRecovered(WEDGE_RECOVER_WINDOW_MS)
+            recordTiming("slow_live_recovered_bool", if (recovered) 1L else 0L)
+            assertTrue(
+                "Expected the SAME session to auto-recover after both faults clear " +
+                    "(status=${currentConnectionStatus()}).",
+                recovered,
             )
             writeTimings()
         }
@@ -507,10 +609,30 @@ class SilentDropSyntheticSeamJourneyE2eTest {
         const val PROBE_TIMEOUT_MS: Long = 2_000L
         const val PROBE_FAILURE_THRESHOLD: Int = 1
 
+        // #964: keepalive-deferral bound on the shortened window. With threshold=1
+        // each "failure run" is one probe (~1s), so 2 deferrals ≈ 2 failed probes
+        // ridden through before the wedge escalates on the 3rd — comfortably within
+        // SLOW_LIVE_BRIEF_WINDOW_MS for the ride-through and DROP_DETECT_WINDOW_MS
+        // for the wedge escalation.
+        const val KEEPALIVE_MAX_DEFERRALS: Int = 2
+
+        // #964 phase-1: how long the `-CC` stays dead during the slow-but-live blip
+        // before it recovers. ~one probe interval — under the deferral bound — so
+        // the probe rides it through without escalating.
+        const val SLOW_LIVE_BRIEF_WINDOW_MS: Long = 1_500L
+
         // Detection budget on the shortened window (interval + threshold*timeout =
         // ~1.5s) with generous headroom for the loaded CI swiftshader emulator.
         val DROP_DETECT_WINDOW_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
+
+        // #964: how long to confirm the probe DEFERS (no indicator) while the
+        // keepalive proves the link alive. Must cover SEVERAL shortened probe
+        // windows (interval + threshold*timeout ≈ 3s) so that, on base (no
+        // deferral), the spurious redial WOULD have surfaced within it — making
+        // the absence assertion load-bearing rather than vacuous.
+        val SLOW_LIVE_OBSERVE_WINDOW_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 18_000L else 9_000L
 
         val WEDGE_RECOVER_WINDOW_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 45_000L

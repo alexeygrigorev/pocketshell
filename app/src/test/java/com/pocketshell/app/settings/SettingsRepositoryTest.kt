@@ -67,6 +67,18 @@ class SettingsRepositoryTest {
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS, snap.backgroundGraceMillis)
         assertEquals(AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED, snap.diagnosticsRecordingEnabled)
+        // Issue #969: diagnostics recording is ON by default so a FRESH install
+        // captures the FIRST reconnect (previously lost — recording defaulted
+        // off). A bare constant comparison can't catch a silent flip back to
+        // false, so HARD-assert the value, not just the constant.
+        assertTrue(
+            "expected diagnostics recording default to be ON (issue #969)",
+            snap.diagnosticsRecordingEnabled,
+        )
+        assertTrue(
+            "expected DEFAULT_DIAGNOSTICS_RECORDING_ENABLED constant to be true (issue #969)",
+            AppSettings.DEFAULT_DIAGNOSTICS_RECORDING_ENABLED,
+        )
         // Issue #818: agent sessions open on Conversation by default — the
         // black-screen cure. The default MUST be Conversation, not Terminal.
         assertEquals(AppSettings.DEFAULT_AGENT_SESSION_VIEW, snap.defaultAgentSessionView)

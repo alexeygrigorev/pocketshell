@@ -84,6 +84,21 @@ internal class RealSshSession(
     private var lastInboundActivityNanos: Long = System.nanoTime()
 
     /**
+     * Why this session's transport went down (issue #969 — reconnect
+     * observability). Flipped to [SshSessionCloseCause.KeepaliveDead] by the
+     * keepalive watchdog ([TransportKeepAlive.KeepAliveIo.onKeepAliveDead]) the
+     * instant it declares the peer dead — BEFORE [close] runs — so the
+     * [SshLeaseManager] reads it when the now-disconnected session surfaces a
+     * lease `Closed` event and stamps `keepalive_dead` instead of an anonymous
+     * disconnect. Pass-through state only; core-ssh never reaches into the app.
+     */
+    @Volatile
+    private var transportCloseCause: SshSessionCloseCause = SshSessionCloseCause.Unknown
+
+    override val closeCause: SshSessionCloseCause
+        get() = transportCloseCause
+
+    /**
      * Issue #945 — the always-on, dispatcher-serialized SSH transport keepalive
      * (the real "stays up like Terminus" fix). It is the SAFE successor to sshj's
      * removed `KeepAliveRunner` background writer (#847): every keepalive packet
@@ -101,6 +116,11 @@ internal class RealSshSession(
             override fun lastInboundActivityNanos(): Long = lastInboundActivityNanos
             override suspend fun sendKeepAlive(): Boolean = this@RealSshSession.sendKeepAlive()
             override fun onKeepAliveDead(consecutiveMisses: Int) {
+                // Issue #969: NAME the cause BEFORE the close so the lease layer
+                // can read it when the now-disconnected session surfaces a
+                // `Closed` event. A keepalive-driven drop is a proactive
+                // silent-drop detection, not an anonymous disconnect.
+                transportCloseCause = SshSessionCloseCause.KeepaliveDead
                 KEEPALIVE_LOGGER.log(
                     Level.INFO,
                     "[$KEEPALIVE_LOG_TAG] transport keepalive declared the peer dead after " +
@@ -114,6 +134,13 @@ internal class RealSshSession(
                 scope.launch { runCatching { close() } }
             }
         },
+        // Issue #970: timing knobs are read from the test-override seam so the
+        // realistic-wifi stability gate (the durable #964 proof) can shorten the
+        // keepalive window deterministically — keeping the inbound-activity
+        // timestamp fresh across a long jittery-but-live hold. Production keeps
+        // the 30s / 3 defaults (the override is null unless a test set it).
+        intervalMs = KeepAliveTestOverride.intervalMs(),
+        countMax = KeepAliveTestOverride.countMax(),
         log = { msg -> KEEPALIVE_LOGGER.log(Level.FINE, "[$KEEPALIVE_LOG_TAG] $msg") },
     )
 
@@ -130,6 +157,24 @@ internal class RealSshSession(
 
     override val isConnected: Boolean
         get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
+
+    /**
+     * Issue #964 — the transport-liveness oracle the app-level `LivenessProbe`
+     * defers to. True while the keepalive ([TransportKeepAlive]) has seen INBOUND
+     * activity (its reply bumps [lastInboundActivityNanos]) within its
+     * [TransportKeepAlive.RIDE_THROUGH_BUDGET_MS] window — i.e. the link is
+     * provably alive at the transport layer, so the probe must not force a redial.
+     * Once the transport is genuinely dead the keepalive stops bumping the
+     * timestamp, this ages out past the ride-through window and returns `false`,
+     * and the keepalive's own ride-through budget closes the dead transport — one
+     * coherent liveness budget, not two competing ones.
+     */
+    override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean {
+        if (!isConnected) return false
+        val sinceActivityNanos = System.nanoTime() - lastInboundActivityNanos
+        val rideThroughNanos = TransportKeepAlive.RIDE_THROUGH_BUDGET_MS * 1_000_000L
+        return sinceActivityNanos in 0 until rideThroughNanos
+    }
 
     override suspend fun sendKeepAlive(): Boolean {
         // Route the global request through the single-writer dispatcher so it is

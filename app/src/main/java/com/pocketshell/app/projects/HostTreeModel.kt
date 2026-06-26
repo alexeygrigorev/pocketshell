@@ -713,43 +713,69 @@ internal class HostTreeModel {
      * as the legacy path did, but starting from the intrinsic expansion memory.
      */
     fun project(): Projection {
-        val orderedSessions = sessionEntries()
-        val folders = FolderListViewModel.groupSessionsIntoFolders(
-            sessions = orderedSessions,
-            sessionFolderPaths = sessionFolderPaths,
-            watchedFolders = watchedFolders,
-            extraFolders = optimisticFolders,
-        )
-        val treeRoots = FolderListViewModel.buildFolderTree(
-            sessions = orderedSessions,
-            sessionFolderPaths = sessionFolderPaths,
+        val result = buildProjection(snapshotForProjection())
+        applyProjection(result)
+        return result.projection
+    }
+
+    /**
+     * Issue #965 (ANR off-Main): the projection is split so the EXPENSIVE
+     * `buildFolderTree`/`groupSessionsIntoFolders` derivation (O(roots ×
+     * projects) — the 71-project main-thread cost) can run OFF the Main thread
+     * without racing the mutable model.
+     *
+     * [snapshotForProjection] runs on the model's owning thread and takes a CHEAP
+     * O(n) **immutable** copy of every input the builders read (the small session
+     * maps + the already-immutable structural maps). [buildProjection] is then a
+     * PURE function of that snapshot — no model field is touched — so it is safe
+     * to run on a worker dispatcher. [applyProjection] writes the recomputed
+     * expansion memory back on the owning thread. Nothing mutable crosses the
+     * thread boundary, so there is no concurrent-modification race even while
+     * other mutations land on the model.
+     */
+    fun snapshotForProjection(): ProjectionSnapshot =
+        ProjectionSnapshot(
+            orderedSessions = sessionEntries(),
+            sessionFolderPaths = LinkedHashMap(sessionFolderPaths),
             watchedFolders = watchedFolders,
             scannedProjectFoldersByRoot = scannedProjectFoldersByRoot,
             historyProjectFoldersByRoot = historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = resolvedWatchedRootPaths,
-            extraFolders = optimisticFolders,
-            stickyBuckets = stickyBuckets,
-        )
-        val visibleFolders = treeRoots.flatMap { it.folders }
-        val visibleProjectPaths = visibleFolders.map { it.path }.toSet()
-        val activeProjectPaths = visibleFolders
-            .filter { it.sessions.isNotEmpty() }
-            .map { it.path }
-            .toSet()
-        expandedProjectPaths = FolderListViewModel.resolveExpandedProjectPaths(
+            optimisticFolders = LinkedHashMap(optimisticFolders),
+            stickyBuckets = LinkedHashMap(stickyBuckets),
             previousExpanded = expandedProjectPaths,
-            visibleProjectPaths = visibleProjectPaths,
-            activeProjectPaths = activeProjectPaths,
             userCollapsedProjectPaths = userCollapsedProjectPaths,
         )
-        userCollapsedProjectPaths = userCollapsedProjectPaths.intersect(visibleProjectPaths)
-        return Projection(
-            folders = folders,
-            treeRoots = treeRoots,
-            flatSessions = orderedSessions,
-            expandedProjectPaths = expandedProjectPaths,
-        )
+
+    /** Write the recomputed expansion memory back (owning-thread side of [project]). */
+    fun applyProjection(result: ProjectionResult) {
+        expandedProjectPaths = result.projection.expandedProjectPaths
+        userCollapsedProjectPaths = result.userCollapsedProjectPaths
     }
+
+    /**
+     * Immutable inputs [buildProjection] needs — a copy taken on the model's
+     * owning thread so the heavy build can run off-Main without racing the
+     * mutable maps. Issue #965.
+     */
+    data class ProjectionSnapshot(
+        val orderedSessions: List<FolderSessionEntry>,
+        val sessionFolderPaths: Map<String, String>,
+        val watchedFolders: List<ProjectRootEntity>,
+        val scannedProjectFoldersByRoot: Map<String, List<String>>,
+        val historyProjectFoldersByRoot: Map<String, List<String>>,
+        val resolvedWatchedRootPaths: Map<String, String>,
+        val optimisticFolders: Map<String, String>,
+        val stickyBuckets: Map<String, String>,
+        val previousExpanded: Set<String>,
+        val userCollapsedProjectPaths: Set<String>,
+    )
+
+    /** Pure off-thread output of [buildProjection] — applied back via [applyProjection]. */
+    data class ProjectionResult(
+        val projection: Projection,
+        val userCollapsedProjectPaths: Set<String>,
+    )
 
     /** Render output of [project] — fed straight into [FolderListUiState.Ready]. */
     data class Projection(
@@ -896,6 +922,55 @@ internal class HostTreeModel {
         get() = isAgent || this == SessionAgentKind.Shell
 
     companion object {
+        /**
+         * Issue #965: the PURE, off-Main half of [project]. Runs the expensive
+         * `buildFolderTree`/`groupSessionsIntoFolders` derivation (O(roots ×
+         * projects) — the 71-project ANR cost) over an immutable
+         * [ProjectionSnapshot] so it can run on a worker dispatcher without
+         * touching the mutable model. No field access; deterministic in its
+         * input — the visuals stay byte-identical to the old inline `project()`.
+         */
+        fun buildProjection(snapshot: ProjectionSnapshot): ProjectionResult {
+            val orderedSessions = snapshot.orderedSessions
+            val folders = FolderListViewModel.groupSessionsIntoFolders(
+                sessions = orderedSessions,
+                sessionFolderPaths = snapshot.sessionFolderPaths,
+                watchedFolders = snapshot.watchedFolders,
+                extraFolders = snapshot.optimisticFolders,
+            )
+            val treeRoots = FolderListViewModel.buildFolderTree(
+                sessions = orderedSessions,
+                sessionFolderPaths = snapshot.sessionFolderPaths,
+                watchedFolders = snapshot.watchedFolders,
+                scannedProjectFoldersByRoot = snapshot.scannedProjectFoldersByRoot,
+                historyProjectFoldersByRoot = snapshot.historyProjectFoldersByRoot,
+                resolvedWatchedRootPaths = snapshot.resolvedWatchedRootPaths,
+                extraFolders = snapshot.optimisticFolders,
+                stickyBuckets = snapshot.stickyBuckets,
+            )
+            val visibleFolders = treeRoots.flatMap { it.folders }
+            val visibleProjectPaths = visibleFolders.map { it.path }.toSet()
+            val activeProjectPaths = visibleFolders
+                .filter { it.sessions.isNotEmpty() }
+                .map { it.path }
+                .toSet()
+            val expandedProjectPaths = FolderListViewModel.resolveExpandedProjectPaths(
+                previousExpanded = snapshot.previousExpanded,
+                visibleProjectPaths = visibleProjectPaths,
+                activeProjectPaths = activeProjectPaths,
+                userCollapsedProjectPaths = snapshot.userCollapsedProjectPaths,
+            )
+            return ProjectionResult(
+                projection = Projection(
+                    folders = folders,
+                    treeRoots = treeRoots,
+                    flatSessions = orderedSessions,
+                    expandedProjectPaths = expandedProjectPaths,
+                ),
+                userCollapsedProjectPaths = snapshot.userCollapsedProjectPaths.intersect(visibleProjectPaths),
+            )
+        }
+
         /**
          * #679 requirement #2: a maintained tree reconciles INFREQUENTLY, not
          * on a constant 5 s loop. A reconcile fires on foreground-resume/open

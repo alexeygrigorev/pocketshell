@@ -38,44 +38,77 @@ class TerminalNetworkObserver @Inject constructor(
 
     val changes: SharedFlow<TerminalNetworkChange> = _changes.asSharedFlow()
 
+    /**
+     * The registered default-network callback, retained so [close] can
+     * unregister it.
+     *
+     * Issue #956 (#935 S3-3): the registration used to have no matching
+     * unregister. Safe while this stays a process-singleton, but a latent
+     * leak / ghost-callback risk if it is ever scoped tighter or
+     * re-created. We retain the reference and unregister it in [close] —
+     * hard-cut, no leftover unregistered path.
+     */
+    private var callback: ConnectivityManager.NetworkCallback? = null
+
+    @Volatile
+    private var closed: Boolean = false
+
     init {
         val manager = cm
         if (manager == null) {
             Log.w(TAG, "connectivity-manager-missing")
         } else {
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    refresh("default-network-available")
+                }
+
+                override fun onLost(network: Network) {
+                    refresh("default-network-lost")
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities,
+                ) {
+                    updateFromSnapshot(
+                        snapshotFrom(network, networkCapabilities),
+                        "default-network-capabilities",
+                    )
+                }
+
+                override fun onUnavailable() {
+                    updateFromSnapshot(
+                        TerminalNetworkSnapshot.NoValidatedNetwork,
+                        "default-network-unavailable",
+                    )
+                }
+            }
             runCatching {
-                manager.registerDefaultNetworkCallback(
-                    object : ConnectivityManager.NetworkCallback() {
-                        override fun onAvailable(network: Network) {
-                            refresh("default-network-available")
-                        }
-
-                        override fun onLost(network: Network) {
-                            refresh("default-network-lost")
-                        }
-
-                        override fun onCapabilitiesChanged(
-                            network: Network,
-                            networkCapabilities: NetworkCapabilities,
-                        ) {
-                            updateFromSnapshot(
-                                snapshotFrom(network, networkCapabilities),
-                                "default-network-capabilities",
-                            )
-                        }
-
-                        override fun onUnavailable() {
-                            updateFromSnapshot(
-                                TerminalNetworkSnapshot.NoValidatedNetwork,
-                                "default-network-unavailable",
-                            )
-                        }
-                    },
-                )
+                manager.registerDefaultNetworkCallback(cb)
+            }.onSuccess {
+                callback = cb
             }.onFailure {
                 Log.w(TAG, "register-default-network-callback-failed", it)
             }
         }
+    }
+
+    /**
+     * Unregisters the default-network [ConnectivityManager.NetworkCallback].
+     * Idempotent — a second call (or a call before registration ever
+     * succeeded) is a no-op. Gives the registration a defined teardown so a
+     * scoped/re-created observer can no longer leak a ghost callback
+     * (#956, #935 S3-3). Does NOT touch any reconnect/handoff logic — that is
+     * owned elsewhere; this only releases the platform callback.
+     */
+    fun close() {
+        if (closed) return
+        closed = true
+        val cb = callback ?: return
+        callback = null
+        runCatching { cm?.unregisterNetworkCallback(cb) }
+            .onFailure { Log.w(TAG, "unregister-default-network-callback-failed", it) }
     }
 
     fun refresh(reason: String = "refresh"): TerminalNetworkChange? =

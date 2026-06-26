@@ -481,6 +481,22 @@ class TmuxSessionScreenTest {
     }
 
     @Test
+    fun presumedAgentTrueWhenConfirmedShellClearedByLiveDetection() {
+        // Issue #962: a session recorded `@ps_agent_kind=shell` with claude/codex/
+        // opencode started INSIDE it is re-classified OUT of confirmed-shell by
+        // the VM when live detection binds the pane (markAgentTailLive →
+        // applyRecordedShellVerdict(isShell=false)). So `confirmedShell` becomes
+        // false and the agent surface (Conversation toggle) is restored.
+        assertTrue(
+            tmuxSessionPresumedAgent(
+                hasLiveDetection = true,
+                stickyAgent = AgentKind.ClaudeCode,
+                confirmedShell = false,
+            ),
+        )
+    }
+
+    @Test
     fun tmuxSessionTabStateShowsConversationTabForPresumedAgentWithoutDetection() {
         // Presumed-agent, no live detection, NOT yet selected: the Conversation
         // tab EXISTS (it does not vanish during slow detection) and the active

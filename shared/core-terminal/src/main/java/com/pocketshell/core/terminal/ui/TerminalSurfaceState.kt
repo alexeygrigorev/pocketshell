@@ -559,6 +559,94 @@ class TerminalSurfaceState(
         visibleScreenIsBlank() || visibleScreenIsPartiallyBlank()
 
     /**
+     * Issue #966/#967: the count of non-whitespace cells the emulator has
+     * actually rendered onto its visible grid. Cheap (a single transcript read +
+     * char scan) so a watchdog can call it every tick without an IO round-trip.
+     *
+     * Returns 0 when no emulator is attached or the emulator throws mid-resize
+     * ("unknown" → treated as empty, never spuriously a stale-render heal on a
+     * transient).
+     */
+    fun renderedNonBlankCharCount(): Int {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return 0
+        val text = try {
+            // Issue #966/#967: measure ONLY the visible screen, NOT the scrollback.
+            // After a `CSI 2J` the visible viewport is black but `transcriptText`
+            // still carries the scrolled-off burst, which would mask the stale
+            // render (the #966 burst variant the user perceives as a black pane).
+            emulator.screen.visibleScreenText
+        } catch (_: Throwable) {
+            return 0
+        }
+        return text.count { !it.isWhitespace() }
+    }
+
+    /**
+     * Issue #966/#967 — the "mostly-black / stale render on a LIVE transport"
+     * oracle. The v0.4.17 black-screen heal ([visibleScreenIsBlank] /
+     * [visibleScreenIsPartiallyBlank]) only engages when the pane is FULLY blank
+     * or has ≤3 live lines, so the maintainer's #966 pane — a connected Claude
+     * window with a lone cursor + "3" + a scattered status line ("24m 3 / 8 / 4 /
+     * 3 / 31") — reads NEITHER fully blank NOR cleanly partial-blank (the
+     * fragments can exceed 3 live lines or scatter so the live FRACTION looks
+     * normal), so the heal SKIPS it and the user is stranded on a black-with-
+     * fragments pane while tmux's grid still holds the full content.
+     *
+     * This oracle closes that gap by diffing the RENDERED grid against what tmux
+     * says the pane SHOULD contain (the authoritative `capture-pane` text the
+     * caller passes in). It returns true — "the local render is stale/mostly-
+     * black relative to tmux, re-seed it" — when BOTH:
+     *
+     *  1. tmux's authoritative capture carries SUBSTANTIAL content
+     *     (≥ [STALE_RENDER_MIN_CAPTURE_CHARS] non-blank chars), i.e. there is a
+     *     real frame to restore — not a legitimately near-empty pane; AND
+     *  2. the rendered grid carries DRAMATICALLY LESS than the capture — its
+     *     non-blank char count is ≤ [STALE_RENDER_MAX_RENDERED_FRACTION] of the
+     *     capture's. A scattered-fragment / mostly-black render is exactly this:
+     *     a handful of glyphs against a full-screen authoritative frame.
+     *
+     * Why diff against `capture-pane` instead of a pure heuristic: re-seeding is
+     * idempotent (a full clear+repaint of tmux's authoritative grid), so a false
+     * positive only re-paints the SAME content the user already sees — no visible
+     * change. Anchoring on divergence-from-tmux (not "few glyphs") is what keeps
+     * a legitimately sparse-but-CORRECT pane (a real shell with little output)
+     * from over-firing: when the render already matches tmux, the rendered count
+     * is NOT a small fraction of the capture, so this returns false.
+     *
+     * Returns false when no emulator is attached (nothing rendered to compare),
+     * when the capture is itself near-empty (no real frame to restore — defer to
+     * the blank oracle), or when the render already carries a comparable amount
+     * of content (a healthy pane).
+     */
+    fun visibleScreenDivergesFromCapture(captureText: String): Boolean {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        // Compare the rendered VISIBLE viewport against the VISIBLE-equivalent of
+        // tmux's capture. The heal's `capture-pane` includes scrollback (`-S -N`),
+        // so comparing rendered-visible against the FULL capture would falsely read
+        // a healthy pane (whose visible grid matches only the BOTTOM of tmux's
+        // grid) as stale. Take the capture's last [visibleRows] non-blank lines —
+        // the visible-tail — so the diff is apples-to-apples and scale-invariant.
+        val visibleRows = try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (visibleRows <= 0) return false
+        val captureVisibleNonBlank = captureText
+            .split('\n')
+            .filter { it.isNotBlank() }
+            .takeLast(visibleRows)
+            .sumOf { line -> line.count { !it.isWhitespace() } }
+        // tmux has (near) nothing visible for this pane → not a stale-render case;
+        // the fully/partially-blank oracle owns the genuinely-empty pane.
+        if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
+        val renderedNonBlank = renderedNonBlankCharCount()
+        // The render carries a healthy share of tmux's visible content → not stale.
+        val staleCeiling = (captureVisibleNonBlank * STALE_RENDER_MAX_RENDERED_FRACTION).toInt()
+        return renderedNonBlank <= staleCeiling
+    }
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid
@@ -793,6 +881,26 @@ class TerminalSurfaceState(
          * viewport) while catching a lone timer line on an otherwise empty grid.
          */
         private const val PARTIAL_BLANK_MAX_LIVE_FRACTION = 0.25
+
+        /**
+         * Issue #966/#967: minimum non-blank chars the authoritative `capture-pane`
+         * text must carry for [visibleScreenDivergesFromCapture] to treat a sparse
+         * render as STALE (rather than a legitimately near-empty pane). A real
+         * full-screen agent/TUI frame is hundreds of chars; this floor keeps the
+         * oracle off a genuinely-tiny pane (a bare prompt) where there is no real
+         * frame to restore.
+         */
+        private const val STALE_RENDER_MIN_CAPTURE_CHARS = 40
+
+        /**
+         * Issue #966/#967: the rendered grid is judged STALE/mostly-black when its
+         * non-blank char count is at most this FRACTION of the authoritative
+         * capture's. The #966 pane shows a handful of scattered glyphs against a
+         * full-screen frame — well under a quarter of tmux's content. A healthy
+         * pane renders a comparable amount to tmux, so it sits ABOVE this ceiling
+         * and never heals.
+         */
+        private const val STALE_RENDER_MAX_RENDERED_FRACTION = 0.25
     }
 }
 

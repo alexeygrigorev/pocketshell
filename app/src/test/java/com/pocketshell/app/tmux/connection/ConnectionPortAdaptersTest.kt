@@ -76,6 +76,41 @@ class ConnectionPortAdaptersTest {
         assertNull(leaseStateToTransportEdge(SshLeaseStateEvent(leaseKey, SshLeaseConnectionState.Idle)))
     }
 
+    // --- #969: keepalive_dead attribution (class-covering) ------------------
+
+    @Test
+    fun `keepalive-driven close is NAMED keepalive_dead, not an anonymous lease_down`() {
+        val host = hostKeyFor(leaseKey)
+        // RED on base: before #969 a KeepaliveDead close reason did not exist;
+        // a keepalive-driven drop surfaced as the anonymous `Disconnected`. The
+        // named token is what makes the cause visible (the #964 ambiguity).
+        assertEquals(
+            TransportUpDown.Down(host, reason = "keepalive_dead"),
+            leaseStateToTransportEdge(
+                SshLeaseStateEvent(
+                    leaseKey,
+                    SshLeaseConnectionState.Closed,
+                    SshLeaseCloseReason.KeepaliveDead,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `transportDropReason names keepalive death but keeps other causes distinct`() {
+        // Class-coverage: keepalive death is named, a GENUINE lease-down stays
+        // `Disconnected`, and every other close reason keeps its own name — so a
+        // real drop or an explicit teardown is never mislabelled as keepalive
+        // death (and vice versa).
+        assertEquals("keepalive_dead", transportDropReason(SshLeaseCloseReason.KeepaliveDead))
+        assertEquals("Disconnected", transportDropReason(SshLeaseCloseReason.Disconnected))
+        assertEquals("ExplicitDisconnect", transportDropReason(SshLeaseCloseReason.ExplicitDisconnect))
+        assertEquals("IdleExpired", transportDropReason(SshLeaseCloseReason.IdleExpired))
+        assertEquals("ProcessStopped", transportDropReason(SshLeaseCloseReason.ProcessStopped))
+        assertEquals("ForceRefresh", transportDropReason(SshLeaseCloseReason.ForceRefresh))
+        assertEquals("closed", transportDropReason(null))
+    }
+
     @Test
     fun `transportEvents flows the manager's pinned stateEvents through the mapping`() = runTest {
         val manager = noDialLeaseManager()

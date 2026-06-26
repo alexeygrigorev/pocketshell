@@ -3,6 +3,7 @@ package com.pocketshell.app
 import android.content.Intent
 import android.net.Uri
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.core.storage.entity.HostEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -237,5 +238,129 @@ class MainActivityDeepLinkTest {
     @Test
     fun composerAttachmentsFromIntent_emptyWhenAbsent() {
         assertEquals(emptyList<String>(), composerAttachmentsFromIntent(Intent()))
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #859 (Slice D): agent-card-push session-feed deep-link.
+    // ----------------------------------------------------------------
+
+    private fun agentCardFeedIntent(
+        session: String = "claude-main",
+        host: String = "agent-box.example",
+    ): Intent = Intent().apply {
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, true)
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION, session)
+        putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_HOST, host)
+    }
+
+    @Test
+    fun agentCardFeedRequestFromIntent_parsesSessionAndHost() {
+        val request = agentCardFeedRequestFromIntent(agentCardFeedIntent())
+        assertEquals(AgentCardFeedRequest(session = "claude-main", host = "agent-box.example"), request)
+    }
+
+    @Test
+    fun agentCardFeedRequestFromIntent_nullWhenFlagAbsent() {
+        val intent = Intent().putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION, "work")
+        assertNull(agentCardFeedRequestFromIntent(intent))
+    }
+
+    @Test
+    fun agentCardFeedRequestFromIntent_nullWhenSessionBlank() {
+        assertNull(agentCardFeedRequestFromIntent(agentCardFeedIntent(session = "   ")))
+    }
+
+    @Test
+    fun agentCardFeedRequestFromIntent_allowsEmptyHost() {
+        // The host CLI may not emit a hostname; the request is still valid (the
+        // resolver then auto-routes only when there is a single host).
+        val intent = Intent().apply {
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, true)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION, "work")
+        }
+        assertEquals(AgentCardFeedRequest(session = "work", host = ""), agentCardFeedRequestFromIntent(intent))
+    }
+
+    // resolveAgentCardFeedHost — the deep-link host-identity matcher (#859 risk #2).
+
+    private fun host(id: Long, name: String, hostname: String) = HostEntity(
+        id = id,
+        name = name,
+        hostname = hostname,
+        port = 22,
+        username = "me",
+        keyId = 1L,
+    )
+
+    @Test
+    fun resolveAgentCardFeedHost_exactHostnameMatch() {
+        val hosts = listOf(
+            host(1L, "Box A", "a.example.com"),
+            host(2L, "Box B", "b.example.com"),
+        )
+        val resolved = resolveAgentCardFeedHost(
+            AgentCardFeedRequest("s", "b.example.com"),
+            hosts,
+        )
+        assertEquals(2L, resolved?.id)
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_leadingLabelMatch() {
+        // Push emits a short hostname; device stores the FQDN (or vice-versa).
+        val hosts = listOf(host(5L, "Hetzner", "rmthz.example.com"))
+        assertEquals(
+            5L,
+            resolveAgentCardFeedHost(AgentCardFeedRequest("s", "rmthz"), hosts)?.id,
+        )
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_nameFallbackMatch() {
+        val hosts = listOf(host(3L, "agent-box", "10.0.0.9"))
+        assertEquals(
+            3L,
+            resolveAgentCardFeedHost(AgentCardFeedRequest("s", "agent-box"), hosts)?.id,
+        )
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_emptyHostSingleHost_autoRoutes() {
+        val hosts = listOf(host(7L, "Only", "only.example.com"))
+        assertEquals(
+            7L,
+            resolveAgentCardFeedHost(AgentCardFeedRequest("s", ""), hosts)?.id,
+        )
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_emptyHostMultipleHosts_isAmbiguous_null() {
+        // No host hint + more than one host → DO NOT guess (never the wrong host).
+        val hosts = listOf(
+            host(1L, "A", "a.example.com"),
+            host(2L, "B", "b.example.com"),
+        )
+        assertNull(resolveAgentCardFeedHost(AgentCardFeedRequest("s", ""), hosts))
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_noMatch_null() {
+        val hosts = listOf(host(1L, "A", "a.example.com"))
+        assertNull(resolveAgentCardFeedHost(AgentCardFeedRequest("s", "zzz.nowhere"), hosts))
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_ambiguousMatch_null() {
+        // Two hosts share the same hostname → ambiguous → never guess.
+        val hosts = listOf(
+            host(1L, "A", "dup.example.com"),
+            host(2L, "B", "dup.example.com"),
+        )
+        assertNull(resolveAgentCardFeedHost(AgentCardFeedRequest("s", "dup.example.com"), hosts))
+    }
+
+    @Test
+    fun resolveAgentCardFeedHost_emptyHostList_null() {
+        assertNull(resolveAgentCardFeedHost(AgentCardFeedRequest("s", "a.example.com"), emptyList()))
     }
 }

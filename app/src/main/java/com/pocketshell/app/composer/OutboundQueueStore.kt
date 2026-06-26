@@ -86,6 +86,21 @@ public interface OutboundQueueStore {
      *
      * Position/ordering is by [OutboundItem.createdAtMs] (oldest-first), so
      * the flush loop delivers in the order the user committed to send.
+     *
+     * ## Logical-send coalesce (issue #961)
+     *
+     * When [sendKey] is non-empty AND an existing row for [sessionKey] carries
+     * the SAME [sendKey] and is still **un-delivered** (`Queued`/`Uploading`/
+     * `InFlight`/`Failed`), this does NOT mint a second row: it returns that
+     * existing row (re-arming a `Failed` match back to `Queued`, since a
+     * repeat enqueue is the explicit "send again" intent). This is the cure for
+     * the drop+reconnect double-send: after a failed send the row is left
+     * `Failed` (still queued/retryable) and the in-flight flag is reset, so a
+     * user re-Send of the restored draft would otherwise mint a SECOND
+     * deliverable row for one logical prompt and the reconnect auto-flush would
+     * deliver BOTH. A delivered+pruned row is gone, so a genuinely-new send of
+     * identical text after delivery still mints a fresh row (correct). An empty
+     * [sendKey] never coalesces — each enqueue is its own row.
      */
     public fun enqueue(
         sessionKey: String,
@@ -96,6 +111,7 @@ public interface OutboundQueueStore {
         paneId: String = "",
         route: OutboundRoute = OutboundRoute.RawBytes,
         agentKind: String? = null,
+        sendKey: String = "",
     ): OutboundItem
 
     /**
@@ -110,6 +126,15 @@ public interface OutboundQueueStore {
      *
      * This is the structural send-once guard: a duplicate enqueue of a pending
      * id can never create a second deliverable item.
+     *
+     * ## Logical-send coalesce (issue #961)
+     *
+     * Beyond the id match, if [item] carries a non-empty [OutboundItem.sendKey]
+     * and a DIFFERENT existing row for the same session has the SAME `sendKey`
+     * and is still un-delivered (`Queued`/`Uploading`/`InFlight`/`Failed`), this
+     * coalesces to that existing row (re-arming a `Failed` match to `Queued`)
+     * instead of adding a sibling — so the sidecar/attachment re-send path is
+     * covered by the same dedup as [enqueue].
      */
     public fun enqueueExisting(item: OutboundItem): OutboundItem
 
@@ -261,6 +286,14 @@ public interface OutboundQueueStore {
  *   rows that were persisted before route metadata existed.
  * @property route the delivery path selected when the item was enqueued.
  * @property agentKind optional agent token captured with agent-routed sends.
+ * @property sendKey the logical-send identity (issue #961): a stable hash of
+ *   `(sessionKey, cleanText, target pane/route, withEnter, attachment refs)`.
+ *   Two `enqueue`/`enqueueExisting` calls that carry the SAME non-empty
+ *   `sendKey` while a matching row is still un-delivered (`Queued`/`Uploading`/
+ *   `InFlight`/`Failed`) COALESCE to one row — the cure for the drop+reconnect
+ *   double-send (a post-failure re-Send of the restored draft must not create a
+ *   second deliverable row). Empty for legacy rows / callers that do not supply
+ *   a logical key; an empty `sendKey` never coalesces (each is its own row).
  */
 public data class OutboundItem(
     val id: String,
@@ -276,6 +309,7 @@ public data class OutboundItem(
     val paneId: String = "",
     val route: OutboundRoute = OutboundRoute.RawBytes,
     val agentKind: String? = null,
+    val sendKey: String = "",
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -340,7 +374,17 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         paneId: String,
         route: OutboundRoute,
         agentKind: String?,
+        sendKey: String,
     ): OutboundItem = synchronized(lock) {
+        // Issue #961: coalesce a re-Send of the SAME logical prompt while a
+        // matching un-delivered row still exists, instead of minting a second
+        // deliverable row (the drop+reconnect double-send).
+        val coalesce = items.values.toList().coalesceTargetForSendKey(sessionKey, sendKey)
+        if (coalesce != null) {
+            val rearmed = coalesce.reArmedForCoalesce()
+            items[rearmed.id] = rearmed
+            return@synchronized rearmed
+        }
         val item = OutboundItem(
             id = UUID.randomUUID().toString(),
             sessionKey = sessionKey,
@@ -352,6 +396,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             paneId = paneId,
             route = route,
             agentKind = agentKind,
+            sendKey = sendKey,
         )
         items[item.id] = item
         item
@@ -370,10 +415,20 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
                 items[rearmed.id] = rearmed
                 rearmed
             }
-            // Unknown id — store as given.
+            // Unknown id but a same-sendKey un-delivered sibling exists — coalesce
+            // (issue #961: the sidecar/attachment re-send path mints a fresh id,
+            // so the id branch above never fires; dedup on the logical key here).
             else -> {
-                items[item.id] = item
-                item
+                val coalesce = items.values.toList()
+                    .coalesceTargetForSendKey(item.sessionKey, item.sendKey, excludeId = item.id)
+                if (coalesce != null) {
+                    val rearmed = coalesce.reArmedForCoalesce()
+                    items[rearmed.id] = rearmed
+                    rearmed
+                } else {
+                    items[item.id] = item
+                    item
+                }
             }
         }
     }
@@ -494,6 +549,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         paneId: String,
         route: OutboundRoute,
         agentKind: String?,
+        sendKey: String,
     ): OutboundItem = OutboundItem(
         id = UUID.randomUUID().toString(),
         sessionKey = sessionKey,
@@ -504,6 +560,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         paneId = paneId,
         route = route,
         agentKind = agentKind,
+        sendKey = sendKey,
     )
 
     override fun enqueueExisting(item: OutboundItem): OutboundItem = item
@@ -585,7 +642,18 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         paneId: String,
         route: OutboundRoute,
         agentKind: String?,
+        sendKey: String,
     ): OutboundItem = synchronized(lock) {
+        val list = loadSession(sessionKey)
+        // Issue #961: coalesce a re-Send of the SAME logical prompt while a
+        // matching un-delivered row still exists, instead of minting a second
+        // deliverable row (the drop+reconnect double-send).
+        val coalesce = list.coalesceTargetForSendKey(sessionKey, sendKey)
+        if (coalesce != null) {
+            val rearmed = coalesce.reArmedForCoalesce()
+            replaceAndStore(sessionKey, list, rearmed)
+            return@synchronized rearmed
+        }
         val item = OutboundItem(
             id = UUID.randomUUID().toString(),
             sessionKey = sessionKey,
@@ -597,8 +665,8 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             paneId = paneId,
             route = route,
             agentKind = agentKind,
+            sendKey = sendKey,
         )
-        val list = loadSession(sessionKey)
         list.add(item)
         storeSession(sessionKey, list.sortedBy { it.createdAtMs })
         item
@@ -616,9 +684,19 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
                 rearmed
             }
             else -> {
-                list.add(item)
-                storeSession(item.sessionKey, list.sortedBy { it.createdAtMs })
-                item
+                // Issue #961: a fresh-id re-send of the same logical prompt
+                // coalesces onto the existing un-delivered sibling (the sidecar
+                // path mints a new id every send, so the id branch never fires).
+                val coalesce = list.coalesceTargetForSendKey(item.sessionKey, item.sendKey, excludeId = item.id)
+                if (coalesce != null) {
+                    val rearmed = coalesce.reArmedForCoalesce()
+                    replaceAndStore(item.sessionKey, list, rearmed)
+                    rearmed
+                } else {
+                    list.add(item)
+                    storeSession(item.sessionKey, list.sortedBy { it.createdAtMs })
+                    item
+                }
             }
         }
     }
@@ -761,6 +839,50 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
 private val OutboundState.isExactClaimable: Boolean
     get() = this == OutboundState.Queued || this == OutboundState.Failed
 
+/**
+ * Issue #961: a row that a same-[OutboundItem.sendKey] enqueue should COALESCE
+ * into rather than mint a second deliverable row. Every non-terminal state
+ * qualifies: `Queued`/`Uploading`/`InFlight` are still on their way out, and
+ * `Failed` is retryable-but-still-queued (the drop+reconnect case — a re-Send
+ * of the restored draft must re-arm THIS row, not add a sibling). A `Delivered`
+ * row is pruned, so it is never seen here; a genuinely-new identical send after
+ * delivery therefore correctly mints a fresh row.
+ */
+private val OutboundState.isCoalescibleForSendKey: Boolean
+    get() = this != OutboundState.Delivered
+
+/**
+ * Issue #961: the un-delivered row this [sendKey] enqueue must coalesce into,
+ * or `null` to mint a fresh row. Never coalesces on an empty [sendKey] (legacy
+ * rows + callers without a logical key are each their own row). [excludeId] is
+ * the id of the row being re-enqueued in [OutboundQueueStore.enqueueExisting]
+ * so an id-keyed re-enqueue does not match itself here (its own id branch
+ * handles that case).
+ */
+private fun List<OutboundItem>.coalesceTargetForSendKey(
+    sessionKey: String,
+    sendKey: String,
+    excludeId: String? = null,
+): OutboundItem? {
+    if (sendKey.isEmpty()) return null
+    return this
+        .filter {
+            it.sessionKey == sessionKey &&
+                it.id != excludeId &&
+                it.sendKey == sendKey &&
+                it.state.isCoalescibleForSendKey
+        }
+        .minByOrNull { it.createdAtMs }
+}
+
+/**
+ * Issue #961: re-arm a coalesced row for the explicit "send again" intent — a
+ * `Failed` match goes back to `Queued`; an already-pending match is returned
+ * unchanged (a strict no-op, exactly like the id-keyed pending guard).
+ */
+private fun OutboundItem.reArmedForCoalesce(): OutboundItem =
+    if (state == OutboundState.Failed) copy(state = OutboundState.Queued, lastError = null) else this
+
 private fun OutboundItem.claimedForAttempt(): OutboundItem =
     if (state == OutboundState.InFlight) {
         this
@@ -781,10 +903,12 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
 /**
  * Issue #900: encode a session's outbound items as newline-separated rows.
  * Each row is tab-delimited:
- * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind`
+ * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey`
  * with the same `\`-escaping [ComposerDraftStore] uses so text/paths containing
  * tabs/newlines round-trip losslessly. The attachments field reuses
- * [encodeAttachments], itself escaped as a single field.
+ * [encodeAttachments], itself escaped as a single field. The trailing `sendKey`
+ * (issue #961) is appended last so legacy rows without it decode to an empty
+ * `sendKey` (never-coalesce) rather than a malformed row.
  */
 internal fun encodeOutboundItems(items: List<OutboundItem>): String =
     items.joinToString(separator = "\n") { item ->
@@ -801,6 +925,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.paneId,
             item.route.name,
             item.agentKind.orEmpty(),
+            item.sendKey,
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -829,6 +954,7 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             route = runCatching { OutboundRoute.valueOf(f.getOrNull(10).orEmpty()) }
                 .getOrDefault(OutboundRoute.RawBytes),
             agentKind = f.getOrNull(11)?.takeIf { it.isNotEmpty() },
+            sendKey = f.getOrNull(12).orEmpty(),
         )
     }
 }

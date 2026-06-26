@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux.connection
 
 import android.util.Log
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.ConnectionState
@@ -359,6 +360,17 @@ class ConnectionEffectDriver(
 
                 is TransportUpDown.Down ->
                     if (edge.host == controller.state.value.hostOrNull()) {
+                        // Issue #969: stamp the NAMED drop cause into the
+                        // exported reconnect trail so the maintainer can see why
+                        // the terminal reconnected (e.g. `keepalive_dead`)
+                        // on-device via the file viewer — recorded even when the
+                        // drop is suppressed under the single-grace-owner gate,
+                        // so a backgrounded keepalive death is still attributed.
+                        ReconnectCauseTrail.record(
+                            stage = "lease_transport",
+                            outcome = if (suppressTransportDrops()) "down_suppressed" else "down",
+                            cause = edge.reason,
+                        )
                         if (suppressTransportDrops()) {
                             record(Observation.DropSuppressed)
                         } else {

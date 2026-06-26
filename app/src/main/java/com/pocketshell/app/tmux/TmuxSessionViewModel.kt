@@ -964,10 +964,14 @@ public class TmuxSessionViewModel @Inject constructor(
 
                 override fun onProbeFailed(consecutiveFailures: Int) =
                     onLivenessProbeDeclaredDrop(consecutiveFailures)
+
+                override fun transportProvenAliveRecently(): Boolean =
+                    isTransportKeepAliveProvenAliveRecently()
             },
             intervalMs = LivenessProbeTestOverride.intervalMs(),
             perProbeTimeoutMs = LivenessProbeTestOverride.perProbeTimeoutMs(),
             failureThreshold = LivenessProbeTestOverride.failureThreshold(),
+            maxKeepAliveDeferrals = LivenessProbeTestOverride.maxKeepAliveDeferrals(),
             log = { line -> Log.i(LIVENESS_PROBE_TAG, line) },
         )
         livenessProbe = probe
@@ -1018,6 +1022,43 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #964 — the keepalive-coordination guard the [LivenessProbe] consults
+     * before declaring a drop. Reports whether the always-on transport keepalive
+     * ([com.pocketshell.core.ssh.TransportKeepAlive], #945) has seen inbound
+     * transport activity within its ride-through window — i.e. the LINK is provably
+     * alive even though the tmux control-channel probe is momentarily failing. When
+     * true the probe DEFERS rather than force-redialing, so a slow-but-live link is
+     * ridden through by the single keepalive budget instead of two competing ones.
+     *
+     * Reads the live [sessionRef] (the transport the warm lease holds). No session
+     * → no keepalive signal → false, so the probe keeps its own authority exactly
+     * as before whenever there is no live transport to defer to.
+     */
+    private fun isTransportKeepAliveProvenAliveRecently(): Boolean {
+        // Test seam: a connected/unit proof can pin the keepalive "alive" state
+        // (a live-but-slow link) without driving the real 90s ride-through window.
+        forceTransportProvenAliveForTest?.let { return it }
+        val session = sessionRef ?: return false
+        return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
+            .getOrDefault(false)
+    }
+
+    /**
+     * Issue #964 test seam: pin the keepalive-alive verdict the probe defers to.
+     * `true` reproduces a LIVE-but-slow link (transport keepalive still riding
+     * through) so the probe must NOT redial; `false` reproduces a genuinely dead
+     * transport (keepalive gave up) so the probe is free to declare. `null`
+     * (production default) reads the real [sessionRef] keepalive signal.
+     * `@Volatile` so the probe-loop coroutine sees the flip from the test thread.
+     */
+    @Volatile
+    internal var forceTransportProvenAliveForTest: Boolean? = null
+
+    /** Issue #964 test seam: drive the keepalive-coordination guard synchronously. */
+    internal fun isTransportKeepAliveProvenAliveRecentlyForTest(): Boolean =
+        isTransportKeepAliveProvenAliveRecently()
+
+    /**
      * EPIC #792 Slice D test seam: arm the synthetic silent-drop. While true,
      * [runLivenessProbePing] returns DEAD without touching the wire, so the
      * connected per-PR proof reproduces a silent mid-session drop on the
@@ -1056,6 +1097,22 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @Volatile
     internal var forceCleanOutageForTest: Boolean = false
+
+    /**
+     * Issue #959 test seam (#780 synthetic-injection model): when set, the
+     * background teardown ([closeCurrentConnectionAndJoin]) closes the live `-CC`
+     * client but PRESERVES the pane runtime — `paneRows`, their `TerminalSurfaceState`s,
+     * the per-pane output producers, input queues + drain jobs, and the
+     * `paneProducerClients` bindings — instead of clearing them. This deterministically
+     * reproduces the on-device RACE the freeze needs: a pane that SURVIVES the teardown's
+     * clear into the foreground `connect(LifecycleReattach)` reconcile, so the reconcile
+     * takes the REUSE branch against a FRESH client while the producer/input are still
+     * wired to the now-dead client. The clean teardown clears `paneRows` (no freeze), so
+     * the journey can only enter the failing state by injecting it here — hard-fail
+     * otherwise, never self-skip. Default false (production clears everything).
+     */
+    @Volatile
+    internal var preservePaneRuntimeOnBackgroundTeardownForTest: Boolean = false
 
     /**
      * EPIC #792 #833 test seam: fire the CLEAN passive-disconnect path directly —
@@ -1549,6 +1606,23 @@ public class TmuxSessionViewModel @Inject constructor(
         connectedBlankWatchdogAutoArmEnabled = enabled
     }
 
+    // Issue #966/#967: the steady-state stale-render watchdog tick bound,
+    // injectable so a connected test can exhaust it quickly. Defaults to the
+    // production constant — production behavior unchanged.
+    private var staleRenderWatchdogMaxTicks: Int = STALE_RENDER_WATCHDOG_MAX_TICKS
+
+    internal fun setStaleRenderWatchdogMaxTicksForTest(maxTicks: Int) {
+        staleRenderWatchdogMaxTicks = maxTicks
+    }
+
+    // Issue #966/#967: when false, [armActivePaneStaleRenderWatchdog] is
+    // suppressed entirely. Always true in production; a test seam toggles it.
+    private var staleRenderWatchdogAutoArmEnabled: Boolean = true
+
+    internal fun setStaleRenderWatchdogAutoArmEnabledForTest(enabled: Boolean) {
+        staleRenderWatchdogAutoArmEnabled = enabled
+    }
+
     /**
      * Issue #640: pane IDs already seeded (via [seedPaneFromCapture]) during
      * the current attach. The cold-open reveal uses this to skip the redundant
@@ -2030,6 +2104,70 @@ public class TmuxSessionViewModel @Inject constructor(
             bridgeExceptionHandler,
     )
 
+    // Issue #935 R1 (#928 D2): crash-containment for the bare
+    // `viewModelScope.launch {}` TEARDOWN/CLOSE/DETACH/RECOVERY sites.
+    //
+    // The #896 [bridgeExceptionHandler] net above is SCOPE-LOCAL — only
+    // `bridgeScope.launch {}` (and child scopes derived from its context, e.g.
+    // the layout coalescer) inherit it, plus two hand-retrofitted
+    // `viewModelScope.launch(bridgeExceptionHandler)` sites (the grace and
+    // auto-reconnect launches). But ~20 bare `viewModelScope.launch {}` sites do
+    // NOT inherit it. The teardown/close/detach/recovery ones
+    // (`closeCurrentConnectionAndJoin`, `closeCachedRuntime`, `detachCleanly`,
+    // recovery re-`connect()`) issue SSH/tmux IO against a transport the close is
+    // racing to tear down — the exact `SshException`/`TransportException`/
+    // `EOFException` family the captured June-8 crash specimens come from. Today
+    // those bodies are guarded by inner `runCatching`, so coverage is
+    // BY-CONVENTION: a single unguarded throw (a future edit, a `cancelAndJoin`
+    // rethrowing a non-cancellation completion cause, a path not yet wrapped)
+    // propagates to `viewModelScope` (NO handler) →
+    // `Thread.defaultUncaughtExceptionHandler` → PROCESS DEATH (the "always
+    // restarting / it zoomed out then started over" class).
+    //
+    // [launchContainedTeardown] makes the containment BY-CONSTRUCTION: it routes
+    // the teardown launch's context through the SAME [bridgeExceptionHandler], so
+    // an uncaught throw is contained + diagnostically logged (DiagnosticEvents +
+    // a non-fatal CrashReporter record — the swallowed throw stays VISIBLE)
+    // instead of killing the process.
+    //
+    // ANTI-MASKING (the #896/#895 invariant, mirrored from the KDoc at the
+    // `bridgeExceptionHandler` above): this does NOT and CANNOT eat a genuine
+    // transport DROP that must drive reconnect. A real `-CC` drop arrives as a
+    // normal `client.disconnected` EMISSION on a latched StateFlow →
+    // handlePassiveClientDisconnect → reduceConnection(TransportDropped), which
+    // surfaces the escapable Reconnecting/Reconnect band. A
+    // CoroutineExceptionHandler is only ever invoked for an UNCAUGHT THROW; it is
+    // never on the path of a normal flow emission, so the drop→band routing is
+    // preserved by construction. The handler's sole job is to stop a
+    // teardown-time throw from killing the process — not to suppress lifecycle
+    // signals.
+    private fun launchContainedTeardown(
+        block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit,
+    ): Job =
+        viewModelScope.launch(bridgeExceptionHandler) {
+            // Issue #935 R1 (#780 synthetic-injection model): when a test arms
+            // [teardownLaunchFailureForTest], throw at the body boundary so the
+            // reproduction deterministically exercises an UNCAUGHT throw escaping
+            // a bare teardown launch. Null (production) → no-op. This is the seam
+            // that proves the containment is wired: WITHOUT the handler the throw
+            // reaches the thread's uncaught handler (process death); WITH it the
+            // throw lands in [bridgeExceptionHandler] and is recorded non-fatal.
+            teardownLaunchFailureForTest?.let { throw it }
+            block()
+        }
+
+    /**
+     * Test-only synthetic-failure seam (issue #935 R1, #780 model). When set,
+     * every [launchContainedTeardown] body throws this at its boundary, so a
+     * unit test can prove a bare teardown/close/detach/recovery launch's uncaught
+     * throw is CONTAINED by the scope-level net (lands in
+     * [bridgeCoroutineFailureProbe]) instead of reaching the thread's
+     * uncaught-exception handler (= process death on device). Null in production.
+     */
+    @get:androidx.annotation.VisibleForTesting
+    @set:androidx.annotation.VisibleForTesting
+    internal var teardownLaunchFailureForTest: Throwable? = null
+
     // Reuse pane rows across reconciles so the attached TerminalSurfaceState
     // (and its emulator scrollback) survives layout-change events. Keyed by
     // pane ID; entries are removed when tmux drops the pane.
@@ -2041,6 +2179,19 @@ public class TmuxSessionViewModel @Inject constructor(
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneOutputActivityJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    // Issue #959: track the EXACT `-CC` client each pane's output producer +
+    // input drain are currently bound to. A beyond-grace background→foreground
+    // fires `connect(LifecycleReattach)` with a fresh SSH lease + fresh
+    // [TmuxClient], but [applyParsedPanes]'s reuse branch keeps the EXISTING
+    // [TmuxPaneState] (so the emulator scrollback survives) and copies metadata
+    // only — it never re-bound the producer/input. Result: a reused pane stays
+    // wired to the DEAD client (`outputFor(paneId)` never delivers new %output;
+    // the stale buffer stays painted; key bar / IME bytes route nowhere) — the
+    // "content on screen but frozen, no I/O" symptom. This map lets the reuse
+    // branch detect the stale binding and re-bind to the live client (the
+    // post-grace reattach has no `rebindVisiblePaneProducersToClient` call that
+    // the silent passive-reattach paths rely on). Identity comparison only.
+    private val paneProducerClients: MutableMap<String, TmuxClient> = ConcurrentHashMap()
 
     // Issue #423: track recent terminal-surface recovery attempts per pane.
     // A single IME/resize/render exception recovers transparently by
@@ -3045,7 +3196,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun launchBackgroundDetachTeardown() {
         if (backgroundDetachJob?.isActive == true) return
         val preserveConnectingTarget = pendingBackgroundDetachPreserveTarget
-        val detachJob = viewModelScope.launch {
+        // Issue #935 R1: contained — the background detach issues `detach-client`
+        // + lease release against a transport the close is racing to tear down.
+        val detachJob = launchContainedTeardown {
             // NonCancellable so a fresh lifecycle transition (e.g.
             // rapid foreground/background) cannot interrupt the detach
             // mid-write — the screen still needs the clean teardown to
@@ -3262,8 +3415,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
         connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
-        viewModelScope.launch {
-            if (client.disconnected.value) return@launch
+        // Issue #935 R1: contained — a within-grace reattach reseed runs
+        // `capture-pane` IO against a warm client that may be racing teardown.
+        launchContainedTeardown {
+            if (client.disconnected.value) return@launchContainedTeardown
             val guard = RuntimeRefreshGuard(
                 generation = connectGeneration,
                 target = target,
@@ -3339,8 +3494,10 @@ public class TmuxSessionViewModel @Inject constructor(
             "generation" to connectGeneration,
             "clientHash" to System.identityHashCode(client),
         )
-        viewModelScope.launch {
-            if (client.disconnected.value) return@launch
+        // Issue #935 R1: contained — the manual redraw reseeds via `capture-pane`
+        // IO against the warm client; a teardown race here must not crash.
+        launchContainedTeardown {
+            if (client.disconnected.value) return@launchContainedTeardown
             val guard = RuntimeRefreshGuard(
                 generation = connectGeneration,
                 target = target,
@@ -3490,7 +3647,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // header indicator never shows Reconnecting/Disconnected during the heal.
         connectionManager.observeForegroundReattachLive()
         projectStatusFromController()
-        viewModelScope.launch {
+        // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
+        // over a fresh lease; a teardown-race throw must not crash the process.
+        launchContainedTeardown {
             // Re-open a fresh `-CC` control client over a freshly-acquired lease and
             // reseed — SILENTLY (the primitive never raises the Connecting overlay or a
             // band; on success it sets [ConnectionStatus.Live] and reseeds every visible
@@ -3525,14 +3684,16 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun replayPendingReattach() {
         val detachJob = backgroundDetachJob
-        viewModelScope.launch {
+        // Issue #935 R1: contained — replay joins the in-flight detach teardown
+        // and then re-connects; a throw on that lifecycle path must not crash.
+        launchContainedTeardown {
             // If the user backgrounds and immediately foregrounds the
             // app, the lifecycle detach may still be inside
             // closeCurrentConnectionAndJoin(). Waiting here prevents a
             // reattach from being consumed by connect()'s still-connected
             // early return before teardown clears activeTarget/clientRef.
             detachJob?.join()
-            val pending = pendingReattach ?: return@launch
+            val pending = pendingReattach ?: return@launchContainedTeardown
             val target = pending.target
             val currentIntent = latestConnectIntent
             if (
@@ -3551,7 +3712,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         "intendedTrigger=${currentIntent.trigger.logValue} " +
                         "detachedHostId=${target.hostId} intendedHostId=${currentIntent.target.hostId}",
                 )
-                return@launch
+                return@launchContainedTeardown
             }
             pendingReattach = null
             Log.i(
@@ -3694,7 +3855,10 @@ public class TmuxSessionViewModel @Inject constructor(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
         )
-        viewModelScope.launch {
+        // Issue #935 R1: contained — the manual detach runs the full
+        // close-cascade (`detach-client` + lease release + cache eviction) IO
+        // against a transport racing to tear down; a throw must not crash.
+        launchContainedTeardown {
             withContext(NonCancellable) {
                 closeCurrentConnectionAndJoin()
             }
@@ -4301,7 +4465,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=disconnected",
             )
-            viewModelScope.launch {
+            // Issue #935 R1: contained — closing a stale cached runtime issues
+            // `detach-client`/close IO against a dead transport.
+            launchContainedTeardown {
                 cached.closeCachedRuntime()
             }
             return null
@@ -4329,7 +4495,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 detail = "source=runtime_cache reason=health_probe_failed",
             )
             runCatching { cached.client.close() }
-            viewModelScope.launch {
+            // Issue #935 R1: contained — closing the unhealthy cached runtime +
+            // disconnecting its lease is teardown IO against a dead transport.
+            launchContainedTeardown {
                 cached.closeCachedRuntime()
                 cached.lease?.key?.let { key ->
                     runCatching { sshLeaseManager.disconnect(key) }
@@ -4496,6 +4664,11 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
+        // Issue #959: the parked panes' producers will be re-bound to a (new
+        // or same) client on restore via [rebindRestoredRuntimePaneJobsIfNeeded];
+        // drop the stale-client bindings so a restore re-binds rather than
+        // assuming the cached client is still live.
+        paneProducerClients.clear()
         paneOutputActivityJobs.values.forEach { it.cancel() }
         paneOutputActivityJobs.clear()
         paneInputQueues.clear()
@@ -4540,6 +4713,11 @@ public class TmuxSessionViewModel @Inject constructor(
             val producerActive = paneProducerJobs[paneId]?.isActive == true
             val inputActive = paneInputJobs[paneId]?.isActive == true
             if (producerActive && inputActive && pane.terminalState.isAttached) {
+                // Issue #959: the still-active producer is bound to this restored
+                // client (the cached runtime carries its own client). Record the
+                // binding so the next reconcile's reuse branch does NOT redundantly
+                // re-bind a producer that is already live on the current client.
+                paneProducerClients[paneId] = client
                 startPaneOutputActivityForPane(paneId = paneId, client = client)
                 startPortDetectionForPane(paneId = paneId, client = client)
                 continue
@@ -4559,7 +4737,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
-        viewModelScope.launch {
+        // Issue #935 R1: contained — async eviction of deactivated cached
+        // runtimes is teardown IO that may race the transport drop.
+        launchContainedTeardown {
             runtimes.forEach { runtime ->
                 runtime.closeCachedRuntime()
             }
@@ -4601,6 +4781,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows.putAll(runtime.paneRows)
         paneProducerJobs.clear()
         paneProducerJobs.putAll(runtime.paneProducerJobs)
+        // Issue #959: the cached client bindings are re-established below by
+        // [rebindRestoredRuntimePaneJobsIfNeeded] (keep-or-rebind to the
+        // restored client). Start empty so a reconcile that races the restore
+        // never trusts a stale binding.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         paneInputQueues.clear()
         paneInputQueues.putAll(runtime.paneInputQueues)
@@ -5055,6 +5240,23 @@ public class TmuxSessionViewModel @Inject constructor(
                     reseedActivePaneForReattach(blankReseedGuard)
                 }
             }
+            // Issue #966/#967: arm the steady-state stale-render watchdog for the
+            // runtime's lifetime. The blank watchdog only catches a pane that is
+            // black AT reveal; this net catches a pane that paints fine then LATER
+            // goes black-with-fragments (a drop-induced stale grid on a live
+            // transport — the #966 shape the blank oracle structurally misses).
+            //
+            // Issue #973 (v0.4.18 regression): arm it ONLY when the active pane
+            // genuinely painted at reveal ([activePaneSeeded]). A still-blank
+            // reveal is OWNED by [armConnectedBlankWatchdog] above — arming the
+            // stale-render net there too would race the same blank pane with a
+            // SECOND `capture-pane` loop (the #693/#661 never-reveal-black guard
+            // counts an exact bound; the stray captures broke that invariant) and
+            // the stale-render oracle ([visibleScreenDivergesFromCapture]) cannot
+            // even fire on a blank pane. When the blank watchdog later recovers a
+            // frame it arms the stale-render net itself, so the #966 lifetime net
+            // is preserved for that path without the blank-pane double-capture.
+            if (activePaneSeeded) armActivePaneStaleRenderWatchdog(blankReseedGuard)
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -5451,6 +5653,17 @@ public class TmuxSessionViewModel @Inject constructor(
             if (!activePaneSeeded) {
                 armConnectedBlankWatchdog(fastSwitchRevealGuard, surfaceErrorOnExhaustion = true)
             }
+            // Issue #966/#967: arm the steady-state stale-render watchdog on the
+            // fast-switch reveal path too, so a pane that later goes
+            // black-with-fragments on this runtime is healed against tmux's grid.
+            //
+            // Issue #973 (v0.4.18 regression): gate on [activePaneSeeded] — a
+            // still-blank fast-switch reveal is owned by the blank watchdog armed
+            // just above; arming the stale-render net on a blank pane would race a
+            // second `capture-pane` loop and break the #693/#661 never-reveal-black
+            // capture-count invariant. The blank watchdog arms this net once it
+            // recovers a frame.
+            if (activePaneSeeded) armActivePaneStaleRenderWatchdog(fastSwitchRevealGuard)
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             logAttachMilestone(
                 attempt = attempt,
@@ -5774,7 +5987,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // so the recovery's [connect] does not block joining itself.
             val recoverTarget = target
             connectJob = null
-            viewModelScope.launch {
+            // Issue #935 R1: contained — the post-EOF recovery re-dial is a
+            // top-level re-`connect()` on the close/recovery cascade; an uncaught
+            // throw while the prior connect unwinds must not crash the process.
+            launchContainedTeardown {
                 connect(
                     hostId = recoverTarget.hostId,
                     hostName = recoverTarget.hostName,
@@ -8257,6 +8473,33 @@ public class TmuxSessionViewModel @Inject constructor(
         for (p in sorted) {
             val existing = paneRows[p.paneId]
             val row = if (existing != null) {
+                // Issue #959: a beyond-grace background→foreground reattaches
+                // via `connect(LifecycleReattach)` against a FRESH client, but
+                // tmux preserves pane ids across detach/reattach, so this is the
+                // reuse branch. We keep the existing [TerminalSurfaceState] (so
+                // scrollback survives), but the pane's output producer + input
+                // drain are still wired to the DEAD client. RE-BIND them to the
+                // live client whenever it changed identity — without this the
+                // terminal is frozen (stale buffer painted, no new %output, key
+                // bar / IME bytes route nowhere). This makes the reuse branch the
+                // single re-bind site for EVERY reconcile caller (LifecycleReattach
+                // cold reattach, parked-runtime restore, cache refresh), so the
+                // post-grace path no longer depends on a `paneRows.clear()` having
+                // raced ahead of it. Identity comparison: a producer bound to a
+                // closed client must be replaced.
+                if (client != null && paneProducerClients[p.paneId] !== client) {
+                    paneProducerJobs.remove(p.paneId)?.cancel()
+                    paneOutputActivityJobs.remove(p.paneId)?.cancel()
+                    panePortDetectorJobs.remove(p.paneId)?.cancel()
+                    paneInputJobs.remove(p.paneId)?.cancel()
+                    paneInputQueues.remove(p.paneId)?.close()
+                    existing.terminalState.detachExternalProducer()
+                    attachTerminalProducerForPane(
+                        paneId = p.paneId,
+                        state = existing.terminalState,
+                        client = client,
+                    )
+                }
                 // Reuse the existing TerminalSurfaceState so the emulator
                 // and its scrollback survive the reconcile. Update the
                 // immutable metadata if it changed.
@@ -8338,6 +8581,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val gonePaneIds = paneRows.keys - nextById.keys
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
+            paneProducerClients.remove(paneId)
             paneOutputActivityJobs.remove(paneId)?.cancel()
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
@@ -8393,6 +8637,10 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
+            // Issue #959: remember which client this producer (and the
+            // 1-arg [inputSinkForPane] drain it just created) is bound to so a
+            // later reconcile can detect a stale binding after a client swap.
+            paneProducerClients[paneId] = client
             startPaneOutputActivityForPane(paneId = paneId, client = client)
             // Issue #448 (epic #432 slice C): tap the same shared output
             // flow for new-port detection whenever a pane's producer is
@@ -8577,6 +8825,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(overflow.paneId)?.cancel()
+        paneProducerClients.remove(overflow.paneId) // Issue #959
         paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorJobs.remove(overflow.paneId)?.cancel()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -8625,6 +8874,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(paneId)?.cancel()
+        paneProducerClients.remove(paneId) // Issue #959
         paneOutputActivityJobs.remove(paneId)?.cancel()
         panePortDetectorJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
@@ -9265,6 +9515,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     // partial-black), reseed-thrashing it on every arming — so the
                     // watchdog keeps its narrow fully-blank contract.
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #973: the pane that was blank AT reveal has now
+                    // produced a frame, so hand off the #966 lifetime net here —
+                    // the reveal sites skip arming the stale-render watchdog while
+                    // the pane is still blank (it would race this blank watchdog on
+                    // the same pane). Now that a frame landed, arm it so a LATER
+                    // stale render on this runtime is still healed.
+                    armActivePaneStaleRenderWatchdog(refreshGuard)
                     return@launch
                 }
                 Log.i(
@@ -9275,6 +9532,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 reseedBlankVisiblePanes(refreshGuard)
                 if (!activePane.terminalState.visibleScreenIsBlank()) {
                     if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #973: frame landed after a reseed — hand off the #966
+                    // stale-render lifetime net (see the early-exit case above).
+                    armActivePaneStaleRenderWatchdog(refreshGuard)
                     return@launch
                 }
                 tick += 1
@@ -9299,6 +9559,79 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
     }
+
+    /**
+     * Issue #966/#967 — the STEADY-STATE stale-render watchdog. The
+     * [armConnectedBlankWatchdog] above exits the instant a frame lands, so it
+     * cannot catch a pane that paints fine at attach and only LATER goes
+     * black-with-fragments (a drop-induced stale grid, a mis-sized resize, a
+     * partial reseed that stalled — the #966 shape). This watchdog runs for the
+     * lifetime of the runtime on a SLOW cadence and, each tick, captures the
+     * ACTIVE visible pane and re-seeds it ONLY when the local render is
+     * mostly-black/stale relative to tmux's authoritative grid
+     * ([healActivePaneIfStaleRender]).
+     *
+     * It is the residual-risk net the #967 spike called out: a render that dies
+     * SILENTLY (no exception, just a stale grid) neither reconnects (correct — the
+     * transport is alive) NOR is caught by the blank/partial-blank oracles. This
+     * watchdog is the missing oracle, gated by a `capture-pane` DIFF so it never
+     * over-fires on a legitimately sparse-but-correct pane.
+     *
+     * Cost: ONE `capture-pane` round-trip per [STALE_RENDER_WATCHDOG_TICK_MS], and
+     * only while the pane is NON-blank (the blank watchdog owns the blank case).
+     * The diff is computed from the captured text, so a healthy pane pays just the
+     * one cheap round-trip and never relayouts.
+     */
+    private fun armActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
+        if (!staleRenderWatchdogAutoArmEnabled) return
+        bridgeScope.launch {
+            var tick = 0
+            while (tick < staleRenderWatchdogMaxTicks) {
+                delay(STALE_RENDER_WATCHDOG_TICK_MS)
+                if (!isCurrentRuntime(refreshGuard)) return@launch
+                val client = clientRef ?: return@launch
+                if (client.disconnected.value) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                    // Paused mid-runtime (a transient reconnecting band): keep the
+                    // watchdog alive but skip the heal until Connected resumes.
+                    tick += 1
+                    continue
+                }
+                val activePane = activeVisiblePane()
+                if (activePane != null) {
+                    runCatching { healActivePaneIfStaleRender(client, activePane, refreshGuard) }
+                }
+                tick += 1
+            }
+        }
+    }
+
+    /**
+     * Issue #966/#967 (characterization test seam): run ONE stale-render heal pass
+     * over the active visible pane against the supplied guard. A passthrough — no
+     * production-only logic — so a connected test can drive the heal deterministically
+     * without waiting on the watchdog cadence.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun healActivePaneIfStaleRenderForTest(): Boolean {
+        val client = clientRef ?: return false
+        val activePane = activeVisiblePane() ?: return false
+        val target = activeTarget ?: return false
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+        return healActivePaneIfStaleRender(client, activePane, guard)
+    }
+
+    /**
+     * Issue #966/#967 (test seam): is the underlying tmux control client currently
+     * disconnected? The discriminating connected journey asserts this is FALSE while
+     * the render is stale — proving the transport is alive (a render bug, not a drop).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clientDisconnectedForTest(): Boolean = clientRef?.disconnected?.value ?: true
 
     /**
      * Issue #886: the attach reveal never produced a frame within the bounded
@@ -9448,6 +9781,91 @@ public class TmuxSessionViewModel @Inject constructor(
         } finally {
             panesSeedInFlightThisAttach.remove(pane.paneId)
         }
+    }
+
+    /**
+     * Issue #966/#967 — the STALE-RENDER heal. The v0.4.17 black-screen heal only
+     * engages on a FULLY-blank or ≤3-live-line pane, so the maintainer's #966 pane
+     * — a connected Claude window rendering only a lone cursor + a couple of
+     * scattered status fragments while tmux's grid holds the full TUI — reads
+     * "not blank" and is SKIPPED, leaving a black-with-fragments pane on a LIVE
+     * transport (the keepalive keeps succeeding; the render is just stale).
+     *
+     * This heal captures the active pane ONCE, diffs the authoritative capture
+     * against what the local emulator actually rendered
+     * ([TerminalSurfaceState.visibleScreenDivergesFromCapture]), and re-seeds the
+     * pane ONLY when the render is mostly-black/stale relative to tmux. The diff
+     * is what keeps a legitimately sparse-but-correct pane from over-firing: when
+     * the render already matches tmux, the capture is applied as a no-op (the
+     * existing full clear+repaint is idempotent — re-painting the SAME
+     * authoritative content), but we skip even that to avoid a needless relayout.
+     *
+     * Returns true when a stale render was detected and re-seeded. The single
+     * `capture-pane` round-trip is paid ONLY on the watchdog cadence (the caller
+     * gates frequency), never per frame, so steady-state rendering is untouched.
+     */
+    private suspend fun healActivePaneIfStaleRender(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
+    ): Boolean {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        if (client.disconnected.value) return false
+        // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
+        // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
+        // decision: it only fires when tmux's grid HAS substantial content while
+        // the rendered VISIBLE viewport shows almost none of it — which is a stale
+        // render regardless of whether the residue is zero glyphs (fully black),
+        // a few scattered fragments (#966), or a post-burst clear. The heal is
+        // idempotent (a full clear+repaint of tmux's authoritative grid), so even
+        // if the blank watchdog also fires it just re-paints identical content.
+        val combined = runCatching {
+            withContext(seedIoDispatcher) {
+                client.captureWithCursor(
+                    pane.paneId,
+                    scrollbackLines = SEED_SCROLLBACK_LINES,
+                    timeoutMs = seedCaptureTimeoutMs,
+                )
+            }
+        }.getOrNull()
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        val captureResponse = combined?.capture
+        if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+            return false
+        }
+        val captureText = captureResponse.output.joinToString(separator = "\n")
+        // The discriminating check: tmux carries a real frame but the local render
+        // shows almost none of it → stale render on a live transport. If the
+        // render already matches tmux, this is false and we never touch the grid.
+        if (!pane.terminalState.visibleScreenDivergesFromCapture(captureText)) return false
+        val cursor = parseTmuxPaneCursor(combined.cursorReply)
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-stale-render-heal pane=${pane.paneId} window=${pane.windowId} " +
+                "session=${activeTarget?.sessionName} status=${_connectionStatus.value} " +
+                "rendered=${pane.terminalState.renderedNonBlankCharCount()} " +
+                "captureChars=${captureText.count { !it.isWhitespace() }}",
+        )
+        DiagnosticEvents.record(
+            "terminal",
+            "stale_render_heal",
+            "paneId" to pane.paneId,
+            "windowId" to pane.windowId,
+            "session" to activeTarget?.sessionName,
+            "renderedChars" to pane.terminalState.renderedNonBlankCharCount(),
+            "captureChars" to captureText.count { !it.isWhitespace() },
+            "reconnect" to false,
+        )
+        try {
+            pane.terminalState.appendRemoteOutput(
+                captureResponse.output.toTerminalViewportBytes(cursor),
+            )
+        } catch (cause: Throwable) {
+            if (cause is CancellationException) throw cause
+            reportTerminalSurfaceFailure(pane.paneId, cause)
+            return false
+        }
+        return true
     }
 
     private suspend fun seedPaneFromCaptureOnce(
@@ -9741,6 +10159,14 @@ public class TmuxSessionViewModel @Inject constructor(
      * the recorded-kind read landed). When [isShell] is false the session is
      * un-marked (an agent / re-classified session must regain its agent surface).
      * Republishes [confirmedShellPaneIds] either way.
+     *
+     * Issue #962: a live agent detection that binds to a pane of this session
+     * re-classifies it out of confirmed-shell via
+     * [clearConfirmedShellOnLiveAgentDetection] (calling this with
+     * `isShell = false`), so a claude/codex/opencode started inside a
+     * shell-recorded session regains its Conversation toggle. A recorded-shell
+     * read that re-marks the session is harmless: if a live agent is present the
+     * next detection bind clears it again; a genuine shell stays marked (#894).
      */
     private fun applyRecordedShellVerdict(sessionId: String, isShell: Boolean) {
         val key = sessionId.trim()
@@ -9770,6 +10196,47 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         if (changed || isShell) refreshConfirmedShellPaneIds()
+    }
+
+    /**
+     * Issue #962: a live agent detection just bound to [paneId] — re-classify its
+     * session out of [confirmedShellSessionIds] because the high-confidence live
+     * signal outranks a stale recorded `@ps_agent_kind=shell`. Idempotent and
+     * cheap; a no-op when the session was not confirmed-shell. This is the single
+     * AUTHORITATIVE override point (driven by the real detection event, not the
+     * unreliable wrapper `comm`), so the Conversation toggle returns for a
+     * claude/codex/opencode started inside a shell-recorded session.
+     */
+    private fun clearConfirmedShellOnLiveAgentDetection(paneId: String) {
+        val sessionId = paneRows[paneId]?.sessionId?.trim().orEmpty()
+        if (sessionId.isEmpty()) return
+        if (!confirmedShellSessionIds.contains(sessionId)) return
+        applyRecordedShellVerdict(sessionId = sessionId, isShell = false)
+    }
+
+    /**
+     * Issue #962: a session recorded `@ps_agent_kind=shell` (a plain shell the
+     * user/kind-picker classified as shell) maps the recorded kind to null →
+     * the FOREIGN resolver, whose host-daemon kind guess is ONE-SHOT cached per
+     * session. If that guess fired BEFORE an agent was started inside the shell
+     * it cached "no agent", and the one-shot rule would then never re-probe — so
+     * a `claude`/`codex`/`opencode` later started in the pane would never bind a
+     * live source. For a CONFIRMED-SHELL session we therefore bust the one-shot
+     * foreign-guess cache before each detection so the daemon (which classifies
+     * via the pane's `/proc` comm+cmdline — e.g. the `…/claude` path token, NOT
+     * the wrapper `comm`) re-evaluates and binds the live agent. Once it binds,
+     * [markAgentTailLive] → [clearConfirmedShellOnLiveAgentDetection] re-classifies
+     * the session out of confirmed-shell so the Conversation toggle returns.
+     *
+     * Cheap + idempotent. A genuine shell re-probes and the daemon returns "no
+     * agent" again (no flap — the #894 invariant holds; no detection ever binds,
+     * so the confirmed-shell verdict is never cleared).
+     */
+    private fun refreshForeignGuessForConfirmedShellPane(pane: TmuxPaneState) {
+        val sessionKey = pane.sessionId.trim()
+        if (sessionKey.isEmpty()) return
+        if (!confirmedShellSessionIds.contains(sessionKey)) return
+        sessionForeignKindGuessCache.remove(sessionKey)
     }
 
     /**
@@ -9972,6 +10439,12 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentTailGenerations.remove(pane.paneId)
         paneAgentInputs[pane.paneId] = input
+        // Issue #962: for a recorded-`shell` session, bust the one-shot foreign
+        // kind-guess cache before probing so the daemon re-evaluates and can bind
+        // an agent started INSIDE the shell (the one-shot guess may have cached
+        // "no agent" before the agent launched). On a positive bind,
+        // markAgentTailLive re-classifies the session out of confirmed-shell.
+        refreshForeignGuessForConfirmedShellPane(pane)
         val paneId = pane.paneId
         val guard = refreshGuard ?: RuntimeRefreshGuard(
             generation = connectGeneration,
@@ -10674,9 +11147,41 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
-        DiagnosticEvents.record("action", "tmux_attachment_stage_start", "count" to uris.size)
+        // Issue #968: BIND THE UPLOAD TO ITS ORIGINATING SESSION AT TAP TIME.
+        //
+        // The attach path used to resolve its destination at upload-COMPLETION
+        // time — it read `activeTarget` / `sessionRef` *after* the (possibly
+        // slow) await, so a switch A->B mid-upload landed the bytes in B's
+        // `.pocketshell/attachments/host-<hostId>-B/` scope (the warm `-CC`
+        // SSH session is shared across every tmux session on the host — D21 —
+        // so only the SCOPE DIR + the composer the paths merge into encode the
+        // session, and both were read late). That is the maintainer's reported
+        // data-MISROUTE: an attachment surprise-landing in the wrong agent
+        // session.
+        //
+        // The send path already snapshots its target at INITIATION
+        // (`sendTargetSnapshotProvider`); this is the un-snapshotted twin. The
+        // fix snapshots the origin target HERE, at the first synchronous line
+        // of the call (before any await / grace heal / switch can rebind
+        // `activeTarget`), derives the scope dir from that snapshot, and — at
+        // completion — refuses to deliver to a session that is no longer the
+        // origin. An upload started in A always lands in A; if the user
+        // switched away (the origin is no longer the active target) we surface
+        // a clear error rather than silently misrouting to whatever is active
+        // now (hard-cut per D22: no "deliver to current" fallback).
+        val originTarget = activeTarget
+        DiagnosticEvents.record(
+            "action",
+            "tmux_attachment_stage_start",
+            "count" to uris.size,
+            "originSession" to (originTarget?.sessionName ?: ""),
+        )
         val context = applicationContext
             ?: return Result.failure(IllegalStateException("Attachment staging unavailable."))
+        val scopeKey = when (originTarget) {
+            null -> "tmux-session"
+            else -> "host-${originTarget.hostId}-${originTarget.sessionName}"
+        }
         // Issue #451: the system file picker backgrounds the app while the
         // user selects a file. Attach now behaves like Send: on a
         // not-currently-live session it lazily connects-then-uploads instead
@@ -10690,10 +11195,29 @@ public class TmuxSessionViewModel @Inject constructor(
         // draft is preserved if the (re)connect never lands within the bound.
         val session = awaitLiveSessionForAttachment()
             ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
-        val target = activeTarget
-        val scopeKey = when (target) {
-            null -> "tmux-session"
-            else -> "host-${target.hostId}-${target.sessionName}"
+        // Issue #968: the await may have spanned a session switch (the file
+        // picker backgrounds the app; the maintainer navigated A->B while the
+        // upload looked stuck). If the active target is no longer the origin we
+        // tapped in, the live `session` now belongs to a DIFFERENT tmux session
+        // — uploading here would write the bytes into the wrong scope and merge
+        // the paths into the wrong composer. Bind-to-origin: do NOT proceed.
+        // Surface a clear error so the user re-attaches in the origin (the
+        // upload is never silently misrouted to the now-active session).
+        if (!isAttachmentOriginStillActive(originTarget)) {
+            DiagnosticEvents.record(
+                "action",
+                "tmux_attachment_stage_origin_changed",
+                "requestedCount" to uris.size,
+                "scope" to scopeKey,
+                "originSession" to (originTarget?.sessionName ?: ""),
+                "activeSession" to (activeTarget?.sessionName ?: ""),
+            )
+            return Result.failure(
+                IllegalStateException(
+                    "Switched sessions before the upload finished — attachment not applied. " +
+                        "Re-attach in the original session.",
+                ),
+            )
         }
         val result = PromptAttachmentStager(
             resolver = context.contentResolver,
@@ -10721,6 +11245,51 @@ public class TmuxSessionViewModel @Inject constructor(
             },
         )
         return result
+    }
+
+    /**
+     * Issue #968: is the [originTarget] snapshotted when the user tapped attach
+     * still the active session at upload-completion time?
+     *
+     * The warm `-CC` SSH session is shared across every tmux session on a host
+     * (D21), so the session-identity discriminator is the tmux **session name**
+     * (plus host), NOT the SSH lease key (which is per-host). If the user
+     * switched tmux sessions (A->B) during the upload await, the active target
+     * is now B and delivering the bytes here would misroute them into B's scope
+     * + composer. This returns `false` in exactly that case so the caller
+     * surfaces an error instead of misrouting.
+     *
+     * A null origin (no target was active at tap) and a null active target both
+     * resolve against the `"tmux-session"` fallback scope, so a null==null pair
+     * is treated as "still the origin" (no switch occurred).
+     */
+    private fun isAttachmentOriginStillActive(originTarget: ConnectionTarget?): Boolean {
+        val active = activeTarget
+        if (originTarget == null) return active == null
+        if (active == null) return false
+        return active.hostId == originTarget.hostId &&
+            active.sessionName == originTarget.sessionName
+    }
+
+    /**
+     * Issue #968 (deterministic test seam): would the attach delivery be bound
+     * to [originSessionName] on [originHostId] as its origin, given the current
+     * active target? Mirrors the [isAttachmentOriginStillActive] gate the upload
+     * consults at completion. On the OLD (base) code there was no origin gate —
+     * the upload always resolved `activeTarget` at completion, so a switch
+     * A->B misrouted the bytes into B. A JVM unit test snapshots A's target,
+     * switches to B, and asserts this returns `false` (origin no longer active
+     * -> error, no misroute) — the red->green discriminator for the fix.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun attachmentOriginStillActiveForTest(
+        originHostId: Long?,
+        originSessionName: String?,
+    ): Boolean {
+        val active = activeTarget
+        if (originHostId == null || originSessionName == null) return active == null
+        if (active == null) return false
+        return active.hostId == originHostId && active.sessionName == originSessionName
     }
 
     public suspend fun uploadQueuedAttachmentSidecars(
@@ -11783,6 +12352,19 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             if (updated == current) conversations else conversations + (paneId to updated)
         }
+        // Issue #962: a live agent detection just bound to [paneId]. If that
+        // pane's session was recorded `@ps_agent_kind=shell` (a plain shell the
+        // user/kind-picker classified as shell, with claude/codex/opencode then
+        // started INSIDE it), the durable recorded-shell verdict
+        // ([confirmedShellSessionIds]) would otherwise keep `presumedAgent` false
+        // and collapse the Conversation toggle for the life of the session. The
+        // AUTHORITATIVE live-detection event outranks the stale recorded shell, so
+        // re-classify the session OUT of confirmed-shell — the symmetric
+        // counterpart of `applyRecordedShellVerdict(isShell = false)`. Hard-cut
+        // (D22): no "recorded shell wins forever" branch remains. A genuine shell
+        // never reaches markAgentTailLive (no detection ever binds), so the #894
+        // no-flap invariant is preserved.
+        clearConfirmedShellOnLiveAgentDetection(paneId)
         rememberAgentStatusForPane(paneId)
         scanAgentConversationEventsForPortOffers(paneId, initialEvents)
     }
@@ -13758,16 +14340,26 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
-        paneInputJobs.clear()
-        paneInputQueues.clear()
         _agentConversations.value = emptyMap()
-        paneProducerJobs.clear()
-        paneOutputActivityJobs.clear()
-        for ((_, row) in paneRows) {
-            runCatching { row.terminalState.detachExternalProducer() }
+        // Issue #959 (#780 synthetic-injection seam): when the test forces the
+        // pane-runtime-survives-teardown race, KEEP paneRows + their producers +
+        // input queues + the paneProducerClients bindings (still pointing at the
+        // now-dead client) so the foreground reattach reconcile REUSES them and
+        // must re-bind. Production ALWAYS clears (the common no-freeze path).
+        if (!preservePaneRuntimeOnBackgroundTeardownForTest) {
+            paneInputJobs.clear()
+            paneInputQueues.clear()
+            paneProducerJobs.clear()
+            // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+            // re-binds every reused pane's producer/input to the new client.
+            paneProducerClients.clear()
+            paneOutputActivityJobs.clear()
+            for ((_, row) in paneRows) {
+                runCatching { row.terminalState.detachExternalProducer() }
+            }
+            paneRows.clear()
+            _panes.value = emptyList()
         }
-        paneRows.clear()
-        _panes.value = emptyList()
         rebuildUnifiedPanes()
         // Issue #215: ask tmux to detach this `-CC` control client before
         // we drop the SSH transport. Without the detach round-trip,
@@ -13879,6 +14471,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+        // re-binds every reused pane's producer/input to the new client.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -13918,8 +14513,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val previousClient = clientRef
         clientRef = null
         orphanDetachJob?.cancel()
+        // Issue #935 R1: contained — the orphan detach runs `detachCleanly()` IO
+        // against the LEAVING client (a transport mid-teardown during the switch).
         orphanDetachJob = previousClient?.let { client ->
-            viewModelScope.launch {
+            launchContainedTeardown {
                 withContext(NonCancellable) {
                     runCatching { client.detachCleanly() }
                 }
@@ -14024,6 +14621,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
+        // Issue #959: drop stale per-pane client bindings so a fresh reconnect
+        // re-binds every reused pane's producer/input to the new client.
+        paneProducerClients.clear()
         paneOutputActivityJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -15186,6 +15786,24 @@ internal const val CONNECTED_BLANK_WATCHDOG_TICK_MS: Long = 500L
 internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
 
 /**
+ * Issue #966/#967: the steady-state stale-render watchdog re-checks the active
+ * visible pane this often. SLOW relative to the blank watchdog (which spins fast
+ * to clear a black reveal): a steady-state stale render is a rarer, residual
+ * failure mode, and each tick costs one `capture-pane` round-trip, so a calm
+ * cadence keeps the cost negligible while still healing a black-with-fragments
+ * pane within a few seconds.
+ */
+internal const val STALE_RENDER_WATCHDOG_TICK_MS: Long = 4_000L
+
+/**
+ * Issue #966/#967: upper bound on stale-render watchdog ticks for the runtime's
+ * lifetime. At [STALE_RENDER_WATCHDOG_TICK_MS] this covers a long dogfood
+ * session; a superseded runtime (switch / reconnect) re-arms a fresh watchdog,
+ * so this bound is a safety ceiling, not a hard session limit.
+ */
+internal const val STALE_RENDER_WATCHDOG_MAX_TICKS: Int = 10_000
+
+/**
  * Issue #941 (black-screen B1): after a send's submit Enter, wait this long for
  * the agent's `%output` overpaint to land before judging whether the active pane
  * settled partial-black/blank and needs the one-shot send-overpaint heal. Short
@@ -15454,6 +16072,9 @@ internal object LivenessProbeTestOverride {
     @Volatile
     private var failureThresholdOverride: Int? = null
 
+    @Volatile
+    private var maxKeepAliveDeferralsOverride: Int? = null
+
     /**
      * Whether a freshly-constructed VM auto-starts its probe loop. Production +
      * the connected emulator proof keep this TRUE (the loop runs on the real Main
@@ -15469,7 +16090,12 @@ internal object LivenessProbeTestOverride {
         autoStartEnabled = enabled
     }
 
-    fun setForTest(intervalMs: Long?, perProbeTimeoutMs: Long?, failureThreshold: Int?) {
+    fun setForTest(
+        intervalMs: Long?,
+        perProbeTimeoutMs: Long?,
+        failureThreshold: Int?,
+        maxKeepAliveDeferrals: Int? = null,
+    ) {
         require(intervalMs == null || intervalMs > 0) { "intervalMs must be > 0" }
         require(perProbeTimeoutMs == null || perProbeTimeoutMs > 0) {
             "perProbeTimeoutMs must be > 0"
@@ -15477,13 +16103,17 @@ internal object LivenessProbeTestOverride {
         require(failureThreshold == null || failureThreshold >= 1) {
             "failureThreshold must be >= 1"
         }
+        require(maxKeepAliveDeferrals == null || maxKeepAliveDeferrals >= 1) {
+            "maxKeepAliveDeferrals must be >= 1"
+        }
         intervalMsOverride = intervalMs
         perProbeTimeoutMsOverride = perProbeTimeoutMs
         failureThresholdOverride = failureThreshold
+        maxKeepAliveDeferralsOverride = maxKeepAliveDeferrals
     }
 
     fun clear() {
-        setForTest(null, null, null)
+        setForTest(null, null, null, null)
         autoStartEnabled = true
     }
 
@@ -15494,6 +16124,9 @@ internal object LivenessProbeTestOverride {
 
     fun failureThreshold(): Int =
         failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
+
+    fun maxKeepAliveDeferrals(): Int =
+        maxKeepAliveDeferralsOverride ?: LivenessProbe.DEFAULT_MAX_KEEPALIVE_DEFERRALS
 }
 
 /**

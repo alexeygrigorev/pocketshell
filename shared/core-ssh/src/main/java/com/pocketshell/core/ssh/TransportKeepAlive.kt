@@ -236,5 +236,28 @@ internal class TransportKeepAlive(
          * Wi-Fi gap ride through where PocketShell used to redial.
          */
         const val DEFAULT_COUNT_MAX: Int = 3
+
+        /**
+         * ### #964 ride-through budget — the single coherent liveness window
+         *
+         * The worst-case time this keepalive needs to RIDE THROUGH a transient
+         * gap before it gives up and declares the transport dead:
+         *
+         *     rideThrough = countMax × intervalMs = 3 × 30s = 90s
+         *
+         * This is the budget the app-level
+         * [com.pocketshell.core.connection.LivenessProbe] DEFERS to (#964): while
+         * the transport has produced inbound activity within this window the
+         * keepalive is still successfully proving the link alive, so the probe
+         * must NOT force a redial — the two liveness mechanisms now share ONE
+         * coherent budget instead of the probe's old ~48s racing ahead of this
+         * ~90s and spuriously redialing a slow-but-live link.
+         *
+         * Kept derived from [DEFAULT_INTERVAL_MS] × [DEFAULT_COUNT_MAX] so a
+         * future keepalive retune moves the probe's deferral window in lockstep
+         * (no second hard-coded number to drift). [KeepAliveBudgetCoherenceTest]
+         * pins this against the probe's own budget so they can never re-diverge.
+         */
+        const val RIDE_THROUGH_BUDGET_MS: Long = DEFAULT_INTERVAL_MS * DEFAULT_COUNT_MAX
     }
 }

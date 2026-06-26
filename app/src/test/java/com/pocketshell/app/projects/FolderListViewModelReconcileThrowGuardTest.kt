@@ -166,6 +166,7 @@ class FolderListViewModelReconcileThrowGuardTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setProcessStartedForTest(true)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }

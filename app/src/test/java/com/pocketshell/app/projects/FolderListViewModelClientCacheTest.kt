@@ -93,10 +93,10 @@ class FolderListViewModelClientCacheTest {
         )
     }
 
-    // ---- GREEN: cold start WITH a populated cache renders instantly ----------
+    // ---- GREEN: cold start WITH a populated cache renders the held tree -------
 
     @Test
-    fun coldStartWithCacheRendersInstantlyNoLoadingFlash() = runTest {
+    fun coldStartWithCacheRendersHeldTreeAfterOffMainRead() = runTest {
         val cache = newCache()
         // The PREVIOUS app session left a settled tree in the client cache.
         writeNodes(
@@ -107,31 +107,25 @@ class FolderListViewModelClientCacheTest {
         val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
         val vm = newViewModel(gateway, cache)
 
-        val states = collectStates(vm)
         bind(vm)
 
-        // SYNCHRONOUSLY after bind (before any coroutine / reconcile runs): the
-        // cached tree paints INSTANTLY — the state is ALREADY Ready (the held
-        // shape), NOT Loading. This is the load-bearing assertion (G6): no empty
-        // 'No folders yet / 0 projects' flash, contrasting the empty-cache case
-        // above which IS Loading at this exact point.
-        val firstAfterBind = vm.state.value
+        // Issue #965 (ANR off-Main): the per-host cache file read + JSON parse now
+        // run OFF the Main thread (they were a StrictMode-flagged Main-thread
+        // `disk_read` inside bind() before — a dominant contributor to the
+        // 71-project folder ANR). So the cold start shows the brief Loading on
+        // Main, then paints the cached held tree the instant the OFF-Main read
+        // completes. After draining the (virtual-time) dispatcher the held shape
+        // is rendered, carrying the cached sessions in order — not the empty
+        // 'Other folders' rebuild.
+        runCurrent()
+        val ready = vm.state.value
         assertTrue(
-            "with a populated client cache the state is Ready the instant bind returns",
-            firstAfterBind is FolderListUiState.Ready,
+            "with a populated client cache the off-Main read paints the held tree",
+            ready is FolderListUiState.Ready,
         )
-        // And the instantly-painted tree carries the cached sessions in order —
-        // not the empty 'Other folders' rebuild.
         assertEquals(
             listOf("alpha", "beta"),
-            (firstAfterBind as FolderListUiState.Ready).flatSessions.map { it.sessionName },
-        )
-
-        runCurrent()
-        // Across the whole cold-start cycle NO Loading state is ever emitted.
-        assertFalse(
-            "no Loading state is ever emitted on a cached cold start",
-            states.any { it is FolderListUiState.Loading },
+            (ready as FolderListUiState.Ready).flatSessions.map { it.sessionName },
         )
     }
 
@@ -230,24 +224,31 @@ class FolderListViewModelClientCacheTest {
             node("ghost", 0, folderPath("ghost")),
             node("alpha", 1, folderPath("alpha")),
         )
-        // The authoritative probe reports ONLY 'alpha'.
-        val gateway = StubGateway(listOf(sessionRow("alpha")))
+        // The authoritative probe reports ONLY 'alpha'. HOLD the reconcile behind
+        // a gate so the off-Main cache paint is observable before it lands (issue
+        // #965 — otherwise StateFlow conflates the transient seed paint away).
+        val reconcileGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val gateway = StubGateway(listOf(sessionRow("alpha")), reconcileGate = reconcileGate)
         val vm = newViewModel(gateway, cache)
 
         val states = collectStates(vm)
         bind(vm)
+        // Drain the OFF-Main cache read + advisory paint (the reconcile is still
+        // gated, so it cannot run yet and conflate the seed away).
         runCurrent()
 
-        // Instant render seeded BOTH (advisory), no flash.
-        assertTrue(states.first() is FolderListUiState.Ready)
+        // The seeded advisory render carries BOTH sessions — the stale 'ghost'
+        // too — before the authoritative reconcile prunes it.
+        val firstReady = states.filterIsInstance<FolderListUiState.Ready>().first()
         assertTrue(
-            "the cache instantly seeds the stale 'ghost' too (advisory render)",
-            (states.first() as FolderListUiState.Ready).flatSessions
-                .map { it.sessionName }.contains("ghost"),
+            "the off-Main cache read seeds the stale 'ghost' too (advisory render)",
+            firstReady.flatSessions.map { it.sessionName }.contains("ghost"),
         )
-        // …but the authoritative reconcile is the source of truth: 'ghost' is
-        // pruned in place once the probe lands, so a stale cache entry can never
-        // survive past the first refresh (D22 / #679 stale-type guard).
+        // Now release the reconcile: the authoritative probe is the source of
+        // truth — 'ghost' is pruned in place once it lands, so a stale cache entry
+        // can never survive past the first refresh (D22 / #679 stale-type guard).
+        reconcileGate.complete(Unit)
+        runCurrent()
         assertEquals(
             "the reconcile is authoritative: the stale cached session is pruned",
             listOf("alpha"),
@@ -316,17 +317,24 @@ class FolderListViewModelClientCacheTest {
                 ),
             ),
         )
-        val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
+        // The gateway never gets to probe in this test — we assert the
+        // CACHE-seeded grouping, captured as the first Ready, before any
+        // authoritative reconcile lands.
+        val gateway = StubGateway(rows = null)
         val vm = newViewModel(gateway, cache, watchedRoots = listOf(watchedRoot("git", gitRoot)))
 
+        val states = collectStates(vm)
         bind(vm)
+        runCurrent()
 
-        // SYNCHRONOUSLY after bind (before any coroutine / reconcile / Room flow):
-        // the instant render shows the GROUPED tree — the "git" watched root with
-        // its project subfolders and the two sessions bucketed UNDER it, NOT a flat
-        // list dumped into "Other folders" with "0 projects".
-        val ready = vm.state.value as? FolderListUiState.Ready
-            ?: error("cold start must paint Ready instantly, got ${vm.state.value}")
+        // Issue #965 (ANR off-Main): the cache read is OFF Main, so bind first
+        // emits the brief Loading then the seeded Ready once the read completes.
+        // The FIRST Ready (the cache-seeded instant render) shows the GROUPED
+        // tree — the "git" watched root with its project subfolders and the two
+        // sessions bucketed UNDER it, NOT a flat list dumped into "Other folders"
+        // with "0 projects".
+        val ready = states.filterIsInstance<FolderListUiState.Ready>().firstOrNull()
+            ?: error("cold start must paint Ready from the off-Main cache read, got $states")
         val gitTreeRoot = ready.treeRoots.firstOrNull { it.path == gitRoot }
             ?: error(
                 "the cached 'git' watched root must paint instantly with its grouping; " +
@@ -479,6 +487,7 @@ class FolderListViewModelClientCacheTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setProcessStartedForTest(true)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }
@@ -509,6 +518,13 @@ class FolderListViewModelClientCacheTest {
         // just the flat session list.
         @Volatile var projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
         @Volatile var resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+        // Issue #965: an optional gate the test completes to RELEASE the
+        // reconcile. With the off-Main cache read, the advisory cache paint and
+        // the reconcile are both coroutines; holding the reconcile here lets a
+        // test deterministically observe the cache-seeded paint BEFORE the
+        // authoritative reconcile prunes it (StateFlow would otherwise conflate
+        // the transient seed paint away under virtual time).
+        private val reconcileGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null,
     ) : FolderListGateway {
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
@@ -516,6 +532,7 @@ class FolderListViewModelClientCacheTest {
             passphrase: CharArray?,
             watchedRoots: List<ProjectRootEntity>,
         ): FolderListResult {
+            reconcileGate?.await()
             val r = rows ?: error("gateway probe must not be called (tree should be reused, not reloaded)")
             return FolderListResult.Sessions(
                 rows = r,

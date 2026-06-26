@@ -741,10 +741,33 @@ class FolderListViewModel internal constructor(
 
     /** Epic #821 slice C: the cold-start tree-hydrate coroutine for this open. */
     private var hydrateTreeJob: Job? = null
+
+    /**
+     * Issue #965: the OFF-Main client-cache seed coroutine for this open (the
+     * read + JSON parse + advisory hydrate). The cold-start reconcile path awaits
+     * it so the instant cache paint lands BEFORE the freshening reconcile — the
+     * stale-while-revalidate ordering (#867) the synchronous-on-Main seed used to
+     * give implicitly, now preserved explicitly across the dispatcher hop.
+     */
+    private var clientCacheSeedJob: Job? = null
     @androidx.annotation.VisibleForTesting
     internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
     @androidx.annotation.VisibleForTesting
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    /**
+     * Issue #965 (ANR off-Main): the worker dispatcher the EXPENSIVE tree
+     * derivation runs on so it never blocks Main. [emitReady] takes a cheap
+     * immutable snapshot of the held tree on the caller's thread and runs the
+     * O(roots × projects) `buildFolderTree`/`groupSessionsIntoFolders`
+     * projection here (the 71-project ANR cost), assigning the result back on
+     * Main. Single-threaded so concurrent projections cannot interleave;
+     * test-overridable (unit tests set it to the virtual-time test dispatcher so
+     * the emit stays deterministic).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var treeDispatcher: CoroutineDispatcher =
+        Dispatchers.Default.limitedParallelism(1)
 
     /**
      * Issue #702: outer bound on a single [runReconcile] gateway call so NO
@@ -761,6 +784,16 @@ class FolderListViewModel internal constructor(
     internal var reconcileTimeoutMs: Long = RECONCILE_TIMEOUT_MS
     private var watchedFoldersJob: Job? = null
     private var probeJob: Job? = null
+
+    /**
+     * Issue #965: the most-recent [emitReady] projection coroutine + a monotone
+     * generation token. Because the heavy projection now runs off-Main and
+     * resumes asynchronously, an older projection that finishes after a newer
+     * one must NOT overwrite the fresher Ready state — the resume checks its
+     * captured generation against [emitGeneration] and drops itself if stale.
+     */
+    private var emitJob: Job? = null
+    private var emitGeneration: Long = 0L
 
     /**
      * Issue #706 / #783: subscription to the bound host's live `tmux -CC`
@@ -1098,6 +1131,8 @@ class FolderListViewModel internal constructor(
         probeJob = null
         hydrateTreeJob?.cancel()
         hydrateTreeJob = null
+        clientCacheSeedJob?.cancel()
+        clientCacheSeedJob = null
         warmSessionReady.value = false
         bound = params
         tree.bindHost(hostId)
@@ -1116,14 +1151,15 @@ class FolderListViewModel internal constructor(
         // diff, no rebuild), and [HostTreeModel.hydrate] skips clobbering an
         // already-populated tree — so a stale cache entry can never survive past
         // the first refresh (#679 stale-type guard, D22).
-        val seeded = hydrateFromClientCache(params)
-        if (!seeded) {
-            // No client cache yet (a genuinely new host / first-ever open): the
-            // brief Loading until the first authoritative reconcile seeds it,
-            // exactly as before — then the cache write below means the NEXT cold
-            // start renders instantly.
-            _state.value = loadingState()
-        }
+        // Issue #965 (ANR off-Main): show the brief Loading IMMEDIATELY on Main,
+        // then read + JSON-parse the per-host client cache OFF Main and hydrate
+        // the held tree. The previous code did the file read + full `JSONObject`
+        // parse SYNCHRONOUSLY on Main inside bind() (a StrictMode disk_read on the
+        // Main thread) — at 71 projects / 12 sessions that parse, stacked with the
+        // projection + first composition, crossed the ANR bar. The cache is still
+        // ADVISORY: the silent reconcile below overwrites the seeded placeholders.
+        _state.value = loadingState()
+        hydrateFromClientCache(params)
         // The maintained in-memory tree is held across opens of the SAME host
         // (so a re-open renders instantly), the daemon registry (#837) makes the
         // presentation state durable host-side, and this client cache makes the
@@ -1752,13 +1788,23 @@ class FolderListViewModel internal constructor(
     private fun hydrateTreeOnColdStart(params: BoundParams) {
         val source = treeRemoteSource
         if (source == null) {
-            // No durable source (unit tests / never-installed daemon): behave
-            // exactly as before — straight to the freshening reconcile.
-            maybeReconcileOnOpen(params)
+            // No durable source (unit tests / never-installed daemon): await the
+            // OFF-Main client-cache seed (#965) so its advisory instant paint
+            // lands BEFORE the freshening reconcile (the #867 stale-while-
+            // revalidate ordering), then reconcile.
+            viewModelScope.launch {
+                clientCacheSeedJob?.join()
+                if (bound != params) return@launch
+                maybeReconcileOnOpen(params)
+            }
             return
         }
         hydrateTreeJob?.cancel()
         hydrateTreeJob = viewModelScope.launch {
+            // Issue #965: await the OFF-Main client-cache seed so its advisory
+            // paint precedes the durable hydrate + freshening reconcile.
+            clientCacheSeedJob?.join()
+            if (bound != params) return@launch
             // Foreground-gated, mirroring the reconcile path (D21-clean).
             processStarted.first { it }
             var hostChanged = false
@@ -1817,53 +1863,69 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Issue #867 (stale-while-revalidate): seed the held tree from the per-host
-     * CLIENT cache the instant [bind] runs — a LOCAL read (no SSH), so the
-     * last-known tree paints INSTANTLY and the empty rebuild flash never shows.
+     * Issue #867 (stale-while-revalidate) + #965 (ANR off-Main): seed the held
+     * tree from the per-host CLIENT cache so a cold start paints the last-known
+     * tree quickly.
      *
-     * Runs in [bind]'s cold-start path BEFORE the Loading state is set and
-     * before the daemon hydrate / first reconcile. [HostTreeModel.hydrate] is a
-     * no-op once the tree already has a snapshot, so a probe that somehow beat
-     * this never gets clobbered by the (older) cache seed. Returns `true` when
-     * the cache seeded ≥1 node (so the caller skips the Loading flash and emits
-     * the held shape immediately), `false` when there is no cache yet.
-     *
-     * The seed is ADVISORY: the silent reconcile stays authoritative and
-     * overwrites these placeholders in place (keyed diff). A cache entry the
-     * probe no longer reports is pruned by the first reconcile, so a stale entry
-     * never survives past the first refresh (#679 stale-type guard, D22).
+     * The expensive part — the file read + full `JSONObject` parse — runs OFF
+     * Main on [ioDispatcher]. The previous implementation read + parsed the cache
+     * SYNCHRONOUSLY on the Main thread inside `bind()` (a StrictMode-flagged
+     * `disk_read` on Main); at 71 projects / 12 sessions that parse, stacked with
+     * the projection and the first composition, was a dominant contributor to the
+     * folder-list ANR. The cheap structural hydrate of the parsed result happens
+     * back on Main (consistent with every other tree mutation) and `emitReady`
+     * then runs the projection off-Main. If the host changed while the read was
+     * in flight, the stale result is dropped.
      */
-    private fun hydrateFromClientCache(params: BoundParams): Boolean {
-        val cache = treeClientCache ?: return false
-        val cached = runCatching { cache.read(params.hostName) }
-            .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
-        if (cached.isEmpty) return false
-        // Issue #867 (REOPEN): seed the watched-root overlay + the structural
-        // maps the grouping needs BEFORE the per-session hydrate's emit, so the
-        // FIRST cold-start frame already shows the SETTLED tree — sessions
-        // bucketed under their watched root, the project subfolders + counts
-        // visible — not "0 projects" with everything dumped into "Other
-        // folders". The authoritative Room `project_roots` Flow overwrites the
-        // seeded watched folders the moment it emits (advisory), and the first
-        // reconcile overwrites the structural maps wholesale.
-        if (cached.watchedFolders.isNotEmpty()) {
-            tree.setWatchedFolders(cached.watchedFolders)
+    private fun hydrateFromClientCache(params: BoundParams) {
+        val cache = treeClientCache ?: return
+        clientCacheSeedJob?.cancel()
+        clientCacheSeedJob = viewModelScope.launch {
+            val cached = withContext(ioDispatcher) {
+                runCatching { cache.read(params.hostName) }
+                    .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
+            }
+            // Drop a stale read if the host changed while we were reading the file.
+            if (bound != params) return@launch
+            if (cached.isEmpty) return@launch
+            // A reconcile/hydrate may have populated the tree while the read was in
+            // flight — [HostTreeModel.hydrate]/[hydrateStructure] self-guard against
+            // clobbering an already-populated (fresher, authoritative) tree, so the
+            // seed below is a no-op in that case and `emitReady` simply re-paints
+            // the held shape.
+            // Issue #867 (REOPEN): seed the watched-root overlay + the structural
+            // maps the grouping needs BEFORE the per-session hydrate's emit, so
+            // the cold-start frame shows the SETTLED tree — sessions bucketed
+            // under their watched root, the project subfolders + counts visible —
+            // not "0 projects" with everything dumped into "Other folders". The
+            // authoritative Room `project_roots` Flow overwrites the seeded
+            // watched folders the moment it emits (advisory), and the first
+            // reconcile overwrites the structural maps wholesale.
+            if (cached.watchedFolders.isNotEmpty()) {
+                tree.setWatchedFolders(cached.watchedFolders)
+            }
+            // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
+            // then the structure — so [HostTreeModel.hydrateStructure]'s
+            // sticky-bucket seed sees the sessions and can place them under their
+            // root by id.
+            tree.hydrate(cached.nodes.map { it.toHydratedNode() })
+            tree.hydrateStructure(
+                resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
+                scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
+                historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
+            )
+            if (!tree.hasSnapshot) return@launch
+            // Render the seeded order / placement / collapse + grouping — the held
+            // shape, no empty-rebuild grouping. The confirmed kinds arrive with
+            // the first reconcile and update in place. AWAIT the (off-Main)
+            // projection so the advisory paint is on screen BEFORE this seed job
+            // completes — the cold-start reconcile path joins this job, so this is
+            // what guarantees the instant cache paint precedes the freshening
+            // reconcile (the #867 stale-while-revalidate ordering, preserved
+            // across the #965 dispatcher hop).
+            emitReady()
+            emitJob?.join()
         }
-        // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
-        // then the structure — so [HostTreeModel.hydrateStructure]'s sticky-bucket
-        // seed sees the sessions and can place them under their root by id.
-        tree.hydrate(cached.nodes.map { it.toHydratedNode() })
-        tree.hydrateStructure(
-            resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
-            scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
-            historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
-        )
-        if (!tree.hasSnapshot) return false
-        // Render the seeded order / placement / collapse + grouping immediately —
-        // instant held shape, no Loading flash, no empty-rebuild grouping. The
-        // confirmed kinds arrive with the first reconcile and update in place.
-        emitReady()
-        return true
     }
 
     /**
@@ -2364,7 +2426,13 @@ class FolderListViewModel internal constructor(
                 }
                 // EPIC #679: reconcile the held tree (diff add/remove/update by
                 // id) instead of overwriting snapshot fields + a from-scratch
-                // rebuild.
+                // rebuild. The reconcile MUTATES the held maps, so — like every
+                // other tree mutation — it runs on Main (the single thread that
+                // owns the model). It is the cheap half (a keyed diff over ≤12
+                // sessions); the EXPENSIVE half is the projection, which
+                // [emitReady] runs OFF Main over an immutable snapshot (issue
+                // #965). Keeping mutations Main-confined is what makes that
+                // snapshot race-free.
                 tree.reconcile(
                     HostTreeModel.ProbeSnapshot(
                         sessions = sessionEntries,
@@ -2588,15 +2656,34 @@ class FolderListViewModel internal constructor(
     private fun emitReady() {
         if (bound == null) return
         if (!tree.hasSnapshot) return
-        val projection = tree.project()
-        _state.value = FolderListUiState.Ready(
-            folders = projection.folders,
-            treeRoots = projection.treeRoots,
-            flatSessions = projection.flatSessions,
-            expandedProjectPaths = projection.expandedProjectPaths,
-            isRefreshing = sessionRefreshInFlight,
-            portForwarding = forwardingSummary(),
-        )
+        // Issue #965 (ANR off-Main): take a CHEAP immutable snapshot of the held
+        // tree on the caller's thread (Main), then run the EXPENSIVE projection
+        // (O(roots × projects) `buildFolderTree` — the 71-project ANR cost) on
+        // the worker [treeDispatcher]. Nothing mutable crosses the boundary
+        // (snapshot is a copy) so other mutations can land on the model while the
+        // build runs. The result + expansion write-back are applied back on Main.
+        // The latest emit wins: a stale [emitGeneration] result is dropped.
+        val snapshot = tree.snapshotForProjection()
+        val generation = ++emitGeneration
+        val refreshing = sessionRefreshInFlight
+        emitJob = viewModelScope.launch {
+            val result = withContext(treeDispatcher) {
+                HostTreeModel.buildProjection(snapshot)
+            }
+            // A newer emit superseded this one (or the host changed) — drop it so
+            // an out-of-order older projection can't clobber fresher state.
+            if (generation != emitGeneration || bound == null) return@launch
+            tree.applyProjection(result)
+            val projection = result.projection
+            _state.value = FolderListUiState.Ready(
+                folders = projection.folders,
+                treeRoots = projection.treeRoots,
+                flatSessions = projection.flatSessions,
+                expandedProjectPaths = projection.expandedProjectPaths,
+                isRefreshing = refreshing,
+                portForwarding = forwardingSummary(),
+            )
+        }
     }
 
     private fun loadingState(): FolderListUiState.Loading {
@@ -2638,6 +2725,10 @@ class FolderListViewModel internal constructor(
         periodicReconcileJob = null
         hydrateTreeJob?.cancel()
         hydrateTreeJob = null
+        clientCacheSeedJob?.cancel()
+        clientCacheSeedJob = null
+        emitJob?.cancel()
+        emitJob = null
         warmJob?.cancel()
         warmReleaseJob?.cancel()
         runBlocking {

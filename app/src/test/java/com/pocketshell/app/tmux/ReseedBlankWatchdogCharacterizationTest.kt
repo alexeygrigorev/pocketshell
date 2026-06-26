@@ -158,6 +158,13 @@ class ReseedBlankWatchdogCharacterizationTest {
         // retryable error mid-setup). The dedicated #886 end-to-end stuck-reveal
         // test uses [connectVmExhaustingWatchdog], which leaves auto-arm ENABLED.
         vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        // Issue #973 (v0.4.18 regression): these tests characterize the BLANK
+        // watchdog's reseed behavior in isolation. The #966/#967 stale-render
+        // watchdog is a SEPARATE net (its own E2E coverage); the blank watchdog
+        // now hands off to it when it recovers a frame, which issues its own
+        // `capture-pane`. Suppress the stale-render auto-arm here so the blank
+        // watchdog's capture-count assertions stay focused on the blank reseed.
+        vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
         vm.setTmuxClientFactoryForTest { _, _, _ -> client }
         vm.connect(
             hostId = 1L,

@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1193,8 +1194,18 @@ internal fun FolderListContent(
                 EmptyState()
             }
         } else {
-            items(treeRoots, key = { it.path }) { root ->
-                FolderTreeRootGroup(
+            // Issue #965 (ANR — defeated virtualization): emit each watched root's
+            // header AND each of its project folders as SEPARATE LazyColumn items,
+            // so off-screen folder rows do NOT compose. The previous code put a
+            // single `items(treeRoots)` entry per root and composed ALL of that
+            // root's project folders eagerly in a nested `Column { root.folders
+            // .forEach { FolderGroup(...) } }` — so the dominant "git" root with 71
+            // projects measured/laid-out all 71 `FolderGroup`s (plus each expanded
+            // folder's session rows) in ONE synchronous composition pass at cold
+            // open, a multi-frame Main-thread stall. Flattening into per-folder
+            // `items` restores LazyColumn virtualization across the whole tree.
+            treeRoots.forEach { root ->
+                folderTreeRootItems(
                     root = root,
                     expandedProjectPaths = expandedProjectPaths,
                     onSessionClick = onSessionClick,
@@ -1630,8 +1641,21 @@ private fun FlatEmptyState() {
     }
 }
 
-@Composable
-private fun FolderTreeRootGroup(
+/**
+ * Issue #965 (ANR — restore virtualization): emit one watched root as SEPARATE
+ * [LazyColumn] items — a header item plus one item PER project folder — instead
+ * of a single list item that eagerly composed `root.folders.forEach { … }` in a
+ * nested `Column`. With the dominant "git" root holding 71 projects, the old
+ * single-item shape composed/measured all 71 `FolderGroup`s (plus each expanded
+ * folder's session rows + agent badges) in one synchronous pass at cold open — a
+ * multi-frame Main-thread stall that contributed to the folder-list ANR.
+ * Per-folder items let LazyColumn virtualize: off-screen folder rows never
+ * compose.
+ *
+ * The root container test tag ([folderTreeRootTestTag]) now lives on the header
+ * row so existing instrumentation that locates a root by tag still finds it.
+ */
+private fun LazyListScope.folderTreeRootItems(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
     onSessionClick: (folderPath: String, session: FolderSessionEntry, windowIndex: Int?) -> Unit,
@@ -1642,40 +1666,39 @@ private fun FolderTreeRootGroup(
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(folderTreeRootTestTag(root.path)),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        FolderTreeRootHeader(
-            root = root,
-            onCreateInRoot = { onCreateInRoot(root) },
-            onRootActions = { onRootActions(root) },
-        )
-        if (root.folders.isEmpty()) {
-            EmptyRootHint(
-                rootPath = root.path,
-                candidateCount = root.addSheetProjects.size,
-                onCreate = { onCreateInRoot(root) },
+    item(key = "tree-root-header:${root.path}") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(folderTreeRootTestTag(root.path))
+                .padding(bottom = 4.dp),
+        ) {
+            FolderTreeRootHeader(
+                root = root,
+                onCreateInRoot = { onCreateInRoot(root) },
+                onRootActions = { onRootActions(root) },
             )
-        } else {
-            Column(
-                modifier = Modifier.padding(start = treeProjectIndent),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                root.folders.forEach { folder ->
-                    FolderGroup(
-                        folder = folder,
-                        expanded = folder.path in expandedProjectPaths,
-                        onSessionClick = onSessionClick,
-                        onRenameSession = onRenameSession,
-                        onStopSession = onStopSession,
-                        onFolderActions = onFolderActions,
-                        onToggleExpanded = { onToggleProjectExpanded(folder) },
-                    )
-                }
+            if (root.folders.isEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                EmptyRootHint(
+                    rootPath = root.path,
+                    candidateCount = root.addSheetProjects.size,
+                    onCreate = { onCreateInRoot(root) },
+                )
             }
+        }
+    }
+    items(root.folders, key = { "tree-root-folder:${root.path}:${it.path}" }) { folder ->
+        Box(modifier = Modifier.padding(start = treeProjectIndent, top = 2.dp, bottom = 2.dp)) {
+            FolderGroup(
+                folder = folder,
+                expanded = folder.path in expandedProjectPaths,
+                onSessionClick = onSessionClick,
+                onRenameSession = onRenameSession,
+                onStopSession = onStopSession,
+                onFolderActions = onFolderActions,
+                onToggleExpanded = { onToggleProjectExpanded(folder) },
+            )
         }
     }
 }

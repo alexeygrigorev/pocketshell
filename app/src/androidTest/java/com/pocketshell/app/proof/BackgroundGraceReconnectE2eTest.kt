@@ -229,6 +229,142 @@ class BackgroundGraceReconnectE2eTest {
         writeTimings()
     }
 
+    /**
+     * Issue #959 — DURABLE END-TO-END REGRESSION for the beyond-grace
+     * background→foreground "TERMINAL frozen (no I/O) but app responsive" report.
+     *
+     * The post-grace `connect(LifecycleReattach)` reconnects against a FRESH SSH
+     * lease + a brand-new `-CC` client, but tmux preserves pane ids so the
+     * reconcile REUSES the pane. Before the fix, the reused pane's output producer
+     * (subscribed to the DEAD client's `outputFor`) and input drain were never
+     * re-bound to the new client: the stale buffer stayed painted, NEW output
+     * never reached the emulator, and typed input went nowhere — a Connected-
+     * looking, frozen terminal.
+     *
+     * The existing post-grace branch in
+     * [quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect] only
+     * asserts `waitForConnected` + `READY_MARKER` present — content that was
+     * already on screen BEFORE backgrounding, so a frozen terminal PASSES it (the
+     * wrong-cost gap, D32-G6). This test closes that gap: after the reattach it
+     * TYPES a unique token through the real input path and asserts the shell's
+     * FRESH ECHO of that token renders in the visible terminal — the live-terminal
+     * property. RED on a frozen reattach (no echo ever appears → times out);
+     * GREEN once the producer + input re-bind to the new client.
+     */
+    @Test
+    fun postGraceReattachLeavesTerminalLiveWithFreshInputEcho() = runBlocking<Unit> {
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForClientCountAtLeast(1, "initial attach")
+
+        // Prove the terminal is LIVE before backgrounding: type a pre-background
+        // token and confirm the shell echoes it. This anchors that the freeze the
+        // test detects later is introduced by the reattach, not pre-existing.
+        val preToken = "ISSUE959-PRE-${SystemClock.elapsedRealtime()}"
+        sendLineToActivePane("echo $preToken")
+        waitForVisibleTerminal("pre-background echo") { it.contains(preToken) }
+        captureViewport("issue959-01-pre-background-live")
+        diagnostics!!.clear()
+
+        // #780 synthetic-injection: force the on-device RACE the freeze needs — a
+        // pane that SURVIVES the background teardown's clear into the foreground
+        // reattach reconcile (cache/park/race). The clean teardown clears paneRows
+        // (so a plain background→foreground builds fresh panes and never freezes),
+        // so the only way to drive the reported frozen state deterministically is
+        // to inject the surviving-pane state. With it, the post-grace reattach
+        // takes the REUSE branch against a fresh client; without the fix the
+        // reused pane stays bound to the dead client -> frozen. HARD-fails if the
+        // state is not entered (no self-skip).
+        forcePreservePaneRuntimeOnBackgroundTeardown()
+
+        // Beyond-grace background -> teardown -> foreground -> reattach. Mirrors
+        // the post-grace branch of the within-grace test (same proven sequencing),
+        // using the short override so the teardown actually fires without a 30s+
+        // real-grace wait.
+        BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
+        val postStart = SystemClock.elapsedRealtime()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        waitForDiagnostic("background_grace_elapsed", "post-grace elapsed") {
+            it.fields["teardown"] == true
+        }
+        waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
+        waitForClientCountAtMost(0, "post-grace detached")
+        waitForPostGraceLocalDetachSettled("post-grace detached")
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        waitForDiagnostic("background_grace_foreground", "post-grace foreground") {
+            it.fields["withinGrace"] == false
+        }
+        // Confirm a REAL reconnect actually fired (rules out the secondary
+        // missing-arm race: if no reattach diagnostics appear, the bug is a
+        // different one and this test would fail here, not on the echo).
+        waitForDiagnostic("terminal_foreground_reattach", "post-grace lifecycle reattach")
+        waitForDiagnostic("foreground_reattach", "post-grace vm reattach")
+        waitForConnected("post-grace reattach")
+        // NOTE: we intentionally do NOT hard-assert the stale READY_MARKER buffer
+        // here — on a frozen reattach the reused pane may never even reveal its
+        // stale content, and asserting it would short-circuit the test before the
+        // LOAD-BEARING live-terminal check below. The single discriminator is the
+        // fresh-input echo: a frozen reattach never produces it. (#641-class
+        // wrong-cost avoidance: prove the user-visible LIVE property, not a
+        // weaker buffer-present proxy.)
+        recordTiming("post_grace_reattach_cycle_ms", SystemClock.elapsedRealtime() - postStart)
+        captureViewport("issue959-02-post-grace-reattached")
+
+        // LOAD-BEARING: type a NEW token AFTER the reattach and require the shell's
+        // FRESH echo to render. On a frozen reattach (producer/input still bound to
+        // the dead client) the keystrokes never reach the shell and/or the echo
+        // never reaches the emulator, so this token NEVER appears -> the wait
+        // HARD-fails. This is the user-visible "terminal usable again" property.
+        val postToken = "ISSUE959-POST-${SystemClock.elapsedRealtime()}"
+        sendLineToActivePane("echo $postToken")
+        waitForVisibleTerminal("post-grace fresh input echo") { it.contains(postToken) }
+        captureViewport("issue959-03-post-grace-fresh-echo")
+        writeTimings()
+    }
+
+    /**
+     * Issue #959: send a line of text + Enter to the active pane through the
+     * REAL on-device input path: bytes are written to the live Termux
+     * [TerminalView]'s session (`currentSession.write`) — EXACTLY what the Termux
+     * key handler does for a typed character. That session is the bridge's
+     * `TerminalSession`, whose output stream is the pane's `remoteStdin` (the tmux
+     * input sink -> queue -> drain coroutine). This is the path the freeze kills:
+     * after a beyond-grace reattach the reused pane's bridge/remoteStdin/drain are
+     * still wired to the DEAD client (its queue was closed at teardown), so the
+     * keystrokes never reach the shell and nothing echoes. Driving the VM's
+     * `writeInputToPane` (which sends straight to `clientRef`) would BYPASS that
+     * frozen queue and mask the bug — this MUST go through the terminal session.
+     */
+    /**
+     * Issue #959 (#780 model): arm the synthetic injection so the next background
+     * teardown PRESERVES the pane runtime (paneRows + producers + input + client
+     * bindings) across into the foreground reattach reconcile — the surviving-pane
+     * race the freeze requires. HARD-asserts the flag took (no silent skip).
+     */
+    private fun forcePreservePaneRuntimeOnBackgroundTeardown() {
+        var armed = false
+        compose.activityRule.scenario.onActivity { activity ->
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            vm.preservePaneRuntimeOnBackgroundTeardownForTest = true
+            armed = vm.preservePaneRuntimeOnBackgroundTeardownForTest
+        }
+        check(armed) { "failed to arm the #959 surviving-pane-runtime injection" }
+    }
+
+    private fun sendLineToActivePane(line: String) {
+        val bytes = (line + "\n").toByteArray(Charsets.UTF_8)
+        var wrote = false
+        compose.activityRule.scenario.onActivity { activity ->
+            val session = activity.window.decorView.findTerminalView()?.currentSession
+                ?: return@onActivity
+            session.write(bytes, 0, bytes.size)
+            wrote = true
+        }
+        check(wrote) { "no live terminal session to send input to" }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
     @Test
     fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
         attachSeededTmuxSession(hostRowTag)
@@ -762,9 +898,21 @@ class BackgroundGraceReconnectE2eTest {
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+            // Issue #959: the pane must run an INTERACTIVE shell (not `exec sleep`)
+            // so the post-grace reattach journey can type a command and assert the
+            // shell's FRESH output echoes back — the live-terminal property that a
+            // frozen (producer-still-bound-to-the-dead-client) reattach fails. A
+            // bare interactive shell stays alive in a detached tmux session, so the
+            // within-grace tests (which only check $READY_MARKER + connection) are
+            // unaffected. PS1 is pinned so the prompt is deterministic.
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " +
-                    shellQuote("printf '$READY_MARKER\\n'; exec sleep 600"),
+                    shellQuote("PS1='$ ' exec bash --noprofile --norc -i"),
+            )
+            appendLine("sleep 1")
+            appendLine(
+                "tmux send-keys -t ${shellQuote(SESSION_NAME)} " +
+                    shellQuote("printf '$READY_MARKER\\n'") + " Enter",
             )
             appendLine("sleep 1")
             appendLine("tmux list-sessions")

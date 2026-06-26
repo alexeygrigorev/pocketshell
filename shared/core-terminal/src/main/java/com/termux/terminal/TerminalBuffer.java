@@ -41,6 +41,30 @@ public final class TerminalBuffer {
         return getSelectedText(0, -getActiveTranscriptRows(), mColumns, mScreenRows).trim();
     }
 
+    /**
+     * Issue #966/#967: the text of ONLY the currently VISIBLE screen rows
+     * (0..mScreenRows), excluding scrollback. {@link #getTranscriptText()} folds
+     * in the whole scrollback (start row {@code -activeTranscriptRows}), so after
+     * a {@code CSI 2J} clear the visible viewport is blank but the transcript
+     * still carries the scrolled-off content — which would make a stale-render
+     * oracle read the pane as "painted" even though the user sees black. The
+     * mostly-black/stale heal compares what the user actually SEES, so it reads
+     * the visible screen here, not the scrollback.
+     */
+    public String getVisibleScreenText() {
+        return getSelectedText(0, 0, mColumns, mScreenRows).trim();
+    }
+
+    /**
+     * Issue #966/#967: the number of VISIBLE screen rows (the viewport height in
+     * cells), so the stale-render oracle can compare the rendered visible grid
+     * against the matching visible-tail of tmux's `capture-pane` text — an
+     * apples-to-apples diff that is robust to the capture carrying scrollback.
+     */
+    public int getVisibleScreenRows() {
+        return mScreenRows;
+    }
+
     public String getTranscriptTextWithoutJoinedLines() {
         return getSelectedText(0, -getActiveTranscriptRows(), mColumns, mScreenRows, false).trim();
     }

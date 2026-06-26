@@ -1340,8 +1340,13 @@ public final class TerminalView extends View {
                 scrollTo(0, 0);
                 scheduleRenderInvalidation();
             }
-        } catch (RuntimeException e) {
-            reportTerminalViewFailure("terminal resize failed", e);
+        } catch (Throwable t) {
+            // Issues #966/#967: widen from RuntimeException to Throwable so an
+            // Error during resize (e.g. OOM allocating a re-sized screen buffer)
+            // is surfaced to the host's recovery path instead of crashing, and a
+            // resize that fails leaves an OBSERVABLE failure event rather than a
+            // silently stale/garbled grid.
+            reportTerminalViewFailure("terminal resize failed", t);
         }
     }
 
@@ -1362,8 +1367,15 @@ public final class TerminalView extends View {
                 // render the text selection handles
                 renderTextSelection();
             }
-        } catch (RuntimeException e) {
-            reportTerminalViewFailure("terminal draw failed", e);
+        } catch (Throwable t) {
+            // Issues #966/#967: widen from RuntimeException to Throwable. An
+            // Error thrown mid-render (OutOfMemoryError on a pathologically large
+            // transcript/line, StackOverflowError) previously ESCAPED this catch
+            // and blanked/crashed the whole terminal composition — a silent black
+            // pane on a LIVE transport. Catching Throwable keeps the self-healing
+            // contract: paint ONE black frame, then force a full repaint next
+            // frame, and surface the failure so the host can recover the surface.
+            reportTerminalViewFailure("terminal draw failed", t);
             canvas.drawColor(mDefaultBackgroundColor);
             // The canvas was wiped to the background colour; the renderer's
             // dirty-region cache (#469) no longer reflects what is on screen, so
@@ -1372,9 +1384,16 @@ public final class TerminalView extends View {
         }
     }
 
-    private void reportTerminalViewFailure(String message, RuntimeException e) {
-        if (mClient != null) {
-            mClient.logStackTraceWithMessage(LOG_TAG, message, e);
+    private void reportTerminalViewFailure(String message, Throwable t) {
+        if (mClient == null) return;
+        // Issues #966/#967: route ALL render/resize failures (including Errors)
+        // through the dedicated render-failure hook so the host's surface-failure
+        // recovery path sees them. The Exception-only logStackTraceWithMessage
+        // path is preserved for an Exception so existing diagnostics/log capture
+        // keep working unchanged.
+        mClient.onTerminalRenderFailure(message, t);
+        if (t instanceof Exception) {
+            mClient.logStackTraceWithMessage(LOG_TAG, message, (Exception) t);
         }
     }
 

@@ -57,6 +57,20 @@ class ConnectivityObserver @Inject constructor(
      */
     val hasNetwork: StateFlow<Boolean> = _hasNetwork.asStateFlow()
 
+    /**
+     * The registered callback, retained so [close] can unregister it.
+     *
+     * Issue #956 (#935 S3-3): the callback registration used to have no
+     * matching unregister. As a process-singleton that was safe, but a
+     * latent leak / ghost-callback risk the moment the observer is scoped
+     * tighter or re-created. We now retain the reference and unregister it
+     * in [close] — hard-cut, no leftover unregistered path.
+     */
+    private var callback: ConnectivityManager.NetworkCallback? = null
+
+    @Volatile
+    private var closed: Boolean = false
+
     init {
         // Register a long-running callback. ConnectivityManager's API
         // surface here is not subject to background-execution limits the
@@ -68,33 +82,52 @@ class ConnectivityObserver @Inject constructor(
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
-        runCatching {
-            cm?.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    _hasNetwork.value = true
-                }
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                _hasNetwork.value = true
+            }
 
-                override fun onLost(network: Network) {
-                    // `onLost` fires per-network. Re-evaluate the global
-                    // signal so a VPN drop with cellular still active
-                    // does not flip the flag.
-                    _hasNetwork.value = currentNetwork()
-                }
+            override fun onLost(network: Network) {
+                // `onLost` fires per-network. Re-evaluate the global
+                // signal so a VPN drop with cellular still active
+                // does not flip the flag.
+                _hasNetwork.value = currentNetwork()
+            }
 
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    networkCapabilities: NetworkCapabilities,
-                ) {
-                    // Capability changes (e.g. losing INTERNET on a
-                    // captive portal) re-evaluate too.
-                    _hasNetwork.value = currentNetwork()
-                }
+            override fun onCapabilitiesChanged(
+                network: Network,
+                networkCapabilities: NetworkCapabilities,
+            ) {
+                // Capability changes (e.g. losing INTERNET on a
+                // captive portal) re-evaluate too.
+                _hasNetwork.value = currentNetwork()
+            }
 
-                override fun onUnavailable() {
-                    _hasNetwork.value = false
-                }
-            })
+            override fun onUnavailable() {
+                _hasNetwork.value = false
+            }
         }
+        runCatching {
+            cm?.registerNetworkCallback(request, cb)
+        }.onSuccess {
+            callback = cb
+        }
+    }
+
+    /**
+     * Unregisters the [ConnectivityManager.NetworkCallback]. Idempotent —
+     * a second call (or a call before registration ever succeeded) is a
+     * no-op. The `@Singleton` lives for the process lifetime in normal
+     * operation, but giving the registration a defined teardown means a
+     * scoped/re-created observer can no longer leak a ghost callback
+     * (#956, #935 S3-3).
+     */
+    fun close() {
+        if (closed) return
+        closed = true
+        val cb = callback ?: return
+        callback = null
+        runCatching { cm?.unregisterNetworkCallback(cb) }
     }
 
     /**

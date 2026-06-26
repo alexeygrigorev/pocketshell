@@ -26,17 +26,20 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #549 (slice a): the diagnostics flight recorder is opt-in (default OFF)
- * and the Diagnostics section shows a clear "REC" indicator while recording is
- * enabled so a short targeted capture session is visible to the user.
+ * Issue #969 (was #549): the diagnostics flight recorder now defaults ON so a
+ * FRESH install captures the FIRST reconnect (the one that matters, previously
+ * lost under #549's opt-in). The Diagnostics section shows a clear "REC"
+ * indicator while recording is enabled, and the Settings toggle still turns it
+ * OFF.
  *
  * This drives the real Settings screen end-to-end:
- *   1. On a fresh install (app_settings cleared) the recording switch is OFF
- *      and the REC indicator is absent.
- *   2. Tapping the switch turns recording ON and the REC indicator appears.
+ *   1. On a fresh install (app_settings cleared) the recording switch is ON and
+ *      the REC indicator is PRESENT (the #969 default-on behaviour).
+ *   2. Tapping the switch turns recording OFF and the REC indicator disappears
+ *      (the opt-out path still works).
  *
  * It captures full-device screenshots in both states for visual inspection of
- * the opt-in copy + indicator.
+ * the default-on copy + indicator.
  */
 @RunWith(AndroidJUnit4::class)
 class DiagnosticsRecordingIndicatorE2eTest {
@@ -52,7 +55,7 @@ class DiagnosticsRecordingIndicatorE2eTest {
     @Before
     fun freshInstall() {
         clearLastSessionPrefs()
-        // Issue #549: prove default-OFF from a genuinely fresh settings store.
+        // Issue #969: prove default-ON from a genuinely fresh settings store.
         InstrumentationRegistry.getInstrumentation().targetContext
             .getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -66,7 +69,7 @@ class DiagnosticsRecordingIndicatorE2eTest {
     }
 
     @Test
-    fun recordingIsOptInAndIndicatorAppearsWhenEnabled() {
+    fun recordingIsOnByDefaultAndIndicatorDisappearsWhenDisabled() {
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
         compose.waitUntil(timeoutMillis = 10_000) {
@@ -82,29 +85,43 @@ class DiagnosticsRecordingIndicatorE2eTest {
         compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
             .performScrollToNode(hasTestTag(DIAGNOSTICS_RECORDING_SWITCH_TAG))
 
-        // Default OFF: no REC indicator.
-        compose.onNodeWithTag(DIAGNOSTICS_RECORDING_INDICATOR_TAG, useUnmergedTree = true)
-            .assertDoesNotExist()
-        val dir = screenshotDir()
-        captureFullDevice(File(dir, "diagnostics-01-off-default.png"))
-
-        // Turn recording ON.
-        compose.onNodeWithTag(DIAGNOSTICS_RECORDING_SWITCH_TAG).performClick()
+        // Issue #969: default ON — the REC indicator is present on a fresh
+        // install, so the first reconnect is captured.
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(
                 DIAGNOSTICS_RECORDING_INDICATOR_TAG,
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-
-        // Recording ON: REC indicator is shown.
         compose.onNodeWithTag(DIAGNOSTICS_RECORDING_INDICATOR_TAG, useUnmergedTree = true)
             .assertExists()
-        captureFullDevice(File(dir, "diagnostics-02-on-recording.png"))
-
-        // Persisted in settings, proving the opt-in toggle path.
+        // The default-on value is persisted on a genuinely fresh settings store.
         assertEquals(
             true,
+            SettingsRepository(
+                InstrumentationRegistry.getInstrumentation().targetContext,
+            ).settings.value.diagnosticsRecordingEnabled,
+        )
+        val dir = screenshotDir()
+        captureFullDevice(File(dir, "diagnostics-01-on-default.png"))
+
+        // Turn recording OFF (the opt-out path still works).
+        compose.onNodeWithTag(DIAGNOSTICS_RECORDING_SWITCH_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(
+                DIAGNOSTICS_RECORDING_INDICATOR_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty()
+        }
+
+        // Recording OFF: REC indicator is gone.
+        compose.onNodeWithTag(DIAGNOSTICS_RECORDING_INDICATOR_TAG, useUnmergedTree = true)
+            .assertDoesNotExist()
+        captureFullDevice(File(dir, "diagnostics-02-off-disabled.png"))
+
+        // Persisted OFF in settings, proving the opt-out toggle path.
+        assertEquals(
+            false,
             SettingsRepository(
                 InstrumentationRegistry.getInstrumentation().targetContext,
             ).settings.value.diagnosticsRecordingEnabled,

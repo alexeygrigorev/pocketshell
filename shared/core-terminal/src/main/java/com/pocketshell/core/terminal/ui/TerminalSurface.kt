@@ -32,6 +32,7 @@ import com.pocketshell.core.terminal.selection.FilePathOverlay
 import com.pocketshell.core.terminal.selection.FilePathRegion
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.SmartSelectionAffordanceOverlay
+import com.pocketshell.core.terminal.selection.safeLayoutDimension
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
@@ -686,8 +687,14 @@ fun TerminalSurface(
         // children (the overlay, if present) are placed on top in source
         // order, exactly as `Box` would do for centred / aligned children.
         val placeables = measurables.map { it.measure(constraints) }
-        val width = placeables.maxOfOrNull { it.width } ?: constraints.minWidth
-        val height = placeables.maxOfOrNull { it.height } ?: constraints.minHeight
+        // Issue #966/#967: under the pager's intermittent UNBOUNDED-dimension
+        // lookahead pass a child can report a huge measured size; forwarding it
+        // straight into `layout(...)` would throw the `Size(W x Int.MAX_VALUE)`
+        // crash (#958 class). Clamp each axis to Compose's layout ceiling so the
+        // outer stack is robust to that transient pass — the real bounded pass is
+        // unchanged.
+        val width = safeLayoutDimension(placeables.maxOfOrNull { it.width } ?: constraints.minWidth)
+        val height = safeLayoutDimension(placeables.maxOfOrNull { it.height } ?: constraints.minHeight)
         layout(width, height) {
             placeables.forEach { it.place(0, 0) }
         }
@@ -883,5 +890,13 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     }
     override fun logStackTrace(tag: String?, e: Exception?) {
         e?.let { onTerminalSurfaceError?.invoke(it) }
+    }
+
+    // Issues #966/#967: a render/resize failure — including an Error (OOM /
+    // StackOverflow) the onDraw catch now swallows instead of crashing — is
+    // surfaced to the host's terminal-surface recovery path. A silent render
+    // death on a LIVE transport becomes an observable, recoverable event.
+    override fun onTerminalRenderFailure(message: String?, t: Throwable?) {
+        t?.let { onTerminalSurfaceError?.invoke(it) }
     }
 }

@@ -98,4 +98,22 @@ public interface TerminalViewClient {
 
     void logStackTrace(String tag, Exception e);
 
+    /**
+     * Issues #966/#967: surface a terminal render/resize failure to the host so a
+     * SILENT render death on a LIVE transport becomes an observable, recoverable
+     * event instead of a black/stale pane the user is stranded on.
+     *
+     * <p>Unlike {@link #logStackTraceWithMessage(String, String, Exception)} (which
+     * only accepts an {@link Exception}), this accepts a {@link Throwable} so an
+     * {@link Error} thrown while rendering (e.g. {@link OutOfMemoryError} on a
+     * pathologically large transcript/line, or a {@link StackOverflowError}) is
+     * surfaced to the same recovery path rather than escaping the {@code onDraw}
+     * catch and crashing the composition. Also fired for a resize/{@code updateSize}
+     * failure so a mis-sized emulator that would otherwise leave a stale grid with
+     * no exception is reported.
+     *
+     * <p>Default no-op keeps existing clients source-compatible.
+     */
+    default void onTerminalRenderFailure(String message, Throwable t) {}
+
 }

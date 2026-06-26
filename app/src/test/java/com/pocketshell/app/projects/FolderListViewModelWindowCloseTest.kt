@@ -501,6 +501,7 @@ class FolderListViewModelWindowCloseTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setProcessStartedForTest(true)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }
@@ -572,6 +573,7 @@ class FolderListViewModelWindowCloseTest {
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
             it.setProcessStartedForTest(processStarted)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }

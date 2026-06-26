@@ -1033,10 +1033,20 @@ public class PromptComposerViewModel @Inject constructor(
             paneId = sendTarget.paneId,
             route = sendTarget.route,
             agentKind = sendTarget.agentKind,
+            // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
+            // existing un-delivered row instead of minting a duplicate.
+            sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
         )
-        outboundQueueStore.enqueueExisting(item)
+        val queuedItem = outboundQueueStore.enqueueExisting(item)
+        // Issue #961: if this coalesced onto an existing un-delivered row, the
+        // freshly-staged sidecars under our throwaway `itemId` are orphaned —
+        // the existing row keeps its own staged bytes. Drop them and dispatch
+        // the row the queue actually kept, not our discarded id.
+        if (queuedItem.id != itemId) {
+            outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
+        }
         refreshOutboundQueueItemsFor(sessionKey)
-        dispatchPreparedOutboundItem(itemId)
+        dispatchPreparedOutboundItem(queuedItem.id)
     }
 
     private fun enqueueOutboundSend(
@@ -1055,6 +1065,9 @@ public class PromptComposerViewModel @Inject constructor(
             paneId = sendTarget.paneId,
             route = sendTarget.route,
             agentKind = sendTarget.agentKind,
+            // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
+            // existing un-delivered row instead of minting a duplicate.
+            sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
         )
         val activeItem = outboundQueueStore.markInFlight(item.id) ?: item
         refreshOutboundQueueItemsFor(sessionKey)
@@ -3216,6 +3229,46 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private fun List<StagedAttachment>.toDurableRefs(): List<DurableAttachmentRef> =
         map { DurableAttachmentRef(it.remotePath, it.displayName, it.mimeType) }
+
+    /**
+     * Issue #961: the logical-send identity for the outbound queue's
+     * coalesce-on-enqueue. It identifies the SAME logical prompt — the clean
+     * draft text, the target pane/route/agent, the Enter intent, and the
+     * attachment set — so that a post-failure re-Send of the restored draft
+     * (after a drop left a `Failed` row + reset `sendInFlight`) coalesces onto
+     * the existing un-delivered row instead of minting a second deliverable row
+     * that the reconnect auto-flush would deliver a SECOND time.
+     *
+     * It deliberately keys on the attachment **displayName/mimeType** (the
+     * stable user-facing identity), NOT the provisional `remotePath` — the
+     * sidecar/upload path re-mints a timestamped remote path on every send, so
+     * keying on it would never coalesce. A genuinely-different prompt (different
+     * text, target, or attachment set) yields a different key and still makes a
+     * second row; an identical send AFTER delivery makes a fresh row because the
+     * delivered row was pruned (no un-delivered match to coalesce into).
+     */
+    private fun computeSendKey(
+        cleanDraft: String,
+        attachments: List<StagedAttachment>,
+        withEnter: Boolean,
+        sendTarget: SendTargetSnapshot,
+    ): String {
+        val attachmentSignature = attachments.joinToString(separator = " ") { attachment ->
+            "${attachment.displayName}${attachment.mimeType.orEmpty()}"
+        }
+        val material = listOf(
+            sendTarget.sessionKey,
+            sendTarget.paneId,
+            sendTarget.route.name,
+            sendTarget.agentKind.orEmpty(),
+            if (withEnter) "1" else "0",
+            cleanDraft,
+            attachmentSignature,
+        ).joinToString(separator = "")
+        return material.toByteArray(Charsets.UTF_8)
+            .let { java.security.MessageDigest.getInstance("SHA-256").digest(it) }
+            .joinToString(separator = "") { byte -> "%02x".format(byte) }
+    }
 
     /**
      * Issue #900: sidecar-backed sends must be able to replace the provisional

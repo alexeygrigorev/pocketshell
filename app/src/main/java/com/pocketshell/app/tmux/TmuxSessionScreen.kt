@@ -3277,6 +3277,16 @@ internal fun tmuxSessionPresumedAgent(
     // slow-detection window. (Slice C, issue #894, supplies the real verdict
     // from the durable recorded `@ps_agent_kind=shell` record; Slice A passed a
     // hard-wired `false`.)
+    //
+    // Issue #962: a recorded `@ps_agent_kind=shell` session with a live agent
+    // started INSIDE it is re-classified OUT of confirmed-shell by the VM the
+    // instant live detection binds the pane's agent
+    // (`TmuxSessionViewModel.markAgentTailLive` → `applyRecordedShellVerdict(
+    // isShell = false)`), so `confirmedShell` here is already false for such a
+    // pane and the Conversation toggle shows. (Driving the override off the
+    // AUTHORITATIVE detection event — not the pane's `#{pane_current_command}`,
+    // which is the wrapper shell `comm` for a node-wrapped agent — is what makes
+    // it fire for a real node-wrapped claude.)
     if (confirmedShell) return false
     return true
 }

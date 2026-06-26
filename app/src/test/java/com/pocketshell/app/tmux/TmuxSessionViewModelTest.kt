@@ -1041,6 +1041,148 @@ class TmuxSessionViewModelTest {
         assertEquals("after", secondRow.title)
     }
 
+    /**
+     * Issue #959 — DURABLE JVM GUARD for the beyond-grace
+     * background→foreground "terminal frozen (no I/O) but app responsive"
+     * symptom, at the precise re-bind site ([applyParsedPanes]'s reuse branch).
+     *
+     * A ~2-minute background fires the grace-elapsed teardown; the foreground
+     * `connect(TmuxConnectTrigger.LifecycleReattach)` forces a FRESH SSH lease +
+     * a brand-new [TmuxClient]. tmux preserves pane ids across detach/reattach,
+     * so the reconcile takes the REUSE branch: it keeps the existing
+     * [TerminalSurfaceState] (scrollback survives) and — before this fix —
+     * copied metadata ONLY, leaving the pane's output producer (subscribed to
+     * the DEAD client's `outputFor(paneId)`) and its input drain still wired to
+     * the dead client. Result: the stale buffer stays painted, NEW `%output`
+     * never reaches the emulator, and key bar / IME bytes route nowhere — the
+     * exact "content visible but frozen" report. The post-grace `connect`
+     * reattach had no `rebindVisiblePaneProducersToClient` call (only the silent
+     * passive-reattach paths did).
+     *
+     * This guard reproduces the client swap directly: connect client A, seed +
+     * prove I/O is live on A, swap [clientRef] to a fresh client B, then run the
+     * reconcile that REUSES pane `%0`. The load-bearing assertions are
+     * BEHAVIORAL, on BOTH directions:
+     *  - OUTPUT: a `%output` emitted on client B reaches the pane's emulator
+     *    (proves the producer re-subscribed to B's `outputFor`).
+     *  - INPUT: a key written to the pane's input sink lands as a `send-keys` on
+     *    client B (proves the input drain re-bound to B).
+     *
+     * RED on base: output emitted on B never renders (producer still on A) and
+     * the test fails on the OUTPUT assertion. GREEN with the reuse-branch
+     * re-bind. Covers the class — output AND input — for the reused-pane swap.
+     */
+    @Test
+    fun reusedPaneRebindsProducerAndInputToNewClientAfterClientSwap() = runTest(scheduler) {
+        val vm = newVm()
+        // Pin the producer's collect dispatcher to the shared virtual clock so the
+        // %output -> emulator feed drains deterministically under advanceUntilIdle
+        // (production default is a real Dispatchers.IO thread). Same harness the
+        // #576 overflow regression uses.
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(scheduler))
+        }
+        // decoupleOutputForFromEvents: outputFor() reads emittedPaneOutputs, so a
+        // test can emit pane %output directly and watch its producer subscription.
+        val clientA = FakeTmuxClient().apply { decoupleOutputForFromEvents = true }
+        vm.attachClientForTest(clientA)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        runCurrent()
+        // Wait until client A's pane-output collectors (producer + activity +
+        // port detector) are all subscribed before emitting.
+        assertTrue(
+            "client A pane-output collectors must subscribe",
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 3 }
+                true
+            } ?: false,
+        )
+
+        // Open the seed gate so live %output flushes to the emulator, then prove
+        // I/O is wired to client A: an %output emitted on A renders.
+        val state = vm.panes.value.single().terminalState
+        state.appendRemoteOutput("SEED-A\r\n".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        clientA.emittedPaneOutputs.emit(
+            ControlEvent.Output("%0", "OUTPUT-ON-A\r\n".toByteArray(Charsets.US_ASCII)),
+        )
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "precondition: A's %output reaches the emulator transcript",
+            renderedTranscriptFrom(state).contains("OUTPUT-ON-A"),
+        )
+
+        // The beyond-grace reattach: a fresh client B becomes the live control
+        // client (mirrors `connect(LifecycleReattach)` swapping clientRef to the
+        // fresh-lease client), then tmux re-lists the SAME pane id %0.
+        val clientB = FakeTmuxClient().apply { decoupleOutputForFromEvents = true }
+        vm.attachClientForTest(clientB)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        runCurrent()
+        // After the fix, the reused pane's producer + activity + port detector
+        // re-subscribe to client B. On base they stay on the dead client A, so
+        // this wait TIMES OUT — making the bug observable as a re-bind failure.
+        val reboundToB = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+            clientB.emittedPaneOutputs.subscriptionCount.first { it >= 1 }
+            true
+        } ?: false
+        assertTrue(
+            "REGRESSION (#959): after a beyond-grace reattach the reused pane's " +
+                "output producer must re-subscribe to the NEW client. On base it " +
+                "stayed bound to the dead client -> no collector on B.",
+            reboundToB,
+        )
+
+        // The reused pane must keep its TerminalSurfaceState (scrollback survives)
+        // — the whole reason the reuse branch exists.
+        assertSame(
+            "reused pane must keep its emulator/scrollback across the reattach",
+            state,
+            vm.panes.value.single().terminalState,
+        )
+
+        // The rebind re-arms the producer's seed gate (awaitSeed=true closes it
+        // until the reattach re-seed lands — in production that is
+        // reseedActivePaneForReattach). Open it so live %output from B flushes,
+        // exactly as the production reattach re-seed does.
+        state.appendRemoteOutput("SEED-B\r\n".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // LOAD-BEARING (output): a %output emitted on the NEW client B must now
+        // reach the emulator. RED on base — the producer was still subscribed to
+        // the dead client A, so B's output was dropped (the frozen terminal).
+        clientB.emittedPaneOutputs.emit(
+            ControlEvent.Output("%0", "OUTPUT-ON-B\r\n".toByteArray(Charsets.US_ASCII)),
+        )
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "REGRESSION (#959): fresh %output on the NEW client must render after " +
+                "the reattach. On base it stayed bound to the dead client -> frozen.",
+            renderedTranscriptFrom(state).contains("OUTPUT-ON-B"),
+        )
+
+        // LOAD-BEARING (input): a key written to the pane's input sink must drain
+        // to the NEW client B (a send-keys on B), NOT the dead client A.
+        val keysOnBBefore = clientB.sentCommands.count { it.startsWith("send-keys") }
+        vm.tmuxInputSinkForTest("%0").write("x".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        assertTrue(
+            "REGRESSION (#959): input after a reattach must reach the NEW client " +
+                "(a send-keys on B), not the dead client.",
+            clientB.sentCommands.count { it.startsWith("send-keys") } > keysOnBBefore,
+        )
+        assertTrue(
+            "the input key must carry the typed byte to client B",
+            clientB.sentCommands.any { it.startsWith("send-keys") && it.contains("'x'") },
+        )
+    }
+
     @Test
     fun newPaneInReconcileGetsDistinctTerminalState() = runTest(scheduler) {
         val vm = newVm()
@@ -2517,6 +2659,69 @@ class TmuxSessionViewModelTest {
             "clearing the seam restores the live ping",
             vm.runLivenessProbePingForTest(),
         )
+    }
+
+    @Test
+    fun issue964KeepAliveCoordinationGuardReflectsTheLiveSessionKeepalive() = runTest(scheduler) {
+        // Issue #964 — the VM wiring of the keepalive-coordination guard the
+        // LivenessProbe defers to. The probe's ProbeIo.transportProvenAliveRecently
+        // is wired to the live SshSession's keepalive-liveness signal, so on a
+        // slow-but-live link (control probe failing, keepalive still proving the
+        // transport alive) the probe DEFERS and does NOT force a redial.
+        val vm = newVm()
+
+        // No live session yet → no keepalive signal → the probe keeps its own
+        // authority (guard reports NOT-alive), exactly as before.
+        assertFalse(
+            "with no live session there is no keepalive signal to defer to",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // Attach a live session whose transport keepalive is still riding through
+        // (a slow-but-live link): the guard must report ALIVE so the probe defers.
+        val session = FakeSshSession().apply { transportProvenAlive = true }
+        val liveClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = liveClient,
+            session = session,
+        )
+        runCurrent()
+        assertTrue(
+            "while the transport keepalive proves the link alive the guard must report " +
+                "ALIVE so the probe defers (no spurious redial on a slow-but-live link)",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // The transport genuinely dies — the keepalive stops proving liveness, so
+        // the guard reports NOT-alive and the probe regains authority (no infinite
+        // deferral / hang on a real death).
+        session.transportProvenAlive = false
+        assertFalse(
+            "once the keepalive stops proving liveness the guard must report NOT-alive " +
+                "so the probe can declare the real drop (#964 — deferral is not a hang)",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // The explicit test seam pins the verdict independently of the session.
+        vm.forceTransportProvenAliveForTest = true
+        assertTrue(
+            "the #964 test seam pins the keepalive-alive verdict",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+        vm.forceTransportProvenAliveForTest = null
+        assertFalse(
+            "clearing the seam falls back to the (now dead) session signal",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        vm.clearForTest()
     }
 
     @Test
@@ -7860,6 +8065,103 @@ class TmuxSessionViewModelTest {
         runCurrent()
         assertFalse(
             "#894: a non-shell (agent) verdict un-publishes the pane — not sticky",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+    }
+
+    // Issue #962 — a live agent started INSIDE a session recorded
+    // `@ps_agent_kind=shell` must regain its agent surface (and the Conversation
+    // toggle). The recorded-shell verdict (#894) publishes the pane as
+    // confirmed-shell, which collapses `presumedAgent` and hides the toggle for
+    // the life of the session — the maintainer's exact dogfood report. The fix:
+    // the AUTHORITATIVE live-detection event re-classifies the session OUT of
+    // confirmed-shell. This deterministic reproduction injects the exact state
+    // machine the on-device journey exercises (the Docker fixture cannot make the
+    // host daemon classify a non-cgroup-scoped process, so per D33 the failing
+    // state is injected synthetically and hard-asserted, never self-skipped).
+    //
+    // RED on base: confirmedShell stays set after the live detection binds (the
+    // override absent). GREEN: confirmedShell is cleared, so the toggle returns.
+    // Class coverage (G2): claude / codex / opencode + the no-flap control.
+
+    @Test
+    fun liveAgentDetectionClearsConfirmedShellSoConversationToggleReturns() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newClaudeDetection)
+    }
+
+    @Test
+    fun liveCodexDetectionClearsConfirmedShellInRecordedShellSession() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newCodexDetection)
+    }
+
+    @Test
+    fun liveOpenCodeDetectionClearsConfirmedShellInRecordedShellSession() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newOpenCodeDetection)
+    }
+
+    private fun TestScope.assertConfirmedShellClearedByLiveAgent(
+        detectionFactory: () -> AgentDetection,
+    ) {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        // The session is recorded `@ps_agent_kind=shell` (a plain shell the
+        // user/kind-picker classified as shell). The pane is published
+        // confirmed-shell → the Conversation toggle is hidden (presumedAgent
+        // collapses). This is the durable state the maintainer hit.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "#962 precondition: a recorded-shell pane is published confirmed-shell " +
+                "(the state that hides the Conversation toggle)",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        // A live agent runtime is detected INSIDE the shell-recorded pane (the
+        // user started claude/codex/opencode). On base (no fix) confirmedShell
+        // stays set and the toggle stays hidden; the fix re-classifies the
+        // session out of confirmed-shell on this authoritative detection event.
+        vm.markAgentTailLiveForTest("%0", detectionFactory())
+        runCurrent()
+
+        assertFalse(
+            "#962: a live agent detection in a recorded-shell session must clear the " +
+                "confirmed-shell verdict so presumedAgent returns and the Conversation " +
+                "toggle reappears (RED on base — confirmedShell stays set)",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        // The pane now carries the live agent detection (the parsed conversation
+        // surface), proving the toggle reaches a real source, not an empty tab.
+        assertEquals(
+            "#962: the live agent detection is bound to the pane",
+            detectionFactory().agent,
+            vm.agentConversations.value["%0"]?.detection?.agent,
+        )
+    }
+
+    @Test
+    fun genuineRecordedShellWithNoAgentKeepsConfirmedShellNoFlap() = runTest(scheduler) {
+        // Issue #962 adjacency / #894 no-flap invariant: a GENUINE recorded shell
+        // (no live agent detection ever binds) must STAY confirmed-shell — the
+        // #962 override must not resurrect the "fresh shell flashes Conversation"
+        // regression. No markAgentTailLive is ever called here (no agent), so the
+        // confirmed-shell verdict is never cleared.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "#894: a genuine recorded shell is published confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        // A reconcile / re-seed must NOT clear it (no agent detection event).
+        vm.seedPresumedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertTrue(
+            "#962/#894 no-flap: a genuine recorded shell with NO agent STAYS " +
+                "confirmed-shell (the toggle correctly stays hidden)",
             "%0" in vm.confirmedShellPaneIds.value,
         )
     }
@@ -14913,6 +15215,15 @@ class TmuxSessionViewModelTest {
 
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
+
+        // Issue #964: lets a test report the transport keepalive as still proving
+        // the link alive (a slow-but-live link). Default mirrors the production
+        // SshSession default (false) so unrelated tests are unaffected.
+        @Volatile
+        var transportProvenAlive: Boolean = false
+
+        override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean =
+            transportProvenAlive && isConnected
 
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
             execCommands += command

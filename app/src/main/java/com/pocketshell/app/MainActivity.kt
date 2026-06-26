@@ -84,9 +84,12 @@ import com.pocketshell.app.usage.UsageScreen
 import com.pocketshell.app.usage.UsageViewModel
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -295,6 +298,14 @@ class MainActivity : FragmentActivity() {
         val intentDestination = initialDestinationFromIntent(intent)
         val resumingFromProcessDeath = savedInstanceState != null
         val importPayload = importPayloadFromIntent(intent)
+        // Issue #859 (Slice D): an agent-card push deep-links to the card's
+        // session feed. We capture the request synchronously here, but resolve
+        // the right host + route to it OFF the Main thread (see
+        // [resolveAgentCardFeedLaunchAsync]) — the resolution does Room reads +
+        // a key-file stat that must never block launch (the #951 off-Main
+        // mandate). A no/ambiguous host match leaves the user on the host list,
+        // never the wrong host.
+        val agentCardFeedRequest = agentCardFeedRequestFromIntent(intent)
         // Issue #560: a share-into-session launch carries the staged remote
         // attachment path(s); seed them into the session composer as #544
         // chips once the navigator reaches the tmux destination.
@@ -314,34 +325,39 @@ class MainActivity : FragmentActivity() {
             } else {
                 null
             }
-        val defaultHostDestination =
-            if (
-                intentDestination == AppDestination.HostList &&
+        // Issue #951 (#928 D2): the default-host resolution does two Room reads
+        // + a key-file stat. Doing it here via `runBlocking { … }` on the Main
+        // thread blocked the UI thread on every cold launch (ANR / cold-start
+        // jank) and turned any DB read failure into a launch crash-loop, since
+        // the throw escaped onCreate. Hard-cut (D22) that blocking read: the
+        // activity now opens synchronously on the host list and the default
+        // host is resolved OFF the Main thread (see
+        // [resolveDefaultHostLaunchAsync] below). When it returns a
+        // destination, we route to it via [requestedDestination] — a brief
+        // host-list flash is acceptable, and a DB failure simply leaves the
+        // user on the host list instead of crashing.
+        // Issue #859: a feed deep-link also presents as `intentDestination ==
+        // HostList` (the feed extras are not read by initialDestinationFromIntent),
+        // so suppress the default-host auto-open when one is present — the feed
+        // resolve owns the route in that case and the two off-Main resolves must
+        // not race for the cold-launch host list.
+        val resolveDefaultHostOnLaunch =
+            intentDestination == AppDestination.HostList &&
                 !resumingFromProcessDeath &&
-                importPayload == null
-            ) {
-                runBlocking {
-                    resolveDefaultHostLaunchDestination(
-                        defaultHostId = settingsRepository.settings.value.defaultHostId,
-                        hostDao = hostDao,
-                        sshKeyDao = sshKeyDao,
-                    )
-                }
-            } else {
-                null
-            }
+                importPayload == null &&
+                agentCardFeedRequest == null
         requestedDestination = resolveInitialDestination(
             intentDestination = intentDestination,
             resumingFromProcessDeath = resumingFromProcessDeath,
             restoredDestination = restored?.let { with(lastSessionStore) { it.toDestination() } },
-            defaultHostDestination = defaultHostDestination,
+            defaultHostDestination = null,
         )
         StartupTiming.mark(
             "main-requested-destination",
             "destination" to requestedDestination.timingName(),
             "restoredSnapshot" to (restored != null),
             "processDeathResume" to resumingFromProcessDeath,
-            "defaultHostLaunch" to (defaultHostDestination != null),
+            "defaultHostLaunchPending" to resolveDefaultHostOnLaunch,
         )
         restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
         restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
@@ -480,7 +496,103 @@ class MainActivity : FragmentActivity() {
         maybeRequestNotificationPermission()
         observeForwardingForNotificationPermission()
         observeKilledSessionsForLastSession()
+        if (resolveDefaultHostOnLaunch) {
+            resolveDefaultHostLaunchAsync()
+        }
+        if (agentCardFeedRequest != null) {
+            resolveAgentCardFeedLaunchAsync(agentCardFeedRequest)
+        }
         StartupTiming.mark("main-on-create-end")
+    }
+
+    /**
+     * Issue #859 (Slice D): resolve an agent-card-push session-feed deep-link OFF
+     * the Main thread, then route to it. Mirrors [resolveDefaultHostLaunchAsync]
+     * — the host resolution does Room reads + a key-file stat that must not block
+     * launch (#951). On success we publish the resolved
+     * [AppDestination.TmuxSession] into [requestedDestination] on the Main thread;
+     * the navigator picks it up via its `requestedDestination` effect and routes
+     * to the right host's session (where the card-feed chip lives) — but ONLY if
+     * the user has not already navigated away. A null result (no/ambiguous host
+     * match, passphrase-protected or missing key) leaves the user on the host
+     * list — never the wrong host.
+     *
+     * Any throw from the DB read is swallowed (worst case: stay on the host
+     * list), the same crash-loop containment [resolveDefaultHostLaunchAsync]
+     * applies to the default-host resolve.
+     */
+    private fun resolveAgentCardFeedLaunchAsync(request: AgentCardFeedRequest) {
+        lifecycleScope.launch {
+            val destination = withContext(Dispatchers.IO) {
+                runCatching {
+                    resolveAgentCardFeedDestination(
+                        request = request,
+                        hostDao = hostDao,
+                        sshKeyDao = sshKeyDao,
+                    )
+                }.getOrNull()
+            } ?: run {
+                StartupTiming.mark(
+                    "main-agent-card-feed-deeplink",
+                    "session" to request.session,
+                    "resolvedHost" to false,
+                )
+                return@launch
+            }
+            StartupTiming.mark(
+                "main-agent-card-feed-deeplink",
+                "session" to request.session,
+                "resolvedHost" to true,
+            )
+            // Publish the resolved destination so the navigator can route to it.
+            // It only honors a late route while the user is still on the
+            // cold-launch host list (it never overrides an in-progress
+            // navigation), so a late resolve cannot yank the user off a screen
+            // they opened in the meantime.
+            requestedDestination = destination
+        }
+    }
+
+    /**
+     * Issue #951 (#928 D2): resolve the default-host launch destination OFF the
+     * Main thread, then route to it. This replaces the old
+     * `runBlocking { resolveDefaultHostLaunchDestination(...) }` in [onCreate]
+     * (deleted, D22) that blocked the UI thread on two Room reads during cold
+     * start.
+     *
+     * The Room reads + key-file stat run on [Dispatchers.IO]. On success we
+     * publish the resolved [AppDestination.FolderList] into
+     * [requestedDestination] on the Main thread; the navigator picks it up via
+     * its `requestedDestination` effect and routes to it — but ONLY if the user
+     * has not already navigated away (see [AppNavigator]). A null result (no
+     * default host, passphrase key, missing key file) leaves the user on the
+     * host list.
+     *
+     * Failure containment is the crash-loop fix: any throw from the DB read is
+     * swallowed here (the worst case is "no auto-open", the host list), so a
+     * corrupt/locked DB can never propagate out of launch and crash-loop the
+     * app the way the in-`onCreate` `runBlocking` did.
+     */
+    private fun resolveDefaultHostLaunchAsync() {
+        lifecycleScope.launch {
+            val destination = withContext(Dispatchers.IO) {
+                resolveDefaultHostLaunchDestinationSafely(
+                    defaultHostId = settingsRepository.settings.value.defaultHostId,
+                    hostDao = hostDao,
+                    sshKeyDao = sshKeyDao,
+                )
+            } ?: return@launch
+            StartupTiming.mark(
+                "main-default-host-resolved",
+                "destination" to destination.timingName(),
+            )
+            // Publish the resolved destination so the navigator can route to it.
+            // The navigator only honors it while the user is still on the
+            // cold-launch host list (it never overrides an in-progress
+            // navigation), so a late resolve cannot yank the user off a screen
+            // they opened in the meantime.
+            requestedDestination = destination
+        }
     }
 
     /**
@@ -615,7 +727,46 @@ class MainActivity : FragmentActivity() {
         const val EXTRA_OPEN_SESSION_ATTACHMENTS: String =
             "pocketshell.extra.OPEN_SESSION_ATTACHMENTS"
         const val EXTRA_OPEN_USAGE: String = "pocketshell.extra.OPEN_USAGE"
+
+        // Issue #859 (Slice D): an agent-card push deep-links to the card's
+        // session feed. The host CLI knows only the tmux session name + a
+        // best-effort host hostname (it does NOT know the app's host alias), so
+        // the activity resolves the host from its own store by hostname/name and
+        // routes to that session screen (where the feed chip lives). On no /
+        // ambiguous host match it falls back to the home screen — never the
+        // wrong host.
+        const val EXTRA_OPEN_SESSION_FEED: String = "pocketshell.extra.OPEN_SESSION_FEED"
+        const val EXTRA_OPEN_SESSION_FEED_SESSION: String =
+            "pocketshell.extra.OPEN_SESSION_FEED_SESSION"
+        const val EXTRA_OPEN_SESSION_FEED_HOST: String =
+            "pocketshell.extra.OPEN_SESSION_FEED_HOST"
     }
+}
+
+/**
+ * Issue #859 (Slice D): the parsed request carried by an agent-card push
+ * notification tap — the tmux session to open and the best-effort host hostname
+ * to resolve it against.
+ */
+internal data class AgentCardFeedRequest(
+    val session: String,
+    val host: String,
+)
+
+/**
+ * Pull an [AgentCardFeedRequest] out of an agent-card push deep-link intent, or
+ * null when the intent is not one (the `EXTRA_OPEN_SESSION_FEED` flag + a
+ * non-blank session are required). Pure + unit-testable without an Activity.
+ */
+internal fun agentCardFeedRequestFromIntent(intent: Intent?): AgentCardFeedRequest? {
+    if (intent == null) return null
+    if (!intent.getBooleanExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, false)) return null
+    val session = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: return null
+    val host = intent.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_HOST).orEmpty().trim()
+    return AgentCardFeedRequest(session = session, host = host)
 }
 
 private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
@@ -731,6 +882,36 @@ private fun AppNavigator(
         )
         if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
             backStack += current
+            setCurrentDestination(requestedDestination)
+        }
+        // Issue #951 (#928 D2): the default-host launch destination is now
+        // resolved OFF the Main thread (MainActivity.resolveDefaultHostLaunchAsync)
+        // instead of via a blocking Room read in onCreate. It arrives here as a
+        // late `requestedDestination` update. Route to it ONLY while the user is
+        // still sitting on the cold-launch host list with an empty back stack —
+        // a resolve that lands after the user already tapped into a host/screen
+        // must never yank them away. This is the async equivalent of seeding
+        // `requestedDestination = FolderList` synchronously before the first
+        // composition, minus the Main-thread DB read.
+        if (
+            requestedDestination is AppDestination.FolderList &&
+            current == AppDestination.HostList &&
+            backStack.isEmpty()
+        ) {
+            setCurrentDestination(requestedDestination)
+        }
+        // Issue #859 (Slice D): the agent-card-push session-feed deep-link is also
+        // resolved OFF the Main thread (MainActivity.resolveAgentCardFeedLaunchAsync)
+        // and arrives here as a late `requestedDestination` TmuxSession update.
+        // Route to it under the same guard as the default-host resolve above —
+        // only while the user is still on the cold-launch host list with an empty
+        // back stack, so a late resolve never yanks them off a screen they opened
+        // in the meantime.
+        if (
+            requestedDestination is AppDestination.TmuxSession &&
+            current == AppDestination.HostList &&
+            backStack.isEmpty()
+        ) {
             setCurrentDestination(requestedDestination)
         }
     }
@@ -1659,6 +1840,36 @@ internal fun resolveInitialDestination(
     return restoredDestination ?: AppDestination.HostList
 }
 
+/**
+ * Issue #951 (#928 D2): the failure-contained wrapper over
+ * [resolveDefaultHostLaunchDestination] used by the off-Main launch resolve in
+ * [MainActivity.resolveDefaultHostLaunchAsync].
+ *
+ * The crash-loop fix lives here: ANY throw from the Room reads / key-file stat
+ * (corrupt or locked DB, migration edge) is swallowed and mapped to `null` (=
+ * "no auto-open", land on the host list). The old in-`onCreate`
+ * `runBlocking { resolveDefaultHostLaunchDestination(...) }` let such a throw
+ * escape `onCreate`, crashing the activity on every launch — an unrecoverable
+ * launch crash-loop. Pulled out as its own top-level function so a JVM test can
+ * drive the containment directly with a throwing DAO.
+ */
+internal suspend fun resolveDefaultHostLaunchDestinationSafely(
+    defaultHostId: Long?,
+    hostDao: HostDao,
+    sshKeyDao: SshKeyDao,
+    keyFileExists: (String) -> Boolean = { path -> File(path).exists() },
+): AppDestination.FolderList? =
+    runCatching {
+        resolveDefaultHostLaunchDestination(
+            defaultHostId = defaultHostId,
+            hostDao = hostDao,
+            sshKeyDao = sshKeyDao,
+            keyFileExists = keyFileExists,
+        )
+    }.onFailure {
+        Log.w("MainActivity", "issue951-default-host-resolve-failed", it)
+    }.getOrNull()
+
 internal suspend fun resolveDefaultHostLaunchDestination(
     defaultHostId: Long?,
     hostDao: HostDao,
@@ -1679,6 +1890,84 @@ internal suspend fun resolveDefaultHostLaunchDestination(
         username = host.username,
         keyPath = keyPath,
         passphrase = null,
+    )
+}
+
+/**
+ * Issue #859 (Slice D): pick the host an agent-card push should deep-link into,
+ * from the device's own host list, by matching the push's best-effort `host`
+ * hostname.
+ *
+ * The host CLI does NOT know the app's host alias (the #859 research risk #2),
+ * so the push carries the host's resolvable hostname (`socket.getfqdn()`), which
+ * we match against [HostEntity.hostname] (case-insensitive, exact or
+ * leading-label, so `box` matches `box.example.com`) then [HostEntity.name].
+ *
+ * Resolution rules — deliberately conservative so a tap NEVER opens the WRONG
+ * host:
+ *  - Empty push host: only auto-route when there is EXACTLY ONE host on the
+ *    device (unambiguous). Otherwise return null (fall back to home).
+ *  - Non-empty push host: return the single matching host, or null when zero or
+ *    MORE THAN ONE host matches (ambiguous).
+ *
+ * Pure (operates on a supplied host list) so it is unit-testable without Room.
+ */
+internal fun resolveAgentCardFeedHost(
+    request: AgentCardFeedRequest,
+    hosts: List<HostEntity>,
+): HostEntity? {
+    if (hosts.isEmpty()) return null
+    val pushHost = request.host.trim()
+    if (pushHost.isEmpty()) {
+        return hosts.singleOrNull()
+    }
+    val matches = hosts.filter { hostnameMatches(it, pushHost) }
+    return matches.singleOrNull()
+}
+
+private fun hostnameMatches(host: HostEntity, pushHost: String): Boolean {
+    val needle = pushHost.lowercase()
+    val hostname = host.hostname.trim().lowercase()
+    val name = host.name.trim().lowercase()
+    if (hostname == needle || name == needle) return true
+    // Leading-label match so a short hostname (`box`) matches its FQDN
+    // (`box.example.com`) and vice-versa — the host CLI may emit either.
+    fun leadingLabel(value: String) = value.substringBefore('.')
+    if (hostname.isNotEmpty() && leadingLabel(hostname) == leadingLabel(needle)) return true
+    return false
+}
+
+/**
+ * Issue #859 (Slice D): resolve an agent-card-feed deep-link to a concrete
+ * [AppDestination.TmuxSession] for the right host's session, or null to fall
+ * back to the home screen (no/ambiguous host match, missing key, or a
+ * passphrase-protected key we can't unlock unattended).
+ *
+ * Lands the user on the session screen where the card-feed chip lives. (Auto-
+ * opening the feed bottom-sheet is a small follow-up that touches the
+ * RC-sensitive session screen, intentionally out of this slice's scope.)
+ */
+internal suspend fun resolveAgentCardFeedDestination(
+    request: AgentCardFeedRequest,
+    hostDao: HostDao,
+    sshKeyDao: SshKeyDao,
+    keyFileExists: (String) -> Boolean = { path -> File(path).exists() },
+): AppDestination.TmuxSession? {
+    val hosts = hostDao.getAll().first()
+    val host = resolveAgentCardFeedHost(request, hosts) ?: return null
+    val key = sshKeyDao.getById(host.keyId) ?: return null
+    if (key.hasPassphrase) return null
+    val keyPath = key.privateKeyPath.trim()
+    if (keyPath.isEmpty() || !keyFileExists(keyPath)) return null
+    return AppDestination.TmuxSession(
+        hostId = host.id,
+        hostName = host.name,
+        hostname = host.hostname,
+        port = host.port,
+        username = host.username,
+        keyPath = keyPath,
+        passphrase = null,
+        sessionName = request.session,
     )
 }
 

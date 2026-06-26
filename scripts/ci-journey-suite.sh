@@ -147,6 +147,14 @@ JOURNEY_CLASSES=(
   # (toxiproxy clean-cut, `withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect`),
   # which is opt-in (assumeNetworkFaultProofsEnabled self-skips on CI since tests.yml
   # keeps this job toxiproxy-free); it is the local/manual fault-injection proof.
+  #
+  # Issue #959: this class now ALSO carries the beyond-grace "terminal frozen (no
+  # I/O) but app responsive" reproduction
+  # (postGraceReattachLeavesTerminalLiveWithFreshInputEcho): after the post-grace
+  # reattach it types a unique token through the real input path and requires the
+  # shell's FRESH echo to render — the live-terminal property a frozen reattach
+  # fails. The whole class FQCN runs every method, so the #959 method is gated
+  # here at PR time with no extra entry. agents:2222, no toxiproxy.
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
   # PROMOTED (#727, epic #657 Wave 1 / S1): the share-auth journey pair. The
   # maintainer's recurring share-auth breakages had nightly-only / advisory E2E
@@ -366,6 +374,23 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#966/#967 — the DISCRIMINATING render-death-on-a-LIVE-transport journey): the
+  # maintainer dogfooded a connected Claude session that went BLACK with only stray
+  # FRAGMENTS (a lone cursor, a "3", a scattered status line) while the transport stayed
+  # CONNECTED. The v0.4.17 black-screen heal only engages on a FULLY-blank / ≤3-live-line
+  # pane, so a black-WITH-fragments pane reads "not blank" and the heal SKIPS it (the #966
+  # oracle gap). This journey attaches a full-viewport banner, injects the scattered-
+  # fragment / fully-blank / stale-after-burst render state on the LIVE emulator (the
+  # REMOTE tmux grid still holds the banner, so the transport is GUARANTEED LIVE — the
+  # discriminator), then asserts BOTH: transport stays Connected (no reconnect surface,
+  # client not disconnected) AND the widened divergence heal re-renders the full viewport
+  # from tmux's authoritative `capture-pane`. RED on base (the v0.4.17 oracle reads
+  # not-blank → the fragment pane is never healed); GREEN with the widened
+  # `visibleScreenDivergesFromCapture` oracle + the stale-render watchdog. Three tests
+  # class-cover fully-blank / scattered-fragment / stale-after-burst (D32 G2). Uses ONLY
+  # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does
+  # NOT self-skip on CI, so it belongs here.
+  "$FQCN_PREFIX.StaleRenderHealOnLiveTransportJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an
@@ -491,6 +516,27 @@ JOURNEY_CLASSES=(
   # Angle-C fix. Uses ONLY the deterministic agents:2222 fixture tests.yml already brings
   # up (no toxiproxy, no workflow change) and does NOT self-skip on CI.
   "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
+  # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
+  # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
+  # reproduces the #964 budget mismatch on the plain deterministic agents:2222
+  # fixture (no toxiproxy, no new Docker service) using ONLY base-available seams:
+  # the `-CC` LivenessProbe is made to report DEAD for a BOUNDED window (a
+  # momentarily-slow control channel, NOT a permanent wedge) WHILE the agents:2222
+  # SSH transport stays genuinely LIVE, so the always-on keepalive keeps proving the
+  # link alive. On BASE (rc/0.4.18 WITHOUT #964) the probe force-redials the FINE
+  # link the instant it reaches its (shortened) budget — records
+  # liveness_probe_silent_drop, bumps TMUX_CONNECT_ATTEMPTS, raises the Reconnecting
+  # band — so the ZERO-reconnect assertions FAIL (RED). With #964 the probe DEFERS
+  # to the still-healthy keepalive and never redials (GREEN). It does NOT self-skip
+  # on CI (the deterministic method has no assumeNetworkFaultProofsEnabled gate); the
+  # opt-in realistic-jitter toxiproxy method in the same class DOES self-skip and is
+  # NOT run by this FQCN entry at PR time. The other (long-running, toxiproxy)
+  # method is gated by assumeNetworkFaultProofsEnabled so only the deterministic
+  # method asserts here.
+  #
+  # INTEGRATION NOTE: this gate is RED until #964 lands, so it MUST be integrated
+  # WITH or AFTER #964 — never before — or it reds the per-push journey job.
+  "$FQCN_PREFIX.RealisticWifiStabilityNoSpuriousReconnectE2eTest"
   # ADDED (#796 H3): the composer-open -> terminal-relayout collision regression
   # catcher. The maintainer's exact v0.4.6 Codex freeze: a bursting Codex pane +
   # OPENING the Prompt Composer (showMicSheet toggles in the body root group)
@@ -556,6 +602,26 @@ JOURNEY_CLASSES=(
   # local-only flaky-reconnect evidence). Target the single @Test method by
   # FQCN#method so the CI-gated reconnect cases are NOT selected here.
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"
+  # ADDED (#962, conversation-source area — sibling of #819/#821/#894, D31/D32):
+  # a live agent (claude/codex/opencode) started INSIDE a session recorded
+  # `@ps_agent_kind=shell` must regain its Terminal <-> Conversation TOGGLE. On
+  # base the recorded-shell verdict (#894) collapses presumedAgent for the life of
+  # the session, hiding the toggle (the maintainer's exact dogfood report). The
+  # LOAD-BEARING reproduction (G6/D33 red->green, class-covering claude/codex/
+  # opencode + the no-flap control) is the DETERMINISTIC JVM
+  # TmuxSessionViewModelTest.liveAgentDetectionClearsConfirmedShellSoConversationToggleReturns
+  # (the Docker agents fixture cannot make the host agent-kind daemon classify a
+  # process — it gates on a cgroup-v2 scope the non-systemd container lacks, so a
+  # recorded-shell pane cannot bind a live detection in-fixture; per D33 that
+  # unenterable state is injected synthetically and hard-asserted in JVM, never
+  # self-skipped). THIS connected journey gates the active-rework ADJACENCY the
+  # fix must preserve: a recorded-shell session with NO agent shows NO toggle on
+  # the real TmuxSessionScreen (the #894 no-flap invariant — a recorded shell must
+  # not flash the Conversation tab). It uses ONLY agents:2222
+  # (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml already brings up,
+  # and does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())).
+  # Lives under com.pocketshell.app.tmux.
+  "com.pocketshell.app.tmux.ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /
@@ -675,7 +741,13 @@ JOURNEY_CLASSES=(
   # drives ONLY the deterministic agents:2222 fixture (DEFAULT_HOST/PORT/USER ->
   # 10.0.2.2:2222) that tests.yml already brings up, and does NOT self-skip on CI
   # (no assumeFalse(isRunningOnCi()) on the load-bearing assertions — process.md
-  # F3 / D31). It lives under the com.pocketshell.app.proof prefix.
+  # F3 / D31). It lives under the com.pocketshell.app.proof prefix. Issue #964/#822
+  # adds a second @Test in this same class — the slow-but-live wifi journey threaded
+  # against wedged-`-CC` recovery: a slow-but-live `-CC` blip that recovers while the
+  # transport keepalive proves the link alive (forceTransportProvenAliveForTest) must
+  # NOT spuriously redial (#964); but a SUSTAINED wedged `-CC` on a still-healthy
+  # keepalive must STILL recover (#822 not suppressed by the deferral). Both methods
+  # run per-PR.
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"
   # Issue #833 (Slice C resilience follow-up): a CLEAN sustained outage (clean
   # FIN/connection-refused for the outage window, then the link returns) is the
@@ -792,6 +864,21 @@ JOURNEY_CLASSES=(
   # cache seed (first state is Loading); GREEN after. Lives under
   # com.pocketshell.app.projects, so it carries its FQCN directly.
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"
+  # ADDED (#965): the SCALE ANR proof — the folder list at the maintainer's
+  # reported scale (71 projects / 12 sessions, mixed agent kinds) must NOT block
+  # the Main thread loading the folder list. Drives the production
+  # FolderListViewModel.bind() against a tree cache seeded at 71/12 with the
+  # process-wide StrictMode policy active on Main, and HARD-asserts ZERO
+  # Main-thread `disk_read` violations — the synchronous tree-cache read + JSON
+  # parse on Main inside hydrateFromClientCache was the dominant cold-start ANR
+  # cause. RED on base (the read trips disk_read at scale); GREEN with the
+  # off-Main read. Pure on-device (no Docker/SSH fixture — the cache read is on
+  # the bind() path before any network), deterministic on the CI swiftshader AVD,
+  # does NOT self-skip on CI. The JVM fast-first backstop (the off-Main projection
+  # split + frame budget) is HostTreeModelProjectionOffMainTest (per-push Unit
+  # job). It lives under com.pocketshell.app.projects, so it carries its FQCN
+  # directly.
+  "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"
   # ADDED (#839, epic #821 workstream C — the #837 durable-tree daemon journey):
   # the END-TO-END durable-tree proof on a REAL device + REAL daemon. #837 was
   # approved on a JVM FakeTreeDaemon proxy; this drives the PRODUCTION
@@ -973,6 +1060,24 @@ JOURNEY_CLASSES=(
   # com.pocketshell.app.projects, not the proof prefix, so it carries its
   # fully-qualified name directly.
   "com.pocketshell.app.projects.CliVersionMismatchBannerUpdateButtonTest"
+  # ---------------------------------------------------------------------------
+  # Issue #951 (#928 D2 — launch ANR / crash-loop). The reproduce-first
+  # end-to-end for the D2 finding: MainActivity.onCreate used to do an
+  # unguarded `runBlocking { resolveDefaultHostLaunchDestination(...) }` — two
+  # Room reads + a key-file stat — ON the Main thread on every default-host cold
+  # launch (UI-thread block = ANR/jank; a DB-read throw escaping onCreate =
+  # launch crash-loop). This journey drives the REAL launch path
+  # (ActivityScenario.launch(MainActivity) with a default host seeded in Room),
+  # with a capturing main-thread StrictMode disk-read policy active, and asserts
+  # the launch-time resolution trips NO MainActivity-attributed main-thread
+  # disk-read violation (red on base, green with the off-Main fix) WHILE the
+  # default host still auto-opens its FolderList (the #305 contract). NO Docker
+  # fixture / SSH / tmux / toxiproxy / port — a pure on-device launch exercise,
+  # deterministic on the CI swiftshader AVD, so it needs no tests.yml service
+  # change, and it does NOT self-skip on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi()) on the load-bearing assertion — process.md
+  # F3 / D33). It lives under the com.pocketshell.app.proof prefix.
+  "$FQCN_PREFIX.LaunchNoMainThreadRoomReadE2eTest"
 )
 
 echo "=========================================================="

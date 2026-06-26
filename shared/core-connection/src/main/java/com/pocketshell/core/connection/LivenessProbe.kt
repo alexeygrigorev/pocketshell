@@ -15,16 +15,36 @@ import kotlinx.coroutines.withTimeoutOrNull
  * The connection core can DECIDE a drop's lifecycle (`ConnectionController`
  * walks `Live --TransportDropped--> Reattaching --> Reconnecting(n) -->
  * Unreachable`), but on a QUIET, idle control channel nothing was telling it a
- * silent half-open Wi-Fi drop had happened: there is NO SSH transport keepalive
- * backstop (it was removed in #847 — see [com.pocketshell.core.ssh.SshConnection]
- * — because a background keepalive writer is a SECOND transport writer that
- * corrupts the KEX sequence), so `sshj.isConnected` lies indefinitely on a
- * half-open socket, and `TmuxClient.disconnected` only flips on a reader EOF or a
+ * silent half-open Wi-Fi drop had happened. The tmux control channel can wedge
+ * (the `-CC` FIFO stops answering `refresh-client`) even while the underlying
+ * transport is fine, and `TmuxClient.disconnected` only flips on a reader EOF or a
  * watchdog-covered DISPATCHED command. With the user reading or recording a voice
- * note (the exact #822 scenario), no command is in flight, so the dead channel is
- * invisible — the "detection void". **This probe is therefore the SOLE dead-peer
- * detector on a foregrounded session — its budget IS the entire detection
- * guarantee, not a fast-path in front of a transport keepalive (there is none).**
+ * note (the exact #822 scenario), no command is in flight, so a wedged channel is
+ * invisible — the "detection void". This probe closes that void.
+ *
+ * **Coordinated with the transport keepalive (#964), WITHOUT regressing #822.**
+ * There IS now an always-on SSH transport keepalive
+ * ([com.pocketshell.core.ssh.TransportKeepAlive], #945 — the safe successor to the
+ * #847-removed sshj `KeepAliveRunner`). It pings the SSH TRANSPORT (a
+ * global-request, ~90s budget); this probe pings the tmux `-CC` CHANNEL
+ * (refresh-client/%output, ~48s budget). They are DIFFERENT channels. The #964
+ * bug: on a live-but-slow link the `-CC` probe declared dead at ~48s and
+ * force-redialed a FINE link before the keepalive's ~90s could prove the transport
+ * alive.
+ *
+ * The fix THREADS THE NEEDLE rather than a blanket keepalive veto. A successful
+ * keepalive ([ProbeIo.transportProvenAliveRecently]) lets the probe DEFER its
+ * redial for up to [maxKeepAliveDeferrals] back-to-back failure runs — absorbing
+ * the slow-but-live `-CC` blip (#964) — BUT if the `-CC` channel keeps not
+ * answering across that bound WHILE the keepalive stays healthy, that is no longer
+ * transport jitter: it is a genuinely WEDGED `-CC` channel on a live transport
+ * (the #822 failure mode the keepalive CANNOT see — transport fine, control
+ * channel stuck). The probe then ESCALATES the drop anyway, so the wedged session
+ * still recovers within a sane bound (≈ `(maxKeepAliveDeferrals + 1) × rawBudget`).
+ * A blanket "keepalive alive ⇒ never redial" would re-open #822. A single
+ * successful `-CC` probe resets the deferral run, so a link that un-congests never
+ * escalates. The probe's raw budget still bounds detection of a `-CC` wedge
+ * whenever no keepalive signal is available to defer to.
  *
  * [LivenessProbe] closes that void. While the session is FOREGROUNDED + `Live`
  * (and only then — D21: no background work, no probe inside grace, no probe
@@ -81,12 +101,14 @@ class LivenessProbe(
     private val intervalMs: Long = DEFAULT_INTERVAL_MS,
     private val perProbeTimeoutMs: Long = DEFAULT_PER_PROBE_TIMEOUT_MS,
     private val failureThreshold: Int = DEFAULT_FAILURE_THRESHOLD,
+    private val maxKeepAliveDeferrals: Int = DEFAULT_MAX_KEEPALIVE_DEFERRALS,
     private val log: (String) -> Unit = {},
 ) {
     init {
         require(intervalMs > 0) { "intervalMs must be > 0" }
         require(perProbeTimeoutMs > 0) { "perProbeTimeoutMs must be > 0" }
         require(failureThreshold >= 1) { "failureThreshold must be >= 1" }
+        require(maxKeepAliveDeferrals >= 1) { "maxKeepAliveDeferrals must be >= 1" }
     }
 
     /**
@@ -121,10 +143,58 @@ class LivenessProbe(
          * recovers — NEVER a second reconnect writer.
          */
         fun onProbeFailed(consecutiveFailures: Int)
+
+        /**
+         * Issue #964 — the keepalive-coordination guard. True iff the always-on
+         * transport keepalive ([com.pocketshell.core.ssh.TransportKeepAlive], #945)
+         * has observed INBOUND transport activity within its ride-through window
+         * ([com.pocketshell.core.ssh.TransportKeepAlive.RIDE_THROUGH_BUDGET_MS],
+         * ~90s) — i.e. the transport is PROVABLY still alive.
+         *
+         * Consulted immediately before [onProbeFailed] would fire. When it returns
+         * `true` the probe DEFERS: it does NOT declare a drop, because the
+         * keepalive is still successfully riding through and the link is fine — it
+         * is only the tmux control channel that is momentarily slow. This is the
+         * #964 fix: the probe's old ~48s budget used to force a redial BEFORE the
+         * keepalive's ~90s ride-through could prove the link alive, spuriously
+         * reconnecting a slow-but-live link. The probe now defers to the single
+         * transport-liveness authority; only when the keepalive ITSELF stops
+         * seeing activity (a genuinely dead transport, so this returns `false`)
+         * does the probe declare the drop. The keepalive's own ~90s budget detects
+         * a real transport death independently (it closes the dead transport), so
+         * deferring here can never cause an infinite hang.
+         *
+         * Default body returns `false` (no keepalive signal available, so the
+         * probe keeps its own authority) so the existing probe fakes need not
+         * override it; only the production VM wires it to the live session's
+         * keepalive liveness.
+         */
+        fun transportProvenAliveRecently(): Boolean = false
     }
 
     private var job: Job? = null
     private var consecutiveFailures: Int = 0
+
+    /**
+     * Issue #964 / #822 — how many times in a row the probe has reached its
+     * failure threshold AND deferred to a still-healthy transport keepalive,
+     * WITHOUT any intervening successful `-CC` probe. Reset to 0 on the next
+     * successful `-CC` probe.
+     *
+     * This BOUNDS the deferral so it threads the needle between the two failure
+     * modes the keepalive cannot tell apart from the transport's vantage:
+     *   - a brief `-CC` non-response that coincides with transport jitter (the
+     *     #964 slow-but-live case) clears within one or two deferrals as the link
+     *     un-congests and the `-CC` probe answers again → no redial; and
+     *   - a `-CC` channel that is genuinely WEDGED while the transport stays
+     *     perfectly healthy (the #822 case: keepalive instant, `refresh-client`
+     *     never answers) keeps failing across every deferral → after
+     *     [maxKeepAliveDeferrals] back-to-back deferrals the probe ESCALATES the
+     *     drop EVEN THOUGH the keepalive is alive, because sustained `-CC` silence
+     *     on a provably-live transport IS the wedged-channel signal and must
+     *     recover. A blanket "keepalive alive ⇒ never redial" would re-open #822.
+     */
+    private var consecutiveDeferrals: Int = 0
 
     /**
      * Start the probe loop in [scope]. Idempotent: a second [start] while a loop
@@ -137,6 +207,7 @@ class LivenessProbe(
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
         consecutiveFailures = 0
+        consecutiveDeferrals = 0
         job = scope.launch {
             while (isActive) {
                 delay(intervalMs)
@@ -145,14 +216,23 @@ class LivenessProbe(
                     // the counter so a prior partial run never leaks into the
                     // next live window, and skip this tick entirely.
                     consecutiveFailures = 0
+                    consecutiveDeferrals = 0
                     continue
                 }
                 val alive = runProbe()
                 if (alive) {
-                    if (consecutiveFailures != 0) {
-                        log("liveness-probe recovered after $consecutiveFailures failure(s)")
+                    if (consecutiveFailures != 0 || consecutiveDeferrals != 0) {
+                        log(
+                            "liveness-probe recovered after $consecutiveFailures failure(s) / " +
+                                "$consecutiveDeferrals deferral(s)",
+                        )
                     }
+                    // A successful `-CC` probe clears BOTH the failure run AND the
+                    // deferral run: the control channel is answering again, so the
+                    // slow-but-live blip is over and we are nowhere near the #822
+                    // wedge.
                     consecutiveFailures = 0
+                    consecutiveDeferrals = 0
                 } else {
                     consecutiveFailures += 1
                     log(
@@ -165,14 +245,59 @@ class LivenessProbe(
                         // probe's timeout window, in which case the single grace
                         // owner / reconnect ladder already governs recovery and
                         // an extra close here would be a spurious teardown.
-                        if (io.shouldProbe()) {
-                            log("liveness-probe DECLARED DROP consecutive=$consecutiveFailures")
+                        if (!io.shouldProbe()) {
+                            // The recovery path / grace owner already governs the
+                            // channel; reset and skip.
+                            consecutiveFailures = 0
+                            consecutiveDeferrals = 0
+                        } else if (
+                            io.transportProvenAliveRecently() &&
+                            consecutiveDeferrals < maxKeepAliveDeferrals
+                        ) {
+                            // Issue #964 — DEFER to the transport keepalive, but only
+                            // up to [maxKeepAliveDeferrals] back-to-back times. The
+                            // `-CC` probe failed N times, but the always-on keepalive
+                            // has seen inbound TRANSPORT activity within its
+                            // ride-through window, so the LINK is provably reachable —
+                            // the `-CC` reply is just parked behind a momentarily slow
+                            // / congested channel. Forcing a redial here would be the
+                            // exact spurious reconnect on a slow-but-live link the
+                            // keepalive exists to ride through (#964). Reset the
+                            // failure run (so we re-probe next interval) but COUNT the
+                            // deferral: if the `-CC` channel keeps not answering across
+                            // [maxKeepAliveDeferrals] deferrals WHILE the keepalive
+                            // stays healthy, that is no longer transport jitter — it is
+                            // a genuinely WEDGED `-CC` channel on a live transport
+                            // (#822), and the branch below escalates it.
+                            consecutiveDeferrals += 1
+                            log(
+                                "liveness-probe DEFERRED to keepalive (transport proven alive) " +
+                                    "consecutive=$consecutiveFailures deferrals=$consecutiveDeferrals " +
+                                    "max=$maxKeepAliveDeferrals",
+                            )
+                            consecutiveFailures = 0
+                        } else {
+                            // Declare the drop. Either the keepalive ALSO stopped
+                            // proving the transport alive (a genuine transport death —
+                            // the #964 deferral correctly ends), OR the keepalive is
+                            // still healthy but the `-CC` channel has now failed across
+                            // [maxKeepAliveDeferrals] back-to-back deferrals — the
+                            // #822 wedged-`-CC`-on-a-live-transport case, which MUST
+                            // recover even though the keepalive says the transport is
+                            // fine (a blanket keepalive veto would re-open #822).
+                            val wedgedDespiteKeepAlive = io.transportProvenAliveRecently()
+                            log(
+                                "liveness-probe DECLARED DROP consecutive=$consecutiveFailures " +
+                                    "deferrals=$consecutiveDeferrals " +
+                                    "wedgedDespiteKeepAlive=$wedgedDespiteKeepAlive",
+                            )
                             io.onProbeFailed(consecutiveFailures)
+                            // The recovery path now owns the channel; reset so the
+                            // probe does not re-fire every interval against the
+                            // already-reconnecting session.
+                            consecutiveFailures = 0
+                            consecutiveDeferrals = 0
                         }
-                        // The recovery path now owns the channel; reset so the
-                        // probe does not re-fire every interval against the
-                        // already-reconnecting session.
-                        consecutiveFailures = 0
                     }
                 }
             }
@@ -184,6 +309,7 @@ class LivenessProbe(
         job?.cancel()
         job = null
         consecutiveFailures = 0
+        consecutiveDeferrals = 0
     }
 
     private suspend fun runProbe(): Boolean =
@@ -209,10 +335,17 @@ class LivenessProbe(
          *     worstCase = failureThreshold × (intervalMs + perProbeTimeoutMs)
          *               = 4 × (7s + 5s) = 48s
          *
-         * This probe is the SOLE dead-peer detector (there is NO 60s SSH keepalive
-         * backstop — #847 removed it; the old "below the 60s keep-alive" reasoning
-         * was vacuous). The budget therefore must land with a real margin BELOW the
-         * three coupled 60s windows it would otherwise race:
+         * This 48s is the probe's RAW budget — the bound on detecting a tmux
+         * control-channel wedge when no transport-keepalive liveness signal is
+         * available to defer to (a test fake, or a transport that has itself gone
+         * silent). When the always-on transport keepalive
+         * ([com.pocketshell.core.ssh.TransportKeepAlive], #945) IS proving the link
+         * alive, the probe DEFERS past this raw budget (the #964 coordination — see
+         * [ProbeIo.transportProvenAliveRecently]) and lets the keepalive's ~90s
+         * ride-through be the death authority, so it never force-redials a
+         * slow-but-live link. The raw budget still lands with a real margin BELOW the
+         * three coupled 60s windows it would otherwise race when it IS the acting
+         * detector:
          *   - lease idle TTL (`SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS = 60_000`),
          *   - passive disconnect grace (`PASSIVE_DISCONNECT_GRACE_MS = 60_000`),
          *   - controller grace (`ConnectionController.DEFAULT_GRACE_MS = 60_000`).
@@ -267,5 +400,28 @@ class LivenessProbe(
          * busy-vs-dead reader-activity guard handles `%output`-burst parking.
          */
         const val DEFAULT_FAILURE_THRESHOLD: Int = 4
+
+        /**
+         * Issue #964 / #822 — how many back-to-back failure runs the probe defers
+         * to a still-healthy transport keepalive before it ESCALATES the drop
+         * anyway (the wedged-`-CC`-on-a-live-transport bound).
+         *
+         * Each failure run is [DEFAULT_FAILURE_THRESHOLD] consecutive missed `-CC`
+         * probes ≈ the raw 48s budget. With [DEFAULT_MAX_KEEPALIVE_DEFERRALS] = 1
+         * the probe RIDES THROUGH one full ~48s window of `-CC` silence while the
+         * keepalive proves the transport alive (absorbing the #964 slow-but-live
+         * blip), but if the `-CC` channel is STILL silent through a SECOND ~48s
+         * window with the keepalive still healthy, it declares the drop — so a
+         * genuinely WEDGED `-CC` channel on a live transport (#822) recovers within
+         * ≈ 2 × 48s ≈ 96s, a sane bound, instead of hanging forever behind a
+         * blanket keepalive veto. A single successful `-CC` probe in between resets
+         * the deferral run, so a link that slowly un-congests never escalates.
+         *
+         * 1 is deliberately conservative: the slow-but-live link the maintainer
+         * hits resolves well within one deferral (the `-CC` reply lands once the
+         * bufferbloat clears), while a never-answering `-CC` channel is the wedge
+         * that must recover. [LivenessProbeWedgeEscalationTest] pins both halves.
+         */
+        const val DEFAULT_MAX_KEEPALIVE_DEFERRALS: Int = 1
     }
 }

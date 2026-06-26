@@ -7,6 +7,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.connectivity.networkDiagnosticFields
@@ -583,6 +584,14 @@ internal fun shouldDispatchPendingTerminalNetworkChange(
 ): Boolean {
     if (pendingChange == null) return false
     if (!resumedWithinGrace) return true
+    // Issue #997: a pending bare-LOSS / RESTORE deferred while backgrounded is a
+    // meaningful drop/recovery, not a same-identity reassoc — replay it on a
+    // within-grace foreground when there is no live runtime, the same as a real
+    // validated handoff. (A NetworkRestored drives the fast reconnect; a
+    // NetworkLost flips the UI to reconnecting/holds.)
+    if (pendingChange.kind != TerminalNetworkChangeKind.ValidatedIdentityChange) {
+        return !hasLiveTerminalRuntime
+    }
     return !hasLiveTerminalRuntime && pendingChange.previousValidated != null &&
         !pendingChange.previousValidated.hasSameNetworkIdentityAs(pendingChange.current)
 }
@@ -818,13 +827,20 @@ private fun TerminalNetworkChange?.pendingNetworkClassification(): String =
     this?.networkClassification() ?: "none"
 
 private fun TerminalNetworkChange.networkClassification(): String =
-    if (
-        previousValidated != null &&
-        !previousValidated.hasSameNetworkIdentityAs(current)
-    ) {
-        "real_validated_identity_change"
-    } else {
-        "non_real_validated_change"
+    when (kind) {
+        // Issue #997: the orthogonal bare-loss / restore signal — classified by
+        // kind, not by validated-identity equality (which would mislabel them).
+        TerminalNetworkChangeKind.NetworkLost -> "network_lost"
+        TerminalNetworkChangeKind.NetworkRestored -> "network_restored"
+        TerminalNetworkChangeKind.ValidatedIdentityChange ->
+            if (
+                previousValidated != null &&
+                !previousValidated.hasSameNetworkIdentityAs(current)
+            ) {
+                "real_validated_identity_change"
+            } else {
+                "non_real_validated_change"
+            }
     }
 
 internal sealed interface TerminalNetworkDecision {

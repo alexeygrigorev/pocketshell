@@ -107,58 +107,183 @@ class TerminalNetworkChangeDetectorTest {
         assertEquals(1L, handoff.sequence)
     }
 
+    // --- Issue #997 — the bare-LOSS / RESTORE signal, orthogonal to the #548
+    // validated-identity-change signal. Pre-#997 the detector returned `null` for
+    // any non-validated snapshot (`:328`) AND for a same-identity restore (`:333`),
+    // so a clean drop (and an airplane-mode round-trip) was invisible to the
+    // proactive path and only noticed ~90s later by the keepalive ride-through.
+    // These cases assert the new NetworkLost / NetworkRestored emissions.
+
     @Test
-    fun `offline transition waits until a validated network returns`() {
+    fun `bare network loss now emits a NetworkLost event (issue 997)`() {
+        // RED on base: a Validated → NoValidatedNetwork transition returned null
+        // (the `:328` swallow). GREEN with #997: a NetworkLost is surfaced.
         val detector = TerminalNetworkChangeDetector(
             initial = TerminalNetworkSnapshot.Validated("wifi"),
         )
 
-        assertNull(
-            detector.update(
-                snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
-                reason = "lost",
-            ),
+        val lost = detector.update(
+            snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "default-network-lost",
         )
 
-        val change = detector.update(
-            snapshot = TerminalNetworkSnapshot.Validated("cell"),
-            reason = "available",
-        )
-
-        assertTrue(change != null)
-        assertEquals(TerminalNetworkSnapshot.NoValidatedNetwork, change!!.previous)
-        assertEquals(TerminalNetworkSnapshot.Validated("cell"), change.current)
+        assertTrue("a bare network loss must surface a proactive change", lost != null)
+        assertEquals(TerminalNetworkChangeKind.NetworkLost, lost!!.kind)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), lost.previous)
+        assertEquals(TerminalNetworkSnapshot.NoValidatedNetwork, lost.current)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), lost.previousValidated)
+        assertEquals(1L, lost.sequence)
     }
 
     @Test
-    fun `transient offline bounce back to same validated network does not emit reconnect`() {
+    fun `loss then restore to the SAME identity emits NetworkRestored (issue 997 airplane-mode round-trip)`() {
+        // The airplane-mode round-trip the issue names: wifi → none → SAME wifi.
+        // RED on base: the loss returned null (`:328`) and the same-identity
+        // restore returned null (`:333`) — so the dead socket was never recovered
+        // proactively. GREEN with #997: loss emits NetworkLost, restore emits
+        // NetworkRestored (NOT swallowed despite the identical identity).
         val detector = TerminalNetworkChangeDetector(
             initial = TerminalNetworkSnapshot.Validated("wifi"),
         )
 
-        assertNull(
-            detector.update(
-                snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
-                reason = "default-network-lost",
-            ),
+        val lost = detector.update(
+            snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "default-network-lost",
+        )
+        assertEquals(TerminalNetworkChangeKind.NetworkLost, lost!!.kind)
+
+        val restored = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "default-network-available",
         )
 
+        assertTrue("a same-identity restore after a loss must NOT be swallowed", restored != null)
+        assertEquals(TerminalNetworkChangeKind.NetworkRestored, restored!!.kind)
+        assertEquals(TerminalNetworkSnapshot.NoValidatedNetwork, restored.previous)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), restored.current)
+        assertEquals(2L, restored.sequence)
+    }
+
+    @Test
+    fun `loss then restore to a DIFFERENT identity emits NetworkRestored (issue 997 handoff)`() {
+        // wifi → none → cell. A cross-transport recovery after a loss. Still a
+        // NetworkRestored (the loss flag is the discriminator vs the #548
+        // validated handoff) and it must drive a reconnect.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi"),
+        )
+
+        val lost = detector.update(
+            snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "default-network-lost",
+        )
+        assertEquals(TerminalNetworkChangeKind.NetworkLost, lost!!.kind)
+
+        val restored = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "default-network-available",
+        )
+
+        assertTrue(restored != null)
+        assertEquals(TerminalNetworkChangeKind.NetworkRestored, restored!!.kind)
+        assertEquals(TerminalNetworkSnapshot.NoValidatedNetwork, restored.previous)
+        assertEquals(TerminalNetworkSnapshot.Validated("cell"), restored.current)
+        assertEquals(2L, restored.sequence)
+    }
+
+    @Test
+    fun `repeated loss callbacks emit exactly one NetworkLost (no churn during loss, issue 997)`() {
+        // Idempotency: airplane mode can deliver onLost + onUnavailable + repeated
+        // NoValidatedNetwork capability churn. Only the FIRST surfaces — the rest
+        // must NOT re-emit (no churn during the loss window).
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi"),
+        )
+
+        val first = detector.update(
+            snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "default-network-lost",
+        )
+        assertEquals(TerminalNetworkChangeKind.NetworkLost, first!!.kind)
+
         assertNull(
+            "a second NoValidatedNetwork while already lost must NOT re-emit",
             detector.update(
-                snapshot = TerminalNetworkSnapshot.Validated("wifi"),
+                snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+                reason = "default-network-unavailable",
+            ),
+        )
+        assertNull(
+            "a third NoValidatedNetwork while already lost must NOT re-emit",
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
                 reason = "default-network-capabilities",
             ),
         )
 
+        // ...and the restore still fires exactly once with the next sequence.
+        val restored = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "default-network-available",
+        )
+        assertEquals(TerminalNetworkChangeKind.NetworkRestored, restored!!.kind)
+        assertEquals(2L, restored.sequence)
+    }
+
+    @Test
+    fun `a normal validated identity change still emits a ValidatedIdentityChange (issue 997 regression guard)`() {
+        // The #548 handoff signal is orthogonal to the new loss/restore signal and
+        // must be UNCHANGED: a WIFI→CELLULAR flip with no intervening loss is still
+        // a ValidatedIdentityChange, not a restore.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")),
+        )
+
         val handoff = detector.update(
-            snapshot = TerminalNetworkSnapshot.Validated("cell"),
+            snapshot = TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR")),
             reason = "real-handoff",
         )
 
         assertTrue(handoff != null)
-        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), handoff!!.previous)
-        assertEquals(TerminalNetworkSnapshot.Validated("cell"), handoff.current)
+        assertEquals(TerminalNetworkChangeKind.ValidatedIdentityChange, handoff!!.kind)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi", setOf("WIFI")), handoff.previous)
+        assertEquals(TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR")), handoff.current)
         assertEquals(1L, handoff.sequence)
+    }
+
+    @Test
+    fun `restore clears the loss flag so a later same-identity reassoc is still suppressed (issue 997)`() {
+        // After a loss→restore cycle the detector returns to normal identity
+        // tracking: a subsequent same-identity (pure-WIFI) reassoc must still be
+        // suppressed (#875), and a real handoff must still emit ValidatedIdentityChange.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi-A", setOf("WIFI")),
+        )
+
+        assertEquals(
+            TerminalNetworkChangeKind.NetworkLost,
+            detector.update(TerminalNetworkSnapshot.NoValidatedNetwork, "lost")!!.kind,
+        )
+        assertEquals(
+            TerminalNetworkChangeKind.NetworkRestored,
+            detector.update(TerminalNetworkSnapshot.Validated("wifi-A", setOf("WIFI")), "available")!!.kind,
+        )
+
+        // A pure-WIFI band-steer reassoc after the restore is still a non-event.
+        assertNull(
+            "a pure-WIFI reassoc after a restore must still be suppressed (#875)",
+            detector.update(
+                TerminalNetworkSnapshot.Validated("wifi-B", setOf("WIFI")),
+                "band-steer",
+            ),
+        )
+
+        // A genuine transport handoff after the restore is still a handoff.
+        val handoff = detector.update(
+            TerminalNetworkSnapshot.Validated("cell", setOf("CELLULAR")),
+            "real-handoff",
+        )
+        assertEquals(TerminalNetworkChangeKind.ValidatedIdentityChange, handoff!!.kind)
     }
 
     // --- Issue #875 (Angle C) — a same-SSID wifi supplicant reassociation mints

@@ -4,6 +4,7 @@ import android.os.Looper
 import android.os.SystemClock
 import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
@@ -3807,6 +3808,148 @@ class TmuxSessionViewModelTest {
             vm.latestRestoreIntentSnapshot()?.trigger,
         )
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+
+        vm.forceTransportProvenAliveForTest = null
+    }
+
+    // ---- Issue #997: bare network LOSS → hold (no churn) → RESTORE → fast reconnect.
+    // Pre-#997 a clean loss produced NO proactive change at all (the detector
+    // swallowed it), so a loss-suspended session never fast-recovered — it waited
+    // ~90s for the keepalive ride-through. The reducer arms here are the
+    // ViewModel half of the fix: a NetworkLost holds the lease + surfaces the calm
+    // band without churning; a NetworkRestored drives `scheduleAutoReconnect` even
+    // from a non-Connected state and bypasses the proven-alive gate.
+
+    @Test
+    fun issue997BareNetworkLossHoldsTheLeaseWithoutChurningOrTearingDown() = runTest(scheduler) {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        runCurrent()
+
+        // The calm "reconnecting" band is surfaced (UI not left on a dead-but-live
+        // session) WITHOUT launching a redial loop and WITHOUT tearing the lease.
+        assertTrue(
+            "a bare loss surfaces the calm Reconnecting band immediately",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertEquals("no redial during the loss window — lease is held", 0, connector.connectCount)
+
+        // No churn: even after time passes nothing redials (no ladder running).
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+        assertEquals(0, connector.connectCount)
+    }
+
+    @Test
+    fun issue997NetworkRestoreDrivesFastReconnectFromLossSuspendedState() = runTest(scheduler) {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        // Loss: hold + flip to Reconnecting (the loss-suspended state).
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        runCurrent()
+        assertTrue(
+            "loss leaves the session in the loss-suspended Reconnecting state",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertEquals(0, connector.connectCount)
+
+        // Restore: must drive a FAST reconnect even though status is NOT Connected
+        // (the #997 gap — the Connected-only ScheduleNetworkReconnect path would
+        // have Ignored this).
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+        advanceUntilIdle()
+
+        assertEquals(
+            "restore must redial via the auto-reconnect ladder with the network trigger",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertEquals("exactly one fresh-lease redial on restore", 1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+    }
+
+    @Test
+    fun issue997NetworkRestoreReconnectsEvenWhenTransportWasProvenAlive() = runTest(scheduler) {
+        // A real loss means the old socket is DEAD, so the proven-alive
+        // ride-through (#981) must NOT suppress a restore-driven reconnect. Pin
+        // proven-alive=true and confirm the restore still redials (unlike a bare
+        // validated handoff, which #981 rides through when proven alive).
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        vm.forceTransportProvenAliveForTest = true
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        runCurrent()
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+        advanceUntilIdle()
+
+        assertEquals(
+            "a restore after a real loss bypasses the proven-alive gate and reconnects",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertEquals(1, connector.connectCount)
 
         vm.forceTransportProvenAliveForTest = null
     }
@@ -15210,6 +15353,37 @@ class TmuxSessionViewModelTest {
             reason = reason,
             sequence = sequence,
             deferredFromBackground = deferredFromBackground,
+        )
+
+    // Issue #997: a bare network LOSS change (Validated → NoValidatedNetwork).
+    private fun networkLoss(
+        previousValidated: TerminalNetworkSnapshot.Validated = TerminalNetworkSnapshot.Validated("wifi"),
+        reason: String = "default-network-lost",
+        sequence: Long = 1L,
+    ): TerminalNetworkChange =
+        TerminalNetworkChange(
+            previous = previousValidated,
+            current = TerminalNetworkSnapshot.NoValidatedNetwork,
+            previousValidated = previousValidated,
+            reason = reason,
+            sequence = sequence,
+            kind = TerminalNetworkChangeKind.NetworkLost,
+        )
+
+    // Issue #997: a network RESTORE change (NoValidatedNetwork → Validated).
+    private fun networkRestore(
+        current: TerminalNetworkSnapshot.Validated = TerminalNetworkSnapshot.Validated("wifi"),
+        previousValidated: TerminalNetworkSnapshot.Validated = TerminalNetworkSnapshot.Validated("wifi"),
+        reason: String = "default-network-available",
+        sequence: Long = 2L,
+    ): TerminalNetworkChange =
+        TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+            current = current,
+            previousValidated = previousValidated,
+            reason = reason,
+            sequence = sequence,
+            kind = TerminalNetworkChangeKind.NetworkRestored,
         )
 
     // ---- Issue #626: unified pane list tests ----

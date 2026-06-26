@@ -26,6 +26,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.LocalAttachmentSidecarRef
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -110,6 +111,7 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
+import com.pocketshell.core.tmux.TmuxServerDeadException
 import com.pocketshell.core.tmux.TmuxSessionNotFoundException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -2800,6 +2802,19 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun lastCreateIfMissingForTest(): Boolean = lastCreateIfMissing
 
+    /**
+     * Issue #998: the most recent [probeServerLiveness] flag passed to
+     * [createTmuxClient]. Exposed for tests because the test client-factory
+     * override keeps its 3-arg shape (so it never sees the flag); this
+     * side-channel lets a test assert the reconnect path requested the
+     * server-death probe (`true`) while the explicit-new path did not (`false`).
+     */
+    @Volatile
+    private var lastProbeServerLiveness: Boolean = false
+
+    @androidx.annotation.VisibleForTesting
+    internal fun lastProbeServerLivenessForTest(): Boolean = lastProbeServerLiveness
+
     private fun createTmuxClient(
         session: SshSession,
         sessionName: String,
@@ -2808,14 +2823,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // genuine cold-restore path passes false so a session killed elsewhere
         // is not resurrected; every create/reconnect/switch path keeps true.
         createIfMissing: Boolean = true,
+        // Issue #998: probe whether the tmux SERVER is alive before `new-session
+        // -A`. True only on a reattach to an expected-existing session (a
+        // reconnect / lifecycle / network-reconnect): a dead server then throws
+        // [TmuxServerDeadException] so we drop to the list instead of silently
+        // booting a fresh empty server. The explicit user "new session" intent
+        // passes false — a brand-new session legitimately wants a fresh server.
+        probeServerLiveness: Boolean = false,
     ): TmuxClient {
         lastCreateIfMissing = createIfMissing
+        lastProbeServerLiveness = probeServerLiveness
         return tmuxClientFactoryOverride?.invoke(session, sessionName, startDirectory)
             ?: tmuxClientFactory.create(
                 session,
                 sessionName = sessionName,
                 startDirectory = startDirectory,
                 createIfMissing = createIfMissing,
+                probeServerLiveness = probeServerLiveness,
             )
     }
 
@@ -4283,9 +4307,15 @@ public class TmuxSessionViewModel @Inject constructor(
         // through. So the controller signal MUST honor the SAME liveness gate: when the
         // old transport is proven alive we report NO handoff to the controller, keeping
         // it Live (no overlay), in lockstep with [reduceNetworkChanged].
-        val realValidatedHandoff = change.previousValidated?.let { previous ->
-            !previous.hasSameNetworkIdentityAs(change.current)
-        } ?: false
+        // Issue #997: the bare-loss / restore signal is ORTHOGONAL to the #548
+        // validated-identity handoff — it must NOT be reported to the controller
+        // as a `validatedHandoff` (that flag is the identity-change overlay path).
+        // The loss/restore arms drive the UI via the loss-hold + the restore's
+        // own `scheduleAutoReconnect` → `setConnectionState`.
+        val realValidatedHandoff = change.kind == TerminalNetworkChangeKind.ValidatedIdentityChange &&
+            (change.previousValidated?.let { previous ->
+                !previous.hasSameNetworkIdentityAs(change.current)
+            } ?: false)
         connectionManager.observeNetworkChanged(
             validatedHandoff = realValidatedHandoff && !isTransportKeepAliveProvenAliveRecently(),
         )
@@ -4298,6 +4328,15 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (target != null) suppressNetworkTransportProvenAlive(change, target)
             ConnectionDecision.ScheduleNetworkReconnect ->
                 if (target != null) scheduleNetworkReconnect(change, target)
+            // Issue #997: a bare network LOSS — hold the lease, suspend probes,
+            // surface "reconnecting"; do NOT churn or tear down (frequently
+            // transient). A RESTORE — drive a FAST reconnect even from a
+            // non-Connected (loss-suspended) state, bypassing the proven-alive
+            // gate (a real loss means the old socket is dead).
+            ConnectionDecision.HoldNetworkLost ->
+                if (target != null) holdNetworkLost(change, target)
+            ConnectionDecision.ScheduleNetworkReconnectOnRestore ->
+                if (target != null) scheduleNetworkReconnectOnRestore(change, target)
             else -> Unit
         }
         // NOTE: the network-change reconnect/coalesce decision is INLINE EFFECT
@@ -4562,6 +4601,138 @@ public class TmuxSessionViewModel @Inject constructor(
             "classification" to "proactive_network_handoff",
             "deferredFromBackground" to change.deferredFromBackground,
             "activeAttempt" to activeAttachMilestone?.attempt,
+        )
+        unregisterCurrentClient()
+        scheduleAutoReconnect(
+            target = target,
+            reason = reconnectReason,
+            trigger = TmuxConnectTrigger.NetworkReconnect,
+        )
+    }
+
+    /**
+     * Issue #997: the [ConnectionDecision.HoldNetworkLost] body. A bare network
+     * LOSS (`onLost` / airplane mode) was observed proactively. We do NOT tear the
+     * lease down — a loss is frequently transient (pocket, elevator) — but we DO
+     * surface the calm "reconnecting" band immediately so the user is not staring
+     * at a live-but-dead session, and we suspend the keepalive probe loop for the
+     * loss window. The probe loop self-suspends: [shouldRunLivenessProbe] only
+     * fires when the controller is `Live`, and flipping to `Reconnecting` here
+     * closes that gate — so probes stop churning writes into the dead socket
+     * without a separate suspend flag. Recovery is driven by the matching
+     * [scheduleNetworkReconnectOnRestore] when validation returns.
+     */
+    private fun holdNetworkLost(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-loss-hold reason=$reason " +
+                "cause=bare-network-loss " +
+                "current=${change.current.logValue} " +
+                targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_loss_hold",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "classification" to "bare_network_loss",
+            "reconnect" to false,
+            "probesSuspended" to true,
+            "leaseHeld" to true,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_loss_decision",
+            outcome = "hold",
+            cause = "bare_network_loss",
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "bare_network_loss",
+            "deferredFromBackground" to change.deferredFromBackground,
+        )
+        // Surface the calm "reconnecting" band WITHOUT launching a redial loop
+        // (the lease is held; recovery fires on restore). A reconnect already in
+        // flight is filtered out by the reducer, so this never clobbers a ladder.
+        setConnectionState(
+            ConnectionState.Reconnecting(
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                attempt = 0,
+                maxAttempts = 0,
+                retryDelayMs = 0L,
+                reason = "Network lost; waiting for it to come back.",
+            ),
+        )
+    }
+
+    /**
+     * Issue #997: the [ConnectionDecision.ScheduleNetworkReconnectOnRestore] body.
+     * Validation RETURNED after a loss — drive a FAST reconnect via the existing
+     * `scheduleAutoReconnect` ladder (D28: NO new reconnect path). Unlike
+     * [scheduleNetworkReconnect] this does NOT require a `Connected` status (it
+     * recovers a loss-suspended / `Reconnecting` session — the whole point) and it
+     * BYPASSES the proven-alive ride-through (a real loss means the old socket is
+     * already dead). `target` is the held [activeTarget]/[connectingTarget].
+     */
+    private fun scheduleNetworkReconnectOnRestore(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        lifecycleReattachNetworkCoalesce = null
+        val reconnectReason =
+            "Network restored; reconnecting ${target.user}@${target.host}:${target.port}."
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-restore-reconnect reason=$reason " +
+                targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_restore_reconnect_start",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "classification" to "network_restored_fast_reconnect",
+            "reconnect" to true,
+            "bypassedProvenAlive" to true,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_reconnect_decision",
+            outcome = "schedule_reconnect",
+            cause = "network_restored",
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "network_restored_fast_reconnect",
+            "deferredFromBackground" to change.deferredFromBackground,
         )
         unregisterCurrentClient()
         scheduleAutoReconnect(
@@ -5210,6 +5381,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.sessionName,
                 target.startDirectory,
                 createIfMissing = createIfMissingForTrigger(trigger),
+                // Issue #998: a reconnect/lifecycle/network reattach expects the
+                // server to already be running, so probe for server-death and
+                // refuse the silent `new-session -A` resurrection if it is gone.
+                probeServerLiveness = trigger.isReconnectTrigger,
             )
             activeTarget = target
             refreshReconnectAvailability()
@@ -5437,7 +5612,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // reconnect would just re-run the same gone-session attach. Surface
             // "that session ended" and drop the user to the list instead of
             // resurrecting it.
-            if (t is TmuxSessionNotFoundException) {
+            if (t is TmuxServerDeadException) {
+                // Issue #998: the remote tmux SERVER is gone (host reboot / OOM /
+                // kill-server). Every session vanished. Do NOT route this through
+                // the auto-reconnect ladder — `new-session -A` would boot a fresh
+                // empty server and silently resurrect a blank "Connected" session
+                // (the data-loss-looking bug). Surface "the server restarted —
+                // all sessions ended" and drop to the host/session list.
+                failServerDied(target, attempt, startedAtMs, t)
+            } else if (t is TmuxSessionNotFoundException) {
                 failSessionEnded(target, attempt, startedAtMs, t)
             } else {
                 failConnectAttempt(
@@ -5499,6 +5682,61 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         setConnectionState(
             ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
+        )
+        _sessionEnded.tryEmit(target.sessionName)
+    }
+
+    /**
+     * Issue #998: terminal handling for a reattach that found the remote tmux
+     * SERVER gone (host reboot / OOM / `kill-server`). Sibling of
+     * [failSessionEnded] — the difference is the *scope* of the loss: a dead
+     * server means EVERY session vanished, not one. Like [failSessionEnded] this
+     * does NOT preserve a reconnect target, does NOT auto-reconnect, and does NOT
+     * `new-session -A`-resurrect (which on a dead server boots a brand-new empty
+     * server — exactly the silent-resurrection bug). We tear the half-open
+     * connection down, evict the runtime lease, surface a server-death
+     * [ConnectionState.Unreachable] message, and emit the one-shot [sessionEnded]
+     * event so the Screen drops to the host/session list (which already renders
+     * the empty `no server running` state correctly) and clears the persisted
+     * last-session snapshot.
+     */
+    private suspend fun failServerDied(
+        target: ConnectionTarget,
+        attempt: Int,
+        startedAtMs: Long,
+        cause: TmuxServerDeadException,
+    ) {
+        lastConnectFailureCause = cause
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-server-died host=${target.host} session=${target.sessionName} " +
+                "${targetLogFields(target)} attempt=$attempt — server gone, dropping to list, not recreating",
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "reconnect_server_died",
+            "attempt" to attempt,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "cause" to cause.javaClass.simpleName,
+            "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
+        )
+        withContext(NonCancellable) {
+            closeCurrentConnectionAndJoin(
+                cacheEviction = RuntimeCacheEviction.TargetRuntime(target.toRuntimeKey()),
+            )
+        }
+        activeAttachMilestone = null
+        activeTarget = null
+        connectingTarget = null
+        refreshReconnectAvailability()
+        setConnectionState(
+            ConnectionState.Unreachable(
+                "The tmux server on ${target.hostName} restarted — all sessions ended.",
+            ),
         )
         _sessionEnded.tryEmit(target.sessionName)
     }
@@ -6436,6 +6674,8 @@ public class TmuxSessionViewModel @Inject constructor(
             when (current.javaClass.simpleName) {
                 "UserAuthException" -> return "authentication failed"
                 "UnknownHostException" -> return "host could not be resolved"
+                // Issue #998: server-death — all sessions ended, recreate one.
+                "TmuxServerDeadException" -> return "the tmux server restarted — all sessions ended"
             }
             if (current.message?.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true) == true) {
                 return "private key file not found"
@@ -7629,6 +7869,12 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.ReaderEof,
             TmuxDisconnectReason.ReaderException,
             TmuxDisconnectReason.CommandTimeout,
+            // Issue #998: a mid-session `%exit server exited` should kick the
+            // reconnect path — NOT to silently resurrect, but because that path
+            // now runs the server-liveness preflight that detects the dead server
+            // and routes to failServerDied (drop to the list). Auto-reconnecting
+            // here is what gives us the chance to classify and recover gracefully.
+            TmuxDisconnectReason.ServerExited,
             -> true
             TmuxDisconnectReason.ExplicitClose,
             TmuxDisconnectReason.ExplicitDetach,
@@ -7646,6 +7892,7 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
             TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
             TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
         // The user/host/port comes from the target; for the degenerate target-less
@@ -7668,6 +7915,7 @@ public class TmuxSessionViewModel @Inject constructor(
             TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
             TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
             TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
             TmuxDisconnectReason.Unknown -> "Disconnected"
         }
         return "$prefix from ${target.user}@${target.host}:${target.port}; reconnecting."
@@ -15540,6 +15788,29 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Schedule a proactive reconnect for a real validated network handoff. */
         data object ScheduleNetworkReconnect : ConnectionDecision
 
+        /**
+         * Issue #997: a bare availability LOSS (`onLost` / airplane mode). Hold
+         * the lease, surface the calm "reconnecting" band, and suspend the
+         * keepalive probe loop so it does not churn writes into a dead socket
+         * during the loss window. Does NOT tear the lease down — a loss is
+         * frequently transient (pocket, elevator); the matching
+         * [ScheduleNetworkReconnectOnRestore] drives recovery when validation
+         * returns. This replaces the pre-#997 behavior where a clean loss was
+         * invisible to the proactive path and only noticed ~90s later by the
+         * keepalive ride-through.
+         */
+        data object HoldNetworkLost : ConnectionDecision
+
+        /**
+         * Issue #997: validation RETURNED after a loss. Drive a FAST reconnect
+         * via the existing `scheduleAutoReconnect` ladder — even from a
+         * non-Connected (loss-suspended / Reconnecting) state, which the
+         * [ScheduleNetworkReconnect] `Connected`-only gate would have ignored —
+         * and BYPASS the proven-alive ride-through (a real loss means the old
+         * socket is already dead, so there is nothing alive to ride through).
+         */
+        data object ScheduleNetworkReconnectOnRestore : ConnectionDecision
+
         /** Suppress: not a real validated handoff (#548). */
         data object SuppressNetworkNotValidated : ConnectionDecision
 
@@ -15611,6 +15882,32 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
         if (!appActive) return ConnectionDecision.Ignore
+
+        // Issue #997: the orthogonal bare-loss / restore signal, classified BEFORE
+        // the #548 validated-identity-change gates (which require a Connected
+        // status and would `Ignore` a loss-suspended session — the whole gap this
+        // closes). A loss/restore is only meaningful when there is a session to
+        // hold or recover.
+        when (change.kind) {
+            TerminalNetworkChangeKind.NetworkLost -> {
+                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
+                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+                // Don't disturb an in-flight reconnect ladder; it already owns the UI.
+                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
+                return ConnectionDecision.HoldNetworkLost
+            }
+            TerminalNetworkChangeKind.NetworkRestored -> {
+                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
+                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+                // A reconnect ladder is already driving recovery — let it run.
+                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
+                // Bypass the proven-alive gate: a real loss means the old socket
+                // is dead, so there is nothing alive to ride through.
+                return ConnectionDecision.ScheduleNetworkReconnectOnRestore
+            }
+            TerminalNetworkChangeKind.ValidatedIdentityChange -> Unit
+        }
+
         if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
         val target = activeTarget ?: connectingTarget ?: return ConnectionDecision.Ignore
@@ -16736,6 +17033,13 @@ private const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
 private val NON_RETRYABLE_FAILURE_CLASS_NAMES: Set<String> = setOf(
     "UserAuthException",
     "UnknownHostException",
+    // Issue #998: a dead tmux server will not come back by retrying the same
+    // attach — every retry would re-detect `no server running` (or worse, on a
+    // host whose tmux DID come back up, silently `new-session -A` a fresh empty
+    // server). So the auto-reconnect ladder must STOP on server-death rather
+    // than burn its 4 rungs; the user lands on the list (failServerDied already
+    // emitted `sessionEnded`) and recreates a session explicitly.
+    "TmuxServerDeadException",
 )
 
 /**

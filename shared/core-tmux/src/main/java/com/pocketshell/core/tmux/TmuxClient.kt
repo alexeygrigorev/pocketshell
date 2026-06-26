@@ -438,6 +438,51 @@ public class TmuxSessionNotFoundException(
     message: String = "tmux session '$sessionName' no longer exists",
 ) : RuntimeException(message)
 
+/**
+ * Issue #998: thrown by [TmuxClient.connect] when a reattach to an
+ * expected-existing session finds that the remote tmux *server* itself is
+ * gone — the host rebooted, OOM-killed tmux, or someone ran `kill-server`.
+ * The `tmux has-session` / `list-sessions` preflight reports
+ * `no server running on <socket>` (exit ≠ 0) in this case.
+ *
+ * This is distinct from [TmuxSessionNotFoundException] (one session ended but
+ * the server is still up): a dead server means EVERY session vanished. It must
+ * NOT be resurrected via `new-session -A`, which on a dead server would boot a
+ * brand-new empty server+session and silently strand the user in a blank
+ * "Connected" shell with their work gone. Callers catch this to surface
+ * "the tmux server restarted — all sessions ended" and drop the user to the
+ * host/session list instead of the silent resurrection.
+ */
+public class TmuxServerDeadException(
+    message: String = "tmux server is no longer running",
+) : RuntimeException(message)
+
+/**
+ * Issue #998: the stderr signature tmux prints to both `has-session` and
+ * `list-sessions` when the control socket has no server behind it (the host
+ * rebooted / OOM / `kill-server`). Matched case-insensitively so a future tmux
+ * wording tweak around the same phrase still classifies as server-death.
+ */
+internal const val TMUX_NO_SERVER_RUNNING_SIGNATURE: String = "no server running"
+
+/**
+ * Issue #998: returns true when [stderr] carries the tmux "server is gone"
+ * signature. Centralised so the reattach preflight, the reader-loop classifier,
+ * and the host session-list gateway all agree on what "server-death" means.
+ */
+internal fun isTmuxServerDeadStderr(stderr: String?): Boolean =
+    stderr?.contains(TMUX_NO_SERVER_RUNNING_SIGNATURE, ignoreCase = true) == true
+
+/**
+ * Issue #998: true when a `%exit` control event's reason announces the SERVER
+ * shutting down (`%exit server exited`), as opposed to a plain client `%exit`.
+ * tmux emits the bare `%exit` for an ordinary client detach and
+ * `%exit server exited` when the server itself is going away. We only treat the
+ * latter as server-death.
+ */
+internal fun isTmuxServerExitReason(reason: String?): Boolean =
+    reason?.contains("server exited", ignoreCase = true) == true
+
 public data class TmuxOutputBacklogOverflow(
     val paneId: String,
     val droppedEvents: Int,
@@ -459,6 +504,11 @@ public enum class TmuxDisconnectReason(public val logValue: String) {
     ReaderEof("reader_eof"),
     ReaderException("reader_exception"),
     CommandTimeout("command_timeout"),
+    // Issue #998: the remote tmux SERVER announced shutdown in-band
+    // (`%exit server exited`) before the channel EOFed — host reboot / OOM /
+    // `kill-server`. The reconnect path treats this as server-death (drop to
+    // the list) rather than a transport blip (silent `new-session -A`).
+    ServerExited("server_exited"),
     Unknown("unknown"),
 }
 
@@ -690,6 +740,16 @@ internal class RealTmuxClient(
     // runs a `tmux has-session` preflight and throws [TmuxSessionNotFoundException]
     // for a session killed elsewhere, so a gone session is never resurrected.
     private val createIfMissing: Boolean = true,
+    // Issue #998: this connect is a *reattach to an expected-existing* session
+    // (a reconnect / lifecycle-reattach / network-reconnect), so before issuing
+    // the `new-session -A` spawn we probe whether the tmux SERVER is still
+    // running. If it is dead (`no server running on <socket>`), `new-session -A`
+    // would boot a brand-new empty server and silently resurrect a blank
+    // session — data-loss-looking. We throw [TmuxServerDeadException] instead so
+    // the caller drops to the host/session list. The default `false` keeps the
+    // explicit user "new session" intent (and every test that never preflights)
+    // unchanged: a brand-new session legitimately wants a fresh server.
+    private val probeServerLiveness: Boolean = false,
     private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
     // Issue #676 / #576 (P4): seam for the per-command response timeout. When
     // left null, production wires the real idle-deadline gate
@@ -790,6 +850,16 @@ internal class RealTmuxClient(
     @Volatile
     private var readerExitIntent: ReaderExitIntent = ReaderExitIntent.Unknown
 
+    // Issue #998: latched when the reader parses a `%exit server exited` (the
+    // tmux SERVER announcing shutdown) before the channel EOFs. The reader-exit
+    // classifier reads this so a server-death drop is reported as
+    // [ReaderDisconnectCause.ServerExited] — categorically distinct from an
+    // ordinary [ReaderDisconnectCause.ReadEof] transport blip. An ordinary
+    // `%exit` with no "server exited" reason (e.g. a plain client exit) does NOT
+    // set this.
+    @Volatile
+    private var serverExitedInBand: Boolean = false
+
     @Volatile
     private var readerExitCommandKind: String? = null
 
@@ -825,7 +895,14 @@ internal class RealTmuxClient(
         // resurrecting it via the `new-session -A` spawn below. We run this on
         // a separate `exec` channel (not the control shell) so the absence
         // check never touches the control-mode wire and never spawns tmux.
-        if (!createIfMissing) {
+        // Issue #666 (attach-only cold-restore) + Issue #998 (reattach
+        // server-death). Run the `has-session` preflight whenever we are
+        // reattaching to a session we EXPECT to already exist — either an
+        // attach-only cold restore (`!createIfMissing`) or a reconnect/lifecycle
+        // reattach (`probeServerLiveness`). We do NOT run it for the explicit
+        // user "new session" intent (`createIfMissing && !probeServerLiveness`),
+        // which legitimately wants a fresh server if none is running.
+        if (!createIfMissing || probeServerLiveness) {
             val probe = try {
                 withContext(Dispatchers.IO) {
                     session.exec("tmux has-session -t '${escapeSingleQuoted(resolvedSessionName)}'")
@@ -837,11 +914,37 @@ internal class RealTmuxClient(
                 )
             }
             if (probe.exitCode != 0) {
-                Log.i(
-                    ISSUE_105_DIAG_TAG,
-                    "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode}",
-                )
-                throw TmuxSessionNotFoundException(resolvedSessionName)
+                // Issue #998: a dead SERVER (`no server running on <socket>`) is
+                // categorically different from one gone SESSION (`can't find
+                // session`). On a dead server EVERY session vanished, so a
+                // `new-session -A` reattach would silently boot a fresh empty
+                // server — the resurrection bug. Surface it as server-death so
+                // the caller drops to the list and never recreates. We classify
+                // server-death FIRST because it dominates: even on the
+                // attach-only restore path a dead server is server-death, not a
+                // single-session-ended.
+                if (isTmuxServerDeadStderr(probe.stderr)) {
+                    Log.i(
+                        ISSUE_105_DIAG_TAG,
+                        "tmux-server-dead session=$resolvedSessionName exit=${probe.exitCode} " +
+                            "stderr=${probe.stderr.trim()}",
+                    )
+                    throw TmuxServerDeadException()
+                }
+                // Server alive but the target session is gone. On the explicit
+                // reattach path (`createIfMissing && probeServerLiveness`) a
+                // single missing session is the #666 not-the-#998 case: the
+                // server is up, so `new-session -A` recreating that one session
+                // is the correct reconnect behaviour — fall through and attach.
+                // Only the attach-only cold-restore path (`!createIfMissing`)
+                // must refuse to recreate a gone session.
+                if (!createIfMissing) {
+                    Log.i(
+                        ISSUE_105_DIAG_TAG,
+                        "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode}",
+                    )
+                    throw TmuxSessionNotFoundException(resolvedSessionName)
+                }
             }
         }
         // Open the SSH shell and launch the reader. We do not synchronously
@@ -1729,6 +1832,22 @@ internal class RealTmuxClient(
                             inflight = null
                         }
                     }
+                    is ControlEvent.Exit -> {
+                        // Issue #998: the tmux server is shutting down. tmux
+                        // emits `%exit server exited` when the SERVER itself dies
+                        // (host reboot / OOM / `kill-server`) — distinct from a
+                        // plain `%exit` (this client detaching). Latch the
+                        // server-death case so the reader-exit classifier reports
+                        // it as ServerExited and the reconnect path drops to the
+                        // list instead of resurrecting via `new-session -A`.
+                        if (isTmuxServerExitReason(event.reason)) {
+                            serverExitedInBand = true
+                            Log.i(
+                                ISSUE_105_DIAG_TAG,
+                                "tmux-exit-server-died session=$sessionName reason=${event.reason}",
+                            )
+                        }
+                    }
                     else -> Unit
                 }
                 // Always forward non-output events to the bus so external
@@ -1893,6 +2012,12 @@ internal class RealTmuxClient(
             readerExitIntent == ReaderExitIntent.CommandTimeout -> ReaderDisconnectCause.CommandTimeout
             readerExitIntent == ReaderExitIntent.DetachOrReplace -> ReaderDisconnectCause.DetachOrReplace
             closed && readerExitIntent == ReaderExitIntent.LocalClose -> ReaderDisconnectCause.LocalClose
+            // Issue #998: the server announced shutdown in-band before the EOF.
+            // This dominates the generic ReadEof/ReadFailure classification —
+            // it's a confirmed server-death, not an ordinary transport blip —
+            // but stays below our own intentional teardowns (close / detach /
+            // command-timeout) above so a clean local close is never mislabelled.
+            serverExitedInBand -> ReaderDisconnectCause.ServerExited
             source == "read_failure" -> ReaderDisconnectCause.ReadFailure
             source == "eof" -> ReaderDisconnectCause.ReadEof
             closed -> ReaderDisconnectCause.LocalClose
@@ -1920,6 +2045,7 @@ internal class RealTmuxClient(
             ReaderDisconnectCause.LocalClose -> TmuxDisconnectReason.ExplicitClose
             ReaderDisconnectCause.DetachOrReplace -> TmuxDisconnectReason.ExplicitDetach
             ReaderDisconnectCause.CommandTimeout -> TmuxDisconnectReason.CommandTimeout
+            ReaderDisconnectCause.ServerExited -> TmuxDisconnectReason.ServerExited
             ReaderDisconnectCause.ReadEof -> TmuxDisconnectReason.ReaderEof
             ReaderDisconnectCause.ReadFailure -> TmuxDisconnectReason.ReaderException
             ReaderDisconnectCause.Unknown -> TmuxDisconnectReason.Unknown
@@ -1940,6 +2066,10 @@ internal class RealTmuxClient(
             TmuxDisconnectReason.ExplicitClose -> 3
             TmuxDisconnectReason.ExplicitDetach -> 4
             TmuxDisconnectReason.CommandTimeout -> 5
+            // Issue #998: a confirmed in-band server-death is the most
+            // authoritative drop cause — it must not be downgraded to a generic
+            // ReaderEof if the EOF event lands a moment later.
+            TmuxDisconnectReason.ServerExited -> 6
         }
 
     private fun commonDiagnosticFields(): Map<String, Any?> =
@@ -2096,6 +2226,11 @@ internal class RealTmuxClient(
         LocalClose("local_close"),
         DetachOrReplace("detach_or_replace"),
         CommandTimeout("command_timeout"),
+        // Issue #998: the in-band `%exit server exited` arrived before the EOF —
+        // the tmux SERVER announced it is shutting down (host reboot / kill).
+        // This is server-death, NOT an ordinary transport blip, so a reattach
+        // must drop to the list instead of resurrecting via `new-session -A`.
+        ServerExited("server_exited"),
         ReadEof("read_eof"),
         ReadFailure("read_failure"),
         Unknown("unknown"),

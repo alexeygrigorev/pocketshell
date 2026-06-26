@@ -1017,6 +1017,16 @@ public fun TmuxSessionScreen(
         viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
     }
 
+    // Issue #989: surface Redraw feedback as a Toast so tapping Redraw with no
+    // live client (dropped / reconnecting) tells the user it can't act right now
+    // instead of silently doing nothing ("I clicked it three times and nothing
+    // happened"). On the happy path Redraw emits NO feedback — it just reseeds.
+    LaunchedEffect(viewModel) {
+        viewModel.redrawFeedback.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // Route inline-dictation transcripts into the currently focused pane.
     // The collector re-binds whenever the focused pane or dictation mode
     // changes so we always write into the pane the user is looking at, not

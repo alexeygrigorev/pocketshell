@@ -610,6 +610,22 @@ public class TmuxSessionViewModel @Inject constructor(
         _sessionCreateError.asSharedFlow()
 
     /**
+     * Issue #989: one-shot user-visible feedback for the manual Redraw kebab item.
+     * Before this, Redraw silently no-op'd (logged + returned) when there was no
+     * live client / the client was disconnected / no active target — so to the
+     * maintainer it read as "Redraw is broken" ("I clicked it three times and
+     * nothing happened"). The Screen collects this and shows a Toast so the user
+     * learns Redraw can't act right now (reconnecting), instead of staring at an
+     * unchanged screen wondering if the feature works. Buffered (replay-less,
+     * extra capacity) so a tap that happens while no collector is bound is not
+     * lost.
+     */
+    private val _redrawFeedback: MutableSharedFlow<String> =
+        MutableSharedFlow(extraBufferCapacity = 4)
+    public val redrawFeedback: SharedFlow<String> =
+        _redrawFeedback.asSharedFlow()
+
+    /**
      * Issue #626: called by the Screen when the unified pager settles on a
      * page. If the pane belongs to a different session, emit a
      * [sessionSwitchRequest] so the Screen triggers a warm switch.
@@ -3484,14 +3500,18 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun redrawActivePane() {
         val client = clientRef ?: run {
             Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip no-client")
+            // Issue #989: surface the no-op so Redraw never silently does nothing.
+            _redrawFeedback.tryEmit(REDRAW_UNAVAILABLE_MESSAGE)
             return
         }
         if (client.disconnected.value) {
             Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip client-disconnected")
+            _redrawFeedback.tryEmit(REDRAW_UNAVAILABLE_MESSAGE)
             return
         }
         val target = activeTarget ?: run {
             Log.i(ISSUE_145_RECONNECT_TAG, "tmux-redraw-skip no-target")
+            _redrawFeedback.tryEmit(REDRAW_UNAVAILABLE_MESSAGE)
             return
         }
         Log.i(
@@ -3579,7 +3599,19 @@ public class TmuxSessionViewModel @Inject constructor(
         if (!freshlySeededAndPainted) {
             // UNCONDITIONAL full-viewport restore of the active pane (id-tagged via the
             // guard) — NOT gated on `visibleScreenIsBlank()`, so a partial blank is healed.
-            seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = false)
+            // Issue #989: FORCE the app to repaint first (`send-keys C-l`) so an idle
+            // alt-screen agent re-emits its full frame BEFORE we capture — otherwise the
+            // capture is near-blank and the seed would clear visible content to black.
+            // This single chokepoint feeds manual Redraw, the within-grace reattach, the
+            // no-op-resize heal, and the reflow completion — so all four recover content,
+            // never clear-to-black.
+            seedPaneFromCapture(
+                client,
+                activePane,
+                refreshGuard,
+                recordMilestone = false,
+                forceAgentRepaint = true,
+            )
         }
         // Then run the existing blank-net backstop over any OTHER visible pane that came
         // back fully blank (a no-op for the active pane just restored above).
@@ -9128,6 +9160,21 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #989 (test seam): drive [reseedActivePaneForReattach] directly against
+     * the supplied guard (typically [currentRuntimeGuardForTest]) — the SAME
+     * chokepoint the within-grace foreground reattach, the no-op-resize heal, and
+     * the reflow completion use. Lets a JVM test prove the attach/return reseed
+     * forces a repaint and is non-destructive without driving the whole
+     * background→foreground lifecycle. A no-op when the guard is null. Passthrough,
+     * no production logic.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun reseedActivePaneForReattachForTest(guard: RuntimeRefreshGuard?) {
+        val refreshGuard = guard ?: return
+        reseedActivePaneForReattach(refreshGuard, skipWhenFreshlySeeded = false)
+    }
+
+    /**
      * EPIC #687 slice 2 (#717) test seam: deterministically reproduce the
      * SAME-DIMENSION resize short-circuit of [maybeRefreshControlClientSize] —
      * the production branch where a composer/keyboard dismissal after a
@@ -9769,6 +9816,15 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshGuard: RuntimeRefreshGuard?,
         recordMilestone: Boolean,
         maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
+        // Issue #989: when true, FORCE the app in the pane to repaint its full
+        // frame (`send-keys C-l`) BEFORE the first capture, then settle, so an
+        // idle alternate-screen agent (which never re-emits its existing frame on
+        // its own) hands tmux a fresh full grid to capture — instead of a near-
+        // blank one that the seed would clear the visible content to black with.
+        // Only the manual-Redraw / attach-reseed chokepoint
+        // ([reseedActivePaneForReattach]) sets this; the cold-open preload leaves
+        // it false to avoid paying the repaint round-trip on every fresh pane.
+        forceAgentRepaint: Boolean = false,
     ): Boolean {
         // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
         // round-trip so a concurrent reseed net (the pager-settle
@@ -9777,6 +9833,24 @@ public class TmuxSessionViewModel @Inject constructor(
         // so the genuine #662 black-window heal still fires once no seed is pending.
         panesSeedInFlightThisAttach.add(pane.paneId)
         try {
+            // Issue #989: ask the app to repaint BEFORE we capture. `send-keys C-l`
+            // is geometry-stable (no window reflow, so it cannot momentarily strip
+            // the idle frame the way a `refresh-client -C` size-nudge can) and is
+            // honored by every well-behaved TUI. Best-effort: a failure here is
+            // harmless because the non-destructive swap in [seedPaneFromCaptureOnce]
+            // keeps the last frame if the subsequent capture is still near-blank.
+            val runtimeStillCurrent = refreshGuard == null || isCurrentRuntime(refreshGuard)
+            if (forceAgentRepaint && runtimeStillCurrent && !client.disconnected.value) {
+                runCatching {
+                    withContext(seedIoDispatcher) {
+                        client.forceFullRepaint(pane.paneId)
+                    }
+                }
+                // Give the app a beat to emit its fresh redraw before we capture.
+                // The runtime-guard re-check at the top of the loop aborts a
+                // superseded reseed even if this settle is mid-flight.
+                delay(FORCE_REPAINT_SETTLE_MS)
+            }
             var attempt = 0
             while (true) {
                 if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
@@ -9927,6 +10001,29 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
         if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+            return false
+        }
+        // Issue #989 — NON-DESTRUCTIVE swap. `toTerminalViewportBytes` prepends a
+        // `CSI 2J` clear, so painting an idle alt-screen agent's near-blank-but-
+        // non-empty capture would wipe the visible content to black (the #989
+        // Redraw-to-black / attach-stays-black symptom). The `isEmpty()` guard
+        // above only catches a TRULY empty capture; this catches the near-blank
+        // one. Refuse to paint a capture that would clear an existing content-rich
+        // frame — return false so the seed loop RE-CAPTURES (giving the forced
+        // `C-l` repaint more time to land); if no good frame ever arrives the last
+        // frame is simply KEPT (never cleared to black). A genuinely black pane's
+        // first real seed is unaffected: the guard only fires when the current
+        // render has materially MORE than the capture would restore.
+        val captureText = captureResponse.output.joinToString(separator = "\n")
+        if (pane.terminalState.captureWouldClearVisibleContent(captureText)) {
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-seed-skip-near-blank-capture pane=${pane.paneId} " +
+                    "window=${pane.windowId} session=${activeTarget?.sessionName} " +
+                    "rendered=${pane.terminalState.renderedNonBlankCharCount()} " +
+                    "captureChars=${captureText.count { !it.isWhitespace() }} " +
+                    "(kept last frame — not cleared to black)",
+            )
             return false
         }
         // Issue #259/#640: the cursor reply arrived in the SAME single-flight
@@ -15964,6 +16061,25 @@ internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
  * without stalling a genuinely-empty pane's reveal.
  */
 internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L
+
+/**
+ * Issue #989: how long [seedPaneFromCapture] waits after sending `send-keys C-l`
+ * (the forced full repaint) before it captures the pane, so the app has a beat to
+ * emit its fresh redraw and tmux's grid holds the real frame at capture time.
+ * Short — an explicit user Redraw / a within-grace reattach can absorb this — and
+ * the empty-capture retry loop covers a slower app, while the non-destructive
+ * swap keeps the last frame if the repaint never lands.
+ */
+internal const val FORCE_REPAINT_SETTLE_MS: Long = 120L
+
+/**
+ * Issue #989: the user-visible message shown when the manual Redraw kebab item is
+ * tapped but Redraw cannot act — there is no live tmux client (dropped /
+ * reconnecting), the client is disconnected, or there is no active target. Surfaced
+ * as a Toast so Redraw never silently no-ops (the maintainer's "I clicked it three
+ * times and nothing happened" report).
+ */
+internal const val REDRAW_UNAVAILABLE_MESSAGE: String = "Can't redraw — reconnecting…"
 
 /**
  * Issue #693/#661: the never-reveal-black guard polls the active (visible) pane

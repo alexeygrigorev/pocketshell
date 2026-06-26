@@ -374,6 +374,19 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#989 — Redraw must NEVER clear-to-black on a NEAR-BLANK remote capture): the
+  # #892 sibling above wipes the LOCAL emulator while the REMOTE tmux grid still holds the
+  # full banner, so its capture-pane returns CONTENT-RICH — it never exercises the #989 root
+  # cause, an IDLE alt-screen agent whose REMOTE grid is itself near-blank. This journey
+  # seeds a genuinely idle near-blank REMOTE pane, feeds a RICH banner LOCALLY (local=rich,
+  # remote=near-blank — the idle-agent mismatch), then TAPS Redraw so the warm capture-pane
+  # comes back near-blank. RED on base (the near-blank capture is painted after a `CSI 2J`
+  # clear → the viewport collapses to black); GREEN with the #989 fix (the non-destructive
+  # swap REFUSES the near-blank capture and KEEPS the last rich frame, and the forced
+  # `send-keys C-l` repaint makes the idle agent re-emit). The missing near-blank-REMOTE
+  # fixture the happy banner-in-remote fixture masked (G10). Deterministic agents:2222 only
+  # (rich frame injected LOCALLY, no toxiproxy), no CI self-skip — belongs in this subset.
+  "$FQCN_PREFIX.RedrawNonDestructiveNearBlankCaptureE2eTest"
   # ADDED (#966/#967 — the DISCRIMINATING render-death-on-a-LIVE-transport journey): the
   # maintainer dogfooded a connected Claude session that went BLACK with only stray
   # FRAGMENTS (a lone cursor, a "3", a scattered status line) while the transport stayed

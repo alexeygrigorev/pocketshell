@@ -647,6 +647,65 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #989 — the NON-DESTRUCTIVE-swap guard for the manual Redraw / attach
+     * reseed. The seed path repaints `capture-pane` into the live buffer with a
+     * leading `CSI 2J` clear (`toTerminalViewportBytes`), so the swap is in-place
+     * and the clear destroys the prior frame BEFORE the new content lands. For an
+     * idle alternate-screen agent (Claude/Codex) a `capture-pane` can come back
+     * near-blank-but-non-empty (whitespace rows + a stray fragment) — it passes
+     * the `output.isEmpty()` guard, so without this gate the clear lands and the
+     * full prior frame is wiped to black-with-fragments (the maintainer's #989
+     * screenshot).
+     *
+     * This returns true — "do NOT paint this capture; keep the last frame" — when
+     * BOTH:
+     *
+     *  1. the fresh capture's visible tail carries near-nothing
+     *     (< [NON_DESTRUCTIVE_SWAP_MIN_CAPTURE_CHARS] non-blank chars), i.e. there
+     *     is no real frame to swap IN; AND
+     *  2. the currently-rendered viewport carries MATERIALLY MORE than the capture
+     *     would restore — so painting it would CLEAR visible content to (near)
+     *     black, a net LOSS.
+     *
+     * It is the inverse discipline of [visibleScreenDivergesFromCapture]: that one
+     * paints only when the capture has substantially MORE than the render (heal a
+     * stale render); this one REFUSES to paint when the capture has substantially
+     * LESS than the render (never clear-to-black). Together the reseed only ever
+     * swaps TOWARD more content.
+     *
+     * Returns false (paint normally) when no emulator is attached, when the
+     * current render is itself (near) blank (a genuinely black pane SHOULD accept
+     * even a sparse capture — there is nothing to lose, and the first real frame
+     * of a freshly-attached black pane must still land), or when the capture
+     * carries a comparable-or-greater amount of content than the render.
+     */
+    fun captureWouldClearVisibleContent(captureText: String): Boolean {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val visibleRows = try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (visibleRows <= 0) return false
+        val captureVisibleNonBlank = captureText
+            .split('\n')
+            .filter { it.isNotBlank() }
+            .takeLast(visibleRows)
+            .sumOf { line -> line.count { !it.isWhitespace() } }
+        // The incoming capture carries real content → swapping it in is safe
+        // (it is not a near-blank wipe). Defer to the normal paint.
+        if (captureVisibleNonBlank >= NON_DESTRUCTIVE_SWAP_MIN_CAPTURE_CHARS) return false
+        val renderedNonBlank = renderedNonBlankCharCount()
+        // The current render carries little/nothing → there is nothing to lose by
+        // painting the (also near-blank) capture. A freshly-attached black pane's
+        // FIRST seed must still land, so a (near) blank render NEVER blocks here.
+        if (renderedNonBlank < NON_DESTRUCTIVE_SWAP_MIN_RENDER_CHARS) return false
+        // The render has materially MORE than this capture would restore → painting
+        // would clear visible content to (near) black. Keep the last frame.
+        return captureVisibleNonBlank * NON_DESTRUCTIVE_SWAP_CLEAR_RATIO < renderedNonBlank
+    }
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid
@@ -901,6 +960,35 @@ class TerminalSurfaceState(
          * and never heals.
          */
         private const val STALE_RENDER_MAX_RENDERED_FRACTION = 0.25
+
+        /**
+         * Issue #989: a fresh `capture-pane` whose visible tail carries FEWER than
+         * this many non-blank chars is treated as "no real frame to swap in" by
+         * [captureWouldClearVisibleContent] — so it cannot clear an existing
+         * content-rich frame to black. An idle alt-screen agent's near-blank
+         * capture (a few stray status fragments) sits well under this floor; a
+         * real frame is hundreds of chars and sails over it.
+         */
+        private const val NON_DESTRUCTIVE_SWAP_MIN_CAPTURE_CHARS = 24
+
+        /**
+         * Issue #989: the current render must carry AT LEAST this many non-blank
+         * chars before [captureWouldClearVisibleContent] will refuse a near-blank
+         * capture. Below this the render is itself (near) black — there is nothing
+         * to lose, and a freshly-attached black pane's first real seed must still
+         * land — so the guard never blocks.
+         */
+        private const val NON_DESTRUCTIVE_SWAP_MIN_RENDER_CHARS = 24
+
+        /**
+         * Issue #989: the render is judged "would be cleared to black" when it
+         * carries MORE than this multiple of the near-blank capture's visible
+         * content. A content-rich frame (hundreds of chars) against a stray-
+         * fragment capture (a handful) is far over this ratio; a render that
+         * already roughly matches the sparse capture sits under it and paints
+         * normally (idempotent re-seed).
+         */
+        private const val NON_DESTRUCTIVE_SWAP_CLEAR_RATIO = 3
     }
 }
 

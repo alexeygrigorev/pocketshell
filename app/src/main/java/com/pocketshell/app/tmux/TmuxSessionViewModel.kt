@@ -26,6 +26,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.LocalAttachmentSidecarRef
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -4283,9 +4284,15 @@ public class TmuxSessionViewModel @Inject constructor(
         // through. So the controller signal MUST honor the SAME liveness gate: when the
         // old transport is proven alive we report NO handoff to the controller, keeping
         // it Live (no overlay), in lockstep with [reduceNetworkChanged].
-        val realValidatedHandoff = change.previousValidated?.let { previous ->
-            !previous.hasSameNetworkIdentityAs(change.current)
-        } ?: false
+        // Issue #997: the bare-loss / restore signal is ORTHOGONAL to the #548
+        // validated-identity handoff — it must NOT be reported to the controller
+        // as a `validatedHandoff` (that flag is the identity-change overlay path).
+        // The loss/restore arms drive the UI via the loss-hold + the restore's
+        // own `scheduleAutoReconnect` → `setConnectionState`.
+        val realValidatedHandoff = change.kind == TerminalNetworkChangeKind.ValidatedIdentityChange &&
+            (change.previousValidated?.let { previous ->
+                !previous.hasSameNetworkIdentityAs(change.current)
+            } ?: false)
         connectionManager.observeNetworkChanged(
             validatedHandoff = realValidatedHandoff && !isTransportKeepAliveProvenAliveRecently(),
         )
@@ -4298,6 +4305,15 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (target != null) suppressNetworkTransportProvenAlive(change, target)
             ConnectionDecision.ScheduleNetworkReconnect ->
                 if (target != null) scheduleNetworkReconnect(change, target)
+            // Issue #997: a bare network LOSS — hold the lease, suspend probes,
+            // surface "reconnecting"; do NOT churn or tear down (frequently
+            // transient). A RESTORE — drive a FAST reconnect even from a
+            // non-Connected (loss-suspended) state, bypassing the proven-alive
+            // gate (a real loss means the old socket is dead).
+            ConnectionDecision.HoldNetworkLost ->
+                if (target != null) holdNetworkLost(change, target)
+            ConnectionDecision.ScheduleNetworkReconnectOnRestore ->
+                if (target != null) scheduleNetworkReconnectOnRestore(change, target)
             else -> Unit
         }
         // NOTE: the network-change reconnect/coalesce decision is INLINE EFFECT
@@ -4562,6 +4578,138 @@ public class TmuxSessionViewModel @Inject constructor(
             "classification" to "proactive_network_handoff",
             "deferredFromBackground" to change.deferredFromBackground,
             "activeAttempt" to activeAttachMilestone?.attempt,
+        )
+        unregisterCurrentClient()
+        scheduleAutoReconnect(
+            target = target,
+            reason = reconnectReason,
+            trigger = TmuxConnectTrigger.NetworkReconnect,
+        )
+    }
+
+    /**
+     * Issue #997: the [ConnectionDecision.HoldNetworkLost] body. A bare network
+     * LOSS (`onLost` / airplane mode) was observed proactively. We do NOT tear the
+     * lease down — a loss is frequently transient (pocket, elevator) — but we DO
+     * surface the calm "reconnecting" band immediately so the user is not staring
+     * at a live-but-dead session, and we suspend the keepalive probe loop for the
+     * loss window. The probe loop self-suspends: [shouldRunLivenessProbe] only
+     * fires when the controller is `Live`, and flipping to `Reconnecting` here
+     * closes that gate — so probes stop churning writes into the dead socket
+     * without a separate suspend flag. Recovery is driven by the matching
+     * [scheduleNetworkReconnectOnRestore] when validation returns.
+     */
+    private fun holdNetworkLost(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-loss-hold reason=$reason " +
+                "cause=bare-network-loss " +
+                "current=${change.current.logValue} " +
+                targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_loss_hold",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "classification" to "bare_network_loss",
+            "reconnect" to false,
+            "probesSuspended" to true,
+            "leaseHeld" to true,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_loss_decision",
+            outcome = "hold",
+            cause = "bare_network_loss",
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "bare_network_loss",
+            "deferredFromBackground" to change.deferredFromBackground,
+        )
+        // Surface the calm "reconnecting" band WITHOUT launching a redial loop
+        // (the lease is held; recovery fires on restore). A reconnect already in
+        // flight is filtered out by the reducer, so this never clobbers a ladder.
+        setConnectionState(
+            ConnectionState.Reconnecting(
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                attempt = 0,
+                maxAttempts = 0,
+                retryDelayMs = 0L,
+                reason = "Network lost; waiting for it to come back.",
+            ),
+        )
+    }
+
+    /**
+     * Issue #997: the [ConnectionDecision.ScheduleNetworkReconnectOnRestore] body.
+     * Validation RETURNED after a loss — drive a FAST reconnect via the existing
+     * `scheduleAutoReconnect` ladder (D28: NO new reconnect path). Unlike
+     * [scheduleNetworkReconnect] this does NOT require a `Connected` status (it
+     * recovers a loss-suspended / `Reconnecting` session — the whole point) and it
+     * BYPASSES the proven-alive ride-through (a real loss means the old socket is
+     * already dead). `target` is the held [activeTarget]/[connectingTarget].
+     */
+    private fun scheduleNetworkReconnectOnRestore(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        val reason = change.reason
+        lifecycleReattachNetworkCoalesce = null
+        val reconnectReason =
+            "Network restored; reconnecting ${target.user}@${target.host}:${target.port}."
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-restore-reconnect reason=$reason " +
+                targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_restore_reconnect_start",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "classification" to "network_restored_fast_reconnect",
+            "reconnect" to true,
+            "bypassedProvenAlive" to true,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_reconnect_decision",
+            outcome = "schedule_reconnect",
+            cause = "network_restored",
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "network_restored_fast_reconnect",
+            "deferredFromBackground" to change.deferredFromBackground,
         )
         unregisterCurrentClient()
         scheduleAutoReconnect(
@@ -15540,6 +15688,29 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Schedule a proactive reconnect for a real validated network handoff. */
         data object ScheduleNetworkReconnect : ConnectionDecision
 
+        /**
+         * Issue #997: a bare availability LOSS (`onLost` / airplane mode). Hold
+         * the lease, surface the calm "reconnecting" band, and suspend the
+         * keepalive probe loop so it does not churn writes into a dead socket
+         * during the loss window. Does NOT tear the lease down — a loss is
+         * frequently transient (pocket, elevator); the matching
+         * [ScheduleNetworkReconnectOnRestore] drives recovery when validation
+         * returns. This replaces the pre-#997 behavior where a clean loss was
+         * invisible to the proactive path and only noticed ~90s later by the
+         * keepalive ride-through.
+         */
+        data object HoldNetworkLost : ConnectionDecision
+
+        /**
+         * Issue #997: validation RETURNED after a loss. Drive a FAST reconnect
+         * via the existing `scheduleAutoReconnect` ladder — even from a
+         * non-Connected (loss-suspended / Reconnecting) state, which the
+         * [ScheduleNetworkReconnect] `Connected`-only gate would have ignored —
+         * and BYPASS the proven-alive ride-through (a real loss means the old
+         * socket is already dead, so there is nothing alive to ride through).
+         */
+        data object ScheduleNetworkReconnectOnRestore : ConnectionDecision
+
         /** Suppress: not a real validated handoff (#548). */
         data object SuppressNetworkNotValidated : ConnectionDecision
 
@@ -15611,6 +15782,32 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
         if (!appActive) return ConnectionDecision.Ignore
+
+        // Issue #997: the orthogonal bare-loss / restore signal, classified BEFORE
+        // the #548 validated-identity-change gates (which require a Connected
+        // status and would `Ignore` a loss-suspended session — the whole gap this
+        // closes). A loss/restore is only meaningful when there is a session to
+        // hold or recover.
+        when (change.kind) {
+            TerminalNetworkChangeKind.NetworkLost -> {
+                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
+                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+                // Don't disturb an in-flight reconnect ladder; it already owns the UI.
+                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
+                return ConnectionDecision.HoldNetworkLost
+            }
+            TerminalNetworkChangeKind.NetworkRestored -> {
+                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
+                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
+                // A reconnect ladder is already driving recovery — let it run.
+                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
+                // Bypass the proven-alive gate: a real loss means the old socket
+                // is dead, so there is nothing alive to ride through.
+                return ConnectionDecision.ScheduleNetworkReconnectOnRestore
+            }
+            TerminalNetworkChangeKind.ValidatedIdentityChange -> Unit
+        }
+
         if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
         val target = activeTarget ?: connectingTarget ?: return ConnectionDecision.Ignore

@@ -552,6 +552,25 @@ JOURNEY_CLASSES=(
   # Reconnect raises the Reconnecting band); GREEN once the #981 liveness gate rides the
   # proven-alive transport through. Same deterministic agents:2222 fixture; runs on CI.
   "$FQCN_PREFIX.StableWifiNoSpuriousReconnectE2eTest"
+  # ADDED (#997, network sub-cluster after #995/#981): the BARE-NETWORK-LOSS
+  # proactive-detection + fast-reconnect-on-restore journey. The pre-#997 detector
+  # returned null for any non-validated snapshot (TerminalNetworkObserver.kt:328)
+  # AND for a same-identity restore (:333), so a clean drop (onLost / airplane
+  # mode) produced NO TerminalNetworkChange at all — the only thing that noticed
+  # was the ~90s keepalive ride-through or sshj EOF, both reactive and slow,
+  # leaving the UI on a live-but-dead session. This journey opens a real `tmux -CC`
+  # session and drives a bare LOSS then a same-identity RESTORE DETERMINISTICALLY by
+  # pushing synthetic NoValidatedNetwork → Validated snapshots through the PRODUCTION
+  # TerminalNetworkObserver detector + emit pipeline (the AVD can't enter airplane
+  # mode without killing the test ADB link — the #780 synthetic-inject model, no
+  # self-skip). HARD-asserts: the loss surfaces a NetworkLost + the VM HOLDS the
+  # lease with NO redial churn during the loss window (network_loss_hold recorded);
+  # the same-identity restore surfaces a NetworkRestored and fires a FAST
+  # network_restore_reconnect_start well inside the ~90s budget; the session settles
+  # back to Connected with a painted viewport. RED on base (loss + same-identity
+  # restore both swallowed → no NetworkLost, no fast reconnect); GREEN after #997.
+  # Same deterministic agents:2222 fixture; runs on CI.
+  "$FQCN_PREFIX.BareNetworkLossRestoreReconnectE2eTest"
   # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
   # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
   # reproduces the #964 budget mismatch on the plain deterministic agents:2222

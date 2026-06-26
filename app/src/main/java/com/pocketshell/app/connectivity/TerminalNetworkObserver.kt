@@ -133,19 +133,27 @@ class TerminalNetworkObserver @Inject constructor(
         reason: String,
     ): TerminalNetworkChange? {
         val change = detector.update(snapshot = snapshot, reason = reason) ?: return null
+        // Issue #997: the trail outcome is kind-aware so a bare loss / restore is
+        // visible in the device trail (not mislabelled as a validated handoff).
+        val outcome = when (change.kind) {
+            TerminalNetworkChangeKind.NetworkLost -> "network_lost"
+            TerminalNetworkChangeKind.NetworkRestored -> "network_restored"
+            TerminalNetworkChangeKind.ValidatedIdentityChange -> "validated_default_changed"
+        }
         Log.i(
             TAG,
-            "terminal-network-change sequence=${change.sequence} reason=${change.reason} " +
+            "terminal-network-change kind=${change.kind} sequence=${change.sequence} " +
+                "reason=${change.reason} " +
                 "previous=${change.previous.logValue} current=${change.current.logValue}",
         )
         DiagnosticEvents.record(
             "network",
-            "validated_default_changed",
+            outcome,
             *change.networkDiagnosticFields(),
         )
         ReconnectCauseTrail.record(
             stage = "network_callback",
-            outcome = "validated_default_changed",
+            outcome = outcome,
             cause = reason,
             "sequence" to change.sequence,
             "previousNetworkHandle" to change.previous.networkHandle,
@@ -194,7 +202,44 @@ data class TerminalNetworkChange(
     val reason: String,
     val sequence: Long,
     val deferredFromBackground: Boolean = false,
+    /**
+     * Issue #997: the event class. The detector models two ORTHOGONAL signals:
+     *
+     * - [TerminalNetworkChangeKind.ValidatedIdentityChange] — the original #548
+     *   signal: the default network's validated *identity* changed while never
+     *   losing validation (WIFI→CELLULAR handoff, VPN up/down). The proven-alive
+     *   ride-through (#981) and the same-identity suppression (#875) apply here.
+     * - [TerminalNetworkChangeKind.NetworkLost] — a bare availability LOSS
+     *   (`onLost` / airplane mode / `onUnavailable`): the default network dropped
+     *   to no-validated-network. Surfaced IMMEDIATELY so the UI can flip to
+     *   reconnecting and probes can suspend, but it does NOT tear the lease down
+     *   (a loss is frequently transient — pocket, elevator). The pre-#997 detector
+     *   swallowed this entirely (`return null` on any non-validated snapshot), so a
+     *   clean drop was only noticed reactively ~90s later by the keepalive.
+     * - [TerminalNetworkChangeKind.NetworkRestored] — validation returned after a
+     *   loss. Drives a FAST reconnect even from a non-Connected (loss-suspended)
+     *   state, even when the restored identity equals the pre-loss one (the
+     *   airplane-mode round-trip the pre-#997 detector also swallowed at `:333`).
+     *   A real loss means the old socket is dead, so this BYPASSES the
+     *   proven-alive gate.
+     */
+    val kind: TerminalNetworkChangeKind = TerminalNetworkChangeKind.ValidatedIdentityChange,
 )
+
+/**
+ * Issue #997: the orthogonal event classes a [TerminalNetworkChange] can carry.
+ * See [TerminalNetworkChange.kind].
+ */
+enum class TerminalNetworkChangeKind {
+    /** The default network's validated identity changed (the #548 handoff). */
+    ValidatedIdentityChange,
+
+    /** A bare availability loss — surfaced immediately, lease held, no churn. */
+    NetworkLost,
+
+    /** Validation returned after a loss — drives a fast reconnect. */
+    NetworkRestored,
+}
 
 sealed interface TerminalNetworkSnapshot {
     val logValue: String
@@ -220,6 +265,7 @@ sealed interface TerminalNetworkSnapshot {
 internal fun TerminalNetworkChange.networkDiagnosticFields(): Array<Pair<String, Any?>> =
     arrayOf(
         "sequence" to sequence,
+        "kind" to kind.name,
         "reason" to reason,
         "previous" to previous.logValue,
         "current" to current.logValue,
@@ -333,19 +379,72 @@ internal class TerminalNetworkChangeDetector(
         initial as? TerminalNetworkSnapshot.Validated
     private var sequence: Long = 0L
 
+    /**
+     * Issue #997: the second, orthogonal state machine — whether the default
+     * network is currently in a bare-LOSS window (no validated network). Set
+     * when a [TerminalNetworkChangeKind.NetworkLost] is emitted, cleared when a
+     * [TerminalNetworkChangeKind.NetworkRestored] is emitted. Like the identity
+     * state it lives UNDER the same `lock` (#995): concurrent `onLost`/
+     * `onAvailable` binder callbacks must see one another's writes so a loss is
+     * surfaced exactly once and the matching restore reconnects exactly once.
+     */
+    private var lost: Boolean = false
+
     fun update(
         snapshot: TerminalNetworkSnapshot,
         reason: String,
     ): TerminalNetworkChange? = synchronized(lock) {
         val previous = current
         val previousValidated = lastValidated
+
+        // Issue #997: the bare availability-LOSS / RESTORE signal, orthogonal to
+        // the #548 validated-identity-change signal below. Evaluated FIRST so a
+        // loss/restore is surfaced even when the identity-change path would have
+        // swallowed it (a non-validated snapshot, or a same-identity restore).
+        if (snapshot !is TerminalNetworkSnapshot.Validated) {
+            // Transition into the loss window. Idempotent: repeated
+            // NoValidatedNetwork callbacks while already lost emit nothing (no
+            // churn during the loss). `current` is still advanced so the identity
+            // state stays coherent for the eventual restore.
+            current = snapshot
+            if (lost) return@synchronized null
+            lost = true
+            sequence += 1L
+            return@synchronized TerminalNetworkChange(
+                previous = previous,
+                current = snapshot,
+                previousValidated = previousValidated,
+                reason = reason,
+                sequence = sequence,
+                kind = TerminalNetworkChangeKind.NetworkLost,
+            )
+        }
+        if (lost) {
+            // Validation returned after a loss. Emit RESTORED even when the
+            // restored identity equals the pre-loss one — that same-identity
+            // restore is exactly the airplane-mode round-trip the pre-#997
+            // detector swallowed at `:333`, leaving a dead socket un-recovered.
+            current = snapshot
+            lastValidated = snapshot
+            lost = false
+            sequence += 1L
+            return@synchronized TerminalNetworkChange(
+                previous = previous,
+                current = snapshot,
+                previousValidated = previousValidated,
+                reason = reason,
+                sequence = sequence,
+                kind = TerminalNetworkChangeKind.NetworkRestored,
+            )
+        }
+
+        // --- The original #548 validated-identity-change signal (unchanged). ---
         if (previous.hasSameNetworkIdentityAs(snapshot)) {
             current = snapshot
-            if (snapshot is TerminalNetworkSnapshot.Validated) lastValidated = snapshot
+            lastValidated = snapshot
             return@synchronized null
         }
         current = snapshot
-        if (snapshot !is TerminalNetworkSnapshot.Validated) return@synchronized null
         if (previousValidated == null) {
             lastValidated = snapshot
             return@synchronized null

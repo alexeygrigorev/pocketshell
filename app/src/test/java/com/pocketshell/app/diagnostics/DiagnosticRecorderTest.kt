@@ -30,6 +30,9 @@ class DiagnosticRecorderTest {
         File(context.filesDir, "diagnostics").deleteRecursively()
         File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR).deleteRecursively()
         settingsRepository = SettingsRepository(context)
+        // Reset the process-global diagnostics sink so a prior test's installed
+        // recorder never leaks reconnect-cause events into this one.
+        DiagnosticEvents.install(DiagnosticEventSink.Noop)
     }
 
     @Test
@@ -49,6 +52,47 @@ class DiagnosticRecorderTest {
 
         assertNotNull(recorder.exportSnapshot())
         assertEquals(1, recorder.readEvents().size)
+    }
+
+    @Test
+    fun `connectionLogJsonl renders only the reconnect-cause trail as jsonl`() = runTest {
+        // Issue #972: the payload the host mirror writes to
+        // ~/.pocketshell/connection-log.jsonl. It must carry the reconnect-cause
+        // breadcrumbs (incl. the named keepalive_dead cause) and NOTHING ELSE
+        // (other diagnostics categories are filtered out), one JSON object per line.
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+        // The reconnect-cause breadcrumbs route through the globally-installed
+        // sink (ReconnectCauseTrail.record -> DiagnosticEvents -> this recorder).
+        DiagnosticEvents.install(recorder)
+        // Unrelated diagnostics noise that must NOT leak into the connection log.
+        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
+        // The reconnect-cause breadcrumbs (what ReconnectCauseTrail records).
+        ReconnectCauseTrail.record(stage = "lease_transport", outcome = "down", cause = "keepalive_dead")
+        ReconnectCauseTrail.record(stage = "tmux_probe", outcome = "ok")
+
+        val jsonl = recorder.connectionLogJsonl()
+
+        val lines = jsonl.split("\n").filter { it.isNotBlank() }
+        assertEquals("only the two reconnect-cause events, not the connect_start", 2, lines.size)
+        lines.forEach { line ->
+            val obj = JSONObject(line)
+            assertEquals(ReconnectCauseTrail.CATEGORY, obj.getString("category"))
+            assertEquals(ReconnectCauseTrail.NAME, obj.getString("name"))
+        }
+        assertTrue(
+            "the named keepalive_dead cause must be carried to the host log",
+            jsonl.contains("keepalive_dead"),
+        )
+    }
+
+    @Test
+    fun `connectionLogJsonl is blank when no reconnect cause recorded`() = runTest {
+        // The mirror treats a blank payload as a no-op (never writes an empty host
+        // file), so a fresh session with no reconnect must produce a blank string.
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
+
+        assertEquals("", recorder.connectionLogJsonl())
     }
 
     @Test

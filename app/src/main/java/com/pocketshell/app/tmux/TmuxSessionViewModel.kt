@@ -278,6 +278,14 @@ public class TmuxSessionViewModel @Inject constructor(
     private val agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
         com.pocketshell.app.agents.AgentKindRemoteSource(),
     private val sessionCardsRemoteSource: SessionCardsRemoteSource = SessionCardsRemoteSource(),
+    // Issue #972: the always-on reconnect-cause flight recorder. Its
+    // [DiagnosticRecorder.connectionLogJsonl] payload is mirrored to the host's
+    // `~/.pocketshell/connection-log.jsonl` over the warm lease right after a
+    // reconnect (the driver's `onTransportReconnected` edge), so the maintainer
+    // can attribute a real-world drop in the in-app file viewer (no adb).
+    // Nullable default keeps the existing unit-test constructors working without
+    // the Hilt singleton; when absent the host mirror is simply skipped.
+    private val diagnosticRecorder: com.pocketshell.app.diagnostics.DiagnosticRecorder? = null,
 ) : ViewModel() {
 
     /**
@@ -929,6 +937,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 classifyPassiveTransportDrop(client) != ConnectionDecision.Ignore
             },
             controlChannelDroppedEffect = { client -> onControllerTransportDropped(client) },
+            // Issue #972: on the current host's lease coming back `Up` after a
+            // reconnect, mirror the recorded reconnect-cause trail to the host's
+            // `~/.pocketshell/connection-log.jsonl` over the now-warm lease so the
+            // just-completed drop is attributable in the in-app file viewer (no
+            // adb). Fail-soft + a blank trail no-ops, so it never perturbs the
+            // live connection.
+            onTransportReconnected = { mirrorConnectionLogToHost() },
         ).also { it.start() }
 
     /**
@@ -15185,6 +15200,90 @@ public class TmuxSessionViewModel @Inject constructor(
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
     )
+
+    /**
+     * The [com.pocketshell.app.sessions.LeaseSessionTarget] for this connection,
+     * byte-identical to the lease key the session screens use (so a borrow reuses
+     * the warm transport, not a fresh handshake). Used by the #972 host
+     * connection-log mirror.
+     */
+    private fun ConnectionTarget.toLeaseSessionTarget(): com.pocketshell.app.sessions.LeaseSessionTarget =
+        com.pocketshell.app.sessions.LeaseSessionTarget(
+            hostId = hostId,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+            passphrase = passphrase,
+        )
+
+    /**
+     * Issue #972 — wire the host connection-log mirror to its trigger. Fired by the
+     * [ConnectionEffectDriver] right after the current host's lease transport comes
+     * back `Up` (a reconnect promoted the controller to Live): mirror the recorded
+     * reconnect-cause trail ([DiagnosticRecorder.connectionLogJsonl]) to the host's
+     * `~/.pocketshell/connection-log.jsonl` over the now-warm lease, so the
+     * maintainer can attribute the just-completed drop in the in-app file viewer
+     * with no adb (#969 part 3 was a tested-but-unwired writer; this is the wiring).
+     *
+     * FAIL-SOFT all the way: a missing recorder, no active target, a blank trail,
+     * or any host-write error is a silent no-op — the mirror NEVER perturbs the
+     * live connection. The write runs on [viewModelScope] off the driver's collect
+     * so the transport-edge collector is never blocked by the host round-trip.
+     */
+    private fun mirrorConnectionLogToHost() {
+        val recorder = diagnosticRecorder ?: return
+        val target = activeTarget ?: return
+        val leaseTarget = target.toLeaseSessionTarget()
+        viewModelScope.launch {
+            // runCatching is belt-and-braces so a surprise never escapes onto
+            // viewModelScope; the shared body is itself fail-soft.
+            runCatching { mirrorConnectionLogToHostBody(recorder, leaseTarget) }
+        }
+    }
+
+    /**
+     * The fail-soft mirror body shared by the production fire-and-forget
+     * [mirrorConnectionLogToHost] and the connected-test seam
+     * [mirrorConnectionLogToHostForTest]. Reads the recorder's reconnect-cause
+     * trail and, when non-blank, writes it to the host over the warm lease via
+     * [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] (itself
+     * `Result.failure` fail-soft, never a throw except cancellation). Returns the
+     * mirror's [Result] (the absolute remote path on success, `null` when the
+     * trail was blank so no write happened).
+     */
+    private suspend fun mirrorConnectionLogToHostBody(
+        recorder: com.pocketshell.app.diagnostics.DiagnosticRecorder,
+        leaseTarget: com.pocketshell.app.sessions.LeaseSessionTarget,
+    ): Result<String?> {
+        val jsonl = runCatching { recorder.connectionLogJsonl() }.getOrNull().orEmpty()
+        if (jsonl.isBlank()) return Result.success(null)
+        return com.pocketshell.app.diagnostics.ConnectionLogHostMirror.mirror(
+            leaseManager = sshLeaseManager,
+            target = leaseTarget,
+            jsonl = jsonl,
+        )
+    }
+
+    /**
+     * Issue #972 connected-test seam. Drives the EXACT production mirror glue —
+     * `activeTarget` → [toLeaseSessionTarget] (the byte-identical lease-key
+     * mapping) → the warm-lease write — synchronously and returns the
+     * [ConnectionLogHostMirror][com.pocketshell.app.diagnostics.ConnectionLogHostMirror]
+     * `Result` so a Docker journey can assert the host file actually lands over
+     * the warm lease (a wrong lease-key field mapping would dial a fresh handshake
+     * or fail outright — the exact "wired but the host file never lands" regression
+     * this issue closes). Returns `Result.failure` when there is no recorder or no
+     * active target, exactly like the fire-and-forget production path returns early.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun mirrorConnectionLogToHostForTest(): Result<String?> {
+        val recorder = diagnosticRecorder
+            ?: return Result.failure(IllegalStateException("no diagnosticRecorder"))
+        val target = activeTarget
+            ?: return Result.failure(IllegalStateException("no activeTarget"))
+        return mirrorConnectionLogToHostBody(recorder, target.toLeaseSessionTarget())
+    }
 
     private fun ConnectionTarget.sessionCardsTargetKey(): String =
         sessionCardsTargetKey(

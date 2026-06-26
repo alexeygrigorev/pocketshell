@@ -98,6 +98,28 @@ class DiagnosticRecorder @Inject constructor(
         }
     }
 
+    /**
+     * The reconnect-cause breadcrumbs ([ReconnectCauseTrail]) rendered as JSONL —
+     * one JSON object per line, the same on-disk encoding the rolling diagnostics
+     * file uses. This is the payload
+     * [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] mirrors to the host
+     * so the maintainer can attribute a real-world drop in the in-app file viewer
+     * (#969/#972).
+     *
+     * Blank when nothing has been recorded yet (recording off, or no reconnect):
+     * the mirror treats a blank payload as a no-op so it never writes an empty host
+     * file.
+     */
+    suspend fun connectionLogJsonl(): String {
+        val events = readEvents(
+            DiagnosticEventFilter(
+                category = ReconnectCauseTrail.CATEGORY,
+                name = ReconnectCauseTrail.NAME,
+            ),
+        )
+        return events.joinToString(separator = "\n") { DiagnosticEventJson.encode(it) }
+    }
+
     private suspend fun flush() {
         val done = CompletableDeferred<Unit>()
         commands.send(RecorderCommand.Flush(done))

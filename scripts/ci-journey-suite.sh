@@ -1095,6 +1095,33 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi()) on the load-bearing assertion — process.md
   # F3 / D33). It lives under the com.pocketshell.app.proof prefix.
   "$FQCN_PREFIX.LaunchNoMainThreadRoomReadE2eTest"
+  # ADDED (#972 — D33/G4/G10: prove the host connection-log mirror's VM GLUE on
+  # the real path). The #969-part-3 ConnectionLogHostMirror writer + its driver
+  # wiring landed JVM-tested, but the load-bearing VM glue —
+  # `mirrorConnectionLogToHost()` -> `ConnectionTarget.toLeaseSessionTarget()`,
+  # the BYTE-IDENTICAL lease-key mapping that makes the warm-lease borrow real —
+  # had ZERO coverage of any kind (the writer test used a FAKE lease; the driver
+  # test only counted the callback). A wrong lease-key field mapping would
+  # reproduce the exact "wired but the host file never lands" failure this issue
+  # closes, uncaught. This connected journey drives the REAL production
+  # TmuxSessionViewModel against the deterministic agents:2222 fixture: it seeds a
+  # real reconnect-cause trail in a real DiagnosticRecorder, sets activeTarget to
+  # the agents:2222 host, PRE-WARMS the SSH lease for that exact key (one cold
+  # handshake), then fires the production mirror glue and asserts the host file
+  # `~/.pocketshell/connection-log.jsonl` ACTUALLY LANDS over the WARM lease
+  # (read back over a FRESH independent SSH exec) carrying the seeded keepalive_dead
+  # trail — with ZERO extra handshakes (warm reuse), proving toLeaseSessionTarget()
+  # produced a byte-identical key. The RED guard
+  # (wrongLeaseKeyMappingDoesNotLandOverTheWarmLease) drives the SAME glue through a
+  # deliberately-MISMATCHED key and asserts a SECOND cold handshake fires + the warm
+  # transport is NOT reused — pinning the byte-identical-key property as the
+  # load-bearing assertion (G6/G10). It uses ONLY the deterministic agents:2222
+  # fixture (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222, or the pool-allocated port
+  # under `--pool`) that tests.yml already brings up — no new Docker service/port,
+  # no toxiproxy — and does NOT self-skip on CI (no assumeTrue /
+  # assumeFalse(isRunningOnCi()) on the load-bearing assertions). It lives under
+  # com.pocketshell.app.diagnostics, so it carries its FQCN directly.
+  "com.pocketshell.app.diagnostics.ConnectionLogHostMirrorReconnectDockerTest"
 )
 
 echo "=========================================================="

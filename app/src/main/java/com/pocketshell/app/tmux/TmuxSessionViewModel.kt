@@ -10131,6 +10131,14 @@ public class TmuxSessionViewModel @Inject constructor(
      * the recorded-kind read landed). When [isShell] is false the session is
      * un-marked (an agent / re-classified session must regain its agent surface).
      * Republishes [confirmedShellPaneIds] either way.
+     *
+     * Issue #962: a live agent detection that binds to a pane of this session
+     * re-classifies it out of confirmed-shell via
+     * [clearConfirmedShellOnLiveAgentDetection] (calling this with
+     * `isShell = false`), so a claude/codex/opencode started inside a
+     * shell-recorded session regains its Conversation toggle. A recorded-shell
+     * read that re-marks the session is harmless: if a live agent is present the
+     * next detection bind clears it again; a genuine shell stays marked (#894).
      */
     private fun applyRecordedShellVerdict(sessionId: String, isShell: Boolean) {
         val key = sessionId.trim()
@@ -10160,6 +10168,47 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         if (changed || isShell) refreshConfirmedShellPaneIds()
+    }
+
+    /**
+     * Issue #962: a live agent detection just bound to [paneId] — re-classify its
+     * session out of [confirmedShellSessionIds] because the high-confidence live
+     * signal outranks a stale recorded `@ps_agent_kind=shell`. Idempotent and
+     * cheap; a no-op when the session was not confirmed-shell. This is the single
+     * AUTHORITATIVE override point (driven by the real detection event, not the
+     * unreliable wrapper `comm`), so the Conversation toggle returns for a
+     * claude/codex/opencode started inside a shell-recorded session.
+     */
+    private fun clearConfirmedShellOnLiveAgentDetection(paneId: String) {
+        val sessionId = paneRows[paneId]?.sessionId?.trim().orEmpty()
+        if (sessionId.isEmpty()) return
+        if (!confirmedShellSessionIds.contains(sessionId)) return
+        applyRecordedShellVerdict(sessionId = sessionId, isShell = false)
+    }
+
+    /**
+     * Issue #962: a session recorded `@ps_agent_kind=shell` (a plain shell the
+     * user/kind-picker classified as shell) maps the recorded kind to null →
+     * the FOREIGN resolver, whose host-daemon kind guess is ONE-SHOT cached per
+     * session. If that guess fired BEFORE an agent was started inside the shell
+     * it cached "no agent", and the one-shot rule would then never re-probe — so
+     * a `claude`/`codex`/`opencode` later started in the pane would never bind a
+     * live source. For a CONFIRMED-SHELL session we therefore bust the one-shot
+     * foreign-guess cache before each detection so the daemon (which classifies
+     * via the pane's `/proc` comm+cmdline — e.g. the `…/claude` path token, NOT
+     * the wrapper `comm`) re-evaluates and binds the live agent. Once it binds,
+     * [markAgentTailLive] → [clearConfirmedShellOnLiveAgentDetection] re-classifies
+     * the session out of confirmed-shell so the Conversation toggle returns.
+     *
+     * Cheap + idempotent. A genuine shell re-probes and the daemon returns "no
+     * agent" again (no flap — the #894 invariant holds; no detection ever binds,
+     * so the confirmed-shell verdict is never cleared).
+     */
+    private fun refreshForeignGuessForConfirmedShellPane(pane: TmuxPaneState) {
+        val sessionKey = pane.sessionId.trim()
+        if (sessionKey.isEmpty()) return
+        if (!confirmedShellSessionIds.contains(sessionKey)) return
+        sessionForeignKindGuessCache.remove(sessionKey)
     }
 
     /**
@@ -10362,6 +10411,12 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentTailGenerations.remove(pane.paneId)
         paneAgentInputs[pane.paneId] = input
+        // Issue #962: for a recorded-`shell` session, bust the one-shot foreign
+        // kind-guess cache before probing so the daemon re-evaluates and can bind
+        // an agent started INSIDE the shell (the one-shot guess may have cached
+        // "no agent" before the agent launched). On a positive bind,
+        // markAgentTailLive re-classifies the session out of confirmed-shell.
+        refreshForeignGuessForConfirmedShellPane(pane)
         val paneId = pane.paneId
         val guard = refreshGuard ?: RuntimeRefreshGuard(
             generation = connectGeneration,
@@ -12269,6 +12324,19 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             if (updated == current) conversations else conversations + (paneId to updated)
         }
+        // Issue #962: a live agent detection just bound to [paneId]. If that
+        // pane's session was recorded `@ps_agent_kind=shell` (a plain shell the
+        // user/kind-picker classified as shell, with claude/codex/opencode then
+        // started INSIDE it), the durable recorded-shell verdict
+        // ([confirmedShellSessionIds]) would otherwise keep `presumedAgent` false
+        // and collapse the Conversation toggle for the life of the session. The
+        // AUTHORITATIVE live-detection event outranks the stale recorded shell, so
+        // re-classify the session OUT of confirmed-shell — the symmetric
+        // counterpart of `applyRecordedShellVerdict(isShell = false)`. Hard-cut
+        // (D22): no "recorded shell wins forever" branch remains. A genuine shell
+        // never reaches markAgentTailLive (no detection ever binds), so the #894
+        // no-flap invariant is preserved.
+        clearConfirmedShellOnLiveAgentDetection(paneId)
         rememberAgentStatusForPane(paneId)
         scanAgentConversationEventsForPortOffers(paneId, initialEvents)
     }

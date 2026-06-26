@@ -8069,6 +8069,103 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // Issue #962 — a live agent started INSIDE a session recorded
+    // `@ps_agent_kind=shell` must regain its agent surface (and the Conversation
+    // toggle). The recorded-shell verdict (#894) publishes the pane as
+    // confirmed-shell, which collapses `presumedAgent` and hides the toggle for
+    // the life of the session — the maintainer's exact dogfood report. The fix:
+    // the AUTHORITATIVE live-detection event re-classifies the session OUT of
+    // confirmed-shell. This deterministic reproduction injects the exact state
+    // machine the on-device journey exercises (the Docker fixture cannot make the
+    // host daemon classify a non-cgroup-scoped process, so per D33 the failing
+    // state is injected synthetically and hard-asserted, never self-skipped).
+    //
+    // RED on base: confirmedShell stays set after the live detection binds (the
+    // override absent). GREEN: confirmedShell is cleared, so the toggle returns.
+    // Class coverage (G2): claude / codex / opencode + the no-flap control.
+
+    @Test
+    fun liveAgentDetectionClearsConfirmedShellSoConversationToggleReturns() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newClaudeDetection)
+    }
+
+    @Test
+    fun liveCodexDetectionClearsConfirmedShellInRecordedShellSession() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newCodexDetection)
+    }
+
+    @Test
+    fun liveOpenCodeDetectionClearsConfirmedShellInRecordedShellSession() = runTest(scheduler) {
+        assertConfirmedShellClearedByLiveAgent(::newOpenCodeDetection)
+    }
+
+    private fun TestScope.assertConfirmedShellClearedByLiveAgent(
+        detectionFactory: () -> AgentDetection,
+    ) {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        // The session is recorded `@ps_agent_kind=shell` (a plain shell the
+        // user/kind-picker classified as shell). The pane is published
+        // confirmed-shell → the Conversation toggle is hidden (presumedAgent
+        // collapses). This is the durable state the maintainer hit.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "#962 precondition: a recorded-shell pane is published confirmed-shell " +
+                "(the state that hides the Conversation toggle)",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+
+        // A live agent runtime is detected INSIDE the shell-recorded pane (the
+        // user started claude/codex/opencode). On base (no fix) confirmedShell
+        // stays set and the toggle stays hidden; the fix re-classifies the
+        // session out of confirmed-shell on this authoritative detection event.
+        vm.markAgentTailLiveForTest("%0", detectionFactory())
+        runCurrent()
+
+        assertFalse(
+            "#962: a live agent detection in a recorded-shell session must clear the " +
+                "confirmed-shell verdict so presumedAgent returns and the Conversation " +
+                "toggle reappears (RED on base — confirmedShell stays set)",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        // The pane now carries the live agent detection (the parsed conversation
+        // surface), proving the toggle reaches a real source, not an empty tab.
+        assertEquals(
+            "#962: the live agent detection is bound to the pane",
+            detectionFactory().agent,
+            vm.agentConversations.value["%0"]?.detection?.agent,
+        )
+    }
+
+    @Test
+    fun genuineRecordedShellWithNoAgentKeepsConfirmedShellNoFlap() = runTest(scheduler) {
+        // Issue #962 adjacency / #894 no-flap invariant: a GENUINE recorded shell
+        // (no live agent detection ever binds) must STAY confirmed-shell — the
+        // #962 override must not resurrect the "fresh shell flashes Conversation"
+        // regression. No markAgentTailLive is ever called here (no agent), so the
+        // confirmed-shell verdict is never cleared.
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "#894: a genuine recorded shell is published confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        // A reconcile / re-seed must NOT clear it (no agent detection event).
+        vm.seedPresumedAgentPlaceholderForTest("%0")
+        runCurrent()
+        assertTrue(
+            "#962/#894 no-flap: a genuine recorded shell with NO agent STAYS " +
+                "confirmed-shell (the toggle correctly stays hidden)",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+    }
+
     @Test
     fun terminalDefaultNeverSeedsPlaceholderRegardlessOfShellVerdict() = runTest(scheduler) {
         // G2 class coverage (default = Terminal, both shell and agent): when the

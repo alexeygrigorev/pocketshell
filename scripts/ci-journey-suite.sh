@@ -602,6 +602,26 @@ JOURNEY_CLASSES=(
   # local-only flaky-reconnect evidence). Target the single @Test method by
   # FQCN#method so the CI-gated reconnect cases are NOT selected here.
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"
+  # ADDED (#962, conversation-source area — sibling of #819/#821/#894, D31/D32):
+  # a live agent (claude/codex/opencode) started INSIDE a session recorded
+  # `@ps_agent_kind=shell` must regain its Terminal <-> Conversation TOGGLE. On
+  # base the recorded-shell verdict (#894) collapses presumedAgent for the life of
+  # the session, hiding the toggle (the maintainer's exact dogfood report). The
+  # LOAD-BEARING reproduction (G6/D33 red->green, class-covering claude/codex/
+  # opencode + the no-flap control) is the DETERMINISTIC JVM
+  # TmuxSessionViewModelTest.liveAgentDetectionClearsConfirmedShellSoConversationToggleReturns
+  # (the Docker agents fixture cannot make the host agent-kind daemon classify a
+  # process — it gates on a cgroup-v2 scope the non-systemd container lacks, so a
+  # recorded-shell pane cannot bind a live detection in-fixture; per D33 that
+  # unenterable state is injected synthetically and hard-asserted in JVM, never
+  # self-skipped). THIS connected journey gates the active-rework ADJACENCY the
+  # fix must preserve: a recorded-shell session with NO agent shows NO toggle on
+  # the real TmuxSessionScreen (the #894 no-flap invariant — a recorded shell must
+  # not flash the Conversation tab). It uses ONLY agents:2222
+  # (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that tests.yml already brings up,
+  # and does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())).
+  # Lives under com.pocketshell.app.tmux.
+  "com.pocketshell.app.tmux.ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /

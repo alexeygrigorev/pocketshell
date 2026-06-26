@@ -1018,7 +1018,6 @@ public class TmuxSessionViewModel @Inject constructor(
             intervalMs = LivenessProbeTestOverride.intervalMs(),
             perProbeTimeoutMs = LivenessProbeTestOverride.perProbeTimeoutMs(),
             failureThreshold = LivenessProbeTestOverride.failureThreshold(),
-            maxKeepAliveDeferrals = LivenessProbeTestOverride.maxKeepAliveDeferrals(),
             log = { line -> Log.i(LIVENESS_PROBE_TAG, line) },
         )
         livenessProbe = probe
@@ -16923,9 +16922,6 @@ internal object LivenessProbeTestOverride {
     @Volatile
     private var failureThresholdOverride: Int? = null
 
-    @Volatile
-    private var maxKeepAliveDeferralsOverride: Int? = null
-
     /**
      * Whether a freshly-constructed VM auto-starts its probe loop. Production +
      * the connected emulator proof keep this TRUE (the loop runs on the real Main
@@ -16945,7 +16941,6 @@ internal object LivenessProbeTestOverride {
         intervalMs: Long?,
         perProbeTimeoutMs: Long?,
         failureThreshold: Int?,
-        maxKeepAliveDeferrals: Int? = null,
     ) {
         require(intervalMs == null || intervalMs > 0) { "intervalMs must be > 0" }
         require(perProbeTimeoutMs == null || perProbeTimeoutMs > 0) {
@@ -16954,17 +16949,13 @@ internal object LivenessProbeTestOverride {
         require(failureThreshold == null || failureThreshold >= 1) {
             "failureThreshold must be >= 1"
         }
-        require(maxKeepAliveDeferrals == null || maxKeepAliveDeferrals >= 1) {
-            "maxKeepAliveDeferrals must be >= 1"
-        }
         intervalMsOverride = intervalMs
         perProbeTimeoutMsOverride = perProbeTimeoutMs
         failureThresholdOverride = failureThreshold
-        maxKeepAliveDeferralsOverride = maxKeepAliveDeferrals
     }
 
     fun clear() {
-        setForTest(null, null, null, null)
+        setForTest(null, null, null)
         autoStartEnabled = true
     }
 
@@ -16975,9 +16966,6 @@ internal object LivenessProbeTestOverride {
 
     fun failureThreshold(): Int =
         failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
-
-    fun maxKeepAliveDeferrals(): Int =
-        maxKeepAliveDeferralsOverride ?: LivenessProbe.DEFAULT_MAX_KEEPALIVE_DEFERRALS
 }
 
 /**

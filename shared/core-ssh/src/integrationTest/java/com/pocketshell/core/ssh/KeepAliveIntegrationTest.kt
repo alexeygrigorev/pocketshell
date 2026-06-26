@@ -9,7 +9,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -593,6 +595,249 @@ class KeepAliveIntegrationTest {
     }
 
     @Test
+    fun keepAliveSurvivesAReplySlowerThanTheReplyBudget() {
+        // Issue #985 — the slow-reply ride-through + no-orphan-leak contract.
+        //
+        // IMPORTANT empirical finding (captured in the status comment): against the
+        // REAL OpenSSH testcontainer a SINGLE reply delayed past the 5s budget then
+        // delivered does NOT permanently desync sshj's FIFO `globalReqPromises`. The
+        // wire is strictly ordered, so the late reply R1 is polled by ITS OWN promise
+        // P1 (FIFO head) and R2 by P2, etc. — the queue stays 1:1. A permanent desync
+        // needs a genuinely LOST reply (a request whose reply never arrives so its
+        // promise sits at the head forever), which a clean ordered byte relay cannot
+        // inject without breaking the MAC'd stream (a hard disconnect, not the silent
+        // desync). So this test pins the fix's OBSERVABLE contract on a slow reply:
+        // (a) the session is NOT torn down, (b) the late reply still bumps the
+        // inbound-activity timestamp (the unbounded `retrieve()` drained its OWN
+        // promise — no orphan-pending leak), and (c) subsequent keepalives keep
+        // answering. It is GREEN on base AND fix for the slow-reply case (both ride
+        // it through); the fix-SPECIFIC red→green proofs are the #983 mutex test
+        // (controlWriteProceedsWhileKeepAliveReplyOutstanding, RED on base) and the
+        // no-leak-on-close assertion below.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            val real = session as RealSshSession
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val deadDeclared = AtomicBoolean(false)
+            val keepAliveSends = AtomicInteger(0)
+            val keepAliveOks = AtomicInteger(0)
+            try {
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        // No reset-on-inbound shortcut: force the loop to actually
+                        // PING every interval so the slow-reply path is exercised.
+                        override fun lastInboundActivityNanos(): Long = Long.MIN_VALUE
+                        override suspend fun sendKeepAlive(): Boolean {
+                            keepAliveSends.incrementAndGet()
+                            val ok = session.sendKeepAlive()
+                            if (ok) keepAliveOks.incrementAndGet()
+                            return ok
+                        }
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclared.set(true)
+                        }
+                    },
+                    intervalMs = 3_000L,
+                    countMax = 5,
+                )
+                keepAlive.start(ioScope)
+
+                // Let a couple of healthy keepalives land first.
+                runBlocking { waitUntil(15_000) { keepAliveOks.get() >= 1 } }
+
+                // Inject a SINGLE slow reply: hold the reply direction ~6s (> the 5s
+                // reply budget) while requests keep flowing — the server answers but
+                // the reply lands late, exactly the #985 trigger. Capture the activity
+                // timestamp before, so we can prove the LATE reply still bumped it (the
+                // unbounded retrieve drained its own promise — no orphan leak).
+                val activityBeforeSlow = real.lastInboundActivityNanosForTest()
+                relay.holdReplyDirectionOnce(6_000L)
+                runBlocking { waitUntil(12_000) { relay.replyHoldElapsed() } }
+
+                // After the slow reply, subsequent keepalives must KEEP answering (the
+                // FIFO is still aligned — no desync) and the inbound-activity timestamp
+                // must have ADVANCED (the late reply was consumed by its own promise).
+                val oksAtHoldEnd = keepAliveOks.get()
+                runBlocking { waitUntil(20_000) { keepAliveOks.get() >= oksAtHoldEnd + 2 } }
+
+                keepAlive.stop()
+
+                assertFalse(
+                    "a reply slower than the reply budget on an otherwise-live link must " +
+                        "NOT tear the transport down (#985). sends=${keepAliveSends.get()} " +
+                        "oks=${keepAliveOks.get()}",
+                    deadDeclared.get(),
+                )
+                assertTrue(
+                    "the session must still be connected after the slow reply (#985)",
+                    session.isConnected,
+                )
+                assertTrue(
+                    "subsequent keepalives must KEEP answering after the slow reply — the " +
+                        "FIFO promise queue must NOT have desynced (oksAtHoldEnd=" +
+                        "$oksAtHoldEnd oksNow=${keepAliveOks.get()})",
+                    keepAliveOks.get() >= oksAtHoldEnd + 2,
+                )
+                assertTrue(
+                    "the LATE reply must have bumped the inbound-activity timestamp — the " +
+                        "unbounded retrieve drained its OWN promise (no orphan-pending leak, " +
+                        "#985). before=$activityBeforeSlow after=" +
+                        "${real.lastInboundActivityNanosForTest()}",
+                    real.lastInboundActivityNanosForTest() != activityBeforeSlow,
+                )
+                // Direct proof the transport is fully usable post-recovery.
+                assertTrue(
+                    "a direct keepalive must answer after the slow-reply window (#985)",
+                    runBlocking { session.sendKeepAlive() },
+                )
+            } finally {
+                ioScope.cancel()
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
+    fun keepAliveReplyWaitDoesNotLeakAJobAcrossClose() {
+        // Issue #985 — the no-orphan-leak invariant the unbounded-retrieve fix MUST
+        // preserve (the reviewer-required "no retrieve() job leaks across teardown"
+        // check). On a genuinely dead/half-open peer the keepalive's unbounded
+        // `retrieve()` job blocks forever waiting for a reply that never comes. The
+        // fix launches it on the session scope, so close() (scope.cancel()) MUST reap
+        // it — the blocking sshj wait runs inside runInterruptible, which a scope
+        // cancel interrupts. We assert close() returns promptly (the pending job does
+        // not wedge teardown) and a subsequent keepalive on the closed session is a
+        // clean miss, not a hang/crash.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            try {
+                // Fire a keepalive whose reply is held → its unbounded retrieve job is
+                // left pending after the local 5s budget elapses (returns a miss).
+                relay.holdReplyDirectionOnce(30_000L)
+                val miss = runBlocking {
+                    withTimeoutOrNull(8_000) { session.sendKeepAlive() }
+                }
+                assertEquals(
+                    "a keepalive whose reply is held past the budget must return a miss " +
+                        "(false) within the budget, not hang (#985)",
+                    false,
+                    miss,
+                )
+                // Now close while the retrieve job is still pending. close() must NOT
+                // block on the forever-pending retrieve — scope.cancel() interrupts it.
+                val closeStart = System.nanoTime()
+                session.close()
+                val closeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closeStart)
+                assertTrue(
+                    "close() must return promptly even with a pending keepalive retrieve " +
+                        "job — the job must be reaped by scope.cancel(), not leaked/wedging " +
+                        "teardown (#985). closeMs=$closeMs",
+                    closeMs < 5_000L,
+                )
+                assertFalse(
+                    "a keepalive on the closed session must be a clean miss, not a hang",
+                    runBlocking { withTimeoutOrNull(3_000) { session.sendKeepAlive() } } ?: false,
+                )
+            } finally {
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
+    fun controlWriteProceedsWhileKeepAliveReplyOutstanding() {
+        // Issue #983 (reproduce-first, the mutex-hold root cause). The keepalive
+        // send used to hold the single-writer TransportDispatcher mutex across the
+        // blocking reply wait (`tryRetrieve(5s)` INSIDE `dispatcher.run { }`), so a
+        // slow keepalive reply froze EVERY `-CC` control write behind it for up to
+        // 5s. The fix holds the mutex ONLY for the wire write and awaits the reply
+        // OUTSIDE it.
+        //
+        // We hold the reply direction so a keepalive reply is outstanding, fire
+        // sendKeepAlive() on one coroutine, and on another assert a `-CC`-style
+        // CONTROL WRITE (`shell.stdin.write`, a pure dispatcher op that needs NO
+        // reply) completes QUICKLY (< 1.5s) WHILE the keepalive reply is still
+        // parked. The stdin write is the faithful proxy for the symptom: the
+        // keepalive that froze every `-CC` control write was the maintainer's pain.
+        // We deliberately do NOT use exec() here — exec's OWN output also flows in
+        // the held reply direction, so it cannot complete fast regardless of the
+        // mutex. A write-only control op isolates the mutex-contention symptom.
+        // RED on base: the write blocks ~5s behind the held mutex
+        // (`tryRetrieve(5s)` ran INSIDE `dispatcher.run { }`).
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            try {
+                // Warm the connection with a healthy round-trip first.
+                runBlocking {
+                    assertEquals(
+                        "warm exec must round-trip before the test",
+                        0,
+                        session.exec("true").exitCode,
+                    )
+                }
+                session.startShell().use { shell ->
+                    // Park the reply direction for 6s (> the 5s reply budget) so a
+                    // keepalive fired now has an OUTSTANDING reply the whole time.
+                    relay.holdReplyDirectionOnce(6_000L)
+
+                    runBlocking {
+                        // Fire the keepalive on its own coroutine — its reply is now
+                        // parked behind the held reply direction.
+                        val keepAliveJob = async { session.sendKeepAlive() }
+                        // Give the keepalive a beat to issue its global-request write
+                        // and (on base) enter its mutex-held reply wait.
+                        delay(300)
+
+                        // Concurrently issue a `-CC`-style control WRITE (stdin write
+                        // = a pure dispatcher op, no reply needed). With the mutex no
+                        // longer held across the reply wait it acquires the mutex and
+                        // completes fast; on base it blocks ~5s behind the keepalive.
+                        val writeStart = System.nanoTime()
+                        val wrote = withTimeoutOrNull(4_000) {
+                            runInterruptible(Dispatchers.IO) {
+                                shell.stdin.write("echo ps983-x\n".toByteArray(Charsets.UTF_8))
+                                shell.stdin.flush()
+                            }
+                            true
+                        }
+                        val writeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - writeStart)
+
+                        assertTrue(
+                            "a `-CC` control write (stdin) must complete WHILE a keepalive " +
+                                "reply is outstanding — it must NOT block behind the dispatcher " +
+                                "mutex (#983). It took ${writeMs}ms (null=timed out).",
+                            wrote != null,
+                        )
+                        assertTrue(
+                            "the control write completed in ${writeMs}ms — it must be well " +
+                                "under the 5s reply budget the mutex used to hold (#983). RED on " +
+                                "base: ~5s while the keepalive reply is parked behind the mutex.",
+                            writeMs < 1_500L,
+                        )
+
+                        // The keepalive itself eventually returns (a miss on the local
+                        // no-activity budget, or an answer once the held reply lands) —
+                        // either way it must not crash.
+                        runCatching { withTimeoutOrNull(12_000) { keepAliveJob.await() } }
+                    }
+                }
+            } finally {
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
     fun keepAliveCadenceDoesNotCorruptTheTransportOver100s() {
         // The #847 GUARD (acceptance #3): a real session held > 100s with the
         // transport keepalive cadence ON, under concurrent exec churn + shell
@@ -736,6 +981,12 @@ class KeepAliveIntegrationTest {
  *  - [resume]: forward bytes again.
  *  - [cut]: close all live tunnels and refuse new accepts (a hard dead peer) —
  *    the genuinely-dead-peer case.
+ *  - [holdReplyDirectionOnce]: hold ONLY the server→client (REPLY) direction for
+ *    a bounded window ONCE, while client→server (REQUESTS) keep flowing normally,
+ *    then resume — the #985 single-slow-reply case. The request still reaches the
+ *    server (so sshj keeps enqueuing reply promises into its FIFO) but the reply
+ *    is delayed past the keepalive's local reply budget, which on base orphans the
+ *    promise and desyncs the FIFO.
  */
 private class PausableTcpRelay(
     private val targetHost: String,
@@ -750,6 +1001,11 @@ private class PausableTcpRelay(
     private val paused = AtomicBoolean(false)
     private val cut = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
+    // #985 — when > 0, the REPLY direction (server→client) holds bytes until this
+    // monotonic [System.nanoTime] deadline; armed exactly ONCE by
+    // [holdReplyDirectionOnce] and cleared the moment it elapses.
+    private val replyHoldUntilNanos = AtomicLong(0L)
+    private val replyHoldArmed = AtomicBoolean(false)
     private val tunnels = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
     private var acceptThread: Thread? = null
 
@@ -780,8 +1036,10 @@ private class PausableTcpRelay(
             }
             tunnels.add(client)
             tunnels.add(upstream)
-            val a = pump(client, upstream)
-            val b = pump(upstream, client)
+            // client→upstream is the REQUEST direction; upstream→client is the
+            // REPLY direction (the only one [holdReplyDirectionOnce] holds).
+            val a = pump(client, upstream, isReplyDirection = false)
+            val b = pump(upstream, client, isReplyDirection = true)
             runCatching { a.join() }
             runCatching { b.join() }
             tunnels.remove(client)
@@ -791,12 +1049,13 @@ private class PausableTcpRelay(
         }
     }
 
-    private fun pump(from: Socket, to: Socket): Thread =
+    private fun pump(from: Socket, to: Socket, isReplyDirection: Boolean): Thread =
         thread(isDaemon = true) {
             val buf = ByteArray(16 * 1024)
             try {
                 val input = from.getInputStream()
                 val output = to.getOutputStream()
+                from.soTimeout = 100
                 while (!closed.get() && !cut.get()) {
                     // While paused, hold the bytes (do NOT read) — a half-open
                     // starve: the socket stays established, the peer just goes
@@ -805,25 +1064,31 @@ private class PausableTcpRelay(
                         Thread.sleep(50)
                         continue
                     }
-                    if (input.available() <= 0) {
-                        // Avoid a busy spin while still being responsive to a
-                        // pause/cut transition; a short blocking read with a
-                        // timeout keeps latency low without burning CPU.
-                        from.soTimeout = 100
-                        val n = try {
-                            input.read(buf)
-                        } catch (e: java.net.SocketTimeoutException) {
-                            continue
-                        }
-                        if (n < 0) break
-                        output.write(buf, 0, n)
-                        output.flush()
-                    } else {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        output.write(buf, 0, n)
-                        output.flush()
+                    // A short blocking read with a timeout keeps latency low without
+                    // burning CPU and stays responsive to a pause/cut transition.
+                    val n = try {
+                        input.read(buf)
+                    } catch (e: java.net.SocketTimeoutException) {
+                        continue
                     }
+                    if (n < 0) break
+                    // #985 — hold the REPLY direction for the armed window. Critically
+                    // the hold is checked AFTER the read (just before forwarding) and
+                    // BUFFERS the already-read bytes until the window elapses, so a
+                    // reply that lands mid-read is STILL delayed (the earlier
+                    // before-read-only check let a reply in an in-flight read slip
+                    // through, which is why the hold appeared ineffective). Bytes are
+                    // forwarded in order, so the reply lands late but intact.
+                    if (isReplyDirection) {
+                        while (!closed.get() && !cut.get() &&
+                            replyHoldUntilNanos.get() > System.nanoTime()
+                        ) {
+                            Thread.sleep(25)
+                        }
+                    }
+                    if (closed.get() || cut.get()) break
+                    output.write(buf, 0, n)
+                    output.flush()
                 }
             } catch (t: Throwable) {
                 // tunnel broken — let the join() finish and clean up.
@@ -832,6 +1097,23 @@ private class PausableTcpRelay(
 
     fun pause() { paused.set(true) }
     fun resume() { paused.set(false) }
+
+    /**
+     * #985 — hold the REPLY direction (server→client) for [ms] milliseconds ONCE,
+     * starting now. Requests (client→server) keep flowing the whole time, so the
+     * server receives the keepalive global request and answers it — but the answer
+     * is buffered at the relay until the window elapses. Idempotent per arming: a
+     * second call before the first window elapses extends it. Used to inject a
+     * single reply slower than the keepalive's local reply budget.
+     */
+    fun holdReplyDirectionOnce(ms: Long) {
+        replyHoldArmed.set(true)
+        replyHoldUntilNanos.set(System.nanoTime() + ms * 1_000_000L)
+    }
+
+    /** True once the armed reply-hold window has fully elapsed (the reply resumed). */
+    fun replyHoldElapsed(): Boolean =
+        replyHoldArmed.get() && replyHoldUntilNanos.get() <= System.nanoTime()
 
     fun cut() {
         cut.set(true)

@@ -9,6 +9,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -16,8 +17,11 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
+import net.schmizz.concurrent.Promise
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
+import net.schmizz.sshj.common.SSHPacket
+import net.schmizz.sshj.connection.ConnectionException
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Session.Command
@@ -134,6 +138,25 @@ internal class RealSshSession(
     internal fun lastInboundActivityNanosForTest(): Long = lastInboundActivityNanos
 
     /**
+     * Issue #985/#983 — single-flight guard for the keepalive reply wait. Holds
+     * the throwaway [awaitKeepAliveReply] `retrieve()` coroutine launched for the
+     * most recent ping that has NOT yet completed (the reply has not landed and the
+     * transport has not errored it out). [sendKeepAlive] skips launching a SECOND
+     * `retrieve()` while a prior one is still pending — a still-outstanding reply is
+     * "not yet a fresh confirmation," so we wait on the EXISTING job rather than
+     * stacking an unbounded queue of `retrieve()` coroutines on a slow/dead link
+     * (bounded job growth: at most one pending reply job at a time).
+     *
+     * Crucially this guard ONLY suppresses launching a DUPLICATE `retrieve()`; it
+     * does NOT suppress miss accounting. On a genuinely dead peer the pending job
+     * never completes, so [sendKeepAlive] must STILL return `false` (a miss) once
+     * the local no-activity budget elapses — otherwise the 90s `onKeepAliveDead`
+     * teardown would never fire (see [awaitKeepAliveReply]).
+     */
+    @Volatile
+    private var pendingKeepAliveReply: Job? = null
+
+    /**
      * Why this session's transport went down (issue #969 — reconnect
      * observability). Flipped to [SshSessionCloseCause.KeepaliveDead] by the
      * keepalive watchdog ([TransportKeepAlive.KeepAliveIo.onKeepAliveDead]) the
@@ -227,56 +250,117 @@ internal class RealSshSession(
     }
 
     override suspend fun sendKeepAlive(): Boolean {
-        // Route the global request through the single-writer dispatcher so it is
-        // FIFO-serialized against every other transport op (the #847-safe path).
-        //
-        // OpenSSH does NOT implement the `keepalive@openssh.com` request type, so
-        // it answers with `SSH_MSG_REQUEST_FAILURE` — which sshj surfaces as a
-        // thrown `ConnectionException("Global request [...] failed")` rather than
-        // a returned packet (see ConnectionImpl.gotGlobalReqResponse). That
-        // FAILURE reply STILL proves the peer is alive — it is exactly how
-        // OpenSSH's own client treats its `ServerAliveInterval` ping. So BOTH a
-        // returned packet (REQUEST_SUCCESS) AND the "request failed" exception
-        // (REQUEST_FAILURE) count as proof of life; only a timeout (no reply) or a
-        // genuine transport-death error is a miss.
-        return runCatching {
-            dispatcher.run {
-                if (!isConnected) return@run false
-                val promise = client.connection.sendGlobalRequest(
-                    KEEPALIVE_REQUEST_NAME,
-                    /* wantReply = */ true,
-                    EMPTY_PAYLOAD,
-                )
-                val answered = try {
-                    // A returned packet (REQUEST_SUCCESS) is proof of life; a null
-                    // (timeout — no reply at all) is a miss.
-                    promise.tryRetrieve(
-                        KEEPALIVE_REPLY_TIMEOUT_MS,
-                        java.util.concurrent.TimeUnit.MILLISECONDS,
-                    ) != null
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (t: Throwable) {
-                    // The reader thread delivered an error to this promise. A
-                    // REQUEST_FAILURE response is delivered as the specific
-                    // "Global request [...] failed" ConnectionException — the
-                    // server DID answer, so the peer is ALIVE. Any OTHER error
-                    // (connection lost, MAC failure, transport torn down) is a
-                    // genuine miss.
-                    isKeepAliveServerAnswered(t)
+        if (!isConnected) return false
+
+        // Issue #983 — split the op so the single-writer mutex is held ONLY for the
+        // wire write, never for the multi-second reply wait. The
+        // `keepalive@openssh.com` global request (wantReply=true) is the only
+        // transport-mutating step here; sshj creates+enqueues the reply Promise into
+        // its FIFO `globalReqPromises` ATOMICALLY with the write, under sshj's own
+        // lock. OpenSSH does not implement the request type, so it answers
+        // `SSH_MSG_REQUEST_FAILURE` — which still proves the peer alive (#945).
+        val promise: Promise<SSHPacket, ConnectionException> =
+            runCatching {
+                dispatcher.run {
+                    if (!isConnected) {
+                        null
+                    } else {
+                        client.connection.sendGlobalRequest(
+                            KEEPALIVE_REQUEST_NAME,
+                            /* wantReply = */ true,
+                            EMPTY_PAYLOAD,
+                        )
+                    }
                 }
-                if (answered) {
-                    lastInboundActivityNanos = System.nanoTime()
+            }.getOrElse { t ->
+                if (t is CancellationException) throw t
+                // The send itself (write / dispatcher) failed. A REQUEST_FAILURE that
+                // escaped here still proves the peer answered; otherwise it is a miss.
+                return isKeepAliveServerAnswered(t)
+            } ?: return false
+
+        // Issue #985 — confirm the reply OUTSIDE the mutex with a NON-ORPHANING wait.
+        return awaitKeepAliveReply(promise)
+    }
+
+    /**
+     * Issue #985 + #983 — await the keepalive reply without ever orphaning the sshj
+     * promise and without holding the transport dispatcher mutex.
+     *
+     * sshj's `Promise.tryRetrieve(timeout)` returns `null` on timeout but does NOT
+     * remove the promise from sshj's FIFO `globalReqPromises` queue (sshj exposes no
+     * per-promise cancel). So a single reply slower than a BOUNDED `tryRetrieve`
+     * budget would abandon a promise at the queue HEAD, every subsequent reply would
+     * be delivered to the wrong (already-abandoned) promise, and every keepalive
+     * thereafter would be a structural miss → `onKeepAliveDead` tears a live
+     * transport. That is the #985 self-corruption that never self-heals.
+     *
+     * The fix: launch an UNBOUNDED `promise.retrieve()` on a throwaway coroutine on
+     * the session [scope]. Because the wait is unbounded, the promise is ALWAYS
+     * eventually polled by sshj's reader thread when its reply lands (even at t+30s)
+     * — or woken with an error on `notifyError` (transport death) / cancelled when
+     * the session [scope] is cancelled in [close]. So the queue slot is never
+     * abandoned and the FIFO can never desync. A late reply always polls its OWN
+     * promise.
+     *
+     * Liveness here is derived from [lastInboundActivityNanos] advancing (the reply,
+     * via [recordInboundActivity] below, OR any reader byte), NOT from the bounded
+     * wait — so the wait can be unbounded while the MISS decision stays bounded.
+     *
+     * Miss accounting (the correctness requirement): if the local
+     * [KEEPALIVE_REPLY_TIMEOUT_MS] no-activity budget elapses with no inbound
+     * activity, this returns `false` (a miss) REGARDLESS of whether the
+     * `retrieve()` job is still pending. On a genuinely dead peer the job blocks
+     * forever, so treating "pending" as "not a miss" would silently break dead-peer
+     * detection and the 90s teardown would never fire. The single-flight guard
+     * ([pendingKeepAliveReply]) only suppresses launching a DUPLICATE `retrieve()`,
+     * never the miss.
+     */
+    private suspend fun awaitKeepAliveReply(
+        promise: Promise<SSHPacket, ConnectionException>,
+    ): Boolean {
+        val before = lastInboundActivityNanos
+
+        // Single-flight: only launch a NEW unbounded retrieve when the prior one has
+        // completed. A still-pending reply job means the previous promise's consumer
+        // is still alive (so its queue slot is not abandoned); we do not need — and
+        // must not — stack a second retrieve. We DO still run the local no-activity
+        // budget below, so a dead peer with a perpetually-pending job is still a miss.
+        val existing = pendingKeepAliveReply
+        if (existing == null || existing.isCompleted) {
+            pendingKeepAliveReply = scope.launch {
+                runCatching {
+                    runInterruptible(Dispatchers.IO) {
+                        // UNBOUNDED — never abandons the queue slot. Returns the
+                        // REQUEST_SUCCESS packet, or throws the REQUEST_FAILURE
+                        // ConnectionException (both prove the peer answered), or
+                        // throws a transport-death error / is interrupted on
+                        // scope-cancel (close()/notifyError).
+                        promise.retrieve()
+                    }
+                }.onSuccess {
+                    recordInboundActivity()
+                }.onFailure { t ->
+                    if (isKeepAliveServerAnswered(t)) recordInboundActivity()
                 }
-                answered
             }
-        }.getOrElse { t ->
-            if (t is CancellationException) throw t
-            // The send itself (write / dispatcher) failed, or a non-promise
-            // exception escaped — but a REQUEST_FAILURE that escaped the inner
-            // catch still proves the peer answered. Otherwise it is a miss.
-            isKeepAliveServerAnswered(t)
         }
+
+        // Locally wait up to KEEPALIVE_REPLY_TIMEOUT_MS for the inbound-activity
+        // timestamp to advance (a reply OR any reader byte). "No inbound activity
+        // within the budget" IS the liveness question, and it leaves the promise
+        // intact — the late reply is delivered to its OWN promise, not the next one.
+        val deadline = System.nanoTime() + KEEPALIVE_REPLY_TIMEOUT_MS * 1_000_000L
+        while (System.nanoTime() < deadline) {
+            if (lastInboundActivityNanos != before) return true
+            if (!isConnected) return false
+            delay(KEEPALIVE_POLL_MS)
+        }
+        // A miss — but the orphan-free retrieve job is STILL pending, so the late
+        // reply (if any) is delivered to its OWN promise. Returning false here even
+        // while the job is pending is REQUIRED so a genuinely dead peer is declared
+        // dead within the keepalive budget (it never bumps the timestamp).
+        return false
     }
 
     @OptIn(InternalCoroutinesApi::class)
@@ -1506,6 +1590,16 @@ internal const val KEEPALIVE_REQUEST_NAME: String = "keepalive@openssh.com"
  * wall-clock ceiling, so a wedged write can never park the keepalive forever.
  */
 internal const val KEEPALIVE_REPLY_TIMEOUT_MS: Long = 5_000L
+
+/**
+ * Poll cadence for the local no-activity budget in
+ * [RealSshSession.awaitKeepAliveReply] (issue #985). The reply confirmation is
+ * derived from [RealSshSession.lastInboundActivityNanos] advancing (a reply OR any
+ * reader byte) rather than a blocking promise wait, so we sample the timestamp at
+ * this cadence while waiting up to [KEEPALIVE_REPLY_TIMEOUT_MS]. 100ms is fine
+ * granularity for a sub-second healthy round-trip without burning CPU.
+ */
+internal const val KEEPALIVE_POLL_MS: Long = 100L
 
 /** Empty payload for the [KEEPALIVE_REQUEST_NAME] global request (issue #945). */
 private val EMPTY_PAYLOAD: ByteArray = ByteArray(0)

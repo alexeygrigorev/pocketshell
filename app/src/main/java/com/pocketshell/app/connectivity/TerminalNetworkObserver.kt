@@ -305,9 +305,29 @@ private val TRANSPORT_PROBES = listOf(
     TransportProbe(NetworkCapabilities.TRANSPORT_SATELLITE, "SATELLITE", Build.VERSION_CODES.VANILLA_ICE_CREAM),
 )
 
+/**
+ * Issue #995 (#935 H2): `update` is driven directly from concurrent
+ * `ConnectivityManager` binder callbacks (`onAvailable` / `onLost` /
+ * `onCapabilitiesChanged` / `onUnavailable` all dispatch on the framework's
+ * own threads), so two callbacks can enter `update` at once. The detector's
+ * identity state (`current` / `lastValidated` / `sequence`) was mutated with
+ * NO synchronization — a cross-thread race that can either (a) suppress a real
+ * handoff (both threads read the same stale `current`, one wins the write, the
+ * transport-changing snapshot's emission is lost → no reconnect → dead socket)
+ * or (b) tear/duplicate the change (two threads both increment `sequence` off a
+ * stale read → a duplicate/torn emission → spurious reconnect).
+ *
+ * The whole compare-and-mutate (read `current`/`lastValidated`, decide, write
+ * back, bump `sequence`) must be ONE atomic critical section. We guard the
+ * entire body with a single lock so concurrent callbacks serialize: each
+ * `update` sees the result of the previous one, so no handoff is dropped and no
+ * duplicate sequence is emitted. This only makes the state mutation thread-safe
+ * — the handoff POLICY (what counts as a handoff) is unchanged (that is #981).
+ */
 internal class TerminalNetworkChangeDetector(
     initial: TerminalNetworkSnapshot,
 ) {
+    private val lock = Any()
     private var current: TerminalNetworkSnapshot = initial
     private var lastValidated: TerminalNetworkSnapshot.Validated? =
         initial as? TerminalNetworkSnapshot.Validated
@@ -316,27 +336,27 @@ internal class TerminalNetworkChangeDetector(
     fun update(
         snapshot: TerminalNetworkSnapshot,
         reason: String,
-    ): TerminalNetworkChange? {
+    ): TerminalNetworkChange? = synchronized(lock) {
         val previous = current
         val previousValidated = lastValidated
         if (previous.hasSameNetworkIdentityAs(snapshot)) {
             current = snapshot
             if (snapshot is TerminalNetworkSnapshot.Validated) lastValidated = snapshot
-            return null
+            return@synchronized null
         }
         current = snapshot
-        if (snapshot !is TerminalNetworkSnapshot.Validated) return null
+        if (snapshot !is TerminalNetworkSnapshot.Validated) return@synchronized null
         if (previousValidated == null) {
             lastValidated = snapshot
-            return null
+            return@synchronized null
         }
         if (snapshot.hasSameNetworkIdentityAs(previousValidated)) {
             lastValidated = snapshot
-            return null
+            return@synchronized null
         }
         lastValidated = snapshot
         sequence += 1L
-        return TerminalNetworkChange(
+        TerminalNetworkChange(
             previous = previous,
             current = snapshot,
             previousValidated = previousValidated,

@@ -1415,9 +1415,10 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
-        // Issue #745: the queued voice send dispatches with the draft RETAINED
-        // and in-flight; it clears only when the host confirms delivery.
-        assertEquals("Please summarize this", vm.uiState.value.draft)
+        // Issue #971: the queued voice send hands the prompt off to the queue
+        // row, so the editor is CLEARED in flight (single representation);
+        // `sendInFlight` clears when the host confirms delivery.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
@@ -1530,8 +1531,8 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(PromptComposerViewModel.SendRequest("Please summarize this", true)), sends)
-        // Issue #745: draft retained in-flight until delivery is confirmed.
-        assertEquals("Please summarize this", vm.uiState.value.draft)
+        // Issue #971: handed off to the queue row — editor cleared in flight.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
@@ -3125,11 +3126,12 @@ class PromptComposerViewModelTest {
 
     @Test
     fun requestSendInIdleDispatchesDraftAndKeepsItInFlightUntilDelivered() = runTest {
-        // Issue #745: tapping Send dispatches the draft AND flips the composer
-        // into the in-flight state — the typed text is NOT cleared
-        // optimistically. The draft only clears once the host confirms
-        // delivery via [markSendDelivered]. This is the no-flicker contract:
-        // the field never empties before the bytes are actually sent.
+        // Issue #971 (reverses #745): tapping Send dispatches the draft AND hands
+        // it off to the outbound queue — the editor is CLEARED on enqueue so the
+        // prompt is represented EXACTLY ONCE (the "Sending…" row, when a queue
+        // store is wired), never as BOTH editor text AND a queued row.
+        // `sendInFlight` stays true (Send disabled / "Sending…") until the host
+        // confirms delivery via [markSendDelivered].
         val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
         val sent = collectSendRequests(vm)
         vm.onDraftChange("hello shell")
@@ -3140,12 +3142,12 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
         assertEquals("hello shell", sent[0].text)
         assertEquals(false, sent[0].withEnter)
-        // In-flight: the draft is RETAINED and `sendInFlight` is true so the
-        // Send button shows "Sending…".
-        assertEquals("hello shell", vm.uiState.value.draft)
+        // In-flight: the editor is CLEARED (the prompt was handed off) and
+        // `sendInFlight` is true so the Send button shows "Sending…" + is disabled.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
 
-        // Host confirms delivery: now the draft clears and in-flight ends.
+        // Host confirms delivery: in-flight ends, editor still empty.
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
         assertFalse(vm.uiState.value.sendInFlight)
@@ -3210,6 +3212,230 @@ class PromptComposerViewModelTest {
         vm.discardOutboundItem(queueId)
         assertNotNull(queue.item(queueId))
         assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    // -- Issue #971/#987: single-representation + auto-retry on drop -------
+    //
+    // The maintainer's v0.4.18 dogfood + the #987 refinement: while a send is in
+    // flight the same prompt was shown TWICE — still in the editable composer
+    // field AND as a "1 unsent prompt — Sending — <text>" queue row — and on a
+    // DROP the composer stacked contradictory status ("Not sent… send again or
+    // discard" vs "Send will retry once reconnected"). The CANONICAL design
+    // (#987 Option A): on enqueue the editor CLEARS (the queue row is the ONE
+    // representation in flight), Send is disabled in flight; on a drop the prompt
+    // STAYS QUEUED and auto-sends on reconnect (NOT returned to the composer for
+    // manual resend), shown as the SINGLE "Will send when reconnected." status.
+
+    @Test
+    fun issue971_sendInFlightClearsComposerSoPromptShowsExactlyOnce() = runTest {
+        // RED on base: emitSendRequest kept the draft visible (#745) AND
+        // enqueued a "Sending…" row, so the prompt appeared in BOTH the editor
+        // and the queue row at once. GREEN after #971: the editor is cleared on
+        // enqueue, leaving the single queue row as the in-flight representation,
+        // and Send is disabled while in flight.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("/clear")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        // The send is in flight…
+        assertTrue("send should be in flight after Send tap", vm.uiState.value.sendInFlight)
+        // …and exactly ONE representation of the prompt exists: the queue row.
+        // The composer editor is empty (handed off), NOT still holding "/clear".
+        assertEquals(
+            "composer editor must be cleared on enqueue — the queue row is the single representation",
+            "",
+            vm.uiState.value.draft,
+        )
+        // The single queue row carries the prompt.
+        assertEquals(listOf("/clear"), vm.outboundQueueItems.value.map { it.cleanText })
+        assertEquals(1, vm.outboundQueueItems.value.size)
+
+        // Delivery clears the in-flight gate and prunes the row — still empty.
+        vm.markSendDelivered(sent.single())
+        assertFalse(vm.uiState.value.sendInFlight)
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun issue971_droppedSendStaysQueuedForAutoRetryNotReturnedToComposer() = runTest {
+        // RED on base (this worktree's prior #971 fix): markOutboundSendDeferred
+        // did not exist and the drop path called restoreFailedSend, which restored
+        // the draft to the composer AND removed the queue row + stamped a "Not
+        // sent. …send again or discard" error — exactly the #987 contradiction.
+        // GREEN after #987 Option A: a dropped send STAYS QUEUED (single "Will
+        // send when reconnected." row), the composer stays EMPTY (single
+        // representation), and NO "Not sent / send again or discard" error is set.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("/clear")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        val request = sent.single()
+        val queueId = requireNotNull(request.outboundQueueItemId)
+
+        // In flight: editor cleared, single row.
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(1, vm.outboundQueueItems.value.size)
+
+        // The send fails because the connection dropped (the dispatcher's
+        // false/timeout branch routes here).
+        vm.markOutboundSendDeferred(request)
+
+        // (a) The composer stays CLEARED — the prompt is NOT returned to the
+        // editor for a manual resend.
+        assertEquals("", vm.uiState.value.draft)
+        // (b) The prompt is ONE queued "will retry" row, NOT a removed/failed row.
+        val row = requireNotNull(queue.item(queueId))
+        assertEquals(OutboundState.Queued, row.state)
+        assertNull("a deferred (will-retry) row carries no error label", row.lastError)
+        assertEquals(listOf("/clear"), vm.outboundQueueItems.value.map { it.cleanText })
+        assertEquals(1, vm.outboundQueueItems.value.size)
+        // (c) NO contradictory "Not sent / send again or discard" error banner.
+        assertNull(
+            "a drop must show the single 'will retry' status, not a 'Not sent' error",
+            vm.uiState.value.error,
+        )
+        // The consolidated status copy reads "Will send when reconnected."
+        assertEquals(
+            PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE,
+            outboundQueueStateLabel(row),
+        )
+        // In-flight gate cleared so the reconnect flush can re-claim the row.
+        assertFalse(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun issue971_queuedDropAutoSendsOnReconnectFlushExactlyOnce() = runTest {
+        // (d) On reconnect the queued message auto-sends (the #900 flush wired in
+        // TmuxSessionScreen via retryNextOutboundItem). After a drop the row stays
+        // Queued; the flush claims it exactly once and delivery prunes it — no
+        // duplicate, no manual resend needed.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("/clear")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        val first = sent.single()
+
+        // Connection drops → the send is deferred (stays queued, composer empty).
+        vm.markOutboundSendDeferred(first)
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(1, queue.itemsFor("1/session-a").size)
+        assertEquals(OutboundState.Queued, queue.itemsFor("1/session-a").single().state)
+        assertFalse(vm.uiState.value.sendInFlight)
+        assertEquals(1, sent.size)
+
+        // Reconnect: the screen's flush claims the next queued row and re-dispatches.
+        val flushedId = vm.retryNextOutboundItem()
+        advanceUntilIdle()
+        waitForSendCount(sent, 2)
+        assertEquals(
+            "the flush must re-claim the SAME queued row, not mint a new one",
+            first.outboundQueueItemId,
+            flushedId,
+        )
+        // Exactly ONE deliverable row for the one logical prompt; the auto-send
+        // delivers it and the row is pruned — no duplicate.
+        assertEquals(1, queue.itemsFor("1/session-a").size)
+        assertEquals(2, sent.size)
+        vm.markSendDelivered(sent.last())
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun issue971_sidecarRemovalFailureNeverLeaksUncaughtCoroutineAcrossTests() = runTest {
+        // Issue #971 cross-test leak regression. The #971 fix added fire-and-forget
+        // `viewModelScope.launch { store.removeOutboundItem(id) }` cleanups on the
+        // delivered / failed / discarded outbound paths. Those hopped to real
+        // `Dispatchers.IO` (inside removeOutboundItem) with NO try/catch, so a
+        // `persistAll` write failure threw an UNCAUGHT exception that escaped
+        // viewModelScope. Under `runTest` that exception is captured and
+        // re-surfaced as `kotlinx.coroutines.test.UncaughtExceptionsBeforeTest`
+        // on the NEXT coroutine-using unit test — exactly the leak that reddened
+        // CI's full `:app:testDebugUnitTest` (green alone, red in the suite).
+        //
+        // The real IO `persistAll` failure is not deterministically reproducible
+        // under `runTest`, so we inject the THROW synthetically on the cleanup
+        // seam (the #780 synthetic-state model). The cleanup runs on the test
+        // scheduler here, so without the [runCatching] guard the throw escapes
+        // viewModelScope and FAILS this very `runTest` at body-end (RED). With the
+        // guard it is swallowed and `runTest` completes cleanly (GREEN) — proving
+        // a cleanup failure can never poison a sibling test or the on-device
+        // pipeline.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = newSidecarStore(),
+        )
+        var removalAttempts = 0
+        vm.sidecarRemovalForTest = { _ ->
+            removalAttempts++
+            throw IllegalStateException("synthetic persistAll failure on sidecar cleanup")
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        // Drive ALL THREE cleanup callers so the whole class is covered:
+        //  1) delivered (markOutboundSendDelivered)
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("delivered prompt")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        vm.markSendDelivered(sent.single())
+        advanceUntilIdle()
+
+        //  2) failed (markOutboundSendFailed via restoreFailedSend)
+        vm.onDraftChange("failing prompt")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        vm.restoreFailedSend(sent.last())
+        advanceUntilIdle()
+
+        //  3) discarded (discardOutboundItem)
+        vm.onDraftChange("discard prompt")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        val toDiscard = vm.outboundQueueItems.value.firstOrNull()
+            ?: queue.itemsFor("1/session-a").first()
+        vm.markOutboundSendDeferred(sent.last())
+        advanceUntilIdle()
+        vm.discardOutboundItem(toDiscard.id)
+        advanceUntilIdle()
+
+        // The cleanup seam was actually exercised (G3: not a vacuous pass) and the
+        // injected throws were contained — `runTest` reaching this assertion at all
+        // means NO uncaught coroutine escaped (the leak is gone). If the guard were
+        // missing, this body would never complete cleanly.
+        assertTrue(
+            "the sidecar cleanup seam must have been driven so the throw path is real",
+            removalAttempts >= 1,
+        )
     }
 
     @Test
@@ -3565,7 +3791,11 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun failedSendMarksOutboundItemFailedAndKeepsItVisible() = runTest {
+    fun failedSendRemovesOutboundRowAndReturnsPromptToComposer() = runTest {
+        // Issue #971: a failed delivery restores the prompt to the composer as
+        // the SINGLE representation, so the queue row is REMOVED (not left as a
+        // "Failed" row). Keeping both was the maintainer's reported duplicate —
+        // the prompt back in the editor PLUS a "1 unsent prompt — Failed" row.
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -3578,19 +3808,19 @@ class PromptComposerViewModelTest {
         vm.onDraftChange("retry me")
         vm.requestSend(withEnter = false, sendTarget = target)
         advanceUntilIdle()
+        // Handed off: editor cleared, single in-flight row.
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(1, vm.outboundQueueItems.value.size)
 
         val request = sent.single()
         vm.restoreFailedSend(request, message = "host send failed")
 
-        val failed = requireNotNull(queue.item(request.outboundQueueItemId!!))
-        assertEquals(OutboundState.Failed, failed.state)
-        assertEquals("host send failed", failed.lastError)
-        assertEquals(1, failed.attemptCount)
-        assertEquals(listOf(failed.id), vm.outboundQueueItems.value.map { it.id })
-
-        vm.discardOutboundItem(failed.id)
-        assertNull(queue.item(failed.id))
+        // The row is GONE — the prompt is the single representation in the editor.
+        assertNull(queue.item(request.outboundQueueItemId!!))
         assertTrue(vm.outboundQueueItems.value.isEmpty())
+        assertEquals("retry me", vm.uiState.value.draft)
+        assertEquals("host send failed", vm.uiState.value.error)
+        assertFalse(vm.uiState.value.sendInFlight)
     }
 
     @Test
@@ -3645,18 +3875,30 @@ class PromptComposerViewModelTest {
         assertEquals(2, inFlight.attemptCount)
         assertEquals(listOf(item.id), vm.outboundQueueItems.value.map { it.id })
 
+        // Issue #971: a failed retry restores the prompt to the composer as the
+        // SINGLE representation, so the queue row is REMOVED (not left "Failed").
         vm.restoreFailedSend(request, message = "still down")
-        val failedAgain = requireNotNull(queue.item(item.id))
-        assertEquals(OutboundState.Failed, failedAgain.state)
-        assertEquals("still down", failedAgain.lastError)
-        assertEquals(2, failedAgain.attemptCount)
+        assertNull(queue.item(item.id))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+        assertEquals("ship with context", vm.uiState.value.draft)
 
-        vm.retryOutboundItem(item.id)
+        // Re-Send from the restored composer mints exactly one fresh deliverable
+        // row, and delivery prunes it.
+        vm.requestSend(
+            withEnter = true,
+            sendTarget = PromptComposerViewModel.SendTargetSnapshot(
+                sessionKey = "1/session-a",
+                paneId = "%7",
+                route = OutboundRoute.AgentPayload,
+                agentKind = "codex",
+            ),
+        )
         advanceUntilIdle()
+        waitForSendCount(sent, 2)
+        assertEquals(1, queue.itemsFor("1/session-a").size)
         val secondRequest = sent.last()
         vm.markSendDelivered(secondRequest)
 
-        assertNull(queue.item(item.id))
         assertTrue(vm.outboundQueueItems.value.isEmpty())
     }
 
@@ -3909,16 +4151,17 @@ class PromptComposerViewModelTest {
 
     @Test
     fun reSendAfterFailedSendCoalescesToOneRowAndDeliversExactlyOnce() = runTest {
-        // Issue #961 — THE REPORTED CASE (drop+reconnect double-send).
+        // Issue #961 + #971 — THE REPORTED CASE (drop+reconnect double-send).
         // Connected → Send (row A, InFlight) → drop fails the send
-        // (restoreFailedSend: row A Failed, sendInFlight reset, draft restored)
-        // → user re-Sends the restored draft → deliver → reconnect auto-flush.
+        // (restoreFailedSend) → user re-Sends the restored draft → deliver →
+        // reconnect auto-flush.
         //
-        // RED on base: the re-Send minted row B (new UUID, same text), so the
-        // queue held TWO rows (A Failed + B). Delivering B pruned it, then the
-        // reconnect auto-flush claimed the leftover A and delivered the prompt a
-        // SECOND time → TWO distinct delivered ids.
-        // GREEN: the re-Send coalesces onto A → ONE row ever, ONE delivery.
+        // Under #971 the failed send REMOVES row A and restores the prompt to the
+        // composer as the single representation. The re-Send mints exactly ONE
+        // fresh row; delivering it prunes it and the reconnect auto-flush finds
+        // nothing left — so the prompt is delivered EXACTLY ONCE (no leftover
+        // Failed row for the storm to re-deliver), the same end guarantee #961
+        // gave via coalesce.
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -3929,27 +4172,29 @@ class PromptComposerViewModelTest {
         vm.onComposerTargetChanged("1/session-a")
         vm.onDraftChange("deploy now")
 
-        // 1) First Send → row A goes in-flight.
+        // 1) First Send → row A goes in-flight, editor cleared (handoff).
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
         val firstRequest = sent.single()
         assertEquals(1, vm.outboundQueueItems.value.size)
+        assertEquals("", vm.uiState.value.draft)
 
         // 2) The link drops mid-send → the dispatcher restores the failed send.
-        //    Row A is left Failed (still queued/retryable), sendInFlight reset,
-        //    and the draft is restored to "deploy now".
+        //    Row A is REMOVED (#971) and the draft is restored to "deploy now".
         vm.restoreFailedSend(firstRequest, message = "Not sent. Reconnect, then send again or discard.")
         assertEquals("deploy now", vm.uiState.value.draft)
-        assertEquals(OutboundState.Failed, queue.item(firstRequest.outboundQueueItemId!!)!!.state)
+        assertNull(queue.item(firstRequest.outboundQueueItemId!!))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
 
         // 3) The user re-Sends the restored draft (the banner says "send again").
-        //    The re-Send itself emits a SendRequest for the (coalesced) row.
+        //    The re-Send emits a SendRequest for the (single fresh) row.
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
+        waitForSendCount(sent, 2)
 
-        // The coalesce: STILL exactly ONE row — no duplicate deliverable row.
+        // STILL exactly ONE row — no duplicate deliverable row.
         assertEquals(
-            "re-Send of the restored draft must coalesce — exactly ONE queued row",
+            "re-Send of the restored draft must leave exactly ONE queued row",
             1,
             queue.itemsFor("1/session-a").size,
         )
@@ -3980,10 +4225,12 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun reSendOfADifferentPromptStillMintsASecondRow() = runTest {
-        // Issue #961 — class coverage: a genuinely different prompt must NOT be
-        // swallowed by the coalesce. After a failed send, typing + sending a
-        // DIFFERENT prompt makes a second row (two distinct logical sends).
+    fun reSendOfADifferentPromptAfterFailureMakesOneFreshRow() = runTest {
+        // Issue #961 + #971 — class coverage. Under #971 a failed send REMOVES
+        // its row and restores the prompt to the composer, so there is no
+        // leftover row to coalesce against. The user clears it and types a
+        // DIFFERENT prompt; sending it must mint exactly ONE fresh deliverable
+        // row carrying the new prompt (the old one is gone, not duplicated).
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -3997,17 +4244,19 @@ class PromptComposerViewModelTest {
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
         vm.restoreFailedSend(sent.single(), message = "down")
+        // The failed row is removed; the prompt is back in the composer.
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+        assertEquals("deploy now", vm.uiState.value.draft)
 
         // A different prompt this time.
         vm.onDraftChange("rollback")
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
+        waitForSendCount(sent, 2)
 
-        assertEquals(
-            "a different prompt must still make a second row",
-            2,
-            queue.itemsFor("1/session-a").size,
-        )
+        val rows = queue.itemsFor("1/session-a")
+        assertEquals("a fresh send makes exactly one row", 1, rows.size)
+        assertEquals("rollback", rows.single().cleanText)
     }
 
     @Test
@@ -4030,8 +4279,10 @@ class PromptComposerViewModelTest {
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
         vm.restoreFailedSend(sent.single(), message = "down")
+        // #971: the failed row is removed; the re-Send mints a single fresh row.
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
+        waitForSendCount(sent, 2)
         assertEquals(1, queue.itemsFor("1/session-a").size)
 
         // The re-Send emitted its own request — deliver it.
@@ -4096,10 +4347,10 @@ class PromptComposerViewModelTest {
             sent[0].text,
         )
         assertEquals(true, sent[0].withEnter)
-        // Issue #745: in-flight — draft + chips are RETAINED until the host
-        // confirms delivery, then cleared by [markSendDelivered].
-        assertEquals("Review these", vm.uiState.value.draft)
-        assertEquals(2, vm.uiState.value.attachments.size)
+        // Issue #971: in-flight — the prompt + chips were HANDED OFF to the queue
+        // row, so the editor is cleared (the row is the single representation).
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
         assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
@@ -4133,9 +4384,10 @@ class PromptComposerViewModelTest {
             """.trimIndent(),
             sent[0].text,
         )
-        // Issue #745: in-flight — the chip is retained until delivery is
-        // confirmed, then cleared.
-        assertEquals(1, vm.uiState.value.attachments.size)
+        // Issue #971: in-flight — the chip was handed off to the queue row, so
+        // the editor's tiles are cleared (the row is the single representation).
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertTrue(vm.uiState.value.attachments.isEmpty())
     }
@@ -4195,7 +4447,9 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent[0].attachments.size)
         assertTrue(sent[0].text.startsWith("send this now"))
         assertTrue(sent[0].text.contains("late.png"))
-        assertEquals("send this now", vm.uiState.value.draft)
+        // Issue #971: once the real dispatch fires (after the upload), the prompt
+        // is handed off to the queue row — the editor is cleared.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
     }
 
@@ -4860,10 +5114,11 @@ class PromptComposerViewModelTest {
         // The composed prompt carries both files.
         assertTrue(composed.text.contains("20260611-120000-01-report.txt"))
         assertTrue(composed.text.contains("20260611-120000-02-data.csv"))
-        // Issue #745: in-flight — the clean draft + chips are RETAINED (no
-        // optimistic empty); `sendInFlight` is true while awaiting the host.
-        assertEquals("Review these", vm.uiState.value.draft)
-        assertEquals(2, vm.uiState.value.attachments.size)
+        // Issue #971: in-flight — the prompt + chips were HANDED OFF, so the
+        // editor is cleared (single representation); `sendInFlight` is true while
+        // awaiting the host. The clean draft + tiles still travel in the request.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
         assertTrue(vm.uiState.value.sendInFlight)
 
         // The host reports the write failed (degraded connection). The sheet
@@ -5129,8 +5384,11 @@ class PromptComposerViewModelTest {
             sent[0].text.contains("shot.png"),
         )
         assertTrue(sent[0].text.startsWith("look at this screenshot"))
-        // And the live tile is on screen while in flight (so Retry has it).
-        assertEquals(1, vm.uiState.value.attachments.size)
+        // Issue #971: once the real dispatch fires (after the upload), the prompt
+        // + tile are handed off to the queue row — the editor is cleared (single
+        // representation). The attachment still travels in the request, and a
+        // failed send restores the tile via [restoreFailedSend].
+        assertTrue(vm.uiState.value.attachments.isEmpty())
         assertTrue(vm.uiState.value.sendInFlight)
     }
 
@@ -5285,14 +5543,15 @@ class PromptComposerViewModelTest {
             advanceUntilIdle()
             job.cancelAndJoin()
 
-            // Issue #745: each send dispatches exactly one request and parks
-            // the composer in-flight with the draft retained. The success path
-            // (host confirmed) then clears it via [markSendDelivered], leaving
-            // a clean slate so the NEXT iteration's send is allowed (the
-            // in-flight guard would otherwise drop a back-to-back send).
+            // Issue #971: each send dispatches exactly one request and HANDS the
+            // prompt off to the queue row, so the editor is cleared in flight (the
+            // message never appears twice). The success path (host confirmed) then
+            // ends the in-flight state via [markSendDelivered], leaving a clean
+            // slate so the NEXT iteration's send is allowed (the in-flight guard
+            // would otherwise drop a back-to-back send).
             assertEquals(1, sent.size)
             assertEquals("message $i", sent[0].text)
-            assertEquals("message $i", vm.uiState.value.draft)
+            assertEquals("", vm.uiState.value.draft)
             assertTrue(vm.uiState.value.sendInFlight)
             vm.markSendDelivered()
             assertEquals("", vm.uiState.value.draft)
@@ -5320,13 +5579,14 @@ class PromptComposerViewModelTest {
         job.cancelAndJoin()
 
         assertEquals(1, sent.size)
-        // Issue #745: no optimistic clear — the draft stays visible while the
-        // send is in flight (no flicker), so the user keeps seeing their text.
-        assertEquals("ship it", vm.uiState.value.draft)
+        // Issue #971: the prompt is handed off to the queue row in flight, so the
+        // editor is cleared (single representation) while `sendInFlight` is true.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
 
-        // Host reports failure → restore. The draft stays, in-flight ends, and
-        // an actionable banner appears; the sheet stays open on this state.
+        // Host reports failure → restore. The prompt returns to the (now-single)
+        // composer, in-flight ends, and an actionable banner appears; the sheet
+        // stays open on this state.
         vm.restoreFailedSend(sent[0])
         assertFalse(vm.uiState.value.sendInFlight)
         assertEquals("ship it", vm.uiState.value.draft)
@@ -5408,11 +5668,12 @@ class PromptComposerViewModelTest {
         // Mic was stopped by the queued-send path, not by a separate
         // mic-tap.
         assertEquals(1, mic.stopCount)
-        // FSM lands back at Idle. Issue #745: the dispatched send parks the
-        // composer in-flight with the combined draft retained until delivery
-        // is confirmed; it clears only via [markSendDelivered].
+        // FSM lands back at Idle. Issue #971: the dispatched send hands the
+        // combined prompt off to the queue row, so the editor is CLEARED in
+        // flight (single representation); `sendInFlight` stays true until
+        // delivery is confirmed via [markSendDelivered].
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
-        assertEquals("Tell me from dictation", vm.uiState.value.draft)
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
@@ -5461,8 +5722,8 @@ class PromptComposerViewModelTest {
         assertEquals("queued result", sent[0].text)
         assertEquals(false, sent[0].withEnter)
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
-        // Issue #745: in-flight until delivery confirmed.
-        assertEquals("queued result", vm.uiState.value.draft)
+        // Issue #971: handed off to the queue row — editor cleared in flight.
+        assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.sendInFlight)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
@@ -5767,8 +6028,8 @@ class PromptComposerViewModelTest {
         assertEquals(1, sent.size)
         assertEquals("deploy the app", sent[0].text)
         assertEquals(true, sent[0].withEnter)
-        // Issue #745: in-flight until delivery confirmed.
-        assertEquals("deploy the app", vm.uiState.value.draft)
+        // Issue #971: handed off to the queue row — editor cleared in flight.
+        assertEquals("", vm.uiState.value.draft)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
@@ -5792,8 +6053,8 @@ class PromptComposerViewModelTest {
 
         assertEquals(1, sent.size)
         assertEquals("deploy the app", sent[0].text)
-        // Issue #745: in-flight until delivery confirmed.
-        assertEquals("deploy the app", vm.uiState.value.draft)
+        // Issue #971: handed off to the queue row — editor cleared in flight.
+        assertEquals("", vm.uiState.value.draft)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }
@@ -5838,8 +6099,8 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
         assertEquals(1, sent.size)
         assertEquals("send from transcribing", sent[0].text)
-        // Issue #745: in-flight until delivery confirmed.
-        assertEquals("send from transcribing", vm.uiState.value.draft)
+        // Issue #971: handed off to the queue row — editor cleared in flight.
+        assertEquals("", vm.uiState.value.draft)
         vm.markSendDelivered()
         assertEquals("", vm.uiState.value.draft)
     }

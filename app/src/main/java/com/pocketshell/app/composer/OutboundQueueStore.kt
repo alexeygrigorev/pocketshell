@@ -238,6 +238,24 @@ public interface OutboundQueueStore {
     ): OutboundItem?
 
     /**
+     * Issue #971/#987: re-arm exactly the row with [id] back to
+     * [OutboundState.Queued] and CLEAR its [OutboundItem.lastError] so the
+     * foreground/reconnect auto-flush can re-claim it. This is the canonical
+     * drop-failure path (maintainer decision on #987 — Option A): a send that
+     * failed because the connection dropped STAYS QUEUED and auto-retries on
+     * reconnect, instead of returning to the composer for a manual resend. It is
+     * distinct from [markFailed] (which leaves a terminal-looking `Failed —
+     * <error>` row): a deferred row reads as the single coherent "Will send when
+     * reconnected." status with no contradictory manual-resend messaging.
+     *
+     * Only an un-delivered row (`Queued`/`Uploading`/`InFlight`/`Failed`) is
+     * re-armed; an unknown/`Delivered` id returns `null` (a late ack cannot
+     * resurrect a pruned/delivered row). Attempt counts are not bumped here; the
+     * next [claimNext] / [claim] records the next attempt.
+     */
+    public fun requeueForRetry(id: String): OutboundItem?
+
+    /**
      * Requeue stale [OutboundState.InFlight] rows for [sessionKey] so a
      * foreground/reconnect flush can pick them up again after a prior delivery
      * attempt was abandoned by process death or a lost callback.
@@ -518,6 +536,14 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             updated
         }
 
+    override fun requeueForRetry(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (existing.state == OutboundState.Delivered) return null
+        val updated = existing.copy(state = OutboundState.Queued, lastError = null)
+        items[updated.id] = updated
+        updated
+    }
+
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
         synchronized(lock) {
             val updated = items.values
@@ -573,6 +599,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
+    override fun requeueForRetry(id: String): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
@@ -799,6 +826,16 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             replaceAndStore(sessionKey, list, updated)
             updated
         }
+
+    override fun requeueForRetry(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.state == OutboundState.Delivered) return null
+        val updated = existing.copy(state = OutboundState.Queued, lastError = null)
+        replaceAndStore(sessionKey, list, updated)
+        updated
+    }
 
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
         synchronized(lock) {

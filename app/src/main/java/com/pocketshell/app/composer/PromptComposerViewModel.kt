@@ -276,6 +276,20 @@ public class PromptComposerViewModel @Inject constructor(
     private var outboundSidecarDispatchInFlight: Boolean = false
 
     /**
+     * Issue #971: the [SendRequest] for the prompt currently in flight, captured
+     * at handoff. Because the editable composer is now CLEARED on enqueue (the
+     * queue row is the single representation), the live `_uiState.draft` is no
+     * longer the source for restoring a wedged send. The non-delivering recovery
+     * paths — the #891 overall-send watchdog ([onSendWatchdogExpired]), the #929
+     * stranded-dispatch clears, and a structured-concurrency cancellation —
+     * therefore reconstruct the prompt from THIS captured request so the exact
+     * draft + attachment tiles still return to the (now-single) composer instead
+     * of an empty one. Set the instant a send goes in-flight; cleared the instant
+     * it resolves (delivered / failed / strand-cleared / discarded).
+     */
+    private var inFlightSendRequest: SendRequest? = null
+
+    /**
      * Issue #891: the overall send-operation watchdog. The maintainer's
      * on-device symptom — a prompt with a PNG attachment stuck on "Sending…"
      * FOREVER, only recoverable by restarting the app — happens when the
@@ -918,12 +932,17 @@ public class PromptComposerViewModel @Inject constructor(
             "attachmentCount" to attachments.size,
             "withEnter" to withEnter,
         )
-        // Issue #745: flip the composer into the IN-FLIGHT state and clear
-        // any stale "Not sent" banner BEFORE emitting the request. The draft
-        // and staged attachment TILES stay on screen (cleared only on
-        // confirmed delivery). The send button reads `sendInFlight` to disable
-        // itself + show the "Sending…" spinner for immediate feedback the moment
-        // Send is tapped.
+        // Issue #971: HAND THE PROMPT OFF to the outbound queue — clear the
+        // editable draft + staged tiles the instant we go in-flight so the
+        // prompt is represented EXACTLY ONCE (the "Sending…" queue row), never
+        // as BOTH the editor text AND a duplicate "1 unsent prompt" row. This
+        // reverses the #745 keep-the-draft-visible behaviour (hard-cut per D22):
+        // the queue row is now the single in-flight source of truth, and the
+        // Send button reads `sendInFlight` to disable itself + show "Sending…".
+        // The clean draft + tiles still travel in the [SendRequest] / queue row,
+        // so a failed send ([restoreFailedSend]) puts the EXACT prompt back into
+        // the (now-single) composer, and a delivered send leaves it empty.
+        clearComposerForHandoff()
         _uiState.update { it.copy(sendInFlight = true, error = null) }
         // Issue #891: arm the overall-send watchdog the instant we go in-flight
         // so a host `onSend` that never resolves (wedged channel / dropped
@@ -977,8 +996,47 @@ public class PromptComposerViewModel @Inject constructor(
             sendTarget = sendTarget,
             outboundQueueItemId = outboundItem?.id,
         )
+        // Issue #971: remember the in-flight prompt so a wedged/cancelled send
+        // (watchdog / strand-clear / cancellation) restores the EXACT draft +
+        // tiles to the now-cleared composer, not an empty one.
+        inFlightSendRequest = request
         if (_sendRequests.trySend(request).isFailure) {
-            restoreFailedSend(request)
+            // Issue #971/#987: a buffer-full enqueue is a transient dispatch
+            // failure, not a permanent rejection — defer to the queue so the row
+            // stays queued and auto-retries on the next flush (Option A). Falls
+            // back to a composer-restore only when there is no durable row.
+            markOutboundSendDeferred(request)
+        }
+    }
+
+    /**
+     * Issue #971: hand the prompt off to the outbound queue — empty the editable
+     * composer (draft text + staged attachment tiles + the persisted draft slots)
+     * so an in-flight send is represented EXACTLY ONCE by its "Sending…" queue
+     * row, never as BOTH the editor AND a duplicate "1 unsent prompt" row.
+     *
+     * This clears the in-memory draft/tiles, the [SavedStateHandle] draft slots
+     * (so a process-death recreate mid-send does not resurrect the handed-off
+     * text into the editor alongside the queue row), and the durable per-session
+     * draft store (so a session switch away-and-back mid-send does not reload the
+     * handed-off draft into the editor next to its queue row). The prompt is NOT
+     * lost: it travels in the [SendRequest] + the durable queue row, so a failed
+     * send ([restoreFailedSend]) restores the exact draft + tiles back into the
+     * (now-single) composer, and a delivered send leaves the composer empty.
+     */
+    private fun clearComposerForHandoff() {
+        savedStateHandle[KEY_DRAFT] = ""
+        savedStateHandle[KEY_DRAFT_OWNER] = null
+        composerTarget?.let { target ->
+            composerDraftStore.clear(target)
+            composerDraftStore.clearAttachments(target)
+        }
+        _uiState.update { current ->
+            current.copy(
+                draft = "",
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
+            )
         }
     }
 
@@ -1087,6 +1145,9 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
         disarmSendWatchdog()
+        // Issue #971: the in-flight send resolved — drop the captured request so a
+        // later watchdog/strand cannot restore a stale prompt.
+        inFlightSendRequest = null
         markOutboundSendDelivered(request)
         val deliveryTarget = request?.sendTarget?.sessionKey?.takeIf { it.isNotBlank() } ?: composerTarget
         if (deliveryTarget != null && deliveryTarget != composerTarget) {
@@ -1141,6 +1202,9 @@ public class PromptComposerViewModel @Inject constructor(
         // watchdog so the retryable failed state we are about to set is not
         // immediately re-stamped by a late watchdog firing.
         disarmSendWatchdog()
+        // Issue #971: the in-flight send resolved — drop the captured request so a
+        // later watchdog/strand cannot restore it a second time.
+        inFlightSendRequest = null
         markOutboundSendFailed(request, message)
         // Issue #872: restore the CLEAN draft (no appended "Attached files:"
         // block) so the editable text is not polluted with raw remote paths and
@@ -1190,6 +1254,72 @@ public class PromptComposerViewModel @Inject constructor(
                 // Issue #872: re-show the actual attachment tiles so Retry
                 // re-sends the original attachment, not just the text.
                 attachments = restoredAttachments,
+                attachmentUpload = AttachmentUploadState.Idle,
+            )
+        }
+    }
+
+    /**
+     * Issue #971/#987 (maintainer decision — Option A): the canonical
+     * drop/wedge-failure path for a send that owns a durable outbound queue row.
+     * A send that fails because the connection dropped (or wedged past the
+     * watchdog) must NOT return to the composer for a manual resend — it STAYS
+     * QUEUED and auto-sends on reconnect (the #900 flush). This:
+     *
+     *  - re-arms the durable row to [OutboundState.Queued] and clears its error
+     *    (so it reads as the single "Will send when reconnected." status, never a
+     *    terminal-looking "Failed — …" row),
+     *  - clears the in-flight gates + watchdog so the next foreground/reconnect
+     *    flush ([retryNextOutboundItem]) can re-claim it,
+     *  - leaves the composer EMPTY (the prompt lives in the queue row — the
+     *    single representation; #971) and sets NO "Not sent / send again or
+     *    discard" error banner.
+     *
+     * Falls back to [restoreFailedSend] only when the request has no durable
+     * queue row ([SendRequest.outboundQueueItemId] is null — e.g. the composer
+     * is wired to [DisabledOutboundQueueStore], or an upload-await wedge that
+     * failed before the row was enqueued): there is then nothing to keep queued,
+     * so the prompt must come back to the composer rather than be silently lost.
+     * The user can still cancel/discard a queued item from the queue surface.
+     */
+    public fun markOutboundSendDeferred(
+        request: SendRequest,
+        // The message used ONLY when there is no durable queue row and we fall
+        // back to [restoreFailedSend] (the prompt comes back to the composer
+        // instead of being lost). The deferred (row-kept) path never sets an
+        // error — its single status is the queue row's "Will send when
+        // reconnected." Defaults to the calm reconnect copy.
+        noRowFallbackMessage: String = "Not sent. Reconnect, then send again or discard the draft.",
+    ) {
+        // Issue #891: the send resolved (deferred to the queue) — disarm the
+        // overall-send watchdog so it cannot re-stamp a stale "Send failed".
+        disarmSendWatchdog()
+        // Issue #971: the in-flight send resolved — drop the captured request so a
+        // later watchdog/strand cannot act on it again.
+        inFlightSendRequest = null
+        val id = request.outboundQueueItemId
+        val requeued = id?.let { outboundQueueStore.requeueForRetry(it) }
+        if (requeued == null) {
+            // No durable row to keep queued — fall back to the composer-restore
+            // path so the typed prompt is not silently lost.
+            restoreFailedSend(request, message = noRowFallbackMessage)
+            return
+        }
+        DiagnosticEvents.record(
+            "action",
+            "composer_send_deferred_to_queue",
+            "attachmentCount" to request.attachments.size,
+        )
+        request.sendTarget.sessionKey
+            .takeIf { it.isNotBlank() }
+            ?.let { refreshOutboundQueueItemsFor(it) }
+        // Clear the in-flight gates so the reconnect flush can re-claim the row.
+        // The composer stays EMPTY (the row is the single representation) and NO
+        // "Not sent" error is set — the queue row's "Will send when reconnected."
+        // is the single coherent status.
+        _uiState.update { current ->
+            current.copy(
+                sendInFlight = false,
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
@@ -1305,6 +1435,31 @@ public class PromptComposerViewModel @Inject constructor(
     private fun clearStrandedSendInFlight(error: String? = null) {
         disarmSendWatchdog()
         outboundSidecarDispatchInFlight = false
+        // Issue #971/#987: the composer was cleared at handoff, so a non-delivering
+        // strand must not silently lose the prompt. Per the maintainer's #987
+        // decision (Option A) a drop/wedge keeps the prompt QUEUED and auto-retries
+        // on reconnect rather than returning to the composer for manual resend.
+        // When we hold the captured in-flight request, route through the deferred
+        // path: a request with a durable queue row stays queued (single
+        // representation, single "Will send when reconnected." status); a request
+        // with no row (Disabled store / pre-enqueue wedge) falls back to the
+        // composer-restore inside markOutboundSendDeferred so the prompt is not
+        // lost. A passed-in [error] (a genuine non-retryable failure, e.g.
+        // "could not preserve attachment bytes") still surfaces via the
+        // composer-restore fallback so the user sees the reason.
+        val pending = inFlightSendRequest
+        if (pending != null && pending.text.isNotEmpty()) {
+            if (error != null) {
+                // A genuine non-retryable reason was given — surface it on the
+                // composer (the bytes/attachment could not be preserved, not a
+                // recoverable connection drop). This is the distinct
+                // permanent-failure path from #987.
+                restoreFailedSend(pending, message = error)
+            } else {
+                markOutboundSendDeferred(pending)
+            }
+            return
+        }
         _uiState.update { current ->
             if (error != null) {
                 current.copy(sendInFlight = false, error = error)
@@ -1325,25 +1480,35 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private fun onSendWatchdogExpired() {
         sendWatchdogJob = null
-        val state = _uiState.value
-        if (!state.sendInFlight) return
-        DiagnosticEvents.record(
-            "action",
-            "composer_send_watchdog_timeout",
-            "attachmentCount" to state.attachments.size,
-        )
-        // Reconstruct a SendRequest from the live composer state so the existing
-        // #872 durable failed-send path restores the exact draft + attachments.
-        val composed = appendAttachmentPaths(state.draft, state.attachments.map { it.remotePath })
-        restoreFailedSend(
+        if (!_uiState.value.sendInFlight) return
+        // Issue #971: the editable composer is cleared on handoff, so prefer the
+        // captured in-flight request to restore the EXACT prompt + tiles. Fall
+        // back to the live state only for the upload-await wedge, where the send
+        // went in-flight before the request was built and the draft is still on
+        // screen.
+        val request = inFlightSendRequest ?: run {
+            val state = _uiState.value
+            val composed = appendAttachmentPaths(state.draft, state.attachments.map { it.remotePath })
             SendRequest(
                 text = composed,
                 withEnter = false,
                 cleanDraft = state.draft,
                 attachments = state.attachments,
-            ),
-            message = SEND_TIMEOUT_MESSAGE,
+            )
+        }
+        DiagnosticEvents.record(
+            "action",
+            "composer_send_watchdog_timeout",
+            "attachmentCount" to request.attachments.size,
         )
+        // Issue #971/#987: a wedged send is a connection problem, not a permanent
+        // rejection — defer it to the queue so it auto-retries on reconnect
+        // (Option A). When the request owns a durable queue row this keeps it
+        // queued + clears the composer; the upload-await wedge (no row) falls
+        // back to the composer-restore path inside markOutboundSendDeferred with
+        // the watchdog-specific copy so the typed prompt is not lost and the user
+        // sees that the send timed out.
+        markOutboundSendDeferred(request, noRowFallbackMessage = SEND_TIMEOUT_MESSAGE)
     }
 
     /**
@@ -1365,6 +1530,9 @@ public class PromptComposerViewModel @Inject constructor(
         // the watchdog so it cannot resurrect a "Send failed" banner over the
         // now-empty composer.
         disarmSendWatchdog()
+        // Issue #971: drop the captured in-flight request so a late
+        // watchdog/strand cannot restore a prompt the user just discarded.
+        inFlightSendRequest = null
         savedStateHandle[KEY_DRAFT] = ""
         savedStateHandle[KEY_DRAFT_OWNER] = null
         // Issue #832 / #872: discard is the explicit "throw it away" control, so
@@ -1493,9 +1661,7 @@ public class PromptComposerViewModel @Inject constructor(
         val item = outboundQueueStore.item(id) ?: return
         if (item.state != OutboundState.Queued && item.state != OutboundState.Failed) return
         outboundQueueStore.remove(id)
-        outboundAttachmentSidecarStore?.let { store ->
-            viewModelScope.launch { store.removeOutboundItem(id) }
-        }
+        launchSidecarRemoval(id)
         refreshOutboundQueueItems()
     }
 
@@ -1685,8 +1851,15 @@ public class PromptComposerViewModel @Inject constructor(
         )
         _uiState.update { it.copy(sendInFlight = true, error = null) }
         armSendWatchdog()
+        // Issue #971: remember the in-flight prompt for the wedged/cancelled
+        // recovery paths (watchdog / strand-clear) so they restore the exact
+        // payload rather than the cleared composer.
+        inFlightSendRequest = request
         if (_sendRequests.trySend(request).isFailure) {
-            restoreFailedSend(request)
+            // Issue #971/#987: transient dispatch failure on a queue-flush — keep
+            // the row queued for the next auto-retry (Option A), don't return it
+            // to the composer.
+            markOutboundSendDeferred(request)
             return false
         }
         return true
@@ -1695,9 +1868,7 @@ public class PromptComposerViewModel @Inject constructor(
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
         outboundQueueStore.markDelivered(id)
-        outboundAttachmentSidecarStore?.let { store ->
-            viewModelScope.launch { store.removeOutboundItem(id) }
-        }
+        launchSidecarRemoval(id)
         request.sendTarget.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
@@ -1705,11 +1876,62 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun markOutboundSendFailed(request: SendRequest, message: String) {
         val id = request.outboundQueueItemId ?: return
-        outboundQueueStore.markFailed(id, lastError = message)
+        // Issue #971/#987: this is the GENUINE-permanent-failure path
+        // ([restoreFailedSend]) — the prompt is returned to the composer as the
+        // SINGLE representation, so REMOVE the queue row instead of leaving a
+        // "Failed" duplicate next to the restored editor text (the maintainer's
+        // exact complaint, and the leftover row would let the reconnect auto-flush
+        // double-send what the user can now re-Send by hand). NOTE: the COMMON
+        // drop/wedge case no longer reaches here — it routes through
+        // [markOutboundSendDeferred], which KEEPS the row queued for auto-retry
+        // (Option A). Drop any sidecar bytes the row owned so nothing is orphaned.
+        outboundQueueStore.remove(id)
+        launchSidecarRemoval(id)
         request.sendTarget.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
     }
+
+    /**
+     * Issue #971 leak fix: the single, GUARDED fire-and-forget for dropping the
+     * durable sidecar bytes a resolved (delivered / failed / discarded) outbound
+     * row owned. Cleanup is best-effort — a failed delete must NEVER surface as
+     * an UNCAUGHT exception that escapes [viewModelScope].
+     *
+     * The bare `viewModelScope.launch { store.removeOutboundItem(id) }` callers
+     * this replaces hopped to real `Dispatchers.IO` (inside
+     * [OutboundAttachmentSidecarStore.removeOutboundItem]) with NO try/catch. A
+     * `persistAll` write failure there threw on a real background thread, after
+     * the test body returned, and kotlinx-coroutines-test re-surfaced it as
+     * `UncaughtExceptionsBeforeTest` on the NEXT coroutine-using unit test — the
+     * cross-test leak that reddened CI's full `:app:testDebugUnitTest`. Wrapping
+     * in [runCatching] (mirroring the #180 reconcile sweep at construction) makes
+     * the cleanup swallow its own failure, so it can never poison another test or
+     * the on-device pipeline. Idempotent and a no-op when no sidecar store is
+     * wired.
+     */
+    private fun launchSidecarRemoval(outboundItemId: String) {
+        val store = outboundAttachmentSidecarStore
+        val seam = sidecarRemovalForTest
+        if (store == null && seam == null) return
+        viewModelScope.launch {
+            runCatching {
+                if (seam != null) seam(outboundItemId) else store?.removeOutboundItem(outboundItemId)
+            }
+        }
+    }
+
+    /**
+     * Issue #971 leak-fix test seam. When non-null, [launchSidecarRemoval] routes
+     * the cleanup through this instead of the real store, so a unit test can
+     * synthetically inject a THROW on the fire-and-forget cleanup path (the #780
+     * synthetic-state model — the real `Dispatchers.IO` `persistAll` failure is
+     * not deterministically reproducible under `runTest`) and prove the
+     * [runCatching] guard contains it: `runTest` must finish with NO uncaught
+     * exception, which is the exact cross-test leak being closed.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var sidecarRemovalForTest: (suspend (String) -> Unit)? = null
 
     private fun refreshOutboundQueueItems() {
         _outboundQueueItems.value = composerTarget
@@ -3758,6 +3980,20 @@ public class PromptComposerViewModel @Inject constructor(
          */
         internal const val SEND_TIMEOUT_MESSAGE: String =
             "Send failed — it took too long. Tap Send to retry, or discard the draft."
+
+        /**
+         * Issue #971/#987 (maintainer decision — Option A): the SINGLE coherent
+         * status shown for a queued send that is waiting to auto-send on
+         * reconnect. Replaces the contradictory stack the maintainer hit during a
+         * drop ("Not sent. Reconnect, then send again or discard the draft." +
+         * "1 unsent prompt — Failed — Not sent…" + "Connection lost — Send will
+         * retry once reconnected."). On Send the message is queued, the composer
+         * clears, and the row auto-sends on reconnect (#900 flush) — there is no
+         * manual-resend affordance to contradict the auto-retry, just this one
+         * status.
+         */
+        internal const val WILL_SEND_WHEN_RECONNECTED_MESSAGE: String =
+            "Will send when reconnected."
 
         /**
          * Issue #939 (audit #935 S5-2): the end-to-end ceiling on the voice

@@ -15,10 +15,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
+import com.pocketshell.app.portfwd.DefaultDispatcher
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -79,9 +81,55 @@ class ForwardingService : Service() {
     @Inject
     lateinit var controller: ForwardingController
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Dispatcher backing the notification-observe coroutine ([startObserving]).
+     *
+     * Injected (not a bare `Dispatchers.Default`) so a test can confine the
+     * observe loop to its own [kotlinx.coroutines.test.TestDispatcher] — one it
+     * cancels in `@After` — instead of leaking a real `Dispatchers.Default`
+     * background coroutine that outlives the test and dereferences the
+     * already-torn-down Robolectric Application in [updateNotification] (issue
+     * #994: the intermittent full-suite `UncaughtExceptionsBeforeTest` NPE).
+     *
+     * Hilt field injection runs for this `@AndroidEntryPoint` service before
+     * `onCreate`, so by the time [onStartCommand] builds [scope] the injected
+     * dispatcher is in place. The `Dispatchers.Default` default keeps a
+     * non-Hilt-graph instantiation (a plain `new ForwardingService()` in a unit
+     * test that does not exercise the observe loop) working without a crash.
+     */
+    @Inject
+    @DefaultDispatcher
+    @JvmField
+    @androidx.annotation.VisibleForTesting
+    var observeDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+    // Built lazily off [observeDispatcher] on first use ([startObserving]) so the
+    // injected dispatcher (set by Hilt field injection before onStartCommand, or
+    // by a test before it drives onStartCommand) backs the scope. `lazy` rather
+    // than building it in onCreate because the generated `Hilt_ForwardingService`
+    // onCreate requires a @HiltAndroidApp Application — a plain Robolectric unit
+    // test drives onStartCommand directly without onCreate, so scope creation must
+    // not depend on onCreate having run. Cancelled in [onDestroy].
+    private val scopeDelegate = lazy {
+        // SupervisorJob so a failure in the observe collector does not cascade.
+        CoroutineScope(SupervisorJob() + observeDispatcher)
+    }
+    private val scope: CoroutineScope by scopeDelegate
     private var observeJob: Job? = null
     private var hasStartedForeground = false
+
+    /** Issue #994 test seam: the observe coroutine, so a test can assert it is
+     * active while observing and cancelled by `onDestroy()`. */
+    @get:androidx.annotation.VisibleForTesting
+    internal val observeJobForTest: Job?
+        get() = observeJob
+
+    /** Issue #994 test seam: the dispatcher the observe collector resumed on,
+     * recorded in [startObserving]. Lets a test assert the observe loop is
+     * confined to the injected dispatcher, not a leaked Dispatchers.Default. */
+    @androidx.annotation.VisibleForTesting
+    internal var lastObserveDispatcherForTest: CoroutineDispatcher? = null
+        private set
 
     companion object {
         private const val TAG = "PsForwardingService"
@@ -216,7 +264,10 @@ class ForwardingService : Service() {
     override fun onDestroy() {
         observeJob?.cancel()
         observeJob = null
-        scope.cancel()
+        // Cancel the observe-loop scope so no coroutine outlives the service
+        // (issue #994). Guarded so we don't force-create the lazy scope just to
+        // cancel it on a service that never started observing.
+        if (scopeDelegate.isInitialized()) scope.cancel()
         super.onDestroy()
     }
 
@@ -238,6 +289,12 @@ class ForwardingService : Service() {
 
     private fun startObserving() {
         observeJob = scope.launch {
+            // Issue #994: record the dispatcher the collector actually resumed
+            // on so a JVM test can assert the observe loop is confined to the
+            // INJECTED dispatcher (not a free-running Dispatchers.Default thread
+            // that outlives the test). No production effect — read only by tests.
+            lastObserveDispatcherForTest =
+                coroutineContext[kotlinx.coroutines.CoroutineDispatcher]
             // Combine active-host count + tunnel count so a single
             // collector renders both into the notification. Dropping
             // duplicates means we don't churn the notification on

@@ -11,6 +11,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -543,6 +545,13 @@ class ForwardingControllerTest {
         // the controller manually, exactly like the sibling notification tests.
         val service = Robolectric.buildService(ForwardingService::class.java).get()
         service.controller = ForwardingController(context)
+        // Issue #994: confine the START path's observe coroutine to a test
+        // dispatcher we own, so it CANNOT escape onto a real Dispatchers.Default
+        // background thread and outlive this test (the intermittent full-suite
+        // UncaughtExceptionsBeforeTest NPE — the observe collector dereferencing
+        // the torn-down Application after teardown). onDestroy() below cancels it.
+        val observeScheduler = TestCoroutineScheduler()
+        service.observeDispatcher = StandardTestDispatcher(observeScheduler)
         // Drive the START path that USED to register the raw default-network
         // callback (the deleted `registerNetworkCallback()` call lived here).
         service.onStartCommand(
@@ -560,6 +569,10 @@ class ForwardingControllerTest {
             callbacksBefore,
             callbacksAfter,
         )
+
+        // Issue #994: tear the service down so its observe coroutine is cancelled
+        // and nothing leaks past this test onto a background thread.
+        service.onDestroy()
     }
 
     @Test

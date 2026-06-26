@@ -32,6 +32,15 @@ internal class RealSshShell(
     private val sessionChannel: Session,
     private val shell: Session.Shell,
     private val dispatcher: TransportDispatcher,
+    /**
+     * Issue #974 — invoked on EVERY successful (>0 bytes) read from [stdout] /
+     * [stderr] so the live `-CC` control-mode reader's decoded bytes prove the
+     * transport alive. [RealSshSession] passes `::recordInboundActivity`, which
+     * bumps the keepalive's inbound-activity timestamp — the signal the keepalive
+     * loop's reset-on-inbound shortcut and #964's deferral oracle read. Defaults
+     * to a no-op so the unit fakes that construct a shell need not supply it.
+     */
+    private val onInboundActivity: () -> Unit = {},
 ) : SshShell {
 
     /**
@@ -42,14 +51,26 @@ internal class RealSshShell(
      */
     private val serializedStdin: OutputStream = DispatchedOutputStream(shell.outputStream, dispatcher)
 
+    /**
+     * stdout/stderr wrapped so every successful read records inbound transport
+     * activity (issue #974). The READ side is NOT dispatched (it runs on the
+     * `-CC` reader coroutine, mirroring sshj's Reader-thread split) — the wrapper
+     * only OBSERVES the byte count to bump the keepalive's inbound-activity
+     * timestamp, never serialises the read.
+     */
+    private val activityStdout: InputStream =
+        InboundActivityInputStream(shell.inputStream, onInboundActivity)
+    private val activityStderr: InputStream =
+        InboundActivityInputStream(shell.errorStream, onInboundActivity)
+
     override val stdin: OutputStream
         get() = serializedStdin
 
     override val stdout: InputStream
-        get() = shell.inputStream
+        get() = activityStdout
 
     override val stderr: InputStream
-        get() = shell.errorStream
+        get() = activityStderr
 
     override fun close() {
         // Order matters: close the shell-level resource first so any in-flight
@@ -161,5 +182,53 @@ private class DispatchedOutputStream(
         // (RealSshShell.close / RealSshSession.close). Closing the stdin stream
         // directly is not part of the public SshShell contract, so this is a
         // no-op to avoid a teardown ordering race with the dispatcher.
+    }
+}
+
+/**
+ * [InputStream] decorator that fires [onActivity] on every successful read of
+ * one or more decoded bytes from [delegate] (issue #974). The `-CC` reader loop
+ * reads off [RealSshShell.stdout]; each non-empty read is decoded application
+ * data from the server — positive proof the transport is alive — so it bumps the
+ * keepalive's inbound-activity timestamp via this callback. A `-1` (EOF) or a
+ * `0`-length read is NOT activity (no server bytes arrived), so it does not bump.
+ *
+ * Pure observer: it never buffers, transforms, or serialises the read — it only
+ * counts. So it is safe on the un-dispatched read side and adds a single cheap
+ * volatile store per read.
+ */
+private class InboundActivityInputStream(
+    private val delegate: InputStream,
+    private val onActivity: () -> Unit,
+) : InputStream() {
+
+    override fun read(): Int {
+        val b = delegate.read()
+        if (b >= 0) onActivity()
+        return b
+    }
+
+    override fun read(b: ByteArray): Int {
+        val n = delegate.read(b)
+        if (n > 0) onActivity()
+        return n
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        val n = delegate.read(b, off, len)
+        if (n > 0) onActivity()
+        return n
+    }
+
+    override fun available(): Int = delegate.available()
+
+    override fun skip(n: Long): Long = delegate.skip(n)
+
+    override fun close() {
+        // Read-side close is owned by RealSshShell.close / RealSshSession.close
+        // (the channel teardown). Delegate the close so a caller that closes the
+        // stream directly still tears the underlying channel stream down, but it
+        // is idempotent at the sshj layer.
+        delegate.close()
     }
 }

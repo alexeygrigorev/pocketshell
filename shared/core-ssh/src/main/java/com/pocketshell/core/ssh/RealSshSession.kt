@@ -74,14 +74,63 @@ internal class RealSshSession(
 
     /**
      * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
-     * transport activity — bumped on every successful keepalive reply (issue
-     * #945). The keepalive loop reads this to SKIP a ping when the link answered
-     * within the last interval (OpenSSH reset-on-server-traffic semantics), so a
-     * busy link is self-evidently alive and we never ping a channel that just
-     * round-tripped.
+     * transport activity — bumped on a successful keepalive reply (issue #945)
+     * AND on ANY decoded application bytes the server sends back over the
+     * transport: the live `-CC` control-mode reader's output, an exec/list/cat
+     * round-trip's stdout/stderr, and each `tail -F` line (issue #974). The
+     * keepalive loop reads this to SKIP a ping when the link produced server
+     * bytes within the last interval (OpenSSH reset-on-server-traffic
+     * semantics), so a busy link is self-evidently alive and we never ping —
+     * nor tear down — a channel that is actively streaming.
+     *
+     * ## Issue #974 — honour the contract: live data proves the transport alive
+     *
+     * Before #974 this was bumped at EXACTLY ONE site — only on a keepalive
+     * global-request reply ([sendKeepAlive]) — even though the contract docstring
+     * ([TransportKeepAlive.KeepAliveIo.lastInboundActivityNanos]) promised it
+     * tracks "any bytes from the server." That gap meant live `-CC` data did NOT
+     * count as proof of life: on a stable-but-jittery Wi-Fi link, a few
+     * delayed/missed 30s keepalive replies (power-save / bufferbloat straddling
+     * three ping windows) could trip the keepalive's `countMax` death budget and
+     * tear a link the user saw as perfectly stable — WHILE the `-CC` reader was
+     * still delivering bytes. And because #964's
+     * [isTransportProvenAliveWithinKeepAliveWindow] reads the SAME field, the
+     * `LivenessProbe` deferral collapsed at the same instant. Recording inbound
+     * data here closes both: real server bytes legitimately reset the miss
+     * counter and keep [isTransportProvenAliveWithinKeepAliveWindow] true, so a
+     * link with live data is never spuriously declared dead.
+     *
+     * Bound to DECODED application bytes from the server (the channel streams
+     * sshj already decrypted/decoded), NOT raw socket reads — a genuinely
+     * half-open peer that sends no bytes still produces no activity here, so the
+     * keepalive's own ride-through budget still catches a truly-dead link
+     * promptly (the fix must not make a dead link look alive forever).
      */
     @Volatile
     private var lastInboundActivityNanos: Long = System.nanoTime()
+
+    /**
+     * Record inbound transport activity (issue #974). Called from EVERY path
+     * that reads decoded application bytes the server sent back — the `-CC`
+     * shell reader, exec/list/cat round-trips, and `tail -F` lines — so live
+     * data proves the transport alive to the keepalive loop's reset-on-inbound
+     * shortcut and to #964's [isTransportProvenAliveWithinKeepAliveWindow]
+     * deferral oracle, exactly as the [TransportKeepAlive.KeepAliveIo] contract
+     * promises. Cheap volatile store, safe to call from any reader thread.
+     */
+    private fun recordInboundActivity() {
+        lastInboundActivityNanos = System.nanoTime()
+    }
+
+    /**
+     * Issue #974 — `core-ssh`-internal accessor on the raw inbound-activity
+     * timestamp so [KeepAliveIntegrationTest] can drive a synthetic
+     * [TransportKeepAlive] off the SAME field the production keepalive reads,
+     * proving that live `-CC`/exec data bumps it (the reproduce-first gate). Not
+     * part of the public [SshSession] surface — production code uses the
+     * keepalive loop + [isTransportProvenAliveWithinKeepAliveWindow] instead.
+     */
+    internal fun lastInboundActivityNanosForTest(): Long = lastInboundActivityNanos
 
     /**
      * Why this session's transport went down (issue #969 — reconnect
@@ -306,6 +355,11 @@ internal class RealSshSession(
                         val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
                         val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
                         liveCommand.join()
+                        // Issue #974: a completed exec round-trip is decoded server
+                        // bytes — proof the transport is alive. Record it so a busy
+                        // exec workload keeps the keepalive's inbound-activity
+                        // timestamp fresh (honouring the contract).
+                        recordInboundActivity()
                         // sshj returns null exitStatus when the server didn't send
                         // one (e.g. signal-killed). Map to -1 so the caller can
                         // still tell it wasn't a clean 0.
@@ -470,6 +524,11 @@ internal class RealSshSession(
                             logTailRecoverableFailure(path, e)
                             return@launch
                         }
+                        // Issue #974: a tail line is decoded server bytes — proof
+                        // the transport is alive. Record it BEFORE the (possibly
+                        // slow) onLine callback so a steadily-tailing agent log
+                        // keeps the keepalive's inbound-activity timestamp fresh.
+                        recordInboundActivity()
                         onLine(line)
                         // Suspend per-line so a cancelled tail job exits
                         // promptly even when the remote is gushing output.
@@ -573,6 +632,11 @@ internal class RealSshSession(
                     sessionChannel = sessionChannel,
                     shell = shell,
                     dispatcher = dispatcher,
+                    // Issue #974: the `-CC` control-mode reader is the highest-rate
+                    // inbound stream on a foregrounded session — every byte it
+                    // decodes proves the transport alive, so record it as inbound
+                    // activity (honouring the keepalive contract).
+                    onInboundActivity = ::recordInboundActivity,
                 )
             } catch (t: Throwable) {
                 runCatching { sessionChannel.close() }

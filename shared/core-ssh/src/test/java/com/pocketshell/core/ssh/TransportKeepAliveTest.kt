@@ -128,6 +128,85 @@ class TransportKeepAliveTest {
     }
 
     @Test
+    fun `inbound data flowing while keepalive replies are starved never declares dead`() = runTest {
+        // Issue #974 — the MISSING #970 signature: a stable-but-jittery link where
+        // every keepalive REPLY is starved (delayed/dropped past the ride-through
+        // window) but the `-CC` reader is STILL delivering bytes. The reset-on-inbound
+        // shortcut must keep the link alive off the live data, NOT tear it down on
+        // the missed replies. The #970 gate only injected sub-budget stalls and never
+        // this case.
+        //
+        // RED on base (production): RealSshSession bumped lastInboundActivityNanos
+        // ONLY on a keepalive reply, so streaming `-CC` data never reset the miss
+        // counter — exactly the spurious stable-Wi-Fi teardown. GREEN with the fix:
+        // the live reader bumps the timestamp every interval, so even though every
+        // ping misses, the loop SKIPS the ping (inbound activity) and never declares
+        // dead. Here we model the fix by keeping lastActivity fresh each tick, which
+        // is precisely what the production `-CC` reader now does.
+        val io = FakeIo()
+        val keepAlive = TransportKeepAlive(io = io, intervalMs = 1_000L, countMax = 3)
+        keepAlive.start(this)
+
+        // Replies are ALWAYS starved — if the loop ever pinged it would miss.
+        io.pingResult = false
+        // Hold the link for FOUR budgets (12 ticks, budget = 3) with inbound DATA
+        // arriving fresh every tick (the live `-CC` reader). The loop must ride
+        // through indefinitely on the data alone.
+        repeat(12) {
+            io.lastActivityNanos = System.nanoTime() // live data just arrived
+            advanceTimeBy(1_000L)
+            runCurrent()
+        }
+
+        assertEquals(
+            "a link with live inbound data must never be declared dead even when every " +
+                "keepalive reply is starved — the streaming data proves it alive (#974)",
+            null,
+            io.deadDeclaredWith,
+        )
+        assertEquals(
+            "the loop must SKIP every ping while inbound data is fresh (reset-on-inbound), " +
+                "so a busy link with starved replies sends ZERO pings",
+            0,
+            io.pingsSent,
+        )
+        keepAlive.stop()
+    }
+
+    @Test
+    fun `data stops AND replies starved - a genuinely dead link is still declared dead`() = runTest {
+        // Issue #974 class-coverage (the dual): once the inbound data ALSO stops
+        // (genuine half-open death — no bytes, no reply), the data-bump no longer
+        // fires, the reset-on-inbound shortcut goes silent, and the loop MUST still
+        // declare the peer dead within countMax. The fix must not make a truly-dead
+        // link look alive forever.
+        val io = FakeIo()
+        val keepAlive = TransportKeepAlive(io = io, intervalMs = 1_000L, countMax = 3)
+        keepAlive.start(this)
+
+        // Phase 1: data flowing + replies starved -> ridden through (no death).
+        io.pingResult = false
+        repeat(5) {
+            io.lastActivityNanos = System.nanoTime()
+            advanceTimeBy(1_000L); runCurrent()
+        }
+        assertEquals("ridden through while data flowed", null, io.deadDeclaredWith)
+
+        // Phase 2: data STOPS (no more bumps) and replies stay starved -> dead.
+        io.lastActivityNanos = Long.MIN_VALUE // no inbound activity any more
+        advanceTimeBy(1_000L); runCurrent() // miss 1
+        advanceTimeBy(1_000L); runCurrent() // miss 2
+        advanceTimeBy(1_000L); runCurrent() // miss 3 -> declare dead
+        assertEquals(
+            "once inbound data ALSO stops, a genuinely dead link must still be declared " +
+                "dead within countMax — the #974 data-bump must not mask a real death",
+            3,
+            io.deadDeclaredWith,
+        )
+        keepAlive.stop()
+    }
+
+    @Test
     fun `a single miss between successes never declares dead - counter resets`() = runTest {
         val io = FakeIo()
         val keepAlive = TransportKeepAlive(io = io, intervalMs = 1_000L, countMax = 3)

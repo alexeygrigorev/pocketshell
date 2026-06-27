@@ -6,6 +6,7 @@ import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.projects.FolderListGateway
@@ -2322,6 +2323,79 @@ class TmuxSessionViewModelTest {
             diagnostics.close()
         }
     }
+
+    @Test
+    fun withinGraceForegroundHealExportsSuppressedDisconnectCauseToTrailAndFallback() =
+        runTest(scheduler) {
+            val diagnostics = installRecordingDiagnosticSink()
+            val registry = ActiveTmuxClients()
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(
+                    connector = FailingLeaseConnector(SshException("synthetic heal failure")),
+                    scope = this,
+                    idleTtlMillis = 0L,
+                ),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 1L, silentReattachTimeoutMs = 1L)
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            try {
+                val backgroundDeadClient = FakeTmuxClient()
+                vm.replaceClientForTest(
+                    hostId = 7L,
+                    hostName = "alpha",
+                    host = "alpha.example",
+                    port = 22,
+                    user = "alex",
+                    keyPath = "/keys/a",
+                    sessionName = "work",
+                    client = backgroundDeadClient,
+                )
+                runCurrent()
+
+                vm.setProcessForegroundForClearedForTest(false)
+                backgroundDeadClient.markDisconnectedForTest(
+                    TmuxDisconnectEvent(
+                        reason = TmuxDisconnectReason.ReaderEof,
+                        source = "reader_loop",
+                        intent = "unexpected_eof",
+                    ),
+                )
+                runCurrent()
+
+                vm.setProcessForegroundForClearedForTest(true)
+                vm.onAppForegrounded(resumedWithinGrace = true)
+                runCurrent()
+                advanceTimeBy(1L)
+                runCurrent()
+
+                val healTrail = diagnostics.eventsNamed(ReconnectCauseTrail.NAME).single {
+                    it.fields["stage"] == "foreground_reattach" &&
+                        it.fields["outcome"] == "silent_heal_within_grace"
+                }
+                assertEquals("reader_eof", healTrail.fields["cause"])
+                assertEquals("reader_eof", healTrail.fields["disconnectReason"])
+                assertEquals("reader_loop", healTrail.fields["disconnectSource"])
+                assertEquals("unexpected_eof", healTrail.fields["disconnectIntent"])
+
+                val foregroundHeal = diagnostics.eventsNamed("foreground_reattach").single {
+                    it.fields["outcome"] == "silent_heal_within_grace"
+                }
+                assertEquals("reader_eof", foregroundHeal.fields["cause"])
+                assertEquals("reader_eof", foregroundHeal.fields["disconnectReason"])
+
+                val scheduledFallback = diagnostics.eventsNamed("auto_reconnect_decision").single {
+                    it.fields["decision"] == "scheduled" &&
+                        it.fields["cause"] == "retryable"
+                }
+                assertEquals("reader_eof", scheduledFallback.fields["originationCause"])
+                assertEquals("reader_eof", scheduledFallback.fields["disconnectReason"])
+                assertEquals("reader_loop", scheduledFallback.fields["disconnectSource"])
+            } finally {
+                vm.setProcessForegroundForClearedForTest(null)
+                diagnostics.close()
+            }
+        }
 
     @Test
     fun livenessProbeDeclaredDropClosesTheClientAndDrivesTheSingleReconnectEntrypoint() =

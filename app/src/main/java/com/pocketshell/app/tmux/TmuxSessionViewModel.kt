@@ -893,7 +893,7 @@ public class TmuxSessionViewModel @Inject constructor(
             transportPort = connectionTransportPort,
             scope = viewModelScope,
             // EPIC #766 Slice 2a: the controller's `-> Backgrounded` edge now DRIVES the
-            // full background decision (the re-home of the inline `reduceConnection(Background)`
+            // full background decision (the re-home of the inline background
             // dispatch). [onControllerBackgrounded] selects pause-vs-detach via the
             // inline-equivalent [reduceBackground] predicate (the #685 trap) and, on the
             // detach arm, routes the clean-detach teardown through the single [GraceEffects]
@@ -913,7 +913,7 @@ public class TmuxSessionViewModel @Inject constructor(
             foregroundReattachEffect = { graceEffects.onForegroundReattachReseed() },
             // EPIC #766 Slice 2a: the controller's Backgrounded -> Reconnecting edge (the
             // BEYOND-grace foreground) now DRIVES the foreground arm dispatch (the re-home
-            // of the inline `reduceConnection(Foreground)`). [onControllerForegrounded]
+            // of the inline foreground dispatch). [onControllerForegrounded]
             // selects replay-vs-resume via the inline-equivalent [reduceForeground]
             // predicate (pendingReattach / pausedAutoReconnect) — the controller edge is
             // only the TRIGGER, not the divergent display-status gate.
@@ -1518,7 +1518,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // writes [_connectionStatus]. The view-facing status is now projected SOLELY
         // from the [ConnectionController]'s state — the controller is the
         // single source of truth for what the user SEES. The inline EFFECT machinery
-        // (reconnect jobs, generation counter, named coroutine jobs, reduceConnection
+        // (reconnect jobs, generation counter, named coroutine jobs, classifier
         // bodies) keeps running UNCHANGED; it just no longer owns the displayed
         // status. Inline effects that need to gate on "am I connected?" read the
         // VM-internal [inlineConnectionStatus] (a pure projection of [_connectionState]
@@ -2106,8 +2106,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // genuine transport DROP that must drive the connection lifecycle. A real
     // `-CC` drop arrives as a normal EMISSION on `client.disconnected`
     // (a latched StateFlow) → handlePassiveClientDisconnect →
-    // reduceConnection(TransportDropped) → ConnectionController, which surfaces
-    // the escapable Reconnecting/Reconnect band (#895's concern). A
+    // the driver-owned current-client drop path → ConnectionController, which
+    // surfaces the escapable Reconnecting/Reconnect band (#895's concern). A
     // CoroutineExceptionHandler is only ever invoked for an UNCAUGHT THROW; it
     // is never on the path of a normal flow emission, so the drop→band routing
     // is preserved by construction. The handler's sole job is to stop a
@@ -2216,8 +2216,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // `bridgeExceptionHandler` above): this does NOT and CANNOT eat a genuine
     // transport DROP that must drive reconnect. A real `-CC` drop arrives as a
     // normal `client.disconnected` EMISSION on a latched StateFlow →
-    // handlePassiveClientDisconnect → reduceConnection(TransportDropped), which
-    // surfaces the escapable Reconnecting/Reconnect band. A
+    // the driver-owned current-client drop path, which surfaces the escapable
+    // Reconnecting/Reconnect band. A
     // CoroutineExceptionHandler is only ever invoked for an UNCAUGHT THROW; it is
     // never on the path of a normal flow emission, so the drop→band routing is
     // preserved by construction. The handler's sole job is to stop a
@@ -3120,7 +3120,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // EPIC #766 Slice 2a: the BACKGROUND decision is now DRIVEN by the
         // [ConnectionController]'s `-> Backgrounded` EDGE (fired by the
         // [ConnectionEffectDriver]'s `backgroundedEffect`), NOT by the inline
-        // [reduceConnection] classifier. Feeding the AUTHORITATIVE controller the
+        // inline background classifier. Feeding the AUTHORITATIVE controller the
         // Background event is the SOLE trigger: its transition INTO Backgrounded fires
         // [onControllerBackgrounded], which runs the inline-equivalent pause-vs-detach
         // bookkeeping AND the clean-detach teardown ([launchBackgroundDetachTeardown]),
@@ -3130,7 +3130,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // `pendingReattach` are the much-later foreground lifecycle event, and the
         // teardown which runs AFTER the bookkeeping inside the same effect).
         //
-        // The inline `reduceConnection(Background)` arm is no longer consulted (Slice
+        // The inline background event arm is no longer consulted (Slice
         // 2a); the #685 trap is avoided because [onControllerBackgrounded] re-applies
         // the inline-equivalent [reduceBackground] predicate (reading
         // `clientRef`/`sessionRef`/`inlineConnectionStatus`) to select the arm — the
@@ -3145,7 +3145,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #766 Slice 2a — the controller-EDGE-driven BACKGROUND effect. Fired by the
      * [ConnectionEffectDriver] when the [ConnectionController] transitions INTO
      * [ConnectionState.Backgrounded]. This is the re-home of the former inline
-     * `reduceConnection(Background)` dispatch: the controller edge is the TRIGGER, but
+     * inline background dispatch: the controller edge is the TRIGGER, but
      * the pause-vs-detach SELECTION still runs through the inline-equivalent
      * [reduceBackground] predicate so behavior is byte-identical (the #685
      * non-byte-identical-predicate trap — the controller transitions to Backgrounded
@@ -3177,7 +3177,7 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * EPIC #687 slice 1a: the [ConnectionDecision.PauseReconnectForBackground]
      * body — formerly inline at the top of [onAppBackgrounded]. Unchanged
-     * behavior; only the decision moved to [reduceConnection].
+     * behavior; only the decision moved to [reduceBackground].
      */
     private fun pauseReconnectForBackground() {
         val reconnecting = inlineConnectionStatus as? ConnectionStatus.Reconnecting ?: return
@@ -3397,7 +3397,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         // EPIC #766 Slice 2a: the FOREGROUND arm dispatch is now DRIVEN by the
         // [ConnectionController]'s foreground EDGE (fired by the [ConnectionEffectDriver]),
-        // NOT by the inline [reduceConnection] classifier. Feeding the AUTHORITATIVE
+        // NOT by the inline foreground classifier. Feeding the AUTHORITATIVE
         // controller the Foreground event is the SOLE trigger: beyond the App-level grace
         // (the only way this branch is reached — the within-grace fast paths returned
         // above) the App-grace teardown evicted the warm lease, so the controller's own
@@ -3405,7 +3405,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // [onControllerForegrounded] which replays `pendingReattach` / resumes a
         // `pausedAutoReconnect` (selected via the inline-equivalent [reduceForeground]
         // predicate — the #685 trap: the controller edge is the trigger, the inline
-        // predicate the gate). The inline `reduceConnection(Foreground)` arm is no longer
+        // predicate the gate). The inline foreground event arm is no longer
         // consulted (Slice 2a).
         connectionManager.observeForeground()
         dispatchPostGraceForegroundArmIfPending()
@@ -3437,7 +3437,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * Fired by the [ConnectionEffectDriver] when the [ConnectionController] transitions
      * [ConnectionState.Backgrounded] -> [ConnectionState.Reconnecting] (the beyond-grace
      * foreground return). This is the re-home of the former inline
-     * `reduceConnection(Foreground)` dispatch: the controller edge is the TRIGGER, but
+     * inline foreground dispatch: the controller edge is the TRIGGER, but
      * the replay-vs-resume SELECTION still runs through the inline-equivalent
      * [reduceForeground] predicate (`pendingReattach` / `pausedAutoReconnect`) so behavior
      * is byte-identical (the #685 non-byte-identical-predicate trap — the arm selection
@@ -3720,7 +3720,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // a genuinely orphaned foreground still does the right (non-grace) thing.
             // EPIC #766 Slice 2a: the foreground arm dispatch is driven by the controller
             // edge (the driver fires [onControllerForegrounded]); the inline
-            // `reduceConnection(Foreground)` consultation is removed. By construction this
+            // inline foreground consultation is removed. By construction this
             // branch has NO `pendingReattach`/`pausedAutoReconnect` (the `target`-deriving
             // expression above already proved both null), so [reduceForeground] is `Ignore`
             // and the driver-fired effect is a no-op — exactly the prior inline `else`
@@ -3813,7 +3813,7 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * EPIC #687 slice 1a: the [ConnectionDecision.ReplayPendingReattach] body —
      * formerly the second half of [onAppForegrounded]. Unchanged behavior; only
-     * the entry decision moved to [reduceConnection].
+     * the entry decision moved to [reduceForeground].
      */
     private fun replayPendingReattach() {
         val detachJob = backgroundDetachJob
@@ -4367,7 +4367,7 @@ public class TmuxSessionViewModel @Inject constructor(
         connectionManager.observeNetworkChanged(
             validatedHandoff = realValidatedHandoff && !isTransportKeepAliveProvenAliveRecently(),
         )
-        when (reduceConnection(ConnectionEvent.NetworkChanged(change))) {
+        when (reduceNetworkChanged(change)) {
             ConnectionDecision.SuppressNetworkNotValidated ->
                 if (target != null) suppressNetworkNotValidated(change, target)
             ConnectionDecision.SuppressNetworkCoalesced ->
@@ -15831,12 +15831,9 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * The connection-lifecycle DECISIONS used to be inlined at the top of each
      * lifecycle entry point ([onAppBackgrounded], [onAppForegrounded],
-     * [onNetworkChanged], and the foreground-runtime-probe gate). This sealed
-     * event/decision pair plus the single [reduceConnection] classifier consolidate those branch decisions
-     * into ONE place. The vocabulary deliberately mirrors
-     * `:shared:core-connection`'s `ConnectionController` (an event-in /
-     * decision-out reducer) so slice 1c can swap the [reduceConnection] body for
-     * a real `ConnectionController` call WITHOUT rewriting the call sites.
+     * [onNetworkChanged], and the foreground-runtime-probe gate). Background and
+     * foreground dispatch are now driven by controller edges, so the remaining
+     * inline classifier is the network-change decision that has not yet moved.
      *
      * This is a PURE classifier: it reads the current VM state and returns the
      * branch the caller must take. It does NOT mutate state, schedule jobs, or
@@ -15845,18 +15842,6 @@ public class TmuxSessionViewModel @Inject constructor(
      * existing generation counter, grace clocks, and named jobs continue to back
      * those side effects; later slices delete them.
      */
-    private sealed interface ConnectionEvent {
-        /** Application moved to the background (ProcessLifecycle ON_STOP). */
-        data object Background : ConnectionEvent
-
-        /** Application moved to the foreground (ProcessLifecycle ON_START). */
-        data object Foreground : ConnectionEvent
-
-        /** A network identity change was observed by the terminal observer. */
-        data class NetworkChanged(val change: TerminalNetworkChange) : ConnectionEvent
-
-    }
-
     /**
      * The branch the lifecycle call site must take. Each variant names the
      * existing side-effect path; the call site dispatches on it and runs the
@@ -15948,18 +15933,6 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Foreground passive disconnect — race the within-grace silent reattach. */
         data object SilentReattachWithinGrace : ConnectionDecision
     }
-
-    /**
-     * EPIC #687 slice 1a — the single decision entry point. Pure: reads VM state,
-     * returns the branch. Slice 1c replaces the body with a `ConnectionController`
-     * reduce, keeping these return values as the contract the call sites consume.
-     */
-    private fun reduceConnection(event: ConnectionEvent): ConnectionDecision =
-        when (event) {
-            is ConnectionEvent.Background -> reduceBackground()
-            is ConnectionEvent.Foreground -> reduceForeground()
-            is ConnectionEvent.NetworkChanged -> reduceNetworkChanged(event.change)
-        }
 
     private fun reduceBackground(): ConnectionDecision {
         if (inlineConnectionStatus is ConnectionStatus.Reconnecting) {

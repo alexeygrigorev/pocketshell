@@ -409,7 +409,7 @@ class ConnectionEffectDriverTest {
     // --- EPIC #766 slice 2a: the BEYOND-grace foreground arm effect -------------
     //
     // The new `foregroundReconnectEffect` seam re-homes the inline
-    // `reduceConnection(Foreground)` replay/resume arm onto the controller's
+    // foreground replay/resume arm onto the controller's
     // Backgrounded -> Reconnecting EDGE. These pin: (1) it fires exactly on the
     // beyond-grace foreground edge, (2) it does NOT fire on the within-grace
     // (Reattaching) foreground edge, and (3) it does NOT fire on a Reconnecting

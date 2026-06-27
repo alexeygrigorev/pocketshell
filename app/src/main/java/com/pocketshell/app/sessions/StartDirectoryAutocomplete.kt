@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -332,8 +333,8 @@ internal data class StartDirectoryAutocompleteRequest(
 
 internal fun startDirectoryAutocompleteCommand(request: StartDirectoryAutocompleteRequest): String =
     """
-        pocketshell_ac_parent=${shellQuote(request.parentDirectory)}
-        pocketshell_ac_prefix=${shellQuote(request.childPrefix)}
+        pocketshell_ac_parent=${shellSingleQuote(request.parentDirectory)}
+        pocketshell_ac_prefix=${shellSingleQuote(request.childPrefix)}
         case "${'$'}pocketshell_ac_parent" in
           '~') pocketshell_ac_parent=${'$'}HOME ;;
           '~/'*) pocketshell_ac_parent=${'$'}HOME/${'$'}{pocketshell_ac_parent#~/} ;;
@@ -363,9 +364,6 @@ internal fun parseStartDirectoryAutocompleteOutput(
         .map { request.suggestionPrefix + it }
         .take(request.limit)
         .toList()
-
-private fun shellQuote(value: String): String =
-    "'" + value.replace("'", "'\\''") + "'"
 
 const val START_DIRECTORY_AUTOCOMPLETE_SUGGESTIONS_TAG: String =
     "start-directory-autocomplete:suggestions"

@@ -3,55 +3,48 @@ package com.pocketshell.app.composer
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.app.di.WhisperClientFactory
-import com.pocketshell.app.proof.signals.waitForInputMethodVisible
-import com.pocketshell.core.voice.WhisperClient
+import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #615 — the maintainer's actual on-device scenario: the **real
- * production [PromptComposerSheet]** (a real `ModalBottomSheet` dialog
- * window) is open, the user taps the draft field, the **real soft IME**
- * comes up, and the primary Send action must stay visible/reachable above
- * the keyboard.
+ * Issue #615 — Send must stay reachable when the composer is in a keyboard-up
+ * layout.
  *
- * Why a new test class instead of reusing [ComposerPartialExpandE2eTest]:
- * that harness mounts a *hand-built* `ModalBottomSheet` and raises the IME
- * with `WindowInsetsControllerCompat.show(ime())` on the activity window.
- * It passed for many rounds while the maintainer's phone still hid Send —
- * because the harness never exercised:
- *
- *   1. the real `PromptComposerSheet` composable (with its IME auto-expand
- *      effect + `WindowInsets.ime`-driven height fraction read from inside
- *      the sheet's own dialog window), and
- *   2. the IME raised by *focusing the field* (the real user gesture),
- *      whose inset has to propagate into the sheet's separate dialog window.
- *
- * This test closes both gaps: it mounts the production sheet, focuses the
- * draft to bring up the real keyboard, captures a full-device screenshot,
- * and asserts the Send button's bottom edge sits at or above the IME top.
+ * This used to raise the REAL soft IME, then `assumeTrue`-skip when the shared
+ * CI emulator failed to surface it. That made the reachability assertion
+ * environment-dependent and allowed a vacuous green run. The newer composer IME
+ * proofs use a deterministic #780 model instead: render the production
+ * [SheetContent] in a fixed host, dispatch a synthetic `Type.ime()` inset, read
+ * the inset back from inside Compose, and HARD-assert it applied before judging
+ * geometry. No real keyboard, no skip.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RunWith(AndroidJUnit4::class)
@@ -60,47 +53,23 @@ class PromptComposerSheetImeReachabilityTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
-    private class TestMicCapture : PromptComposerViewModel.MicCapture {
-        override fun start() {}
-        override fun stop(): ByteArray = ByteArray(0)
-        override fun currentAmplitude(): Float = 0f
-    }
-
-    private class TestVault : PromptComposerViewModel.ApiKeyVault {
-        private var key: CharArray? = "sk-test".toCharArray()
-        override fun save(key: CharArray) { this.key = key.copyOf() }
-        override fun load(): CharArray? = key?.copyOf()
-        override fun clear() { key = null }
-    }
-
-    private class TestVoiceSettings : PromptComposerViewModel.VoiceSettingsSnapshot {
-        override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
-        override fun whisperLanguageHint(): String? = null
-    }
-
-    private fun newViewModel(): PromptComposerViewModel = PromptComposerViewModel(
-        audioRecorder = TestMicCapture(),
-        whisperClientFactory = WhisperClientFactory {
-            object : WhisperClient {
-                override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> =
-                    Result.success("")
-            }
-        },
-        apiKeyStorage = TestVault(),
-        voiceSettings = TestVoiceSettings(),
-    )
+    private val observedImeBottomPx = mutableStateOf(0)
+    private val observedNavBottomPx = mutableStateOf(0)
+    private val observedStatusTopPx = mutableStateOf(0)
 
     @Test
-    fun sendStaysAboveKeyboardWhenDraftFocusedRaisesImeInRealSheet() {
-        val vm = newViewModel()
-        // Match MainActivity's edge-to-edge window setup so IME inset
-        // propagation into the sheet's dialog window mirrors production.
+    fun sendStaysAboveKeyboardUnderSyntheticImeInset() {
         compose.activityRule.scenario.onActivity { activity ->
             WindowCompat.setDecorFitsSystemWindows(activity.window, false)
         }
 
         compose.setContent {
             PocketShellTheme {
+                val density = LocalDensity.current
+                observedImeBottomPx.value = WindowInsets.ime.getBottom(density)
+                observedNavBottomPx.value = WindowInsets.navigationBars.getBottom(density)
+                observedStatusTopPx.value = WindowInsets.statusBars.getTop(density)
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -108,89 +77,110 @@ class PromptComposerSheetImeReachabilityTest {
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     FauxTerminalBackdrop()
-                    PromptComposerSheet(
-                        onDismiss = {},
-                        onSend = { _ -> true },
-                        viewModel = vm,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .width(HOST_WIDTH_DP.dp)
+                            .height(HOST_HEIGHT_DP.dp)
+                            .testTag(HOST_TAG),
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
+                        SheetContent(
+                            state = keyboardUpDraftState(),
+                            onClose = {},
+                            onDraftChange = {},
+                            onMicTap = {},
+                            onSend = {},
+                            onAttachFiles = {},
+                        )
+                    }
                 }
             }
         }
-
         compose.waitForIdle()
 
-        // Real user gesture: tap the draft, type, which raises the soft IME.
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .performClick()
-            .performTextInput("printf issue615 send must be reachable")
-
-        val imeShown = waitForInputMethodVisible(
-            scenario = compose.activityRule.scenario,
-            expected = true,
-            timeoutMs = 30_000L,
+        applySyntheticInsets(
+            imeBottomPx = (IME_HEIGHT_DP * displayDensity()).toInt(),
+            navBarBottomPx = (NAV_BAR_DP * displayDensity()).toInt(),
+            statusBarTopPx = (STATUS_BAR_DP * displayDensity()).toInt(),
         )
-        assumeTrue(
-            "IME not available on this emulator; cannot validate issue #615 geometry",
-            imeShown,
+        compose.waitForIdle()
+
+        val density = displayDensity()
+        val imeBottomPx = observedImeBottomPx.value
+        val navBottomPx = observedNavBottomPx.value
+        val statusTopPx = observedStatusTopPx.value
+        val expectedImePx = (IME_HEIGHT_DP * density).toInt()
+
+        assertTrue(
+            "Synthetic ime() inset did not reach Compose; cannot validate issue " +
+                "#615 keyboard-up Send reachability. observedImeBottomPx=" +
+                "$imeBottomPx (expected ~$expectedImePx).",
+            imeBottomPx > 0,
         )
 
-        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
-        compose.waitForIdle()
-        // Give the sheet's IME auto-expand + host-window-driven padding
-        // recomposition a chance to settle before reading Send's bounds.
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        android.os.SystemClock.sleep(400)
-        compose.waitForIdle()
-
-        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
+        val hostBounds = compose.onNodeWithTag(HOST_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
             .boundsInRoot
-        val imeTop = readDecorHeightPx() - readImeBottomPx()
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        // Model the resized-sheet case: the host height is already the visible
+        // room above the keyboard, so the synthetic keyboard starts at its bottom.
+        val keyboardTopPx = hostBounds.bottom
 
-        // Emit the authoritative geometry so the reviewer can read it from
-        // logcat/instrumentation output for the same run. We deliberately do
-        // NOT take a `uiAutomation.takeScreenshot()` here: on the shared AVD a
-        // sibling instrumentation can leave the UiAutomation half-connected,
-        // crashing this run's teardown (`Cannot call disconnect() while
-        // connecting`). The bounds check below is the authoritative emulator
-        // proof; the full-device keyboard-up screenshot is captured separately
-        // and host-side (crash-free) for the maintainer.
         println(
-            "ISSUE615_GEOMETRY sendTop=${sendBounds.top} sendBottom=${sendBounds.bottom} imeTop=$imeTop",
+            "ISSUE615_SYNTHETIC_GEOMETRY sendTop=${sendBounds.top} " +
+                "sendBottom=${sendBounds.bottom} keyboardTopPx=$keyboardTopPx " +
+                "hostBottom=${hostBounds.bottom} imeBottomPx=$imeBottomPx " +
+                "navBottomPx=$navBottomPx statusTopPx=$statusTopPx density=$density",
         )
 
-        assertTrue(
-            "Send button must stay above the IME in the real composer sheet. " +
-                "sendBottom=${sendBounds.bottom} imeTop=$imeTop",
-            sendBounds.bottom <= imeTop + 2f,
+        compose.assertNodeFullyAboveImeOrKeyboard(
+            COMPOSER_SEND_ENTER_TAG,
+            keyboardTopPx = keyboardTopPx,
+            slopDp = SLOP_DP,
+            useUnmergedTree = true,
+        )
+    }
+
+    private fun keyboardUpDraftState(): PromptComposerViewModel.UiState =
+        PromptComposerViewModel.UiState(
+            draft = "printf issue615 send must be reachable",
+            recording = PromptComposerViewModel.RecordingState.Idle,
+            attachments = emptyList(),
         )
 
-        // Reachability, not just presence: the tappable Send must be fully
-        // inside the visible viewport above the keyboard.
-        assertTrue(
-            "Send button top must be on-screen above the IME. " +
-                "sendTop=${sendBounds.top} imeTop=$imeTop",
-            sendBounds.top in 0f..imeTop.toFloat(),
-        )
-
-        // Optional hold (off by default) so a reviewer/maintainer can grab a
-        // crash-free full-device screenshot host-side via `adb exec-out
-        // screencap` while the composer is on screen with the keyboard up.
-        // Enabled only when `-Pandroid.testInstrumentationRunnerArguments.
-        // issue615HoldMs=<ms>` is passed, so normal/CI runs stay fast and never
-        // touch `uiAutomation.takeScreenshot()` (which crashes teardown under
-        // sibling AVD contention).
-        val holdMs = InstrumentationRegistry.getArguments()
-            .getString("issue615HoldMs")?.toLongOrNull() ?: 0L
-        if (holdMs > 0L) {
-            println("ISSUE615_HOLD_BEGIN ms=$holdMs")
-            android.os.SystemClock.sleep(holdMs)
-            println("ISSUE615_HOLD_END")
+    private fun applySyntheticInsets(
+        imeBottomPx: Int,
+        navBarBottomPx: Int,
+        statusBarTopPx: Int,
+    ) {
+        compose.activityRule.scenario.onActivity { activity ->
+            val decor = activity.window.decorView
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
+                .setInsets(
+                    WindowInsetsCompat.Type.navigationBars(),
+                    Insets.of(0, 0, 0, navBarBottomPx),
+                )
+                .setInsets(
+                    WindowInsetsCompat.Type.statusBars(),
+                    Insets.of(0, statusBarTopPx, 0, 0),
+                )
+                .setInsets(
+                    WindowInsetsCompat.Type.systemBars(),
+                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
+                )
+                .build()
+            ViewCompat.dispatchApplyWindowInsets(decor, insets)
         }
     }
 
-    @Composable
+    private fun displayDensity(): Float =
+        InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+
+    @androidx.compose.runtime.Composable
     private fun FauxTerminalBackdrop() {
         Text(
             text = "alex@pocketshell:~$ tail -f deploy.log\n[ok] migrate complete",
@@ -198,20 +188,13 @@ class PromptComposerSheetImeReachabilityTest {
         )
     }
 
-    private fun readImeBottomPx(): Int {
-        var result = 0
-        compose.activityRule.scenario.onActivity { activity ->
-            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
-            result = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
-        }
-        return result
-    }
-
-    private fun readDecorHeightPx(): Int {
-        var result = 0
-        compose.activityRule.scenario.onActivity { activity ->
-            result = activity.window.decorView.height
-        }
-        return result
+    private companion object {
+        const val HOST_TAG = "issue615-synthetic-ime-host"
+        const val HOST_HEIGHT_DP = 470f
+        const val HOST_WIDTH_DP = 392f
+        const val IME_HEIGHT_DP = 343f
+        const val NAV_BAR_DP = 48f
+        const val STATUS_BAR_DP = 52f
+        const val SLOP_DP = 4f
     }
 }

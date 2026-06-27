@@ -11,6 +11,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -111,6 +112,17 @@ class GitHistoryViewModel @Inject constructor(
     private val sshLeaseManager: SshLeaseManager,
 ) : ViewModel() {
 
+    internal constructor(
+        sshLeaseManager: SshLeaseManager,
+        ioDispatcher: CoroutineDispatcher,
+        bestEffortProbeTimeoutMs: Long = BEST_EFFORT_PROBE_TIMEOUT_MS,
+        createIssueTimeoutMs: Long = CREATE_ISSUE_TIMEOUT_MS,
+    ) : this(sshLeaseManager) {
+        this.ioDispatcher = ioDispatcher
+        this.bestEffortProbeTimeoutMs = bestEffortProbeTimeoutMs
+        this.createIssueTimeoutMs = createIssueTimeoutMs
+    }
+
     private val _state = MutableStateFlow<GitHistoryUiState>(
         GitHistoryUiState.Loading(dir = ""),
     )
@@ -128,6 +140,9 @@ class GitHistoryViewModel @Inject constructor(
     private var lease: SshLease? = null
     private var loadJob: Job? = null
     private var createJob: Job? = null
+    private var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private var bestEffortProbeTimeoutMs: Long = BEST_EFFORT_PROBE_TIMEOUT_MS
+    private var createIssueTimeoutMs: Long = CREATE_ISSUE_TIMEOUT_MS
 
     /**
      * Bind host credentials + the project directory and load it. Idempotent for
@@ -158,13 +173,19 @@ class GitHistoryViewModel @Inject constructor(
         createJob?.cancel()
         _createState.value = CreateIssueUiState.Submitting
         createJob = viewModelScope.launch {
-            val outcome = withContext(Dispatchers.IO) {
+            val outcome = withContext(ioDispatcher) {
                 val live = ensureSession(req)
                     ?: return@withContext CreateIssueUiState.Failure(
                         "Couldn't reach ${req.username}@${req.hostname}.",
                     )
                 val gateway = GitHistoryGateway(live)
-                gateway.createIssue(req.dir, title, body).fold(
+                val result = boundedGatewayResult(
+                    timeoutMs = createIssueTimeoutMs,
+                    timeoutMessage = "gh issue create timed out",
+                ) {
+                    gateway.createIssue(req.dir, title, body)
+                }
+                result.fold(
                     onSuccess = { url -> CreateIssueUiState.Success(url) },
                     onFailure = { error ->
                         if (error is CancellationException) throw error
@@ -191,7 +212,7 @@ class GitHistoryViewModel @Inject constructor(
         loadJob?.cancel()
         _state.value = GitHistoryUiState.Loading(dir = req.dir)
         loadJob = viewModelScope.launch {
-            _state.value = withContext(Dispatchers.IO) { fetch(req) }
+            _state.value = withContext(ioDispatcher) { fetch(req) }
         }
     }
 
@@ -207,13 +228,16 @@ class GitHistoryViewModel @Inject constructor(
             result.fold(
                 onSuccess = { commits ->
                     // Overview is best-effort: a failure here (e.g. a transient
-                    // git error) must not hide the history that already loaded.
-                    val overview = gateway.repoOverview(req.dir).getOrNull()
+                    // git error or hung status/worktree probe) must not hide the
+                    // history that already loaded.
+                    val overview = bestEffortProbe {
+                        gateway.repoOverview(req.dir).getOrNull()
+                    }
                     // Best-effort GitHub detection (#648): a failure here must
                     // not hide the history/overview that already loaded.
-                    val gitHubUrl = runCatching {
+                    val gitHubUrl = bestEffortProbe {
                         GitHubRemote.webUrl(gateway.originRemoteUrl(req.dir))
-                    }.getOrNull()
+                    }
                     // GitHub issues (#649), gated on gh being configured (#645).
                     // Best-effort: a probe/listing failure must not hide the
                     // history that already loaded — the Issues tab degrades to
@@ -267,19 +291,41 @@ class GitHistoryViewModel @Inject constructor(
         gateway: GitHistoryGateway,
         dir: String,
     ): Pair<List<GitHubIssue>?, String?> {
-        val status = runCatching { gateway.ghStatus() }.getOrElse {
-            return null to GitHistoryGateway.DEFAULT_GH_HINT
-        }
+        val status = bestEffortProbe { gateway.ghStatus() }
+            ?: return null to GitHistoryGateway.DEFAULT_GH_HINT
         return when (status) {
             is GhConfigStatus.NotConfigured -> null to status.hint
             is GhConfigStatus.Configured -> {
-                val issues = runCatching {
+                val issues = bestEffortProbe {
                     gateway.listIssues(dir, limit = ISSUE_LIMIT).getOrNull()
-                }.getOrNull()
+                }
                 issues to null
             }
         }
     }
+
+    private suspend fun <T> bestEffortProbe(block: suspend () -> T?): T? =
+        try {
+            withTimeoutOrNull(bestEffortProbeTimeoutMs) { block() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+
+    private suspend fun <T> boundedGatewayResult(
+        timeoutMs: Long,
+        timeoutMessage: String,
+        block: suspend () -> Result<T>,
+    ): Result<T> =
+        try {
+            withTimeoutOrNull(timeoutMs) { block() }
+                ?: Result.failure(GitCommandException(timeoutMessage))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
 
     /**
      * Issue #699: borrow the warm transport from the app-wide
@@ -395,6 +441,12 @@ class GitHistoryViewModel @Inject constructor(
     companion object {
         /** Bound the synchronous lease release at teardown (#699). */
         private const val LEASE_RELEASE_TIMEOUT_MS: Long = 2_000L
+
+        /** Bound optional probes so loaded commits are not hidden behind them. */
+        private const val BEST_EFFORT_PROBE_TIMEOUT_MS: Long = 3_500L
+
+        /** Bound the user-triggered gh create call independently of the screen load. */
+        private const val CREATE_ISSUE_TIMEOUT_MS: Long = 15_000L
 
         /** Cap the history so a giant repo doesn't blow up the listing. */
         const val COMMIT_LIMIT: Int = GitHistoryGateway.DEFAULT_LIMIT

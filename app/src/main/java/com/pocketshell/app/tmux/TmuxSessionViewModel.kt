@@ -16535,10 +16535,26 @@ internal class TmuxPaneInputQueue(
     }
 
     suspend fun takeBatch(): TmuxPaneInputBatch? {
-        signal.receiveCatching().getOrNull() ?: return null
-        val first = synchronized(lock) {
-            pending.removeFirstOrNull()
-        } ?: return null
+        // Issue #1043: `signal` (capacity 1) only NOTIFIES that work may be
+        // pending; it can go STALE relative to `pending` because the drain loop
+        // below greedily consumes segments whose triggering `Unit` is still
+        // buffered. Receiving such a stale signal finds an EMPTY `pending` — that
+        // is NOT end-of-stream. Returning `null` here would be indistinguishable
+        // from the only legitimate `null` (the channel was [close]d), and the
+        // pane input bridge loop (`while (true) { takeBatch() ?: break }`) would
+        // BREAK on it, killing the pane's input pump for good (typed input stops
+        // reaching the pane — the #1043 / post-#1041 dogfood symptom). So a
+        // wakeup on a transiently-empty deque must RE-WAIT for the next signal;
+        // `null` is reserved for a genuinely closed channel.
+        val first: TmuxPaneInputSegment
+        while (true) {
+            if (signal.receiveCatching().isClosed) return null
+            val taken = synchronized(lock) { pending.removeFirstOrNull() }
+            if (taken != null) {
+                first = taken
+                break
+            }
+        }
         val out = java.io.ByteArrayOutputStream(maxBatchBytes)
         out.write(first.bytes)
         var chunks = 1

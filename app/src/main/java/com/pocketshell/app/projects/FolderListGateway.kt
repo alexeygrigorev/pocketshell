@@ -7,7 +7,7 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
-import com.pocketshell.app.sessions.remoteStartDirectoryExists
+import com.pocketshell.app.sessions.remoteStartDirectoryExistsCommand
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
@@ -165,9 +165,9 @@ sealed interface FolderListResult {
 }
 
 /**
- * Raised when a session-enumeration SSH-exec probe (e.g. `tmux
- * list-sessions`) connects and authenticates fine but its output read
- * never reaches EOF within [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
+ * Raised when a folder-list SSH-exec command (for example `tmux
+ * list-sessions` or `tmux new-session`) connects and authenticates fine but its
+ * output read never reaches EOF within [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
  *
  * Issue #470: this is the robustness contract for the enumeration probe.
  * A connect can succeed (`destination=FolderList`) and then the post-
@@ -193,7 +193,7 @@ class FolderListExecTimeoutException(
     command: String,
     timeoutMs: Long,
 ) : RuntimeException(
-    "tmux/session-enumeration probe read did not complete within " +
+    "Remote tmux command read did not complete within " +
         "${timeoutMs}ms (connect+auth succeeded; the exec output never " +
         "reached EOF). Command: $command",
 )
@@ -400,11 +400,11 @@ class SshFolderListGateway internal constructor(
     private val activeTmuxClients: ActiveTmuxClients,
     private val sshLeaseManager: SshLeaseManager,
     private val sessionListParser: HostTmuxSessionListParser,
-    // Issue #470: bound on a single session-enumeration exec read. Defaults
-    // to [EXEC_READ_TIMEOUT_MS] in production; the unit test overrides it to
-    // a small deterministic value so the wedge/healthy split can be asserted
-    // on a real dispatcher without virtual-vs-real time racing. Kept off the
-    // @Inject constructor below so Hilt never has to provide a raw Long.
+    // Issue #470/#1036: bound on a single folder-list SSH exec read. Defaults
+    // to [EXEC_READ_TIMEOUT_MS] in production; the unit test overrides it to a
+    // small deterministic value so the wedge/healthy split can be asserted on a
+    // real dispatcher without virtual-vs-real time racing. Kept off the @Inject
+    // constructor below so Hilt never has to provide a raw Long.
     private val execReadTimeoutMs: Long,
     // Issue #702: bound on the LIVE `-CC` client enumeration round-trip. The
     // live path (listSessionRowsFromLiveClient) serves the picker enumeration
@@ -641,8 +641,8 @@ class SshFolderListGateway internal constructor(
                 ?: run {
                     Log.w(
                         PROBE_LOG_TAG,
-                        "session-enumeration exec read wedged >${execReadTimeoutMs}ms; " +
-                            "closing wedged session + surfacing retryable ConnectError. " +
+                        "folder-list SSH exec read wedged >${execReadTimeoutMs}ms; " +
+                            "closing wedged session + surfacing bounded failure. " +
                             "cmd=${command.takeLast(48)}",
                     )
                     // Stop awaiting the wedged read so this coroutine can
@@ -1197,7 +1197,7 @@ class SshFolderListGateway internal constructor(
         cwd: String,
         startCommand: String?,
     ): String {
-        if (!remoteStartDirectoryExists(session, cwd)) {
+        if (session.execBounded(remoteStartDirectoryExistsCommand(cwd)).exitCode != 0) {
             throw RuntimeException(
                 startDirectoryMissingMessage(
                     sessionName = sessionName,
@@ -1228,21 +1228,21 @@ class SshFolderListGateway internal constructor(
         // fresh list / suffix instead of silently leaking keystrokes. A plain
         // shell/no-launch create keeps its idempotent attach-or-create semantics.
         if (startCommand != null) {
-            val hasSession = session.exec(
+            val hasSession = session.execBounded(
                 pathAware("tmux has-session -t $quotedName"),
             )
             if (hasSession.exitCode == 0) {
                 throw RuntimeException(launchTargetCollisionMessage(sessionName))
             }
         }
-        val createResult = session.exec(
+        val createResult = session.execBounded(
             pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
         )
         if (createResult.exitCode == TMUXCTL_UNSUPPORTED_EXIT_CODE) {
             // Layer 1: tmuxctl is absent OR too old to know `create-detached`.
             // Fall back to the pre-#726 raw capped-less create so the user still
             // gets a session (just without the memory cap).
-            val fallback = session.exec(
+            val fallback = session.execBounded(
                 pathAware(fallbackCreateSessionCommand(quotedName, quotedCwd)),
             )
             if (fallback.exitCode != 0 && fallback.stderr.isNotBlank()) {
@@ -1284,7 +1284,7 @@ class SshFolderListGateway internal constructor(
                 ensureAgentSubcommandAvailable(session)
             }
             val quotedCommand = shellQuote(startCommand)
-            session.exec(
+            session.execBounded(
                 pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
             )
         }
@@ -1305,7 +1305,7 @@ class SshFolderListGateway internal constructor(
      * never blocks a healthy launch.
      */
     private suspend fun ensureAgentSubcommandAvailable(session: SshSession) {
-        val probe = session.exec(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
+        val probe = session.execBounded(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
         if (!AgentLaunchVersionCheck.isAgentSubcommandMissing(
                 stdout = probe.stdout,
                 stderr = probe.stderr,
@@ -1317,7 +1317,7 @@ class SshFolderListGateway internal constructor(
         // Outdated host: best-effort fetch of the installed version so the hint
         // can be concrete ("this host's pocketshell is 0.3.33").
         val installedVersion = runCatching {
-            val version = session.exec(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
+            val version = session.execBounded(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
             AgentLaunchVersionCheck.parseReportedVersion(
                 version.stdout.ifBlank { version.stderr },
             )
@@ -1771,10 +1771,9 @@ class SshFolderListGateway internal constructor(
 
     internal companion object {
         /**
-         * Logcat-grep tag for issue #470: emitted only when a
-         * session-enumeration exec read trips its bounded timeout
-         * ([execBounded]) and the gateway surfaces a retryable
-         * `ConnectError` instead of hanging.
+         * Logcat-grep tag for bounded folder-list SSH exec reads. Emitted only
+         * when an exec trips [execBounded] and the gateway surfaces a bounded
+         * failure instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
 

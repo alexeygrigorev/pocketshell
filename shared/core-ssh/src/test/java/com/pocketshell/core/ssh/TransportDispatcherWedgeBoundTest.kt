@@ -1,16 +1,18 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -156,6 +158,70 @@ class TransportDispatcherWedgeBoundTest {
 
         latch.countDown()
     }
+
+    /**
+     * Regression for forced close after caller-side timeout: closeAndAwaitDrain
+     * sets `closed=true` before it runs the final disconnect. If the caller's
+     * outer close budget expires while disconnect is still wedged, closeNow()
+     * must still interrupt/shutdown the worker even though the dispatcher is
+     * already marked closed.
+     */
+    @Test
+    fun `closeNow interrupts after closeAndAwaitDrain times out during disconnect`() =
+        runBlocking<Unit> {
+            val dispatcher = TransportDispatcher(perOpTimeoutMs = 30_000L)
+            val disconnectEntered = CountDownLatch(1)
+            val firstInterrupt = CountDownLatch(1)
+            val forcedInterrupt = CountDownLatch(1)
+
+            val closing = async(Dispatchers.IO) {
+                runCatching {
+                    withTimeout(250L) {
+                        dispatcher.closeAndAwaitDrain disconnect@{
+                            disconnectEntered.countDown()
+                            var interrupts = 0
+                            while (true) {
+                                try {
+                                    Thread.sleep(30_000L)
+                                } catch (e: InterruptedException) {
+                                    interrupts += 1
+                                    if (interrupts == 1) {
+                                        firstInterrupt.countDown()
+                                    }
+                                    if (interrupts == 2) {
+                                        forcedInterrupt.countDown()
+                                        return@disconnect
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            assertTrue(
+                "disconnect must enter before the caller-side timeout",
+                disconnectEntered.await(5, TimeUnit.SECONDS),
+            )
+
+            val closeResult = closing.await()
+            assertTrue(
+                "caller-side timeout must cancel closeAndAwaitDrain while disconnect is active",
+                closeResult.exceptionOrNull() is TimeoutCancellationException,
+            )
+            assertTrue(
+                "timeout cancellation should interrupt the disconnect once",
+                firstInterrupt.await(5, TimeUnit.SECONDS),
+            )
+            assertTrue("dispatcher must already be marked closed", dispatcher.isClosed)
+
+            dispatcher.closeNow()
+
+            assertTrue(
+                "forced close must still interrupt/shutdown after closed was already set",
+                forcedInterrupt.await(5, TimeUnit.SECONDS),
+            )
+        }
 
     /**
      * Class coverage: a HEALTHY op well under the ceiling is unaffected — the

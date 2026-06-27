@@ -209,24 +209,41 @@ internal class TransportDispatcher(
      */
     suspend fun closeAndAwaitDrain(disconnect: () -> Unit) {
         if (closed.get()) return
-        mutex.withLock {
-            if (closed.getAndSet(true)) return@withLock
-            // Issue #937 / S4-1 (watchdog fix #940): bound + interrupt the final
-            // disconnect too — a `disconnect()` on a half-open link is itself a
-            // blocking socket write that can wedge. Without a ceiling here a
-            // wedged disconnect would hold [mutex] forever and the teardown's own
-            // caller-side timeout (TmuxSessionViewModel / lease release) could
-            // never make progress. The real wall-clock watchdog inside
-            // [runUnderWallClockCeiling] reclaims the dispatch thread when the
-            // ceiling trips (decoupled from the caller's possibly-virtual test
-            // clock); runCatching swallows the resulting timeout so teardown
-            // always completes and the executor is shut down.
-            runCatching {
-                runInterruptible(context) {
-                    runUnderWallClockCeiling { disconnect() }
+        try {
+            mutex.withLock {
+                if (closed.getAndSet(true)) return@withLock
+                // Issue #937 / S4-1 (watchdog fix #940): bound + interrupt the final
+                // disconnect too — a `disconnect()` on a half-open link is itself a
+                // blocking socket write that can wedge. Without a ceiling here a
+                // wedged disconnect would hold [mutex] forever and the teardown's own
+                // caller-side timeout (TmuxSessionViewModel / lease release) could
+                // never make progress. The real wall-clock watchdog inside
+                // [runUnderWallClockCeiling] reclaims the dispatch thread when the
+                // ceiling trips (decoupled from the caller's possibly-virtual test
+                // clock); runCatching swallows the resulting timeout so teardown
+                // always completes and the executor is shut down.
+                runCatching {
+                    runInterruptible(context) {
+                        runUnderWallClockCeiling { disconnect() }
+                    }
                 }
             }
+        } finally {
+            executor.shutdownNow()
         }
+    }
+
+    /**
+     * Mark the dispatcher closed and interrupt its worker immediately.
+     *
+     * Used only by synchronous session teardown after its caller-visible close
+     * budget expires. The normal path remains [closeAndAwaitDrain], which drains
+     * queued channel-close writes before the final disconnect. Once the outer
+     * close budget has elapsed, preserving caller liveness is more important than
+     * waiting for a half-open transport to accept another orderly packet.
+     */
+    fun closeNow() {
+        closed.set(true)
         executor.shutdownNow()
     }
 

@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -57,6 +58,15 @@ internal class RealSshSession(
      * when the session is [close]d so all child jobs cancel deterministically.
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Independent teardown scope for best-effort channel closes and keepalive-dead
+     * transport teardown. It deliberately outlives [scope] until [close] finishes:
+     * cancellation handlers often run while the session scope is being torn down,
+     * and launching those channel-close writes on the same scope lets
+     * `scope.cancel()` erase the cleanup before it reaches the dispatcher.
+     */
+    private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Single-writer dispatch owner for this connection's transport (issue
@@ -200,11 +210,12 @@ internal class RealSshSession(
                         "$consecutiveMisses consecutive misses; closing the dead transport so the " +
                         "reconnect machinery recovers",
                 )
-                // Close the dead transport on the session scope. This drives the
-                // reader to EOF, which the tmux/reconnect layer already handles as
-                // a recoverable drop through its single reconnect entrypoint — no
-                // second reconnect writer (D28).
-                scope.launch { runCatching { close() } }
+                // Close the dead transport outside the session scope: close()
+                // cancels that scope as part of teardown, so re-entering through
+                // it can cancel the child close before the dispatcher drains.
+                launchTeardown {
+                    runCatching { close() }
+                }
             }
         },
         // Issue #970: timing knobs are read from the test-override seam so the
@@ -373,9 +384,11 @@ internal class RealSshSession(
                 // Channel close is itself a transport write — serialise it
                 // through the dispatcher rather than racing the wire from the
                 // cancellation thread.
-                scope.launch {
-                    runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
-                    runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+                launchTeardown {
+                    closeCommandAndSessionChannel(
+                        command = cmdRef.get(),
+                        sessionChannel = sessionChannelRef.get(),
+                    )
                 }
             }
         }
@@ -483,8 +496,10 @@ internal class RealSshSession(
             // `scope.launch` handler stays as belt-and-braces for the
             // can't-suspend-at-all path).
             withContext(NonCancellable) {
-                runCatching { dispatcher.run { runCatching { cmdRef.get()?.close() } } }
-                runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+                closeCommandAndSessionChannel(
+                    command = cmdRef.get(),
+                    sessionChannel = sessionChannelRef.get(),
+                )
             }
         }
     }
@@ -492,6 +507,7 @@ internal class RealSshSession(
     override fun tail(path: String, onLine: (String) -> Unit): Job =
         tail(path, fromLineExclusive = -1, onLine = onLine)
 
+    @OptIn(InternalCoroutinesApi::class)
     override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
         // Each tail owns its own exec channel — running `tail -F` keeps the
         // channel open for the lifetime of the job. Cancelling the job
@@ -563,11 +579,13 @@ internal class RealSshSession(
             // follow loop never wedges the `-CC` write or other ops.
             val sessionChannelRef = AtomicReference<Session?>()
             var cmd: Command? = null
-            val cancelHandle = coroutineJob?.invokeOnCompletion {
+            val cancelHandle = coroutineJob?.invokeOnCompletion(onCancelling = true) {
                 // Close is a transport write — funnel through the dispatcher.
-                scope.launch {
-                    runCatching { dispatcher.run { runCatching { cmd?.close() } } }
-                    runCatching { dispatcher.run { runCatching { sessionChannelRef.get()?.close() } } }
+                launchTeardown {
+                    closeCommandAndSessionChannel(
+                        command = cmd,
+                        sessionChannel = sessionChannelRef.get(),
+                    )
                 }
             }
             try {
@@ -624,8 +642,12 @@ internal class RealSshSession(
                 cancelHandle?.dispose()
                 val closeCmd = cmd
                 val closeChannel = sessionChannelRef.get()
-                runCatching { dispatcher.run { runCatching { closeCmd?.close() } } }
-                runCatching { dispatcher.run { runCatching { closeChannel?.close() } } }
+                withContext(NonCancellable) {
+                    closeCommandAndSessionChannel(
+                        command = closeCmd,
+                        sessionChannel = closeChannel,
+                    )
+                }
             }
         }
     }
@@ -985,6 +1007,7 @@ internal class RealSshSession(
      * copied. Throws [SshException] on a transport failure, a non-zero remote
      * exit, or a timeout — the caller cleans up the temp file.
      */
+    @OptIn(InternalCoroutinesApi::class)
     private suspend fun streamToRemoteTemp(
         input: InputStream,
         name: String,
@@ -1017,12 +1040,14 @@ internal class RealSshSession(
             }
             channel
         }
-        val cancelHandle = coroutineJob?.invokeOnCompletion { cause ->
+        val cancelHandle = coroutineJob?.invokeOnCompletion(onCancelling = true) { cause ->
             if (cause != null) {
                 runCatching { input.close() }
-                scope.launch {
-                    runCatching { dispatcher.run { runCatching { command?.close() } } }
-                    runCatching { dispatcher.run { runCatching { sessionChannel.close() } } }
+                launchTeardown {
+                    closeCommandAndSessionChannel(
+                        command = command,
+                        sessionChannel = sessionChannel,
+                    )
                 }
             }
         }
@@ -1067,8 +1092,12 @@ internal class RealSshSession(
             return copied
         } finally {
             cancelHandle?.dispose()
-            runCatching { dispatcher.run { runCatching { command?.close() } } }
-            runCatching { dispatcher.run { runCatching { sessionChannel.close() } } }
+            withContext(NonCancellable) {
+                closeCommandAndSessionChannel(
+                    command = command,
+                    sessionChannel = sessionChannel,
+                )
+            }
         }
     }
 
@@ -1132,8 +1161,28 @@ internal class RealSshSession(
      */
     private fun cleanupTempDetached(tempRemotePath: String) {
         runCatching {
-            scope.launch {
+            launchTeardown {
                 runCatching { exec("rm -f ${shellSingleQuote(tempRemotePath)}") }
+            }
+        }
+    }
+
+    private fun launchTeardown(block: suspend () -> Unit) {
+        teardownScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable) {
+                block()
+            }
+        }
+    }
+
+    private suspend fun closeCommandAndSessionChannel(
+        command: Command?,
+        sessionChannel: Session?,
+    ) {
+        runCatching {
+            dispatcher.run {
+                runCatching { command?.close() }
+                runCatching { sessionChannel?.close() }
             }
         }
     }
@@ -1165,6 +1214,10 @@ internal class RealSshSession(
         // Issue #945: stop the transport keepalive before tearing the scope down
         // so no keepalive op is submitted to a dispatcher that is about to close.
         keepAlive.stop()
+        // Cancel active exec/tail/upload jobs before the dispatcher drain. Their
+        // cancellation handlers enqueue best-effort channel closes on
+        // teardownScope, which remains alive until close() finishes, so those
+        // closes can run before the final transport disconnect.
         scope.cancel()
         // Issue #151 + #239: `close()` is idempotent and silent by
         // contract. The v0.2.7 crash report showed the original
@@ -1242,9 +1295,20 @@ internal class RealSshSession(
             // rejected before it can touch the dead transport. The disconnect
             // socket write still happens on the dispatch (IO) thread, so the
             // StrictMode `NetworkOnMainThreadException` guard (issue #166) holds.
-            runBlocking {
-                dispatcher.closeAndAwaitDrain {
-                    client.disconnect()
+            runBlocking(Dispatchers.IO) {
+                val drained = withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
+                    dispatcher.closeAndAwaitDrain {
+                        client.disconnect()
+                    }
+                    true
+                } ?: false
+                if (!drained) {
+                    CLOSE_LOGGER.log(
+                        Level.INFO,
+                        "[$CLOSE_LOG_TAG] close() timed out after ${SESSION_CLOSE_TIMEOUT_MS}ms; " +
+                            "forcing dispatcher shutdown",
+                    )
+                    dispatcher.closeNow()
                 }
             }
         } catch (e: TransportException) {
@@ -1289,6 +1353,8 @@ internal class RealSshSession(
                 Level.INFO,
                 "[$CLOSE_LOG_TAG] swallowed RuntimeException during close(): ${e.message}",
             )
+        } finally {
+            teardownScope.cancel()
         }
     }
 
@@ -1555,6 +1621,14 @@ internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
 internal const val EXEC_READ_TIMEOUT_MS: Long = 30_000L
 
 private val EXEC_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".exec")
+
+/**
+ * Hard ceiling on the caller-visible wait inside [RealSshSession.close] for the
+ * dispatcher drain + final disconnect. The dispatcher's per-op watchdog still
+ * owns normal write interruption; this outer bound prevents a synchronous close
+ * caller from parking behind a half-open transport operation indefinitely.
+ */
+private const val SESSION_CLOSE_TIMEOUT_MS: Long = 2_000L
 
 /**
  * Wall-clock ceiling for the blocking byte-copy + `join()` of a single

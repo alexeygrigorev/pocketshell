@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
@@ -15,6 +16,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -28,11 +31,15 @@ import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import net.schmizz.sshj.transport.TransportException
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
 import java.util.logging.Logger
@@ -196,7 +203,7 @@ internal class RealSshSession(
      * the local no-activity budget elapses — otherwise the 90s `onKeepAliveDead`
      * teardown would never fire (see [awaitKeepAliveReply]).
      */
-    @Volatile
+    private val keepAliveSingleFlightMutex = Mutex()
     private var pendingKeepAliveReply: Job? = null
 
     /**
@@ -301,9 +308,20 @@ internal class RealSshSession(
         // request would enqueue a second sshj promise behind the unresolved one.
         // Count this tick against the same bounded no-activity budget, but do
         // not put a new packet on the transport.
-        if (pendingKeepAliveReply?.isCompleted == false) {
-            return awaitKeepAliveActivity(lastInboundActivityNanos)
+        val marker = Job()
+        val decision = keepAliveSingleFlightMutex.withLock {
+            val pending = pendingKeepAliveReply
+            if (pending != null && !pending.isCompleted) {
+                KeepAliveSendDecision.AwaitExisting(lastInboundActivityNanos)
+            } else {
+                pendingKeepAliveReply = marker
+                KeepAliveSendDecision.Send(marker, lastInboundActivityNanos)
+            }
         }
+        if (decision is KeepAliveSendDecision.AwaitExisting) {
+            return awaitKeepAliveActivity(decision.before)
+        }
+        decision as KeepAliveSendDecision.Send
 
         // Issue #983 — split the op so the single-writer mutex is held ONLY for the
         // wire write, never for the multi-second reply wait. The
@@ -329,11 +347,15 @@ internal class RealSshSession(
                 if (t is CancellationException) throw t
                 // The send itself (write / dispatcher) failed. A REQUEST_FAILURE that
                 // escaped here still proves the peer answered; otherwise it is a miss.
+                clearKeepAliveMarker(decision.marker)
                 return isKeepAliveServerAnswered(t)
-            } ?: return false
+            } ?: run {
+                clearKeepAliveMarker(decision.marker)
+                return false
+            }
 
         // Issue #985 — confirm the reply OUTSIDE the mutex with a NON-ORPHANING wait.
-        return awaitKeepAliveReply(promise)
+        return awaitKeepAliveReply(promise, decision.marker, decision.before)
     }
 
     /**
@@ -371,34 +393,47 @@ internal class RealSshSession(
      */
     private suspend fun awaitKeepAliveReply(
         promise: Promise<SSHPacket, ConnectionException>,
+        marker: CompletableJob,
+        before: Long,
     ): Boolean {
-        val before = lastInboundActivityNanos
-
-        // Only launch a NEW unbounded retrieve when the prior one has completed.
-        // A still-pending reply job means the previous promise's consumer is still
-        // alive (so its queue slot is not abandoned); callers with a pending job
-        // are gated before the wire send and run only the local no-activity budget.
-        val existing = pendingKeepAliveReply
-        if (existing == null || existing.isCompleted) {
-            pendingKeepAliveReply = scope.launch {
-                runCatching {
-                    runInterruptible(Dispatchers.IO) {
-                        // UNBOUNDED — never abandons the queue slot. Returns the
-                        // REQUEST_SUCCESS packet, or throws the REQUEST_FAILURE
-                        // ConnectionException (both prove the peer answered), or
-                        // throws a transport-death error / is interrupted on
-                        // scope-cancel (close()/notifyError).
-                        promise.retrieve()
-                    }
-                }.onSuccess {
-                    recordInboundActivity()
-                }.onFailure { t ->
-                    if (isKeepAliveServerAnswered(t)) recordInboundActivity()
+        val observer = scope.launch {
+            runCatching {
+                runInterruptible(Dispatchers.IO) {
+                    // UNBOUNDED — never abandons the queue slot. Returns the
+                    // REQUEST_SUCCESS packet, or throws the REQUEST_FAILURE
+                    // ConnectionException (both prove the peer answered), or
+                    // throws a transport-death error / is interrupted on
+                    // scope-cancel (close()/notifyError).
+                    promise.retrieve()
                 }
+            }.onSuccess {
+                recordInboundActivity()
+            }.onFailure { t ->
+                if (isKeepAliveServerAnswered(t)) recordInboundActivity()
             }
         }
+        keepAliveSingleFlightMutex.withLock {
+            if (pendingKeepAliveReply === marker) {
+                pendingKeepAliveReply = observer
+            }
+        }
+        marker.complete()
 
         return awaitKeepAliveActivity(before)
+    }
+
+    private suspend fun clearKeepAliveMarker(marker: CompletableJob) {
+        keepAliveSingleFlightMutex.withLock {
+            if (pendingKeepAliveReply === marker) {
+                pendingKeepAliveReply = null
+            }
+        }
+        marker.complete()
+    }
+
+    private sealed interface KeepAliveSendDecision {
+        data class Send(val marker: CompletableJob, val before: Long) : KeepAliveSendDecision
+        data class AwaitExisting(val before: Long) : KeepAliveSendDecision
     }
 
     private suspend fun awaitKeepAliveActivity(before: Long): Boolean {
@@ -495,8 +530,7 @@ internal class RealSshSession(
                         timeoutMs = execReadTimeoutMs,
                         onTimeout = { cause -> SshExecTimeoutException(command, execReadTimeoutMs, cause) },
                     ) {
-                        val stdout = liveCommand.inputStream.readBytes().toString(Charsets.UTF_8)
-                        val stderr = liveCommand.errorStream.readBytes().toString(Charsets.UTF_8)
+                        val output = readExecOutputConcurrently(liveCommand)
                         liveCommand.join()
                         // Issue #974: a completed exec round-trip is decoded server
                         // bytes — proof the transport is alive. Record it so a busy
@@ -507,7 +541,7 @@ internal class RealSshSession(
                         // one (e.g. signal-killed). Map to -1 so the caller can
                         // still tell it wasn't a clean 0.
                         val exitCode = liveCommand.exitStatus ?: -1
-                        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+                        ExecResult(stdout = output.stdout, stderr = output.stderr, exitCode = exitCode)
                     }
                 }
             } catch (timeout: SshExecTimeoutException) {
@@ -548,6 +582,65 @@ internal class RealSshSession(
             }
         }
     }
+
+    private fun readExecOutputConcurrently(command: Command): ExecOutput {
+        val executor = Executors.newFixedThreadPool(2) { runnable ->
+            Thread(runnable, "pocketshell-exec-drain").apply { isDaemon = true }
+        }
+        val stdout = executor.submit<String> {
+            command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout")
+                .toString(Charsets.UTF_8)
+        }
+        val stderr = executor.submit<String> {
+            command.errorStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stderr")
+                .toString(Charsets.UTF_8)
+        }
+        return try {
+            ExecOutput(
+                stdout = awaitExecDrain(stdout),
+                stderr = awaitExecDrain(stderr),
+            )
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    private fun awaitExecDrain(future: Future<String>): String =
+        try {
+            future.get()
+        } catch (e: ExecutionException) {
+            val cause = e.cause
+            when (cause) {
+                is SshException -> throw cause
+                is RuntimeException -> throw cause
+                is Error -> throw cause
+                null -> throw e
+                else -> throw IOException("exec stream drain failed: ${cause.message}", cause)
+            }
+        }
+
+    private fun InputStream.readBytesCapped(maxBytes: Int, streamName: String): ByteArray {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val output = ByteArrayOutputStream()
+        var total = 0
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) break
+            if (total + read > maxBytes) {
+                throw SshException(
+                    "SSH exec $streamName exceeded ${maxBytes} bytes; refusing to buffer unbounded output",
+                )
+            }
+            output.write(buffer, 0, read)
+            total += read
+        }
+        return output.toByteArray()
+    }
+
+    private data class ExecOutput(
+        val stdout: String,
+        val stderr: String,
+    )
 
     override fun tail(path: String, onLine: (String) -> Unit): Job =
         tail(path, fromLineExclusive = -1, onLine = onLine)
@@ -860,7 +953,7 @@ internal class RealSshSession(
         // The same reasoning is why `downloadFile`/`uploadStream` use a `cat`
         // exec channel rather than SCP/SFTP — we only require a POSIX shell plus
         // `find`/`stat`, which are present on busybox and coreutils alike.
-        val probe = exec(buildListDirCommand(remotePath))
+        val probe = exec(buildListDirCommand(remotePath, maxEntries))
         if (probe.exitCode != PROBE_EXIT_OK) {
             throw classifyListFailure(remotePath, probe)
         }
@@ -1062,7 +1155,7 @@ internal class RealSshSession(
         // concurrent retries of the same attachment.
         val tempRemotePath = remotePath + ".part-" + java.util.UUID.randomUUID().toString().take(8)
         try {
-            val copied = streamToRemoteTemp(input, name, remotePath, tempRemotePath)
+            val copied = streamToRemoteTemp(input, name, remotePath, tempRemotePath, length)
 
             // Integrity check BEFORE the rename: the bytes that actually landed
             // in the temp file must match what we copied, and — when the caller
@@ -1116,6 +1209,7 @@ internal class RealSshSession(
         name: String,
         remotePath: String,
         tempRemotePath: String,
+        declaredLength: Long,
     ): Long {
         val coroutineJob = currentCoroutineContext()[Job]
         // Channel open + `cat >` exec are transport-mutating packets — serialise
@@ -1164,7 +1258,7 @@ internal class RealSshSession(
             val copied = try {
                 runInterruptible(Dispatchers.IO) {
                     val output = command!!.outputStream
-                    val n = copyToRemoteBlocking(input, output)
+                    val n = copyToRemoteBlocking(input, output, declaredLength)
                     runTransferStepWithStallTimeout(
                         operation = "closing upload output",
                         timeoutMs = uploadStallTimeoutMs,
@@ -1313,7 +1407,11 @@ internal class RealSshSession(
      * a per-step real wall-clock stall budget; total upload duration is
      * intentionally unbounded while bytes continue moving.
      */
-    private fun copyToRemoteBlocking(input: InputStream, output: OutputStream): Long {
+    private fun copyToRemoteBlocking(
+        input: InputStream,
+        output: OutputStream,
+        declaredLength: Long,
+    ): Long {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0L
         while (true) {
@@ -1325,6 +1423,12 @@ internal class RealSshSession(
                 input.read(buffer)
             }
             if (read < 0) break
+            if (declaredLength >= 0 && total + read > declaredLength) {
+                throw SshException(
+                    "Upload stream exceeded declared length: declared $declaredLength bytes " +
+                        "but source produced more",
+                )
+            }
             if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
             runTransferStepWithStallTimeout(
                 operation = "writing upload bytes",
@@ -1617,6 +1721,9 @@ internal const val PROBE_EXIT_DENIED: Int = 22
  */
 internal const val LIST_FIELD_SEP: Char = '|'
 
+private const val LIST_REMOTE_EXTRA_ROWS: Int = 2
+private const val LIST_REMOTE_MAX_LINES: Int = 100_000
+
 /**
  * Build the remote directory-listing command for [remotePath] (issue #528).
  *
@@ -1639,8 +1746,9 @@ internal const val LIST_FIELD_SEP: Char = '|'
  * NUL-terminate); such names are extremely rare and degrade to a skipped/garbled
  * row rather than a crash.
  */
-internal fun buildListDirCommand(remotePath: String): String {
+internal fun buildListDirCommand(remotePath: String, maxEntries: Int? = null): String {
     val quoted = quoteRemotePathForShell(remotePath)
+    val remoteLineLimit = maxEntries?.let { listDirectoryRemoteLineLimit(it) }
     return buildString {
         append("d=").append(quoted).append("; ")
         append("if [ ! -e \"\$d\" ]; then exit ").append(PROBE_EXIT_NO_SUCH).append("; fi; ")
@@ -1651,10 +1759,17 @@ internal fun buildListDirCommand(remotePath: String): String {
         append("find \"\$d\" -maxdepth 1 -exec stat -c '%F")
             .append(LIST_FIELD_SEP).append("%s")
             .append(LIST_FIELD_SEP).append("%Y")
-            .append(LIST_FIELD_SEP).append("%n' {} ").append("\\;").append(" 2>/dev/null; ")
+            .append(LIST_FIELD_SEP).append("%n' {} ").append("\\;").append(" 2>/dev/null")
+        if (remoteLineLimit != null) {
+            append(" | sed -n '1,").append(remoteLineLimit).append("p'")
+        }
+        append("; ")
         append("exit ").append(PROBE_EXIT_OK)
     }
 }
+
+internal fun listDirectoryRemoteLineLimit(maxEntries: Int): Int =
+    (maxEntries.coerceAtLeast(0) + LIST_REMOTE_EXTRA_ROWS).coerceAtMost(LIST_REMOTE_MAX_LINES)
 
 /**
  * Map a non-zero [buildListDirCommand] exit onto a typed [SshException].
@@ -1789,6 +1904,8 @@ internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
  * of its own.
  */
 internal const val EXEC_READ_TIMEOUT_MS: Long = 30_000L
+
+internal const val EXEC_STREAM_MAX_BYTES: Int = 8 * 1024 * 1024
 
 private val EXEC_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".exec")
 

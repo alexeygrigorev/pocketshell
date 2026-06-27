@@ -2400,6 +2400,42 @@ class TmuxSessionViewModelTest {
         }
 
     @Test
+    fun withinGraceForegroundDoesNotReseedDisconnectedHeldClient() = runTest(scheduler) {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> replacementClient }
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 1_000L, silentReattachTimeoutMs = 1_000L)
+        val staleClient = FakeTmuxClient().withSinglePane("work", "%0")
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = staleClient,
+            session = FakeSshSession(),
+        )
+        vm.markActiveLeaseWarmForTest()
+        runCurrent()
+
+        staleClient.disconnectedSignal.value = true
+        vm.onAppForegrounded(resumedWithinGrace = true)
+        advanceUntilIdle()
+
+        assertTrue(
+            "within-grace foreground must not run capture/reseed over a disconnected held client",
+            staleClient.sentCommands.none { it.startsWith("capture-pane") },
+        )
+    }
+
+    @Test
     fun livenessProbeDeclaredDropClosesTheClientAndDrivesTheSingleReconnectEntrypoint() =
         runTest(scheduler) {
             // EPIC #792 Slice D (#822/V7a): the LivenessProbe's confirmed-drop body
@@ -6131,6 +6167,35 @@ class TmuxSessionViewModelTest {
             "recreate must not flip tmux disconnected",
             client.disconnectedSignal.value,
         )
+    }
+
+    @Test
+    fun dequeuedTmuxInputSendFailureRetriesOnceBeforeRecordingSent() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            throwOnCommandPrefix = "send-keys -l -t %0"
+            throwOnCommandRemaining = 1
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+
+        sink.write("retry".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
+        val literalSends = client.sentCommands.filter { it.startsWith("send-keys -l -t %0") }
+        assertEquals(
+            "the dequeued batch must be retried once after a post-dequeue send failure",
+            2,
+            literalSends.size,
+        )
+        val metrics = vm.tmuxInputMetricsForTest("%0") ?: error("input metrics should be recorded")
+        assertEquals(5L, metrics.totalEnqueuedBytes)
+        assertEquals(
+            "bytes should only be counted sent after the retry succeeds",
+            5L,
+            metrics.totalSentBytes,
+        )
+        assertFalse("one recovered send failure must not disconnect the client", client.disconnected.value)
     }
 
     @Test
@@ -15196,6 +15261,40 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertEquals(5173, vm.detectedPort.value)
+    }
+
+    @Test
+    fun stalePortDetectorFromParkedRuntimeDoesNotSurfaceOnNewRuntime() = runTest(scheduler) {
+        val vm = newVm()
+        val oldClient = FakeTmuxClient()
+        val oldSession = FakeSshSession(ssListeningPorts = emptySet())
+        vm.attachForPortDetection(oldClient, oldSession)
+        advanceUntilIdle()
+
+        val newClient = FakeTmuxClient()
+        val newSession = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = newSession,
+        )
+        advanceUntilIdle()
+
+        oldClient.emittedEvents.emit(
+            ControlEvent.Output("%0", "Local:   http://localhost:5173/\n".toByteArray()),
+        )
+        advanceUntilIdle()
+
+        assertNull(
+            "a detector bound to the parked old runtime must not confirm against the new runtime",
+            vm.detectedPort.value,
+        )
     }
 
     @Test

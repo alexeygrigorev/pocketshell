@@ -161,6 +161,12 @@ internal class FakeTmuxClient(
 
     var closeAndThrowDisconnectEvent: TmuxDisconnectEvent? = null
 
+    var throwOnCommandPrefix: String? = null
+
+    var throwOnCommandRemaining: Int = 0
+
+    var throwOnCommandException: Throwable = TmuxClientException("tmux command timed out")
+
     var failBestEffortOnCommandPrefix: String? = null
 
     var bestEffortException: Throwable = TmuxClientException("tmux best-effort command timed out")
@@ -328,6 +334,12 @@ internal class FakeTmuxClient(
                     ),
                 )
                 throw closeAndThrowException
+            }
+        }
+        throwOnCommandPrefix?.let { prefix ->
+            if (cmd.startsWith(prefix) && throwOnCommandRemaining > 0) {
+                throwOnCommandRemaining -= 1
+                throw throwOnCommandException
             }
         }
         if (bestEffort) {

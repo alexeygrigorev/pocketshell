@@ -2070,6 +2070,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // restored runtime never re-prompts a port already handled.
     private val portDetector: PortDetector = PortDetector()
     private val panePortDetectorJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    private val panePortDetectorClients: MutableMap<String, TmuxClient> = ConcurrentHashMap()
     private val scannedConversationPortEventKeys: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
 
@@ -2887,6 +2888,15 @@ public class TmuxSessionViewModel @Inject constructor(
             sameSessionIdentity(currentTarget, guard.target)
     }
 
+    private fun currentRuntimeGuardForClient(client: TmuxClient): RuntimeRefreshGuard? {
+        val target = activeTarget ?: return null
+        return RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+    }
+
     private fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         TmuxRuntimeKey(
             hostId = hostId,
@@ -3562,8 +3572,10 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private fun canReseedWithinGraceForeground(): Boolean {
         if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
-        if (clientRef == null) return false
-        if (sessionRef == null) return false
+        val client = clientRef ?: return false
+        val session = sessionRef ?: return false
+        if (client.disconnected.value) return false
+        if (!session.isConnected) return false
         val target = activeTarget ?: return false
         if (pendingReattach != null) return false
         if (pausedAutoReconnect != null) return false
@@ -5118,6 +5130,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneOutputActivityJobs.clear()
         paneInputQueues.clear()
         paneInputJobs.clear()
+        panePortDetectorJobs.values.forEach { it.cancel() }
+        panePortDetectorJobs.clear()
+        panePortDetectorClients.clear()
         paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
@@ -9031,6 +9046,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     paneProducerClients.remove(p.paneId)
                     paneOutputActivityJobs.remove(p.paneId)?.cancel()
                     panePortDetectorJobs.remove(p.paneId)?.cancel()
+                    panePortDetectorClients.remove(p.paneId)
                     paneInputJobs.remove(p.paneId)?.cancel()
                     paneInputQueues.remove(p.paneId)?.close()
                     existing.terminalState.detachExternalProducer()
@@ -9125,6 +9141,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneOutputActivityJobs.remove(paneId)?.cancel()
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
+            panePortDetectorClients.remove(paneId)
             paneAgentJobs.remove(paneId)?.cancel()
             conversationLoadWatchdogJobs.remove(paneId)?.cancel()
             paneAgentTailGenerations.remove(paneId)
@@ -9203,6 +9220,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneProducerClients.remove(paneId)
             paneOutputActivityJobs.remove(paneId)?.cancel()
             panePortDetectorJobs.remove(paneId)?.cancel()
+            panePortDetectorClients.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             attachTerminalProducerForPane(
@@ -9243,10 +9261,18 @@ public class TmuxSessionViewModel @Inject constructor(
      * and foreground-gated (the flow is only collected while attached).
      */
     private fun startPortDetectionForPane(paneId: String, client: TmuxClient) {
-        if (panePortDetectorJobs[paneId]?.isActive == true) return
-        panePortDetectorJobs[paneId]?.cancel()
-        panePortDetectorJobs[paneId] = bridgeScope.launch {
+        val existingJob = panePortDetectorJobs[paneId]
+        if (existingJob?.isActive == true && panePortDetectorClients[paneId] === client) return
+        if (existingJob != null) {
+            panePortDetectorJobs.remove(paneId)
+            existingJob.cancel()
+        }
+        panePortDetectorClients[paneId] = client
+        val guard = currentRuntimeGuardForClient(client)
+        val job = bridgeScope.launch {
             client.outputFor(paneId).collect { event ->
+                if (panePortDetectorClients[paneId] !== client) return@collect
+                if (guard == null || !isCurrentRuntime(guard)) return@collect
                 if (!appActive) return@collect
                 // Issue #877: the UTF-8 decode + 7-regex PortDetector.scan over
                 // the 4 KB tail is the per-`%output` main-thread work that froze
@@ -9257,6 +9283,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 for (candidate in candidates) {
                     confirmAndSurfaceDetectedPort(candidate.port)
                 }
+            }
+        }
+        panePortDetectorJobs[paneId] = job
+        job.invokeOnCompletion {
+            if (panePortDetectorJobs[paneId] === job) {
+                panePortDetectorJobs.remove(paneId)
+                panePortDetectorClients.remove(paneId)
             }
         }
     }
@@ -9370,6 +9403,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerClients.remove(overflow.paneId) // Issue #959
         paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorJobs.remove(overflow.paneId)?.cancel()
+        panePortDetectorClients.remove(overflow.paneId)
         runCatching { existing.terminalState.detachExternalProducer() }
 
         val errored = existing.copy(surfaceError = true)
@@ -9419,6 +9453,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerClients.remove(paneId) // Issue #959
         paneOutputActivityJobs.remove(paneId)?.cancel()
         panePortDetectorJobs.remove(paneId)?.cancel()
+        panePortDetectorClients.remove(paneId)
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -12208,6 +12243,12 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun attachmentWaitWouldRedialForTest(): Boolean = !isAttachmentLeaseWarm()
 
+    @androidx.annotation.VisibleForTesting
+    internal fun markActiveLeaseWarmForTest() {
+        val target = activeTarget ?: connectingTarget ?: return
+        liveLeaseKeys.add(target.toSshLeaseTarget().leaseKey)
+    }
+
     /**
      * EPIC #687 slice 3 / #785: true when a connect/reconnect attempt is already in
      * flight, so the attach wait must not kick another [reconnect] on top of it.
@@ -13866,15 +13907,88 @@ public class TmuxSessionViewModel @Inject constructor(
                             "pane" to paneId,
                             "bytes" to batch.bytes.size,
                         )
-                        runCatching { sendInputBytesToPane(targetClient, paneId, batch.bytes) }
-                            .onSuccess {
-                                newQueue.recordSent(batch)
-                            }
+                        sendDequeuedInputBatch(
+                            client = targetClient,
+                            paneId = paneId,
+                            batch = batch,
+                            queue = newQueue,
+                        )
                     }
                 }
             }
         }
         return TmuxPaneInputStream(queue)
+    }
+
+    private suspend fun sendDequeuedInputBatch(
+        client: TmuxClient,
+        paneId: String,
+        batch: TmuxPaneInputBatch,
+        queue: TmuxPaneInputQueue,
+    ) {
+        var lastFailure: Throwable? = null
+        repeat(TMUX_INPUT_SEND_MAX_ATTEMPTS) { attempt ->
+            if (attempt > 0) delay(TMUX_INPUT_SEND_RETRY_DELAY_MS)
+            val currentClient = clientRef
+            if (client !== currentClient && !client.disconnected.value) {
+                DiagnosticEvents.record(
+                    "connection",
+                    "pane_input_send_abandoned",
+                    "pane" to paneId,
+                    "bytes" to batch.bytes.size,
+                    "attempt" to (attempt + 1),
+                    "reason" to "client_superseded",
+                    "clientHash" to System.identityHashCode(client),
+                    "currentClientHash" to currentClient?.let { System.identityHashCode(it) },
+                )
+                return
+            }
+            val outcome = runCatching { sendInputBytesToPane(client, paneId, batch.bytes) }
+            if (outcome.isSuccess) {
+                queue.recordSent(batch)
+                return
+            }
+            lastFailure = outcome.exceptionOrNull()
+            if (lastFailure is CancellationException) throw lastFailure
+            DiagnosticEvents.record(
+                "connection",
+                "pane_input_send_failed",
+                "pane" to paneId,
+                "bytes" to batch.bytes.size,
+                "attempt" to (attempt + 1),
+                "maxAttempts" to TMUX_INPUT_SEND_MAX_ATTEMPTS,
+                "willRetry" to (attempt + 1 < TMUX_INPUT_SEND_MAX_ATTEMPTS),
+                "clientHash" to System.identityHashCode(client),
+                "currentClient" to (client === clientRef),
+                "clientDisconnected" to client.disconnected.value,
+                "exceptionClass" to lastFailure?.javaClass?.simpleName,
+                "message" to lastFailure?.message,
+            )
+        }
+        val failure = lastFailure
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-pane-input-send-failed pane=$paneId bytes=${batch.bytes.size} " +
+                "clientCurrent=${client === clientRef} clientDisconnected=${client.disconnected.value}",
+            failure,
+        )
+        if (client === clientRef) {
+            handlePassiveClientDisconnect(
+                client = client,
+                disconnectEvent = TmuxDisconnectEvent(
+                    reason = if (client.disconnected.value) {
+                        TmuxDisconnectReason.ReaderEof
+                    } else {
+                        TmuxDisconnectReason.ReaderException
+                    },
+                    source = "pane_input_send",
+                    intent = "input_send_failure",
+                    commandKind = "send-keys",
+                    exceptionClass = failure?.javaClass?.simpleName,
+                    message = failure?.message,
+                ),
+            )
+        }
     }
 
     private suspend fun sendInputBytesToPane(
@@ -16915,6 +17029,8 @@ internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
 internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024
 internal const val TMUX_INPUT_CHUNK_BYTES: Int = 512
+internal const val TMUX_INPUT_SEND_MAX_ATTEMPTS: Int = 2
+internal const val TMUX_INPUT_SEND_RETRY_DELAY_MS: Long = 150L
 internal const val TMUX_PASTE_BODY_CHUNK_BYTES: Int = BracketedPaste.BODY_CHUNK_BYTES
 internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
     TMUX_INPUT_MAX_PENDING_BYTES / TMUX_INPUT_CHUNK_BYTES - 1

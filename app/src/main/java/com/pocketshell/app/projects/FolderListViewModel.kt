@@ -269,13 +269,6 @@ class FolderReconcileTimeoutException(
     "Session list didn't load within ${timeoutMs}ms. Tap to retry.",
 )
 
-private class CreateSessionActionTimeoutException(
-    timeoutMs: Long,
-) : RuntimeException(
-    "creating the session took longer than ${timeoutMs / 1_000}s. " +
-        "Check whether it appeared on the host, then try again.",
-)
-
 /**
  * Active/idle split of the flat host-detail session list (#489).
  *
@@ -1319,11 +1312,10 @@ class FolderListViewModel internal constructor(
         setCreateSessionInFlight(true)
         viewModelScope.launch {
             try {
-                val result = withTimeoutOrNull(CREATE_SESSION_ACTION_TIMEOUT_MS) {
-                    val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) }
-                        ?: return@withTimeoutOrNull Result.failure<String>(
-                            IllegalStateException("Host not found."),
-                        )
+                val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) }
+                val result = if (host == null) {
+                    Result.failure<String>(IllegalStateException("Host not found."))
+                } else {
                     gateway.createSession(
                         host = host,
                         keyPath = params.keyPath,
@@ -1332,7 +1324,7 @@ class FolderListViewModel internal constructor(
                         cwd = cwd,
                         startCommand = startCommand,
                     )
-                } ?: Result.failure(CreateSessionActionTimeoutException(CREATE_SESSION_ACTION_TIMEOUT_MS))
+                }
                 result.fold(
                     onSuccess = { resolvedName ->
                         // EPIC #679 (#678 create side): the app KNOWS it just created
@@ -2941,14 +2933,6 @@ class FolderListViewModel internal constructor(
          * an indefinite `Loading`.
          */
         const val RECONCILE_TIMEOUT_MS: Long = 12_000L
-
-        /**
-         * User-facing ceiling for the complete create-session action. The
-         * gateway also bounds individual exec reads, but create can perform
-         * several sequential probes/commands; this keeps the sheet in an
-         * explicit busy state for a finite window instead of feeling frozen.
-         */
-        const val CREATE_SESSION_ACTION_TIMEOUT_MS: Long = 12_000L
 
         /**
          * Issue #711: the COMPACT, calm, human one-liner shown when the folder

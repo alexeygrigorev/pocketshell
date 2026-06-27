@@ -15,11 +15,18 @@ Runs a heavy local reproduction command in a transient systemd --user scope
 with memory caps. Use this wrapper for local emulator/connected-test debugging
 when a purpose-built script does not already scope the command.
 
+Fail-closed rule:
+  If user systemd is unavailable, this wrapper refuses to run locally instead
+  of running the command uncapped in the caller's cgroup. Set
+  POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup. CI may fall
+  back automatically.
+
 Defaults:
   POCKETSHELL_TEST_MEM=8G
   POCKETSHELL_TEST_HIGH=<85% of MemoryMax>
   POCKETSHELL_TEST_SWAP=8G
   POCKETSHELL_SCOPE_SLICE=robust.slice
+  POCKETSHELL_SCOPE_ALLOW_BARE=<unset>
 
 Examples:
   scripts/cgroup-run.sh -- ./gradlew --no-daemon :app:compileDebugKotlin

@@ -96,7 +96,7 @@ internal class ShareUploader(
      * default points at the same [SshConnection.connect] the rest of
      * the app uses.
      */
-    private val connect: suspend (HostEntity, SshKey, String) -> Result<SshSession> = { host, key, _ ->
+    private val connect: suspend (HostEntity, SshKey, String, String?) -> Result<SshSession> = { host, key, _, _ ->
         SshConnection.connect(
             host = host.hostname,
             port = host.port,
@@ -126,7 +126,7 @@ internal class ShareUploader(
     ): Result<String> = withContext(Dispatchers.IO) {
         val keyFile = File(keyEntity.privateKeyPath)
         val key: SshKey = SshKey.Path(keyFile)
-        val sessionResult = connect(host, key, keyEntity.privateKeyPath)
+        val sessionResult = connect(host, key, keyEntity.privateKeyPath, SHARE_LEASE_PURPOSE_UPLOAD)
         val session = sessionResult.getOrElse { e ->
             return@withContext Result.failure(
                 SshException(errorMessage("connect", e), e),
@@ -442,6 +442,8 @@ internal class ShareUploader(
             if (mime.isNullOrBlank()) return null
             return MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
         }
+
+        const val SHARE_LEASE_PURPOSE_UPLOAD = "share-upload"
     }
 }
 

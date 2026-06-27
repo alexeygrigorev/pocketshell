@@ -345,7 +345,18 @@ class App : Application() {
         sessionServiceController.observeActiveSessions()
         graceLifecycleScope.launch {
             sessionServiceController.notificationStopRequests().collect {
-                backgroundGraceController.onSessionHoldStoppedByNotification()
+                backgroundGraceController.onSessionHoldStopped(
+                    source = "session_notification",
+                    trigger = "stop_action",
+                )
+            }
+        }
+        graceLifecycleScope.launch {
+            sessionServiceController.sessionHoldEndedRequests().collect {
+                backgroundGraceController.onSessionHoldStopped(
+                    source = "session_service",
+                    trigger = "hold_ended",
+                )
             }
         }
         StartupTiming.mark("session-service-lifecycle-observed")
@@ -1088,6 +1099,10 @@ internal class BackgroundGraceController(
     }
 
     fun onSessionHoldStoppedByNotification() {
+        onSessionHoldStopped(source = "session_notification", trigger = "stop_action")
+    }
+
+    fun onSessionHoldStopped(source: String, trigger: String) {
         if (!backgrounded || !teardownFired || graceJob?.isActive == true) return
         if (holdStopTeardownDispatched) return
         holdStopTeardownDispatched = true
@@ -1104,14 +1119,14 @@ internal class BackgroundGraceController(
             "millis" to backgroundGraceMillisForCycle,
             "deadlineMs" to backgroundDeadlineAtMs,
             "backgroundCycleId" to backgroundCycleId,
-            "source" to "session_notification",
-            "trigger" to "stop_action",
+            "source" to source,
+            "trigger" to trigger,
         )
         ReconnectCauseTrail.record(
             stage = "background_grace",
             outcome = "session_hold_stop_teardown",
-            cause = "session_notification_stop",
-            trigger = "stop_action",
+            cause = source,
+            trigger = trigger,
             "elapsedMs" to elapsedMs,
             "graceMs" to backgroundGraceMillisForCycle,
             "deadlineMs" to backgroundDeadlineAtMs,

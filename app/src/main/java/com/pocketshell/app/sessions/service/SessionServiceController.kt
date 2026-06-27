@@ -43,12 +43,15 @@ class SessionServiceController @Inject constructor(
 
     private val _snapshot = MutableStateFlow(SessionConnectionSnapshot.Empty)
     private val _notificationStopRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+    private val _sessionHoldEndedRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     private var observeJob: Job? = null
     private var holdStoppedByUser: Boolean = false
 
     fun flowOfSnapshot(): StateFlow<SessionConnectionSnapshot> = _snapshot.asStateFlow()
 
     fun notificationStopRequests(): SharedFlow<Unit> = _notificationStopRequests.asSharedFlow()
+
+    fun sessionHoldEndedRequests(): SharedFlow<Unit> = _sessionHoldEndedRequests.asSharedFlow()
 
     fun observeActiveSessions() {
         if (observeJob?.isActive == true) return
@@ -85,7 +88,10 @@ class SessionServiceController @Inject constructor(
                     _snapshot.value = snapshot
                     when {
                         !wasHolding && snapshot.isHoldingConnection -> SessionConnectionService.start(appContext)
-                        wasHolding && !snapshot.isHoldingConnection -> SessionConnectionService.stop(appContext)
+                        wasHolding && !snapshot.isHoldingConnection -> {
+                            _sessionHoldEndedRequests.tryEmit(Unit)
+                            SessionConnectionService.stop(appContext)
+                        }
                     }
                 }
         }

@@ -154,7 +154,7 @@ class StartDirectoryAutocompleteTest {
     }
 
     @Test
-    fun controllerTimesOutSlowSuggestionAndClearsLoading() = runTest {
+    fun controllerKeepsWaitingForSlowSuggestionInsteadOfBlankingResults() = runTest {
         val controller = StartDirectoryAutocompleteController(
             scope = this,
             debounceMs = 0L,
@@ -173,6 +173,12 @@ class StartDirectoryAutocompleteTest {
         runCurrent()
 
         assertEquals(emptyList<String>(), controller.state.value.suggestions)
+        assertTrue(controller.state.value.loading)
+
+        advanceTimeBy(900L)
+        runCurrent()
+
+        assertEquals(listOf("/srv/app/"), controller.state.value.suggestions)
         assertFalse(controller.state.value.loading)
     }
 

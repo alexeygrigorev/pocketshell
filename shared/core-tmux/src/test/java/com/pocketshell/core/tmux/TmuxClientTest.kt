@@ -13,6 +13,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -1818,6 +1819,105 @@ class TmuxClientTest {
             assertEquals(listOf("next-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
             assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `send-keys timeout after begin drains open block before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val sent = scope.async { runCatching { client.sendCommand("send-keys -t %0 Enter") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+            shell.feed("%begin 1 10 0\n")
+            repeat(10) { yield(); delay(10) }
+
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val timedOut = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+            assertTrue("open response block should time out", timedOut.isFailure)
+            assertFalse("fail-open timeout must not close the shell", shell.closed)
+            assertFalse("fail-open timeout must not disconnect the client", client.disconnected.value)
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "late-send-keys-output\n" +
+                    "%end 1 10 0\n" +
+                    "%begin 1 11 0\n" +
+                    "next-ok\n" +
+                    "%end 1 11 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "the late close of the abandoned block must not complete the follow-up command",
+                11L,
+                nextResponse.number,
+            )
+            assertEquals(listOf("next-ok"), nextResponse.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `cancelled command after begin drains open block before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val cancelled = scope.async { client.sendCommand("send-keys -t %0 Enter") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+            shell.feed("%begin 1 20 0\n")
+            repeat(10) { yield(); delay(10) }
+            cancelled.cancelAndJoin()
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "%end 1 20 0\n" +
+                    "%begin 1 21 0\n" +
+                    "next-ok\n" +
+                    "%end 1 21 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(21L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
         } finally {
             client.close()
         }

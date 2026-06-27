@@ -71,6 +71,12 @@ class SessionServiceControllerTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
         val controller = controller(activeClients, testScheduler)
+        val holdEnded = mutableListOf<Unit>()
+        val holdEndedCollector = launch {
+            controller.sessionHoldEndedRequests().collect {
+                holdEnded += Unit
+            }
+        }
 
         controller.observeActiveSessions()
         runCurrent()
@@ -94,6 +100,12 @@ class SessionServiceControllerTest {
         assertEquals(SessionConnectionService::class.java.name, stopped?.component?.className)
         assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
         assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+        assertEquals(
+            "natural hold end must notify App so a post-grace preserved hold can tear down",
+            1,
+            holdEnded.size,
+        )
+        holdEndedCollector.cancel()
     }
 
     @Test

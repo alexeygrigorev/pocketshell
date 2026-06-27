@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -71,7 +72,7 @@ public class SshLeaseManager(
     // from host detail instant: host detail's warm-lease acquire and the
     // user's session-open tap share ONE handshake, so the tap reuses the warm
     // transport the moment it is up rather than racing a second 3-4s connect.
-    private val inFlightConnects: MutableMap<SshLeaseKey, CompletableDeferred<Entry?>> =
+    private val inFlightConnects: MutableMap<SshLeaseKey, CompletableDeferred<Result<Entry>>> =
         linkedMapOf()
     private var closed: Boolean = false
     private var nextEntryId: Long = 1L
@@ -125,7 +126,7 @@ public class SshLeaseManager(
                     // it instead of opening a second redundant handshake.
                     AcquireDecision.Await(pending)
                 } else {
-                    val deferred = CompletableDeferred<Entry?>()
+                    val deferred = CompletableDeferred<Result<Entry>>()
                     inFlightConnects[key] = deferred
                     // Announce the in-flight handshake so a synchronous consumer
                     // (the tmux warm-open hint) can treat a session open landing
@@ -155,21 +156,22 @@ public class SshLeaseManager(
 
     /**
      * Issue #620: take a ref on the entry produced by another acquire's
-     * in-flight connect for this key. If that connect failed, or the shared
-     * entry was closed/disconnected by the time we awoke, fall back to a fresh
-     * owned connect so the caller still gets a lease (never silently fails just
-     * because the connect it joined lost its transport).
+     * in-flight connect for this key. If that connect failed, propagate the
+     * owner failure to every waiter instead of letting waiters serially retry
+     * one-by-one after a shared outage.
      */
     private suspend fun awaitSharedConnect(
         target: SshLeaseTarget,
-        deferred: CompletableDeferred<Entry?>,
+        deferred: CompletableDeferred<Result<Entry>>,
     ): Result<SshLease> {
         val key = target.leaseKey
-        val shared = deferred.await()
+        val shared = deferred.await().getOrElse { error ->
+            return Result.failure(error)
+        }
         val reused = mutex.withLock {
             if (closed) return Result.failure(SshLeaseManagerClosedException())
             val entry = shared
-                ?.takeIf { entries[key] === it && it.session.isConnected }
+                .takeIf { entries[key] === it && it.session.isConnected }
                 ?: return@withLock null
             entry.closeJob?.cancel()
             entry.closeJob = null
@@ -189,8 +191,9 @@ public class SshLeaseManager(
                 ),
             )
         }
-        // The shared connect did not yield a usable entry for us; dial our own.
-        return acquire(target)
+        return Result.failure(
+            SshException("Coalesced SSH connect for $key did not produce a live session"),
+        )
     }
 
     /**
@@ -201,20 +204,20 @@ public class SshLeaseManager(
      */
     private suspend fun runOwnedConnect(
         target: SshLeaseTarget,
-        deferred: CompletableDeferred<Entry?>,
+        deferred: CompletableDeferred<Result<Entry>>,
     ): Result<SshLease> {
         val key = target.leaseKey
         try {
             val session = boundedConnect(target).getOrElse { error ->
                 // Connect failed (including a bounded handshake timeout): clear
                 // the in-flight slot, retract the optimistic Connecting hint, and
-                // wake any awaiters so they fall back to their own dial rather
-                // than blocking forever.
+                // wake any awaiters with the same failure rather than letting
+                // them serially retry the same outage one-by-one.
                 mutex.withLock {
                     if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
                     retractConnectingHintLocked(key)
                 }
-                deferred.complete(null)
+                deferred.complete(Result.failure(error))
                 return Result.failure(error)
             }
             return mutex.withLock {
@@ -222,7 +225,7 @@ public class SshLeaseManager(
                 if (closed) {
                     runCatching { session.close() }
                     retractConnectingHintLocked(key)
-                    deferred.complete(null)
+                    deferred.complete(Result.failure(SshLeaseManagerClosedException()))
                     return@withLock Result.failure(SshLeaseManagerClosedException())
                 }
                 val raced = entries[key]
@@ -237,7 +240,7 @@ public class SshLeaseManager(
                     raced.idleSinceMillis = null
                     raced.refCount += 1
                     emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(raced)
+                    deferred.complete(Result.success(raced))
                     Result.success(
                         SshLease(
                             key = key,
@@ -252,7 +255,7 @@ public class SshLeaseManager(
                     val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
                     entries[key] = entry
                     emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(entry)
+                    deferred.complete(Result.success(entry))
                     Result.success(
                         SshLease(
                             key = key,
@@ -267,9 +270,10 @@ public class SshLeaseManager(
         } finally {
             // Cancellation (or any non-local exit) must never strand the
             // in-flight slot or leave awaiters blocked on a deferred that
-            // would never complete. Clear our slot and wake awaiters; they
-            // fall back to their own dial. No-op when the success/failure
-            // paths above already completed the deferred.
+            // would never complete. Clear our slot and wake awaiters with the
+            // cancellation rather than making them start serial fallback dials.
+            // No-op when the success/failure paths above already completed the
+            // deferred.
             if (!deferred.isCompleted) {
                 withContext(NonCancellable) {
                     mutex.withLock {
@@ -277,7 +281,9 @@ public class SshLeaseManager(
                         retractConnectingHintLocked(key)
                     }
                 }
-                deferred.complete(null)
+                deferred.complete(
+                    Result.failure(CancellationException("SSH connect cancelled for $key")),
+                )
             }
         }
     }
@@ -371,8 +377,8 @@ public class SshLeaseManager(
 
     private sealed interface AcquireDecision {
         data class Reuse(val entry: Entry) : AcquireDecision
-        data class Await(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
-        data class Own(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
+        data class Await(val deferred: CompletableDeferred<Result<Entry>>) : AcquireDecision
+        data class Own(val deferred: CompletableDeferred<Result<Entry>>) : AcquireDecision
     }
 
     /**
@@ -488,7 +494,7 @@ public class SshLeaseManager(
 
     override fun close() {
         val toClose = mutableListOf<Entry>()
-        val pendingToWake = mutableListOf<CompletableDeferred<Entry?>>()
+        val pendingToWake = mutableListOf<CompletableDeferred<Result<Entry>>>()
         runCatching {
             kotlinx.coroutines.runBlocking {
                 mutex.withLock {
@@ -510,7 +516,7 @@ public class SshLeaseManager(
                 }
             }
         }
-        pendingToWake.forEach { it.complete(null) }
+        pendingToWake.forEach { it.complete(Result.failure(SshLeaseManagerClosedException())) }
         toClose.forEach { it.close() }
         connectScope.cancel()
         connectAbortScope.cancel()

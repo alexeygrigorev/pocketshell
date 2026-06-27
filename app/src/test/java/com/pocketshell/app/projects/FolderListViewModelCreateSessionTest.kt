@@ -289,32 +289,37 @@ class FolderListViewModelCreateSessionTest {
     }
 
     @Test
-    fun createSessionTimesOutAndClearsBusyState() = runTest {
+    fun createSessionDoesNotFalseTimeoutHealthySlowCreate() = runTest {
         val gateway = StubGateway(
             rows = listOf(sessionRow("alpha")),
-            createDelayMs = FolderListViewModel.CREATE_SESSION_ACTION_TIMEOUT_MS + 1L,
+            createDelayMs = 13_000L,
         )
         val vm = newViewModel(gateway)
         try {
             bind(vm)
             runCurrent()
 
+            var resolved: String? = null
             vm.createSession(
                 sessionName = "beta",
                 cwd = "/home/alexey/git/beta",
                 startCommand = null,
-                onResolved = {},
+                onResolved = { resolved = it },
             )
             runCurrent()
             assertTrue((vm.state.value as FolderListUiState.Ready).isCreatingSession)
 
-            advanceTimeBy(FolderListViewModel.CREATE_SESSION_ACTION_TIMEOUT_MS)
+            advanceTimeBy(12_000L)
             runCurrent()
 
-            val failed = vm.state.value as FolderListUiState.Failed
-            assertTrue(failed.message.contains("creating the session took longer"))
+            assertTrue((vm.state.value as FolderListUiState.Ready).isCreatingSession)
             assertEquals(1, gateway.createCalls)
-            assertEquals(false, vm.state.value is FolderListUiState.Ready)
+
+            advanceTimeBy(1_000L)
+            runCurrent()
+
+            assertEquals("beta", resolved)
+            assertEquals(false, (vm.state.value as FolderListUiState.Ready).isCreatingSession)
         } finally {
             vm.stopPolling()
         }

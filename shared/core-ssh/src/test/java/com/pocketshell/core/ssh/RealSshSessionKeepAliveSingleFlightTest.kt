@@ -55,6 +55,41 @@ class RealSshSessionKeepAliveSingleFlightTest {
         }
     }
 
+    @Test
+    fun `concurrent sendKeepAlive callers share one wire request`() = runBlocking {
+        val connection = PendingKeepAliveConnection()
+        val client = KeepAliveClient(connection)
+        val session = RealSshSession(client)
+        val callers = 12
+        val start = CountDownLatch(callers)
+
+        try {
+            val jobs = (1..callers).map {
+                async(Dispatchers.IO) {
+                    start.countDown()
+                    start.await(5, TimeUnit.SECONDS)
+                    session.sendKeepAlive()
+                }
+            }
+            assertTrue(connection.requestSent.await(5, TimeUnit.SECONDS))
+            assertTrue(connection.promise.retrieveStarted.await(5, TimeUnit.SECONDS))
+            Thread.sleep(150L)
+            assertEquals(
+                "single-flight must cover the check-to-send race, not only the reply wait",
+                1,
+                connection.sendCount.get(),
+            )
+
+            connection.promise.allowRetrieveToFinish.countDown()
+            withTimeout(5_000L) {
+                jobs.forEach { assertTrue(it.await()) }
+            }
+            assertEquals(1, connection.sendCount.get())
+        } finally {
+            session.close()
+        }
+    }
+
     private class KeepAliveClient(
         private val connection: Connection,
     ) : SSHClient() {

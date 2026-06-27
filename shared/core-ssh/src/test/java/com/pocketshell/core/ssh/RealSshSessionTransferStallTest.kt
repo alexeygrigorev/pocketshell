@@ -96,6 +96,43 @@ class RealSshSessionTransferStallTest {
     }
 
     @Test
+    fun `upload aborts before writing bytes past the declared length`() = runBlocking {
+        val upload = RecordingUploadCommand()
+        val client = ScriptedClient { command ->
+            when {
+                command.startsWith("cat > ") -> upload
+                command.startsWith("rm -f ") -> CompletedCommand(stdout = { "" })
+                else -> error("unexpected command: $command")
+            }
+        }
+        val session = RealSshSession(client, uploadStallTimeoutMs = 120L)
+
+        try {
+            val thrown = withTimeout(5_000L) {
+                try {
+                    session.uploadStream(
+                        input = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)),
+                        length = 3L,
+                        name = "too-long.bin",
+                        remotePath = "/tmp/too-long.bin",
+                    )
+                    throw AssertionError("upload must fail when the source exceeds declared length")
+                } catch (e: SshException) {
+                    e
+                }
+            }
+
+            assertTrue(
+                "upload failure should identify the declared length violation: ${thrown.message}",
+                thrown.message?.contains("exceeded declared length") == true,
+            )
+            assertEquals("bytes past the declared length must not be written", 0, upload.size)
+        } finally {
+            session.close()
+        }
+    }
+
+    @Test
     fun `upload non-zero stderr is byte capped instead of reading forever`() = runBlocking {
         val upload = NonZeroUploadCommand(InfiniteStderrInputStream())
         val client = ScriptedClient { command ->

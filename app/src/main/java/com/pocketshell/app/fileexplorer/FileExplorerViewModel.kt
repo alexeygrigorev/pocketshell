@@ -77,7 +77,11 @@ sealed interface FileTransferState {
      * [isUpload] picks the verb shown in the banner ("Uploading…" vs
      * "Downloading…").
      */
-    data class InProgress(val name: String, val isUpload: Boolean) : FileTransferState
+    data class InProgress(
+        val name: String,
+        val isUpload: Boolean,
+        val bytesTotal: Long? = null,
+    ) : FileTransferState
 
     /** A transfer finished successfully. [message] is the user-facing summary. */
     data class Success(val message: String) : FileTransferState
@@ -257,11 +261,15 @@ class FileExplorerViewModel @Inject constructor(
         if (dir.isBlank()) return
         if (_transfer.value is FileTransferState.InProgress) return
         val safeName = sanitizeUploadName(displayName)
-        _transfer.value = FileTransferState.InProgress(name = safeName, isUpload = true)
+        _transfer.value = FileTransferState.InProgress(
+            name = safeName,
+            isUpload = true,
+            bytesTotal = length.takeIf { it > 0L },
+        )
         transferJob?.cancel()
         transferJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                withLeaseSession(req) { live ->
+                withLeaseSession(req, leasePurpose = LEASE_PURPOSE_TRANSFER, blockTimeoutMs = null) { live ->
                     val remotePath = joinPath(dir, safeName)
                     val input = openStream()
                         ?: throw IllegalStateException("Couldn't read the selected file.")
@@ -311,11 +319,15 @@ class FileExplorerViewModel @Inject constructor(
         val dir = currentDir
         if (dir.isBlank()) return
         if (_transfer.value is FileTransferState.InProgress) return
-        _transfer.value = FileTransferState.InProgress(name = entry.name, isUpload = false)
+        _transfer.value = FileTransferState.InProgress(
+            name = entry.name,
+            isUpload = false,
+            bytesTotal = entry.sizeBytes.takeIf { it > 0L },
+        )
         transferJob?.cancel()
         transferJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                withLeaseSession(req) { live ->
+                withLeaseSession(req, leasePurpose = LEASE_PURPOSE_TRANSFER, blockTimeoutMs = null) { live ->
                     val remotePath = joinPath(dir, entry.name)
                     val bytes = live.downloadFile(remotePath, MAX_DOWNLOAD_BYTES)
                     writeBytes(bytes)
@@ -444,11 +456,14 @@ class FileExplorerViewModel @Inject constructor(
      */
     private suspend fun <T> withLeaseSession(
         req: Request,
+        leasePurpose: String? = null,
+        blockTimeoutMs: Long? = LeaseSessionExec.BLOCK_TIMEOUT_MS,
         block: suspend (SshSession) -> T,
     ): Result<T> =
         LeaseSessionExec.withSession(
             leaseManager = sshLeaseManager,
-            target = req.toLeaseSessionTarget(),
+            target = req.toLeaseSessionTarget(leasePurpose),
+            blockTimeoutMs = blockTimeoutMs,
             block = block,
         )
 
@@ -459,7 +474,7 @@ class FileExplorerViewModel @Inject constructor(
      * warm transport those screens already opened, so the explorer's SFTP/exec
      * channel rides the existing connection instead of dialing its own.
      */
-    private fun Request.toLeaseSessionTarget(): LeaseSessionTarget =
+    private fun Request.toLeaseSessionTarget(leasePurpose: String? = null): LeaseSessionTarget =
         LeaseSessionTarget(
             hostId = hostId,
             hostname = hostname,
@@ -467,6 +482,7 @@ class FileExplorerViewModel @Inject constructor(
             username = username,
             keyPath = keyPath,
             passphrase = passphrase?.copyOf(),
+            leasePurpose = leasePurpose,
         )
 
     /**
@@ -594,6 +610,8 @@ class FileExplorerViewModel @Inject constructor(
          */
         internal fun sanitizeUploadName(displayName: String): String =
             FilenameSanitiser.sanitise(displayName).render()
+
+        internal const val LEASE_PURPOSE_TRANSFER: String = "file-transfer"
 
         /**
          * Join [name] onto a directory [base], collapsing the trailing slash.

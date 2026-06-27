@@ -35,7 +35,8 @@ build/local-avd-start/<run-id>/ so an emulator that exits before adb discovery
 leaves actionable logs instead of only a missing device.
 
 New emulator processes are cgroup-scoped by default through
-scripts/lib/scope-run.sh. Set AVD_SCOPE=0 only when debugging cgroup setup.
+scripts/lib/scope-run.sh. Set AVD_SCOPE=0 together with
+POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup.
 
 Environment overrides:
   ANDROID_SDK=/home/alexey/Android/Sdk
@@ -48,15 +49,16 @@ Environment overrides:
   AVD_START_FLAGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save"
   AVD_WIPE_DATA=1
   AVD_HOLD=1
-  AVD_SCOPE=0
+  AVD_SCOPE=0 POCKETSHELL_SCOPE_ALLOW_BARE=1
   POCKETSHELL_TEST_MEM=8G
+  POCKETSHELL_SCOPE_ALLOW_BARE=1
 
 Set AVD_HOLD=1 in one terminal when collecting connectedDebugAndroidTest
 evidence. The helper keeps monitoring adb/process state until interrupted, so
 an emulator that exits after boot is reported in the same run directory.
 
 On success, run focused evidence commands such as:
-  ./gradlew --no-daemon :app:connectedDebugAndroidTest \
+  scripts/connected-test.sh --suffix i123 \
     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest
 USAGE
 }
@@ -248,6 +250,9 @@ if ! has_adb_device && [[ -z "$(list_emulator_processes)" ]]; then
       "$EMULATOR" -avd "$AVD_NAME" "${start_args[@]}"
     printf '%s\n' "$scope_unit.scope" > "$RUN_DIR/emulator.scope"
   else
+    if ! pocketshell_scope_allow_bare; then
+      fail "AVD_SCOPE=0 would start AVD '$AVD_NAME' uncapped; set POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup"
+    fi
     nohup "$EMULATOR" -avd "$AVD_NAME" "${start_args[@]}" >> "$RUN_DIR/emulator.log" 2>&1 &
     emulator_pid="$!"
     printf '%s\n' "$emulator_pid" > "$RUN_DIR/emulator.pid"

@@ -35,10 +35,12 @@ import java.io.InputStream
 class ShareUploaderTargetTest {
 
     private lateinit var context: Context
+    private val seenLeasePurposes: MutableList<String?> = mutableListOf()
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        seenLeasePurposes.clear()
     }
 
     @Test
@@ -64,6 +66,7 @@ class ShareUploaderTargetTest {
             "success path must show ~/inbox/pocketshell, got '${result.getOrNull()}'",
             result.getOrNull()!!.startsWith("~/inbox/pocketshell/"),
         )
+        assertEquals(listOf("share-upload"), seenLeasePurposes)
     }
 
     @Test
@@ -163,7 +166,10 @@ class ShareUploaderTargetTest {
     private fun newUploader(session: SshSession): ShareUploader =
         ShareUploader(
             context = context,
-            connect = { _, _, _ -> Result.success(session) },
+            connect = { _, _, _, purpose ->
+                seenLeasePurposes += purpose
+                Result.success(session)
+            },
             now = { 0L },
         )
 

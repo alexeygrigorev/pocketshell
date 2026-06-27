@@ -77,7 +77,10 @@ class SshLeaseAcquireBoundCharacterizationTest {
         // The bound CANCELS the owned connect job, which is the signal that
         // propagates into SshConnection.connect's invokeOnCancellation to
         // disconnect the half-open transport and unpark the blocking read.
-        assertTrue("the wedged connect job was cancelled to unpark the read", connector.connectCancelled)
+        assertTrue(
+            "the wedged connect job was cancelled to unpark the read",
+            connector.cancellationObserved.await(5, TimeUnit.SECONDS),
+        )
     }
 
     @Test
@@ -195,6 +198,7 @@ class SshLeaseAcquireBoundCharacterizationTest {
     private class WedgedLeaseConnector : SshLeaseConnector {
         @Volatile var connectEntered: Boolean = false
         @Volatile var connectCancelled: Boolean = false
+        val cancellationObserved = CountDownLatch(1)
 
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             connectEntered = true
@@ -203,6 +207,7 @@ class SshLeaseAcquireBoundCharacterizationTest {
                 error("unreachable")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 connectCancelled = true
+                cancellationObserved.countDown()
                 throw e
             }
         }

@@ -12,6 +12,7 @@ import net.schmizz.sshj.connection.channel.Channel
 import net.schmizz.sshj.connection.channel.direct.PTYMode
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.Signal
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,6 +22,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -81,6 +83,54 @@ class RealSshSessionExecReadTimeoutTest {
             }
         }
 
+    @Test
+    fun `exec drains stdout and stderr concurrently`() = runBlocking {
+        val command = CoordinatedStdoutStderrCommand()
+        val session = RealSshSession(
+            ConnectedClient(RecordingSessionChannel(command)),
+            execReadTimeoutMs = 2_000L,
+        )
+
+        try {
+            val result = withTimeout(5_000L) {
+                session.exec("writes-both-streams")
+            }
+
+            assertEquals("stdout\n", result.stdout)
+            assertEquals("stderr\n", result.stderr)
+            assertEquals(0, result.exitCode)
+            assertTrue("stderr reader must have started", command.stderrReadStarted.await(1, TimeUnit.SECONDS))
+        } finally {
+            session.close()
+        }
+    }
+
+    @Test
+    fun `exec caps buffered stdout`() = runBlocking {
+        val command = LargeStdoutCommand()
+        val session = RealSshSession(
+            ConnectedClient(RecordingSessionChannel(command)),
+            execReadTimeoutMs = 2_000L,
+        )
+
+        try {
+            val thrown = try {
+                session.exec("too-much-output")
+                throw AssertionError("exec must reject unbounded stdout")
+            } catch (e: com.pocketshell.core.ssh.SshException) {
+                e
+            }
+
+            assertTrue(
+                "error should mention capped stdout",
+                thrown.message.orEmpty().contains("stdout exceeded"),
+            )
+            assertTrue("command channel should be closed", command.closed)
+        } finally {
+            session.close()
+        }
+    }
+
     private class ConnectedClient(
         private val sessionChannel: Session,
     ) : SSHClient() {
@@ -135,6 +185,56 @@ class RealSshSessionExecReadTimeoutTest {
             super.close()
             stdout.close()
         }
+    }
+
+    private class CoordinatedStdoutStderrCommand : FakeChannel(), Session.Command {
+        val stderrReadStarted = CountDownLatch(1)
+        private val stdout = object : InputStream() {
+            private val delegate = ByteArrayInputStream("stdout\n".toByteArray(StandardCharsets.UTF_8))
+
+            override fun read(): Int {
+                stderrReadStarted.await(5, TimeUnit.SECONDS)
+                return delegate.read()
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                stderrReadStarted.await(5, TimeUnit.SECONDS)
+                return delegate.read(b, off, len)
+            }
+        }
+        private val stderr = object : InputStream() {
+            private val delegate = ByteArrayInputStream("stderr\n".toByteArray(StandardCharsets.UTF_8))
+
+            override fun read(): Int {
+                stderrReadStarted.countDown()
+                return delegate.read()
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                stderrReadStarted.countDown()
+                return delegate.read(b, off, len)
+            }
+        }
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = stderr
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+    }
+
+    private class LargeStdoutCommand : FakeChannel(), Session.Command {
+        private val stdout = ByteArrayInputStream(ByteArray(EXEC_STREAM_MAX_BYTES + 1) { 'x'.code.toByte() })
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
     }
 
     /**

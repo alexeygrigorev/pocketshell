@@ -23,6 +23,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.io.InputStream
 
 /**
@@ -121,6 +122,34 @@ class FileExplorerLeaseTest {
         leaseManager.close()
     }
 
+    @Test
+    fun transfersUsePurposeLeaseSeparateFromBrowseLease() = runBlocking {
+        val session = FakeSshSession()
+        val connector = RecordingConnector(session)
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+
+        vm.uploadFile("note.txt", 4L) { ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)) }
+        vm.transfer.awaitSuccess()
+        vm.downloadFile(ready.entries.first { it.type == RemoteEntry.Type.FILE }) { }
+        vm.transfer.awaitSuccess()
+
+        assertEquals(
+            listOf(
+                "1:/tmp/key",
+                "1:/tmp/key|purpose=${FileExplorerViewModel.LEASE_PURPOSE_TRANSFER}",
+            ),
+            connector.credentialIds,
+        )
+        leaseManager.close()
+    }
+
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
         predicate: (FileExplorerUiState.Ready) -> Boolean = { true },
     ): FileExplorerUiState.Ready {
@@ -131,6 +160,16 @@ class FileExplorerLeaseTest {
             kotlinx.coroutines.delay(20)
         }
         error("explorer never reached the expected Ready state; was ${value}")
+    }
+
+    private suspend fun StateFlow<FileTransferState>.awaitSuccess(): FileTransferState.Success {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = value
+            if (s is FileTransferState.Success) return s
+            kotlinx.coroutines.delay(20)
+        }
+        error("transfer never reached Success; was ${value}")
     }
 
     private fun request(startDir: String) = FileExplorerViewModel.Request(
@@ -168,6 +207,17 @@ class FileExplorerLeaseTest {
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             val session = sessions.getOrNull(connectCount) ?: sessions.last()
             connectCount += 1
+            return Result.success(session)
+        }
+    }
+
+    private class RecordingConnector(
+        private val session: FakeSshSession,
+    ) : SshLeaseConnector {
+        val credentialIds: MutableList<String> = mutableListOf()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            credentialIds += target.leaseKey.credentialId
             return Result.success(session)
         }
     }
@@ -226,14 +276,17 @@ class FileExplorerLeaseTest {
 
         override fun startShell(): SshShell = error("not used")
 
-        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = remotePath
 
         override suspend fun uploadStream(
             input: InputStream,
             length: Long,
             name: String,
             remotePath: String,
-        ): String = error("not used")
+        ): String = remotePath
+
+        override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
+            byteArrayOf(1, 2, 3)
 
         override fun close() {
             closed = true

@@ -364,12 +364,11 @@ class SshLeaseManagerTest {
     }
 
     @Test
-    fun `awaiter falls back to its own connect when the shared connect fails`() = runTest {
-        // Issue #620: if the coalesced (owning) connect fails, the acquire that
-        // joined it must NOT silently fail — it dials its own transport so the
-        // caller still gets a usable lease.
-        val good = FakeSshSession()
-        val connector = GatedLeaseConnector(null, good)
+    fun `awaiter receives the shared connect failure instead of serially retrying`() = runTest {
+        // If the coalesced owner fails, every waiter must see that same failure.
+        // Otherwise a burst of waiters retries one-by-one and turns one outage
+        // into serialized SSH handshakes.
+        val connector = GatedLeaseConnector(null, FakeSshSession())
         val manager = leaseManager(connector, idleTtlMillis = 60_000)
 
         val firstDeferred = async { manager.acquire(TARGET) }
@@ -385,13 +384,10 @@ class SshLeaseManagerTest {
         val first = firstDeferred.await()
         assertTrue("the owning acquire surfaces the connect failure", first.isFailure)
 
-        // The awaiter falls back to its own dial and succeeds.
-        connector.releaseConnect()
         runCurrent()
         val second = secondDeferred.await()
-        assertTrue("the awaiter recovers with its own connect", second.isSuccess)
-        assertSame(good, second.getOrThrow().session)
-        assertEquals("exactly two connects: failed shared + awaiter fallback", 2, connector.startedConnects)
+        assertTrue("the waiter receives the shared connect failure", second.isFailure)
+        assertEquals("the waiter must not serially retry after the shared failure", 1, connector.startedConnects)
     }
 
     @Test

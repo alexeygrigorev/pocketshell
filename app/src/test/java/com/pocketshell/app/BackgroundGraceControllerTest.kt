@@ -292,6 +292,44 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
+    fun `natural session hold end after held grace elapsed runs the destructive teardown path`() = runTest {
+        val events = mutableListOf<String>()
+        var sessionHoldActive = true
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                if (sessionHoldActive) {
+                    events += "session:preserve"
+                } else {
+                    events += "tmux:background"
+                    events += "runtime-cache:clear"
+                    events += "ssh:stop"
+                }
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "foreground:$resumedWithinGrace"
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+
+        assertEquals(listOf("session:preserve"), events)
+
+        sessionHoldActive = false
+        controller.onSessionHoldStopped(source = "session_service", trigger = "hold_ended")
+        runCurrent()
+
+        assertEquals(
+            listOf("session:preserve", "tmux:background", "runtime-cache:clear", "ssh:stop"),
+            events,
+        )
+    }
+
+    @Test
     fun `a second background during the window does not restart the deadline`() = runTest {
         val events = mutableListOf<String>()
         val controller = controller(events)

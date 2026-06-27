@@ -47,7 +47,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 data class StartDirectoryAutocompleteTarget(
@@ -121,7 +120,7 @@ class StartDirectoryAutocompleteController(
     private val scope: CoroutineScope,
     private val suggest: suspend (String) -> List<String>,
     private val debounceMs: Long = START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS,
-    private val requestTimeoutMs: Long = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
+    private val requestTimeoutMs: Long? = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
 ) {
     private val _state = MutableStateFlow(StartDirectoryAutocompleteUiState())
     val state: StateFlow<StartDirectoryAutocompleteUiState> = _state.asStateFlow()
@@ -142,7 +141,7 @@ class StartDirectoryAutocompleteController(
             val query = value
             var suggestions: List<String> = emptyList()
             try {
-                suggestions = withTimeoutOrNull(requestTimeoutMs) { suggest(query) }.orEmpty()
+                suggestions = suggest(query)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Throwable) {
@@ -190,7 +189,7 @@ class StartDirectoryAutocompleteController(
 fun rememberStartDirectoryAutocompleteController(
     suggestStartDirectories: (suspend (String) -> List<String>)?,
     debounceMs: Long = START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS,
-    requestTimeoutMs: Long = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
+    requestTimeoutMs: Long? = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
 ): StartDirectoryAutocompleteController? {
     val currentSuggest by rememberUpdatedState(suggestStartDirectories)
     val scope = rememberCoroutineScope()
@@ -386,5 +385,5 @@ fun startDirectoryAutocompleteSuggestionTag(path: String): String =
     "start-directory-autocomplete:suggestion:${path.hashCode()}"
 
 private const val START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS: Long = 250L
-private const val START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS: Long = 1_500L
+private val START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS: Long? = null
 private const val DEFAULT_START_DIRECTORY_AUTOCOMPLETE_LIMIT: Int = 30

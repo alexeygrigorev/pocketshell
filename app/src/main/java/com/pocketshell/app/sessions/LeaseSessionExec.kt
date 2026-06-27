@@ -34,6 +34,7 @@ data class LeaseSessionTarget(
     val username: String,
     val keyPath: String,
     val passphrase: CharArray?,
+    val leasePurpose: String? = null,
 ) {
     internal fun toSshLeaseTarget(): SshLeaseTarget =
         SshLeaseTarget(
@@ -41,7 +42,7 @@ data class LeaseSessionTarget(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$hostId:$keyPath",
+                credentialId = credentialId(),
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
@@ -58,7 +59,8 @@ data class LeaseSessionTarget(
             hostname == other.hostname &&
             port == other.port &&
             username == other.username &&
-            keyPath == other.keyPath
+            keyPath == other.keyPath &&
+            leasePurpose == other.leasePurpose
     }
 
     override fun hashCode(): Int {
@@ -67,7 +69,14 @@ data class LeaseSessionTarget(
         result = 31 * result + port
         result = 31 * result + username.hashCode()
         result = 31 * result + keyPath.hashCode()
+        result = 31 * result + (leasePurpose?.hashCode() ?: 0)
         return result
+    }
+
+    private fun credentialId(): String {
+        val base = "$hostId:$keyPath"
+        val purpose = leasePurpose?.trim()?.takeIf { it.isNotEmpty() } ?: return base
+        return "$base|purpose=$purpose"
     }
 }
 
@@ -122,7 +131,7 @@ object LeaseSessionExec {
     suspend fun <T> withSession(
         leaseManager: SshLeaseManager,
         target: LeaseSessionTarget,
-        blockTimeoutMs: Long,
+        blockTimeoutMs: Long?,
         block: suspend (SshSession) -> T,
     ): Result<T> {
         val leaseTarget = target.toSshLeaseTarget()
@@ -139,7 +148,7 @@ object LeaseSessionExec {
     private suspend fun <T> runAttempt(
         leaseManager: SshLeaseManager,
         leaseTarget: SshLeaseTarget,
-        blockTimeoutMs: Long,
+        blockTimeoutMs: Long?,
         block: suspend (SshSession) -> T,
     ): Result<T> {
         val lease = try {
@@ -170,10 +179,14 @@ object LeaseSessionExec {
             // exceptions propagate OUT of `withTimeoutOrNull` to the `catch`
             // below (we do NOT `runCatching` inside, which would swallow the
             // timeout's own CancellationException and defeat the bound).
-            val holder = withTimeoutOrNull(blockTimeoutMs) { Holder(block(lease.session)) }
+            val holder = if (blockTimeoutMs == null) {
+                Holder(block(lease.session))
+            } else {
+                withTimeoutOrNull(blockTimeoutMs) { Holder(block(lease.session)) }
+            }
             if (holder == null) {
                 poisonedTransport = true
-                Result.failure(LeaseSessionBlockTimeoutException(blockTimeoutMs))
+                Result.failure(LeaseSessionBlockTimeoutException(blockTimeoutMs ?: BLOCK_TIMEOUT_MS))
             } else {
                 Result.success(holder.value)
             }

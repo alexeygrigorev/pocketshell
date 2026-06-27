@@ -657,7 +657,7 @@ class ShareViewModelTest {
     }
 
     @Test
-    fun startUploadReusesActiveSshLeaseInsteadOfStartingFreshAuth() = runTest {
+    fun startUploadReusesShareUploadPurposeLeaseInsteadOfStartingFreshAuth() = runTest {
         val host = seededHost(id = 138L, name = "hetzner")
         val keyPath = "/tmp/key-138"
         val fakeSession = FakeStagingSshSession()
@@ -672,7 +672,9 @@ class ShareViewModelTest {
                 }
             },
         )
-        val activeLease = leaseManager.acquire(host.shareTestLeaseTarget(keyPath)).getOrThrow()
+        val activeLease = leaseManager.acquire(
+            host.shareTestLeaseTarget(keyPath, purpose = "share-upload"),
+        ).getOrThrow()
         try {
             val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
             vm.setItem(ShareableItem.TextItem(text = "crash report body", displayName = "report"))
@@ -687,7 +689,7 @@ class ShareViewModelTest {
                     success.copyText.endsWith("report.txt"),
             )
             assertEquals(
-                "a live lease for the same host/key should be reused",
+                "a live share-upload lease for the same host/key should be reused",
                 1,
                 connectCalls,
             )
@@ -702,6 +704,96 @@ class ShareViewModelTest {
         } finally {
             activeLease.release()
             leaseManager.close()
+        }
+    }
+
+    @Test
+    fun startUploadDoesNotReuseGenericInteractiveLease() = runTest {
+        val host = seededHost(id = 139L, name = "hetzner")
+        val keyPath = "/tmp/key-139"
+        val genericSession = FakeStagingSshSession()
+        val uploadSession = FakeStagingSshSession()
+        val seenCredentialIds = mutableListOf<String>()
+        var connectCalls = 0
+        val leaseManager = SshLeaseManager(
+            connector = { target: SshLeaseTarget ->
+                seenCredentialIds += target.leaseKey.credentialId
+                connectCalls += 1
+                if (connectCalls == 1) {
+                    Result.success(genericSession)
+                } else {
+                    Result.success(uploadSession)
+                }
+            },
+        )
+        val activeLease = leaseManager.acquire(host.shareTestLeaseTarget(keyPath)).getOrThrow()
+        try {
+            val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
+            vm.setItem(ShareableItem.TextItem(text = "body", displayName = "report"))
+
+            vm.startUpload(host)
+            advanceUntilIdle()
+
+            val success = vm.uploadState.first { it is UploadState.Success }
+            assertTrue(success is UploadState.Success)
+            assertEquals(
+                listOf("${host.id}:$keyPath", "${host.id}:$keyPath|purpose=share-upload"),
+                seenCredentialIds,
+            )
+            assertTrue(uploadSession.uploadedRemotePaths.isNotEmpty())
+            assertTrue(genericSession.uploadedRemotePaths.isEmpty())
+        } finally {
+            activeLease.release()
+            leaseManager.close()
+        }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun stageIntoSessionUsesShareStagingPurposeLease() {
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
+            try {
+                val registry = ActiveTmuxClients()
+                val host = seededHost(id = 140L, name = "hetzner")
+                val fakeSession = FakeStagingSshSession()
+                val seenCredentialIds = mutableListOf<String>()
+                val leaseManager = SshLeaseManager(
+                    connector = { target: SshLeaseTarget ->
+                        seenCredentialIds += target.leaseKey.credentialId
+                        Result.success(fakeSession)
+                    },
+                )
+                val vm = newVm(registry, sshLeaseManager = leaseManager)
+                registry.register(
+                    hostId = host.id,
+                    hostName = host.name,
+                    hostname = host.hostname,
+                    port = host.port,
+                    username = host.username,
+                    keyPath = "/tmp/key-140",
+                    client = FakeTmuxClient(),
+                )
+                vm.setItem(ShareableItem.TextItem(text = "attach me", displayName = "note"))
+
+                vm.stageIntoSession(
+                    host,
+                    ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+                )
+                kotlinx.coroutines.withTimeout(5_000L) {
+                    fakeSession.uploadStarted.await()
+                }
+
+                assertEquals(
+                    listOf("${host.id}:/tmp/key-140|purpose=share-staging"),
+                    seenCredentialIds,
+                )
+                leaseManager.close()
+            } finally {
+                kotlinx.coroutines.Dispatchers.setMain(
+                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
+                )
+            }
         }
     }
 
@@ -727,7 +819,9 @@ class ShareViewModelTest {
                 }
             },
         )
-        val activeLease = leaseManager.acquire(host.shareTestLeaseTarget(keyPath)).getOrThrow()
+        val activeLease = leaseManager.acquire(
+            host.shareTestLeaseTarget(keyPath, purpose = "share-upload"),
+        ).getOrThrow()
         try {
             val vm = newVm(ActiveTmuxClients(), sshLeaseManager = leaseManager)
             vm.setItem(ShareableItem.TextItem(text = "report body", displayName = "report"))
@@ -1708,13 +1802,13 @@ class ShareViewModelTest {
             keyId = 99L,
         )
 
-    private fun HostEntity.shareTestLeaseTarget(keyPath: String): SshLeaseTarget =
+    private fun HostEntity.shareTestLeaseTarget(keyPath: String, purpose: String? = null): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$id:$keyPath",
+                credentialId = if (purpose == null) "$id:$keyPath" else "$id:$keyPath|purpose=$purpose",
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(java.io.File(keyPath)),

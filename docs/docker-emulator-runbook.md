@@ -35,7 +35,8 @@ diagnostics under `build/local-avd-start/<run-id>/` if the emulator exits before
 adb device discovery. A newly started emulator runs in a memory-capped cgroup by
 default via `scripts/lib/scope-run.sh`, so an emulator OOM stops that scope
 instead of the interactive session. The default cap is `POCKETSHELL_TEST_MEM=8G`;
-override it only for a specific reproduction:
+if local user systemd is unavailable, the helper fails closed instead of
+starting the emulator raw. Override memory only for a specific reproduction:
 
 ```bash
 POCKETSHELL_TEST_MEM=6G scripts/start-local-avd.sh
@@ -66,8 +67,8 @@ scripts/cgroup-run.sh -- ./gradlew --no-daemon :app:compileDebugKotlin
 POCKETSHELL_TEST_MEM=6G scripts/cgroup-run.sh --unit local-repro -- bash -lc '...'
 ```
 
-Only set `AVD_SCOPE=0` or bypass `scripts/cgroup-run.sh` when debugging cgroup
-setup itself.
+Only set `AVD_SCOPE=0` or bypass `scripts/cgroup-run.sh` together with
+`POCKETSHELL_SCOPE_ALLOW_BARE=1` when debugging cgroup setup itself.
 
 To run the same command manually:
 
@@ -293,15 +294,15 @@ ssh -i tests/docker/test_key -p 2222 \
 Run the full connected Android suite:
 
 ```bash
-./gradlew --no-daemon connectedDebugAndroidTest --stacktrace
+scripts/connected-test.sh
 ```
 
 Run focused connected checks:
 
 ```bash
-./gradlew --no-daemon :shared:core-terminal:connectedDebugAndroidTest --stacktrace
+scripts/connected-test.sh --module shared:core-terminal --suffix terminal
 CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest"
-./gradlew --no-daemon :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix smoke \
   "$CLASS_ARG"
 ```
 
@@ -483,7 +484,7 @@ The fast pre-release gate does all of the following:
    first runs focused app KSP/Hilt generated-source tasks for debug, release,
    androidTest, and unit-test variants so lint has deterministic generated
    source inputs, then runs
-   `./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=2 assembleDebug check -x lint -x lintDebug --stacktrace`.
+   `scripts/cgroup-run.sh -- ./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=2 assembleDebug check -x lint -x lintDebug --stacktrace`.
    Lint is intentionally excluded from this local pre-release gate so unrelated
    dirty-worktree lint findings do not block the install and focused
    instrumentation checks; run lint separately from a clean checkout before
@@ -554,16 +555,16 @@ AVD_HOLD=1 RUN_ID=pre-release-hold scripts/start-local-avd.sh
 ```
 
 Leave that terminal open while `scripts/pre-release-confidence-gate.sh` or any
-focused `connectedDebugAndroidTest` command runs in another terminal. Hold mode
+focused `scripts/connected-test.sh` command runs in another terminal. Hold mode
 keeps the startup helper attached to the emulator and records diagnostics under
 `build/local-avd-start/pre-release-hold/` if the AVD exits while Gradle is still
 collecting connected-test evidence.
 
-If you need to start the AVD manually instead of using the helper, use the same
-flag set:
+If you need to start the AVD manually instead of using the helper, still use the
+cgroup wrapper with the same flag set:
 
 ```bash
-"$EMULATOR" -avd test \
+scripts/cgroup-run.sh -- "$EMULATOR" -avd test \
   -no-window \
   -no-audio \
   -no-boot-anim \
@@ -592,7 +593,7 @@ scripts/pre-release-confidence-gate.sh
 Slower opt-in suites are not part of the fast APK pre-release gate:
 
 - Full connected Android sweep:
-  `./gradlew --no-daemon connectedDebugAndroidTest --stacktrace`. Run this
+  `scripts/connected-test.sh`. Run this
   before a public release candidate or when shared instrumentation fixtures
   change.
 - Bootstrap/setup scenarios:
@@ -621,7 +622,7 @@ Run the opt-in bootstrap suite:
 ```bash
 BOOTSTRAP_ARG="-Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true"
 CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
-./gradlew --no-daemon :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix bootstrap \
   "$BOOTSTRAP_ARG" \
   "$CLASS_ARG"
 ```

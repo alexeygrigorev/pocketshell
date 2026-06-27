@@ -86,9 +86,7 @@ fun SessionTypePickerSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     ModalBottomSheet(
-        onDismissRequest = {
-            if (!creating) onDismiss()
-        },
+        onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         modifier = Modifier.testTag(SESSION_TYPE_PICKER_SHEET_TAG),
@@ -294,7 +292,6 @@ internal fun SessionTypePickerContent(
                 text = "Cancel",
                 onClick = onCancel,
                 variant = ButtonVariant.Text,
-                enabled = !creating,
                 modifier = Modifier.testTag(SESSION_TYPE_PICKER_CANCEL_TAG),
             )
             Spacer(modifier = Modifier.padding(end = 8.dp))

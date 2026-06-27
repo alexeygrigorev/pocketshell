@@ -1122,14 +1122,11 @@ internal class RealTmuxClient(
                     ?.output
                     ?.firstOrNull()
                 if (cursorReply == null) {
-                    // Stop waiting on the cursor block: drop it from the queue so
-                    // a late reply is treated as a stale block to ignore rather
-                    // than mis-correlating with the NEXT command on the wire.
+                    // Stop waiting on the cursor block: discard a not-yet-begun
+                    // late block or drain an already-open one so it cannot
+                    // mis-correlate with the NEXT command on the wire.
                     synchronized(responseCorrelationLock) {
-                        val stillWaitingForBegin = cursorPending.commandNumber < 0L
-                        if (pendingQueue.remove(cursorPending) && stillWaitingForBegin) {
-                            staleResponseBlocksToIgnore += 1
-                        }
+                        abandonPendingResponse(cursorPending, commandWasWritten = true)
                     }
                 }
                 CaptureWithCursor(capture = capture, cursorReply = cursorReply)
@@ -1167,10 +1164,7 @@ internal class RealTmuxClient(
     ) {
         synchronized(responseCorrelationLock) {
             for (pending in listOf(capturePending, cursorPending)) {
-                val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && (startedBlock || commandWasWritten)) {
-                    staleResponseBlocksToIgnore += 1
-                }
+                abandonPendingResponse(pending, commandWasWritten = commandWasWritten)
             }
         }
     }
@@ -1306,10 +1300,7 @@ internal class RealTmuxClient(
                         responses += response
                     } else {
                         synchronized(responseCorrelationLock) {
-                            val stillWaitingForBegin = pending.commandNumber < 0L
-                            if (pendingQueue.remove(pending) && stillWaitingForBegin) {
-                                staleResponseBlocksToIgnore += 1
-                            }
+                            abandonPendingResponse(pending, commandWasWritten = true)
                         }
                         responses += CommandResponse(
                             number = -1L,
@@ -1349,11 +1340,27 @@ internal class RealTmuxClient(
     ) {
         synchronized(responseCorrelationLock) {
             for (pending in pendings) {
-                val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && (startedBlock || commandWasWritten)) {
-                    staleResponseBlocksToIgnore += 1
-                }
+                abandonPendingResponse(pending, commandWasWritten = commandWasWritten)
             }
+        }
+    }
+
+    private fun abandonPendingResponse(
+        pending: PendingCommand,
+        commandWasWritten: Boolean,
+    ) {
+        if (pending.commandNumber >= 0L) {
+            pending.abandoned = true
+            pending.deferred.completeExceptionally(
+                TmuxClientException("tmux command abandoned while response block was open"),
+            )
+            return
+        }
+        if (pendingQueue.remove(pending) && commandWasWritten) {
+            staleResponseBlocksToIgnore += 1
+            pending.deferred.completeExceptionally(
+                TmuxClientException("tmux command abandoned before response block began"),
+            )
         }
     }
 
@@ -1431,11 +1438,7 @@ internal class RealTmuxClient(
                 // (`staleResponseBlocksToIgnore += 1`) so a cancelled-after-write
                 // command leaves the FIFO consistent.
                 synchronized(responseCorrelationLock) {
-                    val stillWaitingForBegin = pendingCmd.commandNumber < 0L
-                    val removed = pendingQueue.remove(pendingCmd)
-                    if (writeCompleted && removed && stillWaitingForBegin) {
-                        staleResponseBlocksToIgnore += 1
-                    }
+                    abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted)
                 }
                 writeJob.cancel()
                 if (!writeCompleted) {
@@ -1489,10 +1492,11 @@ internal class RealTmuxClient(
                 )
                 val waitingForBegin = synchronized(responseCorrelationLock) {
                     val waiting = pendingCmd.commandNumber < 0L
-                    if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waiting) {
-                        staleResponseBlocksToIgnore += 1
+                    if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain) {
+                        abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted)
+                    } else {
+                        pendingQueue.remove(pendingCmd)
                     }
-                    pendingQueue.remove(pendingCmd)
                     waiting
                 }
                 if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waitingForBegin) {
@@ -1548,9 +1552,7 @@ internal class RealTmuxClient(
                     // for it, count that block as stale so the reader discards it
                     // instead of binding it to the next command (FIFO desync).
                     val waitingForBegin = pendingCmd.commandNumber < 0L
-                    if (pendingQueue.remove(pendingCmd) && waitingForBegin) {
-                        staleResponseBlocksToIgnore += 1
-                    }
+                    abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted)
                 }
                 throw exception
             }
@@ -1560,7 +1562,7 @@ internal class RealTmuxClient(
                 "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs transportProvenAlive=false",
             )
             synchronized(responseCorrelationLock) {
-                pendingQueue.remove(pendingCmd)
+                abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted)
             }
             closeInternal(
                 ReaderExitIntent.CommandTimeout,
@@ -1840,6 +1842,10 @@ internal class RealTmuxClient(
                         val match = inflight
                         if (ignoredResponseNumber == event.number) {
                             ignoredResponseNumber = -1L
+                        } else if (match?.abandoned == true && match.commandNumber == event.number) {
+                            // The waiter timed out or was cancelled after `%begin`.
+                            // Drain the open block to its close marker, then let the
+                            // next `%begin` bind to the next queued command.
                         } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
@@ -1857,6 +1863,9 @@ internal class RealTmuxClient(
                         val match = inflight
                         if (ignoredResponseNumber == event.number) {
                             ignoredResponseNumber = -1L
+                        } else if (match?.abandoned == true && match.commandNumber == event.number) {
+                            // See the `%end` branch: this closes an abandoned
+                            // response block without poisoning the FIFO.
                         } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
@@ -2353,6 +2362,8 @@ internal class RealTmuxClient(
     ) {
         @Volatile
         var commandNumber: Long = -1L
+        @Volatile
+        var abandoned: Boolean = false
         val output: MutableList<String> = mutableListOf()
     }
 }

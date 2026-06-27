@@ -16,6 +16,7 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -27,6 +28,8 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -3099,6 +3102,14 @@ class PromptComposerViewModelTest {
         }
     }
 
+    /**
+     * The sidecar store does real `Dispatchers.IO` file work (see
+     * [OutboundAttachmentSidecarStore]) and the dispatch resumes back on the
+     * test Main dispatcher only AFTER that IO completes — so driving the virtual
+     * clock alone never observes the settled outcome. Each tick must also yield
+     * to the real IO threads so the store work can make progress before the next
+     * scheduler advance.
+     */
     private suspend fun kotlinx.coroutines.test.TestScope.advanceSchedulerUntil(
         predicate: suspend () -> Boolean,
         maxTicks: Int = 1_000,
@@ -3111,9 +3122,16 @@ class PromptComposerViewModelTest {
             advanceTimeBy(1L)
             runCurrent()
             if (predicate()) return true
+            yieldToRealDispatchers()
         }
         advanceUntilIdle()
         return predicate()
+    }
+
+    private suspend fun yieldToRealDispatchers() {
+        withContext(Dispatchers.IO) {
+            yield()
+        }
     }
 
     private suspend fun kotlinx.coroutines.test.TestScope.waitForSidecarsCleared(

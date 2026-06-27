@@ -2819,7 +2819,7 @@ class FolderListViewModel internal constructor(
 
     private fun releaseWarmLeaseAsync() {
         val lease = takeWarmLeaseForRelease() ?: return
-        CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(ioDispatcher).launch {
             releaseWarmLeaseBounded(lease)
         }
     }
@@ -2832,7 +2832,15 @@ class FolderListViewModel internal constructor(
     }
 
     private suspend fun releaseWarmLeaseBounded(lease: SshLease) {
-        withContext(NonCancellable + Dispatchers.IO) {
+        // Run the bounded release off the Main thread (in production [ioDispatcher]
+        // is `Dispatchers.IO`) so a wedged half-open transport `close()` socket
+        // write can never block the caller; the lease manager's own release does
+        // the wedge-free refcount bookkeeping NonCancellably and only the bounded
+        // transport close runs here. Use the injectable [ioDispatcher] — NOT a
+        // hardcoded `Dispatchers.IO` — so a `runTest` virtual clock drives the
+        // release-into-idle-TTL deterministically, matching every other IO hop in
+        // this view model.
+        withContext(NonCancellable + ioDispatcher) {
             withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) {
                 lease.release()
             }

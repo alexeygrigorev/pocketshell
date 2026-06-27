@@ -374,6 +374,7 @@ internal fun startDirectoryAutocompleteCommand(request: StartDirectoryAutocomple
           pocketshell_ac_count=${'$'}((pocketshell_ac_count + 1))
           [ "${'$'}pocketshell_ac_count" -ge ${request.limit} ] && break
         done
+        exit 0
     """.trimIndent()
 
 internal fun parseStartDirectoryAutocompleteOutput(

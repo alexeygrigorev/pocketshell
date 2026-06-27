@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import click
 import pytest
@@ -56,6 +57,20 @@ def _restore_cwd():
         yield
     finally:
         os.chdir(original)
+
+
+class _FakePopen:
+    pid = 12345
+
+
+@pytest.fixture(autouse=True)
+def _no_source_recorder_child(monkeypatch):
+    """Keep launch tests from spawning the background source watcher."""
+    monkeypatch.setattr(
+        agents.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakePopen(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +527,168 @@ def test_record_agent_kind_swallows_runner_failure():
     assert ok is False
 
 
+def test_record_agent_source_noop_when_not_in_tmux(tmp_path):
+    calls = []
+    ok = agents.record_agent_source(
+        "claude",
+        str(tmp_path),
+        env={},
+        runner=lambda argv, **kw: calls.append(argv),
+        popen=lambda *a, **kw: calls.append(a),
+    )
+    assert ok is False
+    assert calls == []
+
+
+def test_record_agent_source_clears_stale_source_and_starts_watcher(tmp_path):
+    run_calls = []
+    popen_calls = []
+
+    ok = agents.record_agent_source(
+        "codex",
+        str(tmp_path),
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0", "PATH": "/usr/bin"},
+        runner=lambda argv, **kw: run_calls.append((argv, kw)),
+        popen=lambda *args, **kwargs: popen_calls.append((args, kwargs)) or _FakePopen(),
+    )
+
+    assert ok is True
+    generation = run_calls[0][0][-1]
+    assert run_calls[0][0] == ["tmux", "set-option", "@ps_agent_source_generation", generation]
+    assert len(generation) == 32
+    assert run_calls[0][1] == {"check": False}
+    assert run_calls[1] == (
+        ["tmux", "set-option", "-uq", "@ps_agent_source"],
+        {"check": False},
+    )
+    assert len(popen_calls) == 1
+    argv = popen_calls[0][0][0]
+    assert argv[:2] == [sys.executable, "-c"]
+    assert argv[3:5] == ["codex", str(tmp_path)]
+    assert argv[6] == generation
+    assert popen_calls[0][1]["env"]["TMUX"] == "/tmp/tmux-1000/default,1234,0"
+
+
+def test_watch_agent_source_refuses_stale_generation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        agents,
+        "_latest_agent_source",
+        lambda kind, cwd, started_at: "/tmp/current.jsonl",
+    )
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[:3] == ["tmux", "show-options", "-v"]:
+            return agents.subprocess.CompletedProcess(argv, 0, stdout="newer-generation\n")
+        return agents.subprocess.CompletedProcess(argv, 0, stdout="")
+
+    monkeypatch.setattr(agents.subprocess, "run", fake_run)
+
+    assert agents._watch_and_record_agent_source(
+        "claude",
+        "/workspace/proj",
+        "100",
+        "older-generation",
+        timeout_seconds="0.01",
+    ) == 1
+    assert calls == [
+        (
+            ["tmux", "show-options", "-v", "@ps_agent_source_generation"],
+            {
+                "check": False,
+                "stdout": agents.subprocess.PIPE,
+                "stderr": agents.subprocess.DEVNULL,
+                "text": True,
+            },
+        )
+    ]
+
+
+def test_watch_agent_source_records_generation_scoped_source(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        agents,
+        "_latest_agent_source",
+        lambda kind, cwd, started_at: "/tmp/current.jsonl",
+    )
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[:3] == ["tmux", "show-options", "-v"]:
+            return agents.subprocess.CompletedProcess(argv, 0, stdout="same-generation\n")
+        return agents.subprocess.CompletedProcess(argv, 0, stdout="")
+
+    monkeypatch.setattr(agents.subprocess, "run", fake_run)
+
+    assert agents._watch_and_record_agent_source(
+        "claude",
+        "/workspace/proj",
+        "100",
+        "same-generation",
+        timeout_seconds="0.01",
+    ) == 0
+    assert calls[-1][0] == [
+        "tmux",
+        "set-option",
+        "@ps_agent_source",
+        "same-generation\t/tmp/current.jsonl",
+    ]
+
+
+def test_latest_claude_source_encodes_dot_cwd_like_android_detector(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd = "/workspace/app.1"
+    log_dir = tmp_path / ".claude" / "projects" / "-workspace-app-1"
+    log_dir.mkdir(parents=True)
+    transcript = log_dir / "session.jsonl"
+    transcript.write_text("new\n", encoding="utf-8")
+    os.utime(transcript, (300, 300))
+
+    assert agents._latest_agent_source("claude", cwd, started_at=200) == str(transcript)
+
+
+def test_latest_claude_source_ignores_prelaunch_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd = "/workspace/proj"
+    log_dir = tmp_path / ".claude" / "projects" / "-workspace-proj"
+    log_dir.mkdir(parents=True)
+    older = log_dir / "older.jsonl"
+    newer = log_dir / "newer.jsonl"
+    older.write_text("old\n", encoding="utf-8")
+    newer.write_text("new\n", encoding="utf-8")
+    os.utime(older, (100, 100))
+    os.utime(newer, (300, 300))
+
+    assert agents._latest_agent_source("claude", cwd, started_at=200) == str(newer)
+
+
+def test_latest_codex_source_matches_cwd_and_launch_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".codex" / "sessions" / "2026" / "06" / "27"
+    root.mkdir(parents=True)
+    mine = root / "rollout-mine.jsonl"
+    sibling = root / "rollout-sibling.jsonl"
+    stale = root / "rollout-stale.jsonl"
+    mine.write_text(
+        """{"type":"session_meta","payload":{"cwd":"/workspace/proj"}}\n""",
+        encoding="utf-8",
+    )
+    sibling.write_text(
+        """{"type":"session_meta","payload":{"cwd":"/workspace/other"}}\n""",
+        encoding="utf-8",
+    )
+    stale.write_text(
+        """{"type":"session_meta","payload":{"cwd":"/workspace/proj"}}\n""",
+        encoding="utf-8",
+    )
+    os.utime(mine, (300, 300))
+    os.utime(sibling, (400, 400))
+    os.utime(stale, (100, 100))
+
+    assert agents._latest_agent_source("codex", "/workspace/proj", started_at=200) == str(mine)
+
+
 @pytest.mark.parametrize("kind", ["claude", "codex", "opencode"])
 def test_launch_agent_records_kind_before_exec(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -525,6 +702,10 @@ def test_launch_agent_records_kind_before_exec(tmp_path, monkeypatch, kind):
     def fake_execvpe(file, argv, env):
         order.append(("exec", file))
 
+    def fake_record_source(k, cwd, env=None, runner=None, popen=None):
+        order.append(("source", k, cwd, env.get("TMUX") if env else None))
+        return True
+
     agents.launch_agent(
         _FakeCtx(),
         kind,
@@ -533,11 +714,12 @@ def test_launch_agent_records_kind_before_exec(tmp_path, monkeypatch, kind):
         config_dir=None,
         execvpe=fake_execvpe,
         record_kind=fake_record,
+        record_source=fake_record_source,
     )
-    # The kind is recorded with the wrapper's own $TMUX, and recorded BEFORE
-    # the exec replaces the process.
+    # The kind/source are recorded with the wrapper's own $TMUX before exec.
     assert order == [
         ("record", kind, "/tmp/tmux-1000/default,1234,0"),
+        ("source", kind, str(tmp_path), "/tmp/tmux-1000/default,1234,0"),
         ("exec", kind),
     ]
 
@@ -684,6 +866,7 @@ def test_launch_agent_records_profile_before_exec(tmp_path, monkeypatch):
         profile="Claude (Z.AI)",
         execvpe=lambda f, a, e: None,
         record_kind=fake_record,
+        record_source=lambda *a, **kw: True,
     )
     assert recorded == {"kind": "claude", "profile": "Claude (Z.AI)"}
 
@@ -692,7 +875,7 @@ def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
     """End-to-end #858: launching claude via the z.ai profile inside tmux
     writes BOTH @ps_agent_kind=claude AND @ps_agent_profile=<name> before
     exec, via the real --profile resolution path."""
-    home = _seed_zlaude_home(tmp_path, monkeypatch)
+    _seed_zlaude_home(tmp_path, monkeypatch)
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
@@ -793,7 +976,8 @@ def test_cli_agent_default_then_zai_relaunch_sets_profile(tmp_path, monkeypatch)
     )
     assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
     assert not any(
-        argv[:3] == ["tmux", "set-option", "-uq"] for argv in zai_calls
+        argv[:4] == ["tmux", "set-option", "-uq", "@ps_agent_profile"]
+        for argv in zai_calls
     )
 
 

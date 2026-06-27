@@ -74,7 +74,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -442,6 +446,215 @@ def record_agent_kind(
     return True
 
 
+def _encode_agent_cwd(cwd: str) -> str:
+    trimmed = cwd.strip()
+    return trimmed.replace("/", "-").replace(".", "-") if trimmed else "-"
+
+
+def _codex_file_cwd(path: Path) -> Optional[str]:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"session_meta"' not in line or '"cwd"' not in line:
+                    continue
+                row = json.loads(line)
+                payload = row.get("payload")
+                if row.get("type") == "session_meta" and isinstance(payload, dict):
+                    cwd = payload.get("cwd")
+                    return cwd if isinstance(cwd, str) else None
+    except Exception:
+        return None
+    return None
+
+
+def _path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _latest_claude_source(cwd: str, started_at: float) -> Optional[str]:
+    root = Path.home() / ".claude" / "projects" / _encode_agent_cwd(cwd)
+    if not root.is_dir():
+        return None
+    candidates = [
+        path
+        for path in root.glob("*.jsonl")
+        if path.is_file() and _path_mtime(path) >= started_at
+    ]
+    if not candidates:
+        return None
+    return str(max(candidates, key=_path_mtime))
+
+
+def _latest_codex_source(cwd: str, started_at: float) -> Optional[str]:
+    root = Path.home() / ".codex" / "sessions"
+    if not root.is_dir():
+        return None
+    candidates = [
+        path
+        for path in root.rglob("*.jsonl")
+        if path.is_file()
+        and _path_mtime(path) >= started_at
+        and _codex_file_cwd(path) == cwd
+    ]
+    if not candidates:
+        return None
+    return str(max(candidates, key=_path_mtime))
+
+
+def _latest_opencode_source(cwd: str, started_at: float) -> Optional[str]:
+    db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    if not db.is_file():
+        return None
+    normalized_cwd = cwd.rstrip("/") or "/"
+    started_ms = int(started_at * 1000)
+    query = """
+        SELECT s.id, COALESCE(s.time_updated, s.time_created, 0),
+               COALESCE(p.worktree, ''), COALESCE(s.directory, '')
+        FROM session s
+        LEFT JOIN project p ON p.id = s.project_id
+        WHERE COALESCE(s.time_updated, s.time_created, 0) >= ?
+        ORDER BY COALESCE(s.time_updated, s.time_created, 0) DESC
+    """
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            rows = conn.execute(query, (started_ms,)).fetchall()
+    except Exception:
+        return None
+    for session_id, _updated, worktree, directory in rows:
+        for candidate_cwd in (worktree, directory):
+            if not candidate_cwd:
+                continue
+            root = str(candidate_cwd).rstrip("/") or "/"
+            if normalized_cwd == root or normalized_cwd.startswith(root + "/"):
+                return f"{db}#{session_id}"
+    return None
+
+
+def _latest_agent_source(
+    kind: str,
+    cwd: str,
+    started_at: float,
+) -> Optional[str]:
+    if kind == "claude":
+        return _latest_claude_source(cwd, started_at)
+    if kind == "codex":
+        return _latest_codex_source(cwd, started_at)
+    if kind == "opencode":
+        return _latest_opencode_source(cwd, started_at)
+    return None
+
+
+def _watch_and_record_agent_source(
+    kind: str,
+    cwd: str,
+    started_at: str,
+    generation: str,
+    timeout_seconds: str = "20",
+) -> int:
+    """Watch for this launch's transcript and record it on the tmux session.
+
+    The wrapper starts this helper immediately before ``execvpe``. The agent
+    process has not minted its transcript id yet, so this runs in a detached
+    host-side child and records ``@ps_agent_source`` once the source appears.
+    """
+    try:
+        started = float(started_at)
+        timeout = float(timeout_seconds)
+    except ValueError:
+        return 2
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while time.monotonic() <= deadline:
+        source = _latest_agent_source(kind, cwd, started)
+        if source:
+            try:
+                current_generation = subprocess.run(
+                    ["tmux", "show-options", "-v", "@ps_agent_source_generation"],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).stdout.strip()
+                if current_generation != generation:
+                    return 1
+                subprocess.run(
+                    ["tmux", "set-option", "@ps_agent_source", f"{generation}\t{source}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return 0
+            except Exception:
+                return 1
+        time.sleep(0.25)
+    return 1
+
+
+def record_agent_source(
+    kind: str,
+    cwd: str,
+    env: Optional[dict[str, str]] = None,
+    runner=None,
+    popen=None,
+) -> bool:
+    """Start a best-effort recorder for this launch's transcript source.
+
+    ``@ps_agent_kind`` records the engine at launch. This sibling option records
+    the exact transcript identity once the launched CLI has created it, so the
+    Android conversation opener can prefer an exact source over same-kind mtime
+    selection. The old source option is cleared first; if the watcher never
+    finds a transcript, the client falls back to its current selector instead of
+    trusting a stale path from a previous relaunch in the same tmux session.
+    """
+    if not kind or not cwd:
+        return False
+    source_env = os.environ if env is None else env
+    if not source_env.get("TMUX"):
+        return False
+    if runner is None:
+        runner = subprocess.run
+    if popen is None:
+        popen = subprocess.Popen
+    try:
+        generation = uuid.uuid4().hex
+        runner(
+            ["tmux", "set-option", "@ps_agent_source_generation", generation],
+            check=False,
+        )
+        runner(
+            ["tmux", "set-option", "-uq", "@ps_agent_source"],
+            check=False,
+        )
+        started_at = str(time.time() - 1.0)
+        popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pocketshell.agents import "
+                    "_watch_and_record_agent_source; import sys; "
+                    "raise SystemExit(_watch_and_record_agent_source("
+                    "sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]))"
+                ),
+                kind,
+                cwd,
+                started_at,
+                generation,
+            ],
+            env=dict(source_env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def launch_agent(
     ctx: click.Context,
     kind: str,
@@ -453,6 +666,7 @@ def launch_agent(
     profile: Optional[str] = None,
     execvpe=None,
     record_kind=None,
+    record_source=None,
 ) -> None:
     """Resolve the dir, build env+argv, suppress prompts, exec the agent.
 
@@ -482,6 +696,8 @@ def launch_agent(
         execvpe = os.execvpe
     if record_kind is None:
         record_kind = record_agent_kind
+    if record_source is None:
+        record_source = record_agent_source
 
     path = _resolve_dir(ctx, directory)
     resolved_dir = str(path)
@@ -517,6 +733,7 @@ def launch_agent(
     # environment (os.environ) for the TMUX detection — `env` is the
     # provider-stripped launch env that does not necessarily carry $TMUX.
     record_kind(kind, dict(os.environ), profile=profile)
+    record_source(kind, resolved_dir, dict(os.environ))
 
     # Replace this process with the agent so it owns the pty cleanly.
     execvpe(argv[0], argv, env)

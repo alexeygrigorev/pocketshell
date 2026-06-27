@@ -419,6 +419,81 @@ public class AgentConversationRepository internal constructor(
     }
 
     /**
+     * Issue #821 branch 1: read the exact transcript source PocketShell recorded
+     * for this tmux session (`@ps_agent_source`). It is optional and best-effort:
+     * legacy sessions and old host CLIs simply return `null`, which keeps the
+     * existing source selector unchanged.
+     */
+    suspend fun readRecordedAgentSource(
+        session: SshSession,
+        sessionTarget: String,
+    ): String? = readRecordedAgentSourceOption(session, sessionTarget).source
+
+    data class RecordedAgentSourceOption(
+        val source: String?,
+        val generationScoped: Boolean,
+    )
+
+    suspend fun readRecordedAgentSourceOption(
+        session: SshSession,
+        sessionTarget: String,
+    ): RecordedAgentSourceOption {
+        val target = sessionTarget.trim().ifBlank {
+            return RecordedAgentSourceOption(source = null, generationScoped = false)
+        }
+        val generationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
+        val raw = runCatching {
+            session.exec(
+                "ps_recorded_source_generation=\$(" +
+                    "tmux show-options -v -t ${shellQuote(target)} @ps_agent_source_generation 2>/dev/null || true" +
+                    "); printf '%s\\n' \"\$ps_recorded_source_generation\"; " +
+                    "printf '%s\\n' $generationSentinel; " +
+                    "tmux show-options -v -t ${shellQuote(target)} @ps_agent_source 2>/dev/null || true",
+            ).stdout
+        }.getOrNull() ?: return RecordedAgentSourceOption(source = null, generationScoped = false)
+        val lines = raw.split("\n")
+        val generationIndex = lines.indexOf(generationSentinel)
+        val generation = if (generationIndex >= 0) {
+            lines.take(generationIndex).joinToString("\n").trim().ifBlank { null }
+        } else {
+            null
+        }
+        val sourceRaw = if (generationIndex >= 0) {
+            lines.drop(generationIndex + 1).joinToString("\n")
+        } else {
+            raw
+        }
+        return recordedAgentSourceOptionFromRaw(sourceRaw, generation)
+    }
+
+    internal fun recordedAgentSourceOptionFromRaw(
+        raw: String?,
+        generation: String? = null,
+    ): RecordedAgentSourceOption {
+        val value = raw?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return RecordedAgentSourceOption(source = null, generationScoped = false)
+        val currentGeneration = generation?.trim().orEmpty()
+        val parts = value.split("\t", limit = 2)
+        if (parts.size == 2 && parts[0].isNotBlank()) {
+            if (currentGeneration.isNotEmpty() && parts[0] != currentGeneration) {
+                return RecordedAgentSourceOption(source = null, generationScoped = false)
+            }
+            val source = parts[1].trim().takeIf { it.isNotEmpty() }
+            return RecordedAgentSourceOption(
+                source = source,
+                generationScoped = source != null && currentGeneration.isNotEmpty(),
+            )
+        }
+        if (currentGeneration.isNotEmpty()) {
+            return RecordedAgentSourceOption(source = null, generationScoped = false)
+        }
+        return RecordedAgentSourceOption(source = value, generationScoped = false)
+    }
+
+    internal fun recordedAgentSourceFromOption(raw: String?, generation: String? = null): String? =
+        recordedAgentSourceOptionFromRaw(raw, generation).source
+
+    /**
      * Epic #821 slice #3 (#825): map a raw `@ps_agent_kind` option value to an
      * [AgentKind]. The launch wrapper writes the lowercase engine token
      * (`claude` / `codex` / `opencode`); anything else (blank, a foreign
@@ -473,6 +548,7 @@ public class AgentConversationRepository internal constructor(
         paneTty: String,
         paneCommand: String,
         recordedKind: AgentKind,
+        recordedSource: String? = null,
     ): AgentDetection? {
         val normalizedCwd = cwd.trim().ifBlank { return null }
         val normalizedTty = paneTty.trim().ifBlank { return null }
@@ -491,6 +567,7 @@ public class AgentConversationRepository internal constructor(
             normalizedTty = normalizedTty,
             paneCommand = paneCommand,
             recordedKind = recordedKind,
+            recordedSource = recordedSource,
             candidates = candidates,
         )
     }
@@ -549,6 +626,7 @@ public class AgentConversationRepository internal constructor(
             normalizedTty = normalizedTty,
             paneCommand = paneCommand,
             recordedKind = recordedKind,
+            recordedSource = null,
             candidates = candidates.filter { it.agent == recordedKind },
         )
     }
@@ -570,9 +648,17 @@ public class AgentConversationRepository internal constructor(
         normalizedTty: String,
         paneCommand: String,
         recordedKind: AgentKind,
+        recordedSource: String?,
         candidates: List<AgentLogCandidate>,
     ): AgentDetection? {
         val nowMillis = System.currentTimeMillis()
+        if (recordedKind != AgentKind.Codex) {
+            exactRecordedSourceDetection(
+                recordedKind = recordedKind,
+                recordedSource = recordedSource,
+                candidates = candidates,
+            )?.let { return it }
+        }
         // Issue #828 (perf): the process scan is ONLY load-bearing for the
         // recorded-Codex path — it feeds the `/proc/<pid>/fd` owned-rollout
         // resolution that disambiguates same-cwd Codex siblings (#819) and the
@@ -647,6 +733,22 @@ public class AgentConversationRepository internal constructor(
         )
     }
 
+    private fun exactRecordedSourceDetection(
+        recordedKind: AgentKind,
+        recordedSource: String?,
+        candidates: List<AgentLogCandidate>,
+    ): AgentDetection? {
+        val source = recordedSource?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val candidate = candidates.firstOrNull { it.agent == recordedKind && it.path == source }
+            ?: return null
+        return AgentDetection(
+            agent = recordedKind,
+            sourcePath = candidate.path,
+            sessionId = candidate.sessionId ?: candidate.path.substringAfterLast('/').substringBeforeLast('.'),
+            confidence = AgentDetection.Confidence.RecentFile,
+        )
+    }
+
     /**
      * Issue #819: a pane-owned Codex process can hold open a rollout that the
      * normal `find -mmin -120` enumeration skipped because Codex has been idle
@@ -703,6 +805,8 @@ public class AgentConversationRepository internal constructor(
      */
     data class RecordedSessionOpen(
         val recordedKind: AgentKind?,
+        val recordedSource: String?,
+        val recordedSourceGenerationScoped: Boolean,
         val detection: AgentDetection?,
         val needsCodexResolution: Boolean,
         val prefetchedWindow: ConversationEventsWindow? = null,
@@ -751,9 +855,17 @@ public class AgentConversationRepository internal constructor(
         val normalizedCwd = cwd.trim()
         val normalizedTty = paneTty.trim()
         if (normalizedCwd.isBlank() || normalizedTty.isBlank()) {
-            return RecordedSessionOpen(recordedKind = null, detection = null, needsCodexResolution = false)
+            return RecordedSessionOpen(
+                recordedKind = null,
+                recordedSource = null,
+                recordedSourceGenerationScoped = false,
+                detection = null,
+                needsCodexResolution = false,
+            )
         }
         val kindSentinel = "@@PS_RECORDED_KIND@@"
+        val sourceGenerationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
+        val sourceSentinel = "@@PS_RECORDED_SOURCE@@"
         // The Claude window-fold tail budget mirrors [readEventsWindow]: raw
         // lines = messages * JSONL_RAW_LINES_PER_EVENT, floored at the message
         // count and at 1.
@@ -771,6 +883,26 @@ public class AgentConversationRepository internal constructor(
             append("\n")
             append("printf '%s\\n' $kindSentinel")
             append("\n")
+            // 1b. The exact source recorded by the host-side launch watcher.
+            //     Empty on legacy/foreign sessions. Read in the same exec so it
+            //     adds no round-trip to the cold-open path.
+            append(
+                "ps_recorded_source_generation=\$(" +
+                    "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} " +
+                    "@ps_agent_source_generation 2>/dev/null || true" +
+                    "); printf '%s\\n' \"\$ps_recorded_source_generation\"",
+            )
+            append("\n")
+            append("printf '%s\\n' $sourceGenerationSentinel")
+            append("\n")
+            append(
+                "ps_recorded_source=\$(" +
+                    "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} @ps_agent_source 2>/dev/null || true" +
+                    "); printf '%s\\n' \"\$ps_recorded_source\"",
+            )
+            append("\n")
+            append("printf '%s\\n' $sourceSentinel")
+            append("\n")
             // 2. The SAME candidate enumeration the split path runs.
             append(detectionCommand(normalizedCwd))
             append("\n")
@@ -787,14 +919,17 @@ public class AgentConversationRepository internal constructor(
             append("printf '%s\\n' $claudeWindowSentinel")
             append("\n")
             append(
-                "claude_proj=\"\$HOME/.claude/projects/$encodedClaudeCwd\"; " +
+                    "claude_proj=\"\$HOME/.claude/projects/$encodedClaudeCwd\"; " +
+                    "if [ -n \"\$ps_recorded_source\" ] && [ -f \"\$ps_recorded_source\" ]; then " +
+                    "newest=\"\$ps_recorded_source\"; " +
+                    "else " +
                     "newest=\$(" +
                     "find \"\$claude_proj\" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | " +
                     "while IFS= read -r f; do " +
                     "m=\$(stat -c '%Y' \"\$f\" 2>/dev/null) || continue; " +
                     "printf '%s %s\\n' \"\$m\" \"\$f\"; " +
                     "done | sort -rn | head -n 1 | cut -d' ' -f2-" +
-                    "); " +
+                    "); fi; " +
                     "if [ -n \"\$newest\" ]; then " +
                     "printf 'PATH=%s\\n' \"\$newest\"; " +
                     "wc -l < \"\$newest\" 2>/dev/null || printf 0; " +
@@ -814,18 +949,45 @@ public class AgentConversationRepository internal constructor(
         val recordedKind = recordedAgentKindFromOption(rawKind)
             ?: return RecordedSessionOpen(
                 recordedKind = null,
+                recordedSource = null,
+                recordedSourceGenerationScoped = false,
                 detection = null,
                 needsCodexResolution = false,
             )
-        // Candidate rows live between the kind sentinel and the FIRST Claude
+        val afterKindRaw = if (kindSentinelIndex >= 0) lines.drop(kindSentinelIndex + 1) else lines
+        val sourceGenerationSentinelIndex = afterKindRaw.indexOf(sourceGenerationSentinel)
+        val rawSourceGeneration = if (sourceGenerationSentinelIndex >= 0) {
+            afterKindRaw.take(sourceGenerationSentinelIndex).joinToString("\n").trim().ifBlank { null }
+        } else {
+            null
+        }
+        val afterSourceGeneration = if (sourceGenerationSentinelIndex >= 0) {
+            afterKindRaw.drop(sourceGenerationSentinelIndex + 1)
+        } else {
+            afterKindRaw
+        }
+        val sourceSentinelIndex = afterSourceGeneration.indexOf(sourceSentinel)
+        val rawSource = if (sourceSentinelIndex >= 0) {
+            afterSourceGeneration.take(sourceSentinelIndex).joinToString("\n").trim().ifBlank { null }
+        } else {
+            null
+        }
+        val recordedSourceOption = recordedAgentSourceOptionFromRaw(rawSource, rawSourceGeneration)
+        val recordedSource = recordedSourceOption.source
+        // Candidate rows live between the source sentinel and the FIRST Claude
         // window sentinel (the section-2 enumeration). Everything from the
         // SECOND Claude window sentinel onward is the prefetched window.
         val afterKind = if (kindSentinelIndex >= 0) lines.drop(kindSentinelIndex + 1) else lines
-        val firstClaudeSentinel = afterKind.indexOf(claudeWindowSentinel)
-        val candidateLines = if (firstClaudeSentinel >= 0) {
-            afterKind.take(firstClaudeSentinel)
+        val afterSource = if (sourceSentinelIndex >= 0) {
+            afterSourceGeneration.drop(sourceSentinelIndex + 1)
         } else {
             afterKind
+        }
+        val firstClaudeSentinel = afterSource.indexOf(claudeWindowSentinel)
+        val candidateLines = if (firstClaudeSentinel >= 0) {
+            afterSource.take(firstClaudeSentinel)
+        } else {
+            afterSource
         }
         val candidates = candidateLines
             .asSequence()
@@ -837,6 +999,8 @@ public class AgentConversationRepository internal constructor(
         if (recordedKind == AgentKind.Codex) {
             return RecordedSessionOpen(
                 recordedKind = recordedKind,
+                recordedSource = recordedSource,
+                recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
                 detection = null,
                 needsCodexResolution = true,
             )
@@ -847,9 +1011,12 @@ public class AgentConversationRepository internal constructor(
             normalizedTty = normalizedTty,
             paneCommand = paneCommand,
             recordedKind = recordedKind,
+            recordedSource = recordedSource,
             candidates = candidates,
         ) ?: return RecordedSessionOpen(
             recordedKind = recordedKind,
+            recordedSource = recordedSource,
+            recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
             detection = null,
             needsCodexResolution = false,
         )
@@ -861,7 +1028,7 @@ public class AgentConversationRepository internal constructor(
         val prefetchedWindow = if (recordedKind == AgentKind.ClaudeCode) {
             parseFoldedClaudeWindow(
                 lines = if (firstClaudeSentinel >= 0) {
-                    afterKind.drop(firstClaudeSentinel + 1)
+                    afterSource.drop(firstClaudeSentinel + 1)
                 } else {
                     emptyList()
                 },
@@ -874,6 +1041,8 @@ public class AgentConversationRepository internal constructor(
         }
         return RecordedSessionOpen(
             recordedKind = recordedKind,
+            recordedSource = recordedSource,
+            recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
             detection = detection,
             needsCodexResolution = false,
             prefetchedWindow = prefetchedWindow,

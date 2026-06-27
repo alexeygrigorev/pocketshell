@@ -7916,6 +7916,150 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun cachedRecordedKindWithNullSourceRereadsSourceOptionAndRebinds() = runTest(scheduler) {
+        val now = System.currentTimeMillis() / 1000
+        val ownSource = "/home/u/.claude/projects/-workspace-proj/own.jsonl"
+        val siblingSource = "/home/u/.claude/projects/-workspace-proj/sibling.jsonl"
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            recordedSourceOutput = "",
+            detectionOutput = """
+                claude|${now - 60}|/workspace/proj|$ownSource
+                claude|$now|/workspace/proj|$siblingSource
+            """.trimIndent(),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "claude",
+                    paneIndex = 0,
+                    cwd = "/workspace/proj",
+                    currentCommand = "claude",
+                    paneTty = "/dev/pts/7",
+                    sessionName = "work",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "precondition: before the delayed source option exists, the recorded-kind " +
+                "cache has source=null and Claude falls back to newest same-cwd candidate",
+            siblingSource,
+            vm.agentConversations.value["%0"]?.detection?.sourcePath,
+        )
+
+        session.setRecordedSourceOutput("$ownSource\n")
+        vm.startAgentDetectionForPaneForTest("%0")
+        advanceUntilIdle()
+
+        assertEquals(
+            "a cached recorded kind with source=null must re-read @ps_agent_source " +
+                "and rebind to the exact recorded source once the watcher writes it",
+            ownSource,
+            vm.agentConversations.value["%0"]?.detection?.sourcePath,
+        )
+        assertTrue(
+            "the cache-hit path must issue a standalone source option read; commands=${session.execCommands}",
+            session.execCommands.any {
+                it.contains("show-options -v") &&
+                    it.contains("@ps_agent_source") &&
+                    !it.contains("@@PS_RECORDED_KIND@@")
+            },
+        )
+    }
+
+    @Test
+    fun cachedRecordedKindWithRawSourceRereadsAfterGenerationAppearsAndRebinds() =
+        runTest(scheduler) {
+            val now = System.currentTimeMillis() / 1000
+            val rawSource = "/home/u/.claude/projects/-workspace-proj/raw-before-generation.jsonl"
+            val generationSource = "/home/u/.claude/projects/-workspace-proj/generation-current.jsonl"
+            val siblingSource = "/home/u/.claude/projects/-workspace-proj/sibling.jsonl"
+            val session = FakeSshSession(
+                recordedKindOutput = "claude\n",
+                recordedSourceOutput = "$rawSource\n",
+                detectionOutput = """
+                    claude|${now - 120}|/workspace/proj|$rawSource
+                    claude|${now - 60}|/workspace/proj|$generationSource
+                    claude|$now|/workspace/proj|$siblingSource
+                """.trimIndent(),
+            )
+            val vm = newVm()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = FakeTmuxClient(),
+                session = session,
+            )
+            vm.applyParsedPanesForTest(
+                listOf(
+                    TmuxSessionViewModel.ParsedPane(
+                        paneId = "%0",
+                        windowId = "@0",
+                        sessionId = "$0",
+                        title = "claude",
+                        paneIndex = 0,
+                        cwd = "/workspace/proj",
+                        currentCommand = "claude",
+                        paneTty = "/dev/pts/7",
+                        sessionName = "work",
+                    ),
+                ),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "precondition: the first open cached a raw legacy @ps_agent_source",
+                rawSource,
+                vm.agentConversations.value["%0"]?.detection?.sourcePath,
+            )
+
+            session.setRecordedSourceGenerationOutput("launch-2\n")
+            session.setRecordedSourceOutput("launch-2\t$generationSource\n")
+            vm.startAgentDetectionForPaneForTest("%0")
+            advanceUntilIdle()
+
+            assertEquals(
+                "when @ps_agent_source_generation appears, the cache-hit path must " +
+                    "not return the previously cached raw source before validating " +
+                    "the generation-scoped source option",
+                generationSource,
+                vm.agentConversations.value["%0"]?.detection?.sourcePath,
+            )
+            assertTrue(
+                "the raw cached source must be overridden via a standalone " +
+                    "generation-aware source read; commands=${session.execCommands}",
+                session.execCommands.any {
+                    it.contains("@@PS_RECORDED_SOURCE_GENERATION@@") &&
+                        it.contains("@ps_agent_source_generation") &&
+                        it.contains("@ps_agent_source") &&
+                        !it.contains("@@PS_RECORDED_KIND@@")
+                },
+            )
+        }
+
+    @Test
     fun codexReattachSeedReanchorsAcrossSubAgentTwoWindowAndTwoWorktreeSiblings() =
         runTest(scheduler) {
             // G2 class coverage: the three same-cwd same-kind collision shapes the
@@ -16088,6 +16232,9 @@ class TmuxSessionViewModelTest {
         private val tailFailure: Throwable? = null,
         private val detectionOutput: String = "",
         private val processOutput: String = "",
+        private val recordedKindOutput: String = "",
+        private var recordedSourceGenerationOutput: String = "",
+        private var recordedSourceOutput: String = "",
         private val cardGetStdouts: List<String> = emptyList(),
         private val cardCheckExitCode: Int = 0,
         // Issue #448: ports the `ss -tlnp` confirm scan reports as
@@ -16105,6 +16252,8 @@ class TmuxSessionViewModelTest {
         // Issue #793: let a paging test reprogram the window the fake returns.
         fun setWcOutput(value: String) { wcOutput = value }
         fun setInitialEventsOutput(value: String) { initialEventsOutput = value }
+        fun setRecordedSourceGenerationOutput(value: String) { recordedSourceGenerationOutput = value }
+        fun setRecordedSourceOutput(value: String) { recordedSourceOutput = value }
 
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
@@ -16123,6 +16272,25 @@ class TmuxSessionViewModelTest {
             execGate?.await()
             execFailure?.let { throw it }
             val stdout = when {
+                command.contains("@@PS_RECORDED_KIND@@") -> buildString {
+                    append(recordedKindOutput.trim())
+                    append("\n@@PS_RECORDED_KIND@@\n")
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
+                    append(detectionOutput)
+                    append("\n@@PS_CLAUDE_WINDOW@@\n")
+                }
+                command.contains("show-options -v") && command.contains("@ps_agent_kind") ->
+                    recordedKindOutput
+                command.contains("@@PS_RECORDED_SOURCE_GENERATION@@") -> buildString {
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                }
+                command.contains("show-options -v") && command.contains("@ps_agent_source") ->
+                    recordedSourceOutput
                 command.contains("ss -tlnp") ->
                     ssListeningPorts.joinToString("\n") { "0.0.0.0:$it users:((\"server\",pid=1,fd=3))" }
                 command.contains("netstat -tlnp") || command.contains("ss -tln") -> ""

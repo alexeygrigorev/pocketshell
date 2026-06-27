@@ -8,7 +8,10 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageWindow
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -198,6 +201,71 @@ class UsageSchedulerTest {
 
         scheduler.refreshNow()
         assertTrue("stale snapshot must be dropped when pocketshell is gone", scheduler.snapshots.value.isEmpty())
+    }
+
+    @Test
+    fun refreshNow_boundsHungHostFetch_andDoesNotWedgeLaterManualRefresh() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hungHostId = db.hostDao().insert(
+            HostEntity(name = "a-hung", hostname = "hung", username = "u", keyId = keyId, pocketshellInstalled = true),
+        )
+        val healthyHostId = db.hostDao().insert(
+            HostEntity(
+                name = "b-healthy",
+                hostname = "healthy",
+                username = "u",
+                keyId = keyId,
+                pocketshellInstalled = true,
+            ),
+        )
+        val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+        scheduler.hostFetchTimeoutMs = 50L
+
+        val hungStarted = CompletableDeferred<Unit>()
+        val releaseHungFetch = CompletableDeferred<Unit>()
+        var hungFetches = 0
+        scheduler.fetchHost = { host ->
+            when (host.id) {
+                hungHostId -> {
+                    hungFetches += 1
+                    if (hungFetches == 1) {
+                        hungStarted.complete(Unit)
+                        releaseHungFetch.await()
+                    }
+                    UsageSnapshot.Failed(
+                        hostId = host.id,
+                        hostName = host.name,
+                        reason = "later manual refresh recovered",
+                        fetchedAt = Instant.now(),
+                    )
+                }
+
+                healthyHostId -> UsageSnapshot.Records(
+                    hostId = host.id,
+                    hostName = host.name,
+                    records = emptyList(),
+                    fetchedAt = Instant.now(),
+                    command = UsageRemoteSource.defaultUsageCommand,
+                )
+
+                else -> null
+            }
+        }
+
+        val firstRefresh = async { scheduler.refreshNow() }
+        hungStarted.await()
+
+        val secondRefresh = async { scheduler.refreshNow() }
+        val secondCompleted = withTimeoutOrNull(500L) {
+            secondRefresh.await()
+            true
+        }
+
+        releaseHungFetch.complete(Unit)
+        firstRefresh.await()
+
+        assertEquals("later manual refresh must not stay parked behind a hung host", true, secondCompleted)
+        assertTrue(scheduler.snapshots.value[healthyHostId] is UsageSnapshot.Records)
     }
 
     /**

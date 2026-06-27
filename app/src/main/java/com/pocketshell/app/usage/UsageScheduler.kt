@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
@@ -318,6 +319,13 @@ public class UsageScheduler @Inject constructor(
      */
     internal var loopIntervalOverrideMs: Long? = null
 
+    /**
+     * Per-host upper bound for one usage fetch. A single host can be slow,
+     * wedged in SSH/exec, or stuck behind a transport lease; keep that failure
+     * local so the scheduler-wide cadence/manual-refresh mutex is released.
+     */
+    internal var hostFetchTimeoutMs: Long = HOST_FETCH_TIMEOUT_MS
+
     private suspend fun runLoop() {
         try {
             while (true) {
@@ -357,13 +365,30 @@ public class UsageScheduler @Inject constructor(
         // Drop snapshots for hosts that have been removed or lost pocketshell.
         next.keys.retainAll(pocketshellHosts.map { it.id }.toSet())
         pocketshellHosts.forEach { host ->
-            val snapshot = fetchHost(host)
+            val snapshot = fetchHostWithTimeout(host)
             if (snapshot != null) {
                 next[host.id] = snapshot
             }
         }
         publishSnapshots(next.toMap())
     }
+
+    private suspend fun fetchHostWithTimeout(host: HostEntity): UsageSnapshot? {
+        val completed = withTimeoutOrNull(hostFetchTimeoutMs) {
+            HostFetchResult(fetchHost(host))
+        }
+        if (completed != null) return completed.snapshot
+        return UsageSnapshot.Failed(
+            hostId = host.id,
+            hostName = host.name,
+            reason = "Usage fetch timed out after ${hostFetchTimeoutMs} ms",
+            fetchedAt = Instant.now(),
+        )
+    }
+
+    private data class HostFetchResult(
+        val snapshot: UsageSnapshot?,
+    )
 
     private fun publishSnapshots(next: Map<Long, UsageSnapshot>) {
         _snapshots.value = next
@@ -441,6 +466,9 @@ public class UsageScheduler @Inject constructor(
          * a "background while backgrounded" cadence (D21).
          */
         public const val BACKGROUND_INTERVAL_MS: Long = 5L * 60L * 1000L
+
+        /** Bound each host fetch so one hung host cannot wedge the cadence. */
+        public const val HOST_FETCH_TIMEOUT_MS: Long = 30_000L
     }
 }
 

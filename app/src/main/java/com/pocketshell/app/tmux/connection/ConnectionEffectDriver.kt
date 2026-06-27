@@ -153,6 +153,9 @@ import kotlinx.coroutines.launch
  * @param controlChannelDroppedEffect fired AFTER an accepted, unsuppressed current-control-channel
  *   drop has moved the controller. This is the typed effect edge for the VM's passive recovery IO;
  *   suppressed drops, rejected stale drops, and controller no-ops do not fire it.
+ * @param onDropSuppressed records the originating cause for a drop suppressed by
+ *   the single-grace-owner gate, so the later within-grace foreground heal can
+ *   export the real cause instead of a generic foreground placeholder.
  * @param sink where every observed transition is recorded. Defaults to logcat.
  */
 class ConnectionEffectDriver(
@@ -192,6 +195,7 @@ class ConnectionEffectDriver(
     // current host (the reconnect edge); the VM's effect is fail-soft + cheap, and
     // a blank trail is a no-op, so an extra fire never perturbs the connection.
     private val onTransportReconnected: () -> Unit = {},
+    private val onDropSuppressed: (SuppressedDropDiagnostic) -> Unit = {},
     private val sink: (String) -> Unit = { line -> Log.i(TAG, line) },
 ) {
     private val jobs = mutableListOf<Job>()
@@ -292,6 +296,7 @@ class ConnectionEffectDriver(
         drops.collect { client ->
             record(Observation.Disconnected(true))
             if (suppressTransportDrops()) {
+                onDropSuppressed(suppressedControlChannelDiagnostic(client))
                 record(Observation.DropSuppressed)
             } else if (shouldSubmitControlChannelDrop(client)) {
                 val wasTargetless = isTargetless()
@@ -322,6 +327,9 @@ class ConnectionEffectDriver(
                 // returns to a (controller-projected) disconnect band. Deferring leaves
                 // the channel-heal to the within-grace foreground (the single owner).
                 if (suppressTransportDrops()) {
+                    onDropSuppressed(
+                        SuppressedDropDiagnostic(cause = "control_channel_disconnected"),
+                    )
                     record(Observation.DropSuppressed)
                 } else {
                     submitTransport(
@@ -389,6 +397,15 @@ class ConnectionEffectDriver(
                             cause = edge.reason,
                         )
                         if (suppressTransportDrops()) {
+                            onDropSuppressed(
+                                SuppressedDropDiagnostic(
+                                    cause = edge.reason,
+                                    fields = mapOf(
+                                        "transportDropReason" to edge.reason,
+                                        "transportDropSource" to "lease_transport",
+                                    ),
+                                ),
+                            )
                             record(Observation.DropSuppressed)
                         } else {
                             submitTransport(
@@ -417,6 +434,25 @@ class ConnectionEffectDriver(
 
     private fun isTargetless(): Boolean =
         controller.state.value is ConnectionState.Idle
+
+    private fun suppressedControlChannelDiagnostic(client: TmuxClient): SuppressedDropDiagnostic {
+        val disconnectEvent = client.disconnectEvent.value
+        return SuppressedDropDiagnostic(
+            cause = disconnectEvent?.reason?.logValue ?: "control_channel_disconnected",
+            fields = buildMap {
+                put("transportDropSource", "control_channel")
+                if (disconnectEvent != null) {
+                    put("disconnectReason", disconnectEvent.reason.logValue)
+                    put("disconnectSource", disconnectEvent.source)
+                    put("disconnectIntent", disconnectEvent.intent)
+                    put("commandKind", disconnectEvent.commandKind)
+                    put("timeoutMode", disconnectEvent.timeoutMode)
+                    put("exceptionClass", disconnectEvent.exceptionClass)
+                    put("message", disconnectEvent.message)
+                }
+            },
+        )
+    }
 
     private fun record(observation: Observation) {
         _observations.value = _observations.value + observation
@@ -483,3 +519,8 @@ class ConnectionEffectDriver(
         const val TAG: String = "PsConnEffectDriver"
     }
 }
+
+data class SuppressedDropDiagnostic(
+    val cause: String,
+    val fields: Map<String, Any?> = emptyMap(),
+)

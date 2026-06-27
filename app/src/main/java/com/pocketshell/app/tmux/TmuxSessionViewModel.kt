@@ -64,6 +64,7 @@ import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
+import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
 import com.pocketshell.app.tmux.connection.TransportEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
@@ -930,6 +931,9 @@ public class TmuxSessionViewModel @Inject constructor(
             // band (the #635 regression). Recovery is deferred to the within-grace
             // foreground heal ([launchForegroundHealWithinGrace]) — the single owner.
             suppressTransportDrops = { shouldSuppressTransportDropsForSingleGraceOwner() },
+            onDropSuppressed = { diagnostic ->
+                recordSuppressedDropDiagnostic(diagnostic)
+            },
             // EPIC #766 Slice 2b: the driver now owns the passive transport-drop edge.
             // The typed client stream lets the VM reject a late old-client close BEFORE
             // the driver submits TransportDropped to the controller (#630), while still
@@ -1301,6 +1305,36 @@ public class TmuxSessionViewModel @Inject constructor(
         // deferred to the single grace owner.
         return isProcessBackgroundedForGraceOwner()
     }
+
+    private fun recordSuppressedDropDiagnostic(diagnostic: SuppressedDropDiagnostic) {
+        lastSuppressedDropDiagnostic = diagnostic
+    }
+
+    private fun suppressedDropDiagnosticFor(
+        disconnectEvent: TmuxDisconnectEvent,
+        source: String,
+    ): SuppressedDropDiagnostic =
+        SuppressedDropDiagnostic(
+            cause = disconnectEvent.reason.logValue,
+            fields = mapOf(
+                "transportDropSource" to source,
+                "disconnectReason" to disconnectEvent.reason.logValue,
+                "disconnectSource" to disconnectEvent.source,
+                "disconnectIntent" to disconnectEvent.intent,
+                "commandKind" to disconnectEvent.commandKind,
+                "timeoutMode" to disconnectEvent.timeoutMode,
+                "exceptionClass" to disconnectEvent.exceptionClass,
+                "message" to disconnectEvent.message,
+            ),
+        )
+
+    private fun suppressedDropDiagnosticFields(
+        diagnostic: SuppressedDropDiagnostic?,
+    ): Array<Pair<String, Any?>> =
+        diagnostic?.fields
+            ?.map { (key, value) -> key to value }
+            ?.toTypedArray()
+            ?: emptyArray()
 
     /**
      * EPIC #687 P2 (J1/#635): true when the app is backgrounded at the PROCESS level
@@ -3028,6 +3062,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingReattach: PendingReattach? = null
     private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var backgroundDetachJob: Job? = null
+    private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
     // SYNCHRONOUSLY by [detachForBackground] at background time, stashed for the
@@ -3702,6 +3737,11 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         activeTarget = target
         connectingTarget = null
+        val suppressedDropDiagnostic = lastSuppressedDropDiagnostic
+        val originationCause =
+            suppressedDropDiagnostic?.cause ?: "within_grace_foreground_socket_drop"
+        val originationDiagnosticFields = suppressedDropDiagnosticFields(suppressedDropDiagnostic)
+        lastSuppressedDropDiagnostic = null
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-foreground-heal-within-grace generation=$connectGeneration " +
@@ -3710,16 +3750,18 @@ public class TmuxSessionViewModel @Inject constructor(
         ReconnectCauseTrail.record(
             stage = "foreground_reattach",
             outcome = "silent_heal_within_grace",
-            cause = "within_grace_foreground_socket_drop",
+            cause = originationCause,
             trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
             "hostId" to target.hostId,
             "generation" to connectGeneration,
+            *originationDiagnosticFields,
         )
         DiagnosticEvents.record(
             "connection",
             "foreground_reattach",
             "source" to "app_lifecycle",
             "outcome" to "silent_heal_within_grace",
+            "cause" to originationCause,
             "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
             "generation" to connectGeneration,
             "hostId" to target.hostId,
@@ -3727,6 +3769,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "port" to target.port,
             "user" to target.user,
             "session" to target.sessionName,
+            *originationDiagnosticFields,
         )
         // Keep the displayed status CALM while we heal: the within-grace foreground is a
         // ride-through, not a reconnect. Promote the controller back toward Live so the
@@ -3758,6 +3801,10 @@ public class TmuxSessionViewModel @Inject constructor(
                     target = target,
                     reason = "Reattaching to ${target.user}@${target.host}:${target.port}.",
                     trigger = TmuxConnectTrigger.AutoReconnect,
+                    diagnosticFields = arrayOf(
+                        "originationCause" to originationCause,
+                        *originationDiagnosticFields,
+                    ),
                 )
             }
         }
@@ -5351,6 +5398,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // stale cause from a previous attempt never influences the retry
         // decision. [failConnectAttempt] re-populates it if this one fails.
         lastConnectFailureCause = null
+        lastSuppressedDropDiagnostic = null
         try {
             val lease = acquireLeaseForTmux(target, attempt, trigger, startedAtMs)
                 ?: return
@@ -7123,6 +7171,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // within-grace background. [isProcessBackgroundedForGraceOwner] flips at `ON_STOP`
         // regardless of grace, correctly identifying the within-grace background.
         if (isProcessBackgroundedForGraceOwner()) {
+            recordSuppressedDropDiagnostic(
+                suppressedDropDiagnosticFor(
+                    disconnectEvent = disconnectEvent,
+                    source = "passive_disconnect_deferred_to_grace_owner",
+                ),
+            )
             DiagnosticEvents.record(
                 "connection",
                 "passive_disconnect_deferred_to_grace_owner",

@@ -21,6 +21,8 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -541,12 +543,14 @@ class ConnectionEffectDriverTest {
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val suppressedDrops = mutableListOf<SuppressedDropDiagnostic>()
         val driver = ConnectionEffectDriver(
             controller = controller,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
             suppressTransportDrops = { true }, // backgrounded under the NEW path
+            onDropSuppressed = { suppressedDrops += it },
         ).also { it.start() }
 
         // Drive to Live (warm enter: Attaching -> Live).
@@ -576,6 +580,53 @@ class ConnectionEffectDriverTest {
         assertTrue(
             "controller must remain Live (the single grace owner handles recovery)",
             controller.state.value is ConnectionState.Live,
+        )
+        assertEquals(
+            "untyped control-channel suppression must preserve its originating cause token",
+            listOf("control_channel_disconnected"),
+            suppressedDrops.map { it.cause },
+        )
+        scope.cancel()
+    }
+
+    @Test
+    fun suppressedTypedControlChannelDropPreservesDisconnectEventCause() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val tmuxPort = InertTmuxPort()
+        val transportPort = InertTransportPort(warm = true)
+        val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val typedDrops = MutableSharedFlow<FakeTmuxClient>(extraBufferCapacity = 16)
+        val suppressedDrops = mutableListOf<SuppressedDropDiagnostic>()
+        val driver = ConnectionEffectDriver(
+            controller = controller,
+            tmuxPort = tmuxPort,
+            transportPort = transportPort,
+            scope = scope,
+            controlChannelDrops = typedDrops,
+            suppressTransportDrops = { true },
+            onDropSuppressed = { suppressedDrops += it },
+        ).also { it.start() }
+
+        controller.submit(ConnectionEvent.Enter(host, sessionA))
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+
+        val client = FakeTmuxClient()
+        client.disconnectEventSignal.value = TmuxDisconnectEvent(
+            reason = TmuxDisconnectReason.ReaderEof,
+            source = "reader_loop",
+            intent = "unexpected_eof",
+        )
+        typedDrops.emit(client)
+
+        val suppressed = suppressedDrops.single()
+        assertEquals("reader_eof", suppressed.cause)
+        assertEquals("reader_eof", suppressed.fields["disconnectReason"])
+        assertEquals("reader_loop", suppressed.fields["disconnectSource"])
+        assertEquals("unexpected_eof", suppressed.fields["disconnectIntent"])
+        assertEquals(
+            "a suppressed typed drop must NOT walk the controller off Live",
+            listOf("Idle", "Attaching", "Live"),
+            stateNamesOf(driver),
         )
         scope.cancel()
     }
@@ -853,12 +904,14 @@ class ConnectionEffectDriverTest {
         val tmuxPort = InertTmuxPort()
         val transportPort = InertTransportPort(warm = true)
         val controller = ConnectionController(clock = TestClock(), transport = transportPort)
+        val suppressedDrops = mutableListOf<SuppressedDropDiagnostic>()
         val driver = ConnectionEffectDriver(
             controller = controller,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
             suppressTransportDrops = { true }, // backgrounded: single grace owner governs
+            onDropSuppressed = { suppressedDrops += it },
         ).also { it.start() }
 
         controller.submit(ConnectionEvent.Enter(host, sessionA))
@@ -868,7 +921,7 @@ class ConnectionEffectDriverTest {
         // A lease Down while backgrounded must be recorded as DropSuppressed and NOT
         // submitted — submitting it would collapse the controller toward Unreachable
         // while backgrounded (the #635 band on the next within-grace foreground).
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "keepalive_dead"))
         assertTrue(
             "a suppressed lease Down must be recorded as DropSuppressed",
             driver.observations.value.any {
@@ -883,6 +936,11 @@ class ConnectionEffectDriverTest {
         assertTrue(
             "controller stays Live (single grace owner handles recovery)",
             controller.state.value is ConnectionState.Live,
+        )
+        assertEquals(
+            "suppressed lease Down must preserve the lease-originating cause token",
+            listOf("keepalive_dead"),
+            suppressedDrops.map { it.cause },
         )
         scope.cancel()
     }

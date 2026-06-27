@@ -16,6 +16,7 @@ import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -222,6 +223,46 @@ class FolderListViewModelCreateSessionTest {
     }
 
     @Test
+    fun createSessionShowsRunningStatusUntilGatewayReturns() = runTest {
+        val pendingCreate = CompletableDeferred<Result<String>>()
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha")),
+            createResult = pendingCreate,
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = null,
+                onResolved = {},
+            )
+            runCurrent()
+
+            val running = vm.actionStatus.value
+            assertTrue(
+                "create must show non-displacing in-progress feedback while the remote call is pending",
+                running is FolderActionStatus.Running,
+            )
+            assertEquals(
+                "Creating session…",
+                (running as FolderActionStatus.Running).message,
+            )
+
+            pendingCreate.complete(Result.success("beta"))
+            runCurrent()
+
+            assertEquals(FolderActionStatus.Idle, vm.actionStatus.value)
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
     fun failedCreateDoesNotInsertARow() = runTest {
         val gateway = StubGateway(rows = listOf(sessionRow("alpha")), createSucceeds = false)
         val vm = newViewModel(gateway)
@@ -241,8 +282,13 @@ class FolderListViewModelCreateSessionTest {
 
             assertEquals("a failed create must not fire onResolved", null, resolved)
             assertTrue(
-                "a failed create surfaces the Failed state",
-                vm.state.value is FolderListUiState.Failed,
+                "a failed create keeps the current session list visible",
+                vm.state.value is FolderListUiState.Ready,
+            )
+            assertEquals(setOf("alpha"), readySessionNames(vm))
+            assertTrue(
+                "a failed create surfaces the non-displacing action failure",
+                vm.actionStatus.value is FolderActionStatus.Failed,
             )
         } finally {
             vm.stopPolling()
@@ -383,6 +429,7 @@ class FolderListViewModelCreateSessionTest {
     private class StubGateway(
         @Volatile var rows: List<FolderSessionRow>,
         @Volatile var createSucceeds: Boolean = true,
+        private val createResult: CompletableDeferred<Result<String>>? = null,
         // When true, a successful create makes the gateway's probe start
         // reporting the created session (i.e. the probe observed it).
         @Volatile var reportCreatedSession: Boolean = false,
@@ -406,6 +453,10 @@ class FolderListViewModelCreateSessionTest {
             startCommand: String?,
         ): Result<String> {
             createCalls += 1
+            // #1036: when a pending deferred is supplied the create stays
+            // in-flight until the test completes it (drives the Running→Idle
+            // actionStatus assertion).
+            createResult?.let { return it.await() }
             if (createDelayMs > 0L) {
                 delay(createDelayMs)
             }

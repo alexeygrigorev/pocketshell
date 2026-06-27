@@ -165,9 +165,9 @@ sealed interface FolderListResult {
 }
 
 /**
- * Raised when a session-enumeration SSH-exec probe (e.g. `tmux
- * list-sessions`) connects and authenticates fine but its output read
- * never reaches EOF within [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
+ * Raised when a folder-list SSH-exec command (for example `tmux
+ * list-sessions` or `tmux new-session`) connects and authenticates fine but its
+ * output read never reaches EOF within [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
  *
  * Issue #470: this is the robustness contract for the enumeration probe.
  * A connect can succeed (`destination=FolderList`) and then the post-
@@ -193,7 +193,7 @@ class FolderListExecTimeoutException(
     command: String,
     timeoutMs: Long,
 ) : RuntimeException(
-    "tmux/session-enumeration probe read did not complete within " +
+    "Remote tmux command read did not complete within " +
         "${timeoutMs}ms (connect+auth succeeded; the exec output never " +
         "reached EOF). Command: $command",
 )
@@ -401,11 +401,11 @@ class SshFolderListGateway internal constructor(
     private val activeTmuxClients: ActiveTmuxClients,
     private val sshLeaseManager: SshLeaseManager,
     private val sessionListParser: HostTmuxSessionListParser,
-    // Issue #470: bound on a single session-enumeration exec read. Defaults
-    // to [EXEC_READ_TIMEOUT_MS] in production; the unit test overrides it to
-    // a small deterministic value so the wedge/healthy split can be asserted
-    // on a real dispatcher without virtual-vs-real time racing. Kept off the
-    // @Inject constructor below so Hilt never has to provide a raw Long.
+    // Issue #470/#1036: bound on a single folder-list SSH exec read. Defaults
+    // to [EXEC_READ_TIMEOUT_MS] in production; the unit test overrides it to a
+    // small deterministic value so the wedge/healthy split can be asserted on a
+    // real dispatcher without virtual-vs-real time racing. Kept off the @Inject
+    // constructor below so Hilt never has to provide a raw Long.
     private val execReadTimeoutMs: Long,
     // Issue #702: bound on the LIVE `-CC` client enumeration round-trip. The
     // live path (listSessionRowsFromLiveClient) serves the picker enumeration
@@ -642,8 +642,8 @@ class SshFolderListGateway internal constructor(
                 ?: run {
                     Log.w(
                         PROBE_LOG_TAG,
-                        "session-enumeration exec read wedged >${execReadTimeoutMs}ms; " +
-                            "closing wedged session + surfacing retryable ConnectError. " +
+                        "folder-list SSH exec read wedged >${execReadTimeoutMs}ms; " +
+                            "closing wedged session + surfacing bounded failure. " +
                             "cmd=${command.takeLast(48)}",
                     )
                     // Stop awaiting the wedged read so this coroutine can
@@ -1783,10 +1783,9 @@ class SshFolderListGateway internal constructor(
 
     internal companion object {
         /**
-         * Logcat-grep tag for issue #470: emitted only when a
-         * session-enumeration exec read trips its bounded timeout
-         * ([execBounded]) and the gateway surfaces a retryable
-         * `ConnectError` instead of hanging.
+         * Logcat-grep tag for bounded folder-list SSH exec reads. Emitted only
+         * when an exec trips [execBounded] and the gateway surfaces a bounded
+         * failure instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
 

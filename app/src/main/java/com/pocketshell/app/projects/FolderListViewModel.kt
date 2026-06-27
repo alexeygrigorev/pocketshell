@@ -229,17 +229,22 @@ sealed interface FolderListUiState {
 /**
  * Host-detail action feedback surface (#656).
  *
- * For a routine **success** there is deliberately no status state at all — the
- * list updating (a session disappearing on Stop, appearing on Create) IS the
- * feedback, so a success never produces a banner that would push the list down.
- * Only a [Failed] action carries a message (the user must know it did not
- * work), and the screen surfaces that as a NON-displacing overlay rather than a
- * top-of-list row. In-progress feedback for the manual refresh rides the
- * non-displacing refresh progress bar ([FolderListUiState.Ready.isRefreshing],
- * #639), not a status banner.
+ * For a routine **success** there is deliberately no final status state at all
+ * — the list updating (a session disappearing on Stop, appearing on Create) IS
+ * the feedback, so a success never produces a banner that would push the list
+ * down. Failures carry a message (the user must know it did not work), and the
+ * screen surfaces them as NON-displacing overlays rather than top-of-list rows.
  */
 sealed interface FolderActionStatus {
     data object Idle : FolderActionStatus
+
+    /**
+     * Non-displacing in-progress feedback for actions whose result is not
+     * otherwise visible until a remote call returns. Create-session uses this so
+     * closing the picker is followed by an explicit "still working" signal rather
+     * than an apparently frozen/no-op host screen.
+     */
+    data class Running(val message: String) : FolderActionStatus
 
     /**
      * A failure banner. [isRefreshFailure] marks the calm "couldn't refresh the
@@ -1295,9 +1300,9 @@ class FolderListViewModel internal constructor(
      *
      * On success [onResolved] fires with the resolved tmux session name
      * so the caller can route to `AppDestination.TmuxSession`. On
-     * failure the screen falls back to the Failed state with the error
-     * message (so the user sees what went wrong instead of a silent
-     * "nothing happened").
+     * failure the screen keeps the current list visible and shows the error
+     * through [actionStatus] (so the user sees what went wrong instead of a
+     * silent "nothing happened").
      */
     fun createSession(
         sessionName: String,
@@ -1312,19 +1317,22 @@ class FolderListViewModel internal constructor(
         setCreateSessionInFlight(true)
         viewModelScope.launch {
             try {
-                val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) }
-                val result = if (host == null) {
-                    Result.failure<String>(IllegalStateException("Host not found."))
-                } else {
-                    gateway.createSession(
-                        host = host,
-                        keyPath = params.keyPath,
-                        passphrase = params.passphrase,
-                        sessionName = sessionName,
-                        cwd = cwd,
-                        startCommand = startCommand,
-                    )
+                // #1036: non-displacing in-progress feedback so closing the
+                // picker is followed by an explicit "still working" signal
+                // rather than an apparently frozen/no-op host screen.
+                _actionStatus.value = FolderActionStatus.Running("Creating session…")
+                val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
+                    _actionStatus.value = FolderActionStatus.Failed("Host not found.")
+                    return@launch
                 }
+                val result = gateway.createSession(
+                    host = host,
+                    keyPath = params.keyPath,
+                    passphrase = params.passphrase,
+                    sessionName = sessionName,
+                    cwd = cwd,
+                    startCommand = startCommand,
+                )
                 result.fold(
                     onSuccess = { resolvedName ->
                         // EPIC #679 (#678 create side): the app KNOWS it just created
@@ -1357,11 +1365,16 @@ class FolderListViewModel internal constructor(
                             folderPath = cwd,
                         )
                         emitReady()
+                        _actionStatus.value = FolderActionStatus.Idle
                         onResolved(resolvedName)
                         refresh()
                     },
                     onFailure = { error ->
-                        _state.value = FolderListUiState.Failed(
+                        // #1036: surface the failure through the non-displacing
+                        // [actionStatus] overlay (matching killSession/renameSession)
+                        // so the current session list stays visible instead of being
+                        // replaced by a displacing Failed state.
+                        _actionStatus.value = FolderActionStatus.Failed(
                             "Couldn't create session: ${error.message ?: error.javaClass.simpleName}",
                         )
                     },

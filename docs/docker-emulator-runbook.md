@@ -466,9 +466,10 @@ Unless `GRADLE_USER_HOME` is already set, the gate uses
 `build/pre-release-confidence-gate/gradle-home` for its Gradle cache and daemon
 registry. This isolates the release gate from unrelated local Gradle daemon
 stops and generated-output churn in other worktrees. Gate Gradle invocations
-also pass `--no-build-cache`, `--no-parallel`, and `--max-workers=2` to avoid
-cache-packing races, generated-source ordering races, and resource
-oversubscription when other local Gradle jobs are active.
+also run through `scripts/cgroup-run.sh` and pass `--no-build-cache`,
+`--no-parallel`, and `--max-workers=2` to avoid cache-packing races,
+generated-source ordering races, and resource oversubscription when other local
+Gradle jobs are active.
 
 By default, the script copies the current working tree to
 `build/pre-release-confidence-gate/<run-id>/worktree` and re-execs from that

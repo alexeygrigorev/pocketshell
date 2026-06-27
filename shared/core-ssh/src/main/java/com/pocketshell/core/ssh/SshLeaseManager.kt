@@ -365,13 +365,17 @@ public class SshLeaseManager(
      * as warm. No-op when a live entry exists for the key (it already announced
      * Connected). Must be called while holding [mutex].
      */
-    private fun retractConnectingHintLocked(key: SshLeaseKey) {
+    private fun retractConnectingHintLocked(
+        key: SshLeaseKey,
+        closeReason: SshLeaseCloseReason = SshLeaseCloseReason.Disconnected,
+    ) {
         if (entries[key]?.session?.isConnected == true) return
         if (inFlightConnects.containsKey(key)) return
+        if (lastPublishedState[key] != SshLeaseConnectionState.Connecting) return
         emitStateLocked(
             key = key,
             state = SshLeaseConnectionState.Closed,
-            closeReason = SshLeaseCloseReason.Disconnected,
+            closeReason = closeReason,
         )
     }
 
@@ -500,12 +504,22 @@ public class SshLeaseManager(
                 mutex.withLock {
                     closed = true
                     toClose += entries.values
+                    val keysWithEntries = entries.keys.toSet()
+                    val pendingKeys = inFlightConnects.keys.toList()
                     entries.clear()
                     // Issue #620: wake any acquires parked on an in-flight
                     // connect so they observe `closed` and fail fast instead of
                     // blocking forever on a deferred that would never complete.
                     pendingToWake += inFlightConnects.values
                     inFlightConnects.clear()
+                    pendingKeys
+                        .filterNot { it in keysWithEntries }
+                        .forEach {
+                            retractConnectingHintLocked(
+                                key = it,
+                                closeReason = SshLeaseCloseReason.ManagerClosed,
+                            )
+                        }
                     toClose.forEach {
                         emitStateLocked(
                             key = it.key,

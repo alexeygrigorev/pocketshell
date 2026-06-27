@@ -1,6 +1,7 @@
 package com.pocketshell.app.share
 
 import android.content.Context
+import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
@@ -155,6 +156,42 @@ class ShareUploaderTargetTest {
     }
 
     @Test
+    fun uriItemIsMaterializedBeforeSshConnect() = runTest {
+        val source = File(context.cacheDir, "picked-note.txt").apply {
+            writeText("provider bytes")
+        }
+        val session = RecordingSession(execStdout = "")
+        val uploader = ShareUploader(
+            context = context,
+            connect = { _, _, _, purpose ->
+                seenLeasePurposes += purpose
+                source.delete()
+                Result.success(session)
+            },
+            now = { 0L },
+        )
+
+        val result = uploader.upload(
+            host(),
+            keyEntity(),
+            ShareableItem.UriItem(
+                uri = Uri.fromFile(source),
+                displayName = "picked-note.txt",
+                size = source.length(),
+                mimeType = "text/plain",
+                fallbackExtension = "txt",
+            ),
+            ShareTarget.HostInbox,
+        )
+
+        assertTrue(result.isSuccess)
+        assertTrue(
+            "upload must still succeed after the original URI source disappears at connect time",
+            session.lastRemotePath!!.endsWith("picked-note.txt"),
+        )
+    }
+
+    @Test
     fun toShellExpandablePathRewritesTildeAndTrimsTrailingSlash() {
         assertEquals("\$HOME", ShareUploader.toShellExpandablePath("~"))
         assertEquals("\$HOME/git/foo", ShareUploader.toShellExpandablePath("~/git/foo"))
@@ -225,6 +262,7 @@ class ShareUploaderTargetTest {
         override fun startShell(): SshShell = error("not used")
 
         override suspend fun uploadFile(file: File, remotePath: String): String {
+            file.readBytes()
             lastRemotePath = remotePath
             return remotePath
         }

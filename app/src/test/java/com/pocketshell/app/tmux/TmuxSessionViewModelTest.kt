@@ -1114,12 +1114,14 @@ class TmuxSessionViewModelTest {
             listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
         )
         runCurrent()
-        // Wait until client A's pane-output collectors (producer + activity +
-        // port detector) are all subscribed before emitting.
+        // Wait until client A's pane-output collectors (producer + activity)
+        // are subscribed before emitting. The port detector is now
+        // target/generation-owned and intentionally does not start from this
+        // attachClientForTest-only harness because it has no active target.
         assertTrue(
             "client A pane-output collectors must subscribe",
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 3 }
+                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 2 }
                 true
             } ?: false,
         )
@@ -5163,6 +5165,46 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun postGraceForegroundWithoutPendingReattachReconnectsDisconnectedHeldRuntime() = runTest(scheduler) {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            val client = FakeTmuxClient().withSinglePane("work", "%1")
+            val session = FakeSshSession()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+                session = session,
+            )
+            client.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "test",
+                    intent = "held_post_grace",
+                ),
+            )
+
+            vm.onAppForegrounded(resumedWithinGrace = false)
+            runCurrent()
+
+            assertTrue(
+                "post-grace foreground with a disconnected held client must schedule reconnect, got " +
+                    "${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
     fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -6206,7 +6248,7 @@ class TmuxSessionViewModelTest {
         }
         vm.attachClientForTest(client)
         val sink = vm.tmuxInputSinkForTest("%0")
-        val chunks = List(2_000) { index ->
+        val chunks = List(800) { index ->
             ("stress-${index.toString().padStart(4, '0')}-" + "x".repeat(51))
                 .toByteArray(Charsets.US_ASCII)
         }
@@ -6250,6 +6292,32 @@ class TmuxSessionViewModelTest {
             expected.toList(),
             reconstructed.toList(),
         )
+    }
+
+    @Test
+    fun tmuxInputEnqueueRejectsWhenPendingByteBudgetIsFull() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            sendCommandGatePrefix = "send-keys -l -t %0"
+            sendCommandGate = CompletableDeferred()
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+        val chunk = ByteArray(TMUX_INPUT_CHUNK_BYTES) { 'x'.code.toByte() }
+
+        repeat(vm.tmuxInputCapacityBytesForTest() / TMUX_INPUT_CHUNK_BYTES) {
+            sink.write(chunk)
+        }
+        runCurrent()
+
+        val thrown = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
+            .exceptionOrNull()
+        assertTrue(
+            "enqueue must fail fast instead of blocking when the pending-byte budget is full",
+            thrown is IOException,
+        )
+        client.sendCommandGate?.complete(Unit)
+        advanceUntilIdle()
     }
 
     @Test

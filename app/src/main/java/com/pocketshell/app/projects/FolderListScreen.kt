@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -50,6 +51,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,7 +102,12 @@ import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 
 /**
  * Per-host folder list — issue #171.
@@ -245,6 +252,7 @@ fun FolderListScreen(
     }
     val assistantDictationState by assistantDictationUiState.collectAsState()
     val context = LocalContext.current
+    val importScope = rememberCoroutineScope()
     val showFlatFolderList = hostDetailViewMode == HostDetailViewMode.Flat
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var actionFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -307,13 +315,23 @@ fun FolderListScreen(
         val target = importFolder
         importFolder = null
         if (uri != null && target != null) {
-            viewModel.importFileIntoFolder(
-                folderPath = target.path,
-                payload = folderImportPayload(
-                    resolver = context.contentResolver,
-                    uri = uri,
-                ),
-            )
+            val appContext = context.applicationContext
+            importScope.launch {
+                val payload = runCatching {
+                    folderImportPayload(
+                        resolver = appContext.contentResolver,
+                        uri = uri,
+                        cacheDir = appContext.cacheDir,
+                    )
+                }.getOrElse {
+                    Toast.makeText(appContext, "Couldn't read selected file", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                viewModel.importFileIntoFolder(
+                    folderPath = target.path,
+                    payload = payload,
+                )
+            }
         }
     }
 
@@ -614,20 +632,28 @@ private data class PickerTarget(
 
 private enum class AssistantDictationTarget { Prompt, Correction }
 
-private fun folderImportPayload(resolver: ContentResolver, uri: Uri): FolderImportPayload {
-    val displayName = ShareUploader.queryUriDisplayName(resolver, uri)
-        ?: uri.lastPathSegment
-        ?: "imported"
-    val mime = resolver.getType(uri)
-    val sanitised = FilenameSanitiser.sanitise(
-        input = displayName,
-        defaultExtension = ShareUploader.extensionForMimeType(mime),
-    )
-    return FolderImportPayload(
-        remoteName = sanitised.render(),
-        length = queryUriSize(resolver, uri),
-        openStream = { resolver.openInputStream(uri) },
-    )
+private suspend fun folderImportPayload(
+    resolver: ContentResolver,
+    uri: Uri,
+    cacheDir: File,
+): FolderImportPayload = withContext(Dispatchers.IO) {
+    withTimeoutOrNull(FOLDER_IMPORT_SAF_TIMEOUT_MS) {
+        val displayName = ShareUploader.queryUriDisplayName(resolver, uri)
+            ?: uri.lastPathSegment
+            ?: "imported"
+        val mime = resolver.getType(uri)
+        val sanitised = FilenameSanitiser.sanitise(
+            input = displayName,
+            defaultExtension = ShareUploader.extensionForMimeType(mime),
+        )
+        val temp = copyImportUriToTempFile(resolver, uri, cacheDir)
+        FolderImportPayload(
+            remoteName = sanitised.render(),
+            length = temp.length().takeIf { it > 0L } ?: queryUriSize(resolver, uri),
+            openStream = { temp.inputStream() },
+            cleanup = { temp.delete() },
+        )
+    } ?: throw IllegalStateException("Timed out reading selected file.")
 }
 
 private fun queryUriSize(resolver: ContentResolver, uri: Uri): Long? = try {
@@ -640,6 +666,27 @@ private fun queryUriSize(resolver: ContentResolver, uri: Uri): Long? = try {
 } catch (_: Throwable) {
     null
 }
+
+private fun copyImportUriToTempFile(
+    resolver: ContentResolver,
+    uri: Uri,
+    cacheDir: File,
+): File {
+    val dir = File(cacheDir, "folder-imports").also { it.mkdirs() }
+    val temp = File.createTempFile("folder-import-", ".bin", dir)
+    try {
+        resolver.openInputStream(uri).use { input ->
+            if (input == null) throw IllegalStateException("Couldn't read selected file.")
+            temp.outputStream().use { output -> input.copyTo(output) }
+        }
+        return temp
+    } catch (t: Throwable) {
+        temp.delete()
+        throw t
+    }
+}
+
+private const val FOLDER_IMPORT_SAF_TIMEOUT_MS: Long = 10_000L
 
 /**
  * Derive a tmux session name from the user's picker choice — issue #429.

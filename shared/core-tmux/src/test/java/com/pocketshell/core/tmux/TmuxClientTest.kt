@@ -2342,6 +2342,63 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `best-effort timeout after begin abandons open response before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        val command = "capture-pane -p -e -S -200 -t %0"
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val sent = scope.async { runCatching { client.sendBestEffortCommand(command) } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1 20 0\n" +
+                    "stale-open-response\n",
+            )
+
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+            assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
+            assertFalse("open-block best-effort timeout must not close shell", shell.closed)
+            assertFalse("open-block best-effort timeout must not disconnect client", client.disconnected.value)
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%end 1 20 0\n" +
+                    "%begin 1 21 0\n" +
+                    "next-ok\n" +
+                    "%end 1 21 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(21L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendCommand write failure closes client and fails visibly`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

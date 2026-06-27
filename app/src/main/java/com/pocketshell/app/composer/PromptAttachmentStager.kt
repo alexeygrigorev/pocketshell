@@ -10,6 +10,7 @@ import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
@@ -48,11 +49,54 @@ internal class PromptAttachmentStager(
         val safeScope = safeScopeSegment(scopeKey)
         val remoteDir = "$REMOTE_DIRECTORY/$safeScope"
         val displayDir = "~/$remoteDir"
+        val timestamp = ShareUploader.formatTimestamp(now())
+
+        val preparedAttachments = mutableListOf<PreparedAttachment>()
+        var firstFailure: Throwable? = null
+        var failedCount = 0
+        uris.forEachIndexed { index, uri ->
+            try {
+                val prepared = withTimeoutOrNull(ATTACHMENT_SAF_TIMEOUT_MS) {
+                    val item = describe(uri)
+                    val sanitised = FilenameSanitiser.sanitise(
+                        item.displayName ?: uri.lastPathSegment,
+                        defaultExtension = ShareUploader.extensionForMimeType(item.mimeType),
+                    )
+                    val remoteName = composeAttachmentName(timestamp, index, sanitised)
+                    PreparedAttachment(
+                        remotePath = "$remoteDir/$remoteName",
+                        displayPath = "$displayDir/$remoteName",
+                        tempFile = drainToTempFile(uri),
+                    )
+                } ?: throw SshException("Timed out reading selected file")
+                preparedAttachments += prepared
+            } catch (cancelled: CancellationException) {
+                preparedAttachments.forEach { it.tempFile.delete() }
+                throw cancelled
+            } catch (t: Throwable) {
+                failedCount++
+                if (firstFailure == null) firstFailure = t
+            }
+        }
+
+        if (preparedAttachments.isEmpty()) {
+            val cause = firstFailure
+            return@withContext Result.failure(
+                if (cause is SshException) {
+                    cause
+                } else {
+                    SshException("Attachment upload failed: ${cause?.message}", cause)
+                },
+            )
+        }
+
         try {
             ensureRemoteDirectory(session, remoteDir)
         } catch (cancelled: CancellationException) {
+            preparedAttachments.forEach { it.tempFile.delete() }
             throw cancelled
         } catch (t: Throwable) {
+            preparedAttachments.forEach { it.tempFile.delete() }
             // The remote directory could not be created — nothing can be
             // uploaded, so this is a clean total failure.
             return@withContext Result.failure(
@@ -60,35 +104,32 @@ internal class PromptAttachmentStager(
             )
         }
 
-        val timestamp = ShareUploader.formatTimestamp(now())
         // Issue #570: upload each file independently so a single stalling /
         // failing image among N never discards the ones that DID upload (the
         // multi-image wedge/discard the maintainer hit). Successful display
         // paths are collected as they land; per-file failures are recorded
         // and aggregated after the loop.
         val uploadedPaths = mutableListOf<String>()
-        var firstFailure: Throwable? = null
-        var failedCount = 0
-        uris.forEachIndexed { index, uri ->
-            try {
-                val item = describe(uri)
-                val sanitised = FilenameSanitiser.sanitise(
-                    item.displayName ?: uri.lastPathSegment,
-                    defaultExtension = ShareUploader.extensionForMimeType(item.mimeType),
-                )
-                val remoteName = composeAttachmentName(timestamp, index, sanitised)
-                val remotePath = "$remoteDir/$remoteName"
-                uploadUri(session, uri, item.size, remotePath, remoteName)
-                uploadedPaths += "$displayDir/$remoteName"
-            } catch (cancelled: CancellationException) {
-                // A cancellation (sheet dismissed, send-while-uploading
-                // override, or the [withTimeout] in the ViewModel) must
-                // unwind the whole stage — never swallow it into a partial.
-                throw cancelled
-            } catch (t: Throwable) {
-                failedCount++
-                if (firstFailure == null) firstFailure = t
+        try {
+            preparedAttachments.forEach { prepared ->
+                try {
+                    session.uploadFile(prepared.tempFile, prepared.remotePath)
+                    uploadedPaths += prepared.displayPath
+                } catch (cancelled: CancellationException) {
+                    // A cancellation (sheet dismissed, send-while-uploading
+                    // override, or the [withTimeout] in the ViewModel) must
+                    // unwind the whole stage — never swallow it into a partial.
+                    throw cancelled
+                } catch (t: Throwable) {
+                    failedCount++
+                    if (firstFailure == null) firstFailure = t
+                } finally {
+                    prepared.tempFile.delete()
+                }
             }
+        } catch (cancelled: CancellationException) {
+            preparedAttachments.forEach { it.tempFile.delete() }
+            throw cancelled
         }
 
         // Best-effort prune runs whenever at least one upload landed — the
@@ -138,53 +179,18 @@ internal class PromptAttachmentStager(
 
     private fun describe(uri: Uri): AttachmentDescription {
         var displayName: String? = null
-        var size: Long? = null
         runCatching {
             resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
                 ?.use { cursor ->
                     if (!cursor.moveToFirst()) return@use
                     val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (nameIndex >= 0) displayName = cursor.getString(nameIndex)
-                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (sizeIndex >= 0) {
-                        val queriedSize = cursor.getLong(sizeIndex)
-                        if (queriedSize > 0L) size = queriedSize
-                    }
                 }
         }
         return AttachmentDescription(
             displayName = displayName,
-            size = size,
             mimeType = resolver.getType(uri),
         )
-    }
-
-    private suspend fun uploadUri(
-        session: SshSession,
-        uri: Uri,
-        size: Long?,
-        remotePath: String,
-        remoteName: String,
-    ) {
-        val knownSize = size
-        if (knownSize != null) {
-            resolver.openInputStream(uri)?.use { input ->
-                session.uploadStream(
-                    input = input,
-                    length = knownSize,
-                    name = remoteName,
-                    remotePath = remotePath,
-                )
-            } ?: throw SshException("Could not read selected file")
-            return
-        }
-
-        val temp = drainToTempFile(uri)
-        try {
-            session.uploadFile(temp, remotePath)
-        } finally {
-            temp.delete()
-        }
     }
 
     private fun drainToTempFile(uri: Uri): File {
@@ -204,12 +210,18 @@ internal class PromptAttachmentStager(
 
     private data class AttachmentDescription(
         val displayName: String?,
-        val size: Long?,
         val mimeType: String?,
+    )
+
+    private data class PreparedAttachment(
+        val remotePath: String,
+        val displayPath: String,
+        val tempFile: File,
     )
 
     companion object {
         const val REMOTE_DIRECTORY: String = ".pocketshell/attachments"
+        const val ATTACHMENT_SAF_TIMEOUT_MS: Long = 10_000L
 
         fun safeScopeSegment(scopeKey: String): String {
             val cleaned = scopeKey.map { ch ->

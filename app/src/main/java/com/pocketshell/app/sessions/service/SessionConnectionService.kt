@@ -64,14 +64,16 @@ class SessionConnectionService : Service() {
         const val ACTION_START = "com.pocketshell.app.sessions.action.START_SESSION_HOLD"
         const val ACTION_STOP = "com.pocketshell.app.sessions.action.STOP_SESSION_HOLD"
 
-        fun start(context: Context) {
+        fun start(context: Context): Boolean {
             val intent = Intent(context, SessionConnectionService::class.java).apply {
                 action = ACTION_START
             }
-            runCatching {
+            return runCatching {
                 ContextCompat.startForegroundService(context, intent)
-            }.onFailure {
+                true
+            }.getOrElse {
                 Log.w(TAG, "session foreground service start was rejected", it)
+                false
             }
         }
 
@@ -100,7 +102,10 @@ class SessionConnectionService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                promoteToForegroundIfNeeded(initialNotification())
+                if (!promoteToForegroundIfNeeded(initialNotification())) {
+                    stopSessionHold()
+                    return START_NOT_STICKY
+                }
                 acquireWakeLockIfNeeded()
                 if (observeJob?.isActive != true) {
                     startObserving()
@@ -144,22 +149,31 @@ class SessionConnectionService : Service() {
         observeJob = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         hasStartedForeground = false
+        controller.onForegroundServiceStopped()
         releaseWakeLock()
         stopSelf()
     }
 
-    private fun promoteToForegroundIfNeeded(notification: Notification) {
-        if (hasStartedForeground) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+    private fun promoteToForegroundIfNeeded(notification: Notification): Boolean {
+        if (hasStartedForeground) return true
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            hasStartedForeground = true
+            controller.onForegroundServicePromoted()
+            true
+        }.getOrElse {
+            Log.w(TAG, "session foreground service promotion failed", it)
+            controller.onForegroundServiceStartFailed()
+            false
         }
-        hasStartedForeground = true
     }
 
     private fun updateNotification(snapshot: SessionConnectionSnapshot) {

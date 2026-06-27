@@ -327,9 +327,15 @@ class FileExplorerViewModel @Inject constructor(
         transferJob?.cancel()
         transferJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                withLeaseSession(req, leasePurpose = LEASE_PURPOSE_TRANSFER, blockTimeoutMs = null) { live ->
+                val downloaded = withLeaseSession(
+                    req,
+                    leasePurpose = LEASE_PURPOSE_TRANSFER,
+                    blockTimeoutMs = null,
+                ) { live ->
                     val remotePath = joinPath(dir, entry.name)
-                    val bytes = live.downloadFile(remotePath, MAX_DOWNLOAD_BYTES)
+                    live.downloadFile(remotePath, MAX_DOWNLOAD_BYTES)
+                }
+                downloaded.mapCatching { bytes ->
                     writeBytes(bytes)
                     bytes.size
                 }

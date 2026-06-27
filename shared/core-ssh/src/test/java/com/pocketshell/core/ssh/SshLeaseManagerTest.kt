@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -360,6 +361,38 @@ class SshLeaseManagerTest {
             "a failed in-flight connect emits Closed to retract the hint",
             events.contains(SshLeaseConnectionState.Closed),
         )
+        eventsCollector.cancel()
+    }
+
+    @Test
+    fun `closing manager emits Closed for optimistic Connecting key`() = runTest {
+        val connector = GatedLeaseConnector(FakeSshSession())
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val eventsCollector = launch { manager.stateEvents.collect { events.add(it) } }
+        runCurrent()
+
+        val acquireJob = async { manager.acquire(TARGET) }
+        runCurrent()
+
+        assertTrue(manager.hasLiveOrConnectingLease(TARGET.leaseKey))
+        assertTrue(events.any { it.state == SshLeaseConnectionState.Connecting })
+
+        manager.close()
+        runCurrent()
+
+        assertFalse(manager.hasLiveOrConnectingLease(TARGET.leaseKey))
+        assertTrue(
+            "manager close must publish a terminal Closed edge for an optimistic Connecting key",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.ManagerClosed
+            },
+        )
+
+        acquireJob.cancelAndJoin()
         eventsCollector.cancel()
     }
 

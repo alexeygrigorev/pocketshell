@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -676,7 +677,9 @@ build_and_install_apks() {
     if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
       GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
     fi
-    run_logged "08-build-apks" ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
+    run_logged "08-build-apks" \
+      "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-phone-walkthrough-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+      ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
   else
     [[ -f "$APP_APK" ]] || fail "BUILD_APKS=0 but app APK is missing at $APP_APK"
     [[ -f "$TEST_APK" ]] || fail "BUILD_APKS=0 but androidTest APK is missing at $TEST_APK"

@@ -144,13 +144,60 @@ class FolderListGatewaySshLeaseTest {
         )
     }
 
+    @Test
+    fun importFileUsesPurposeLeaseAndCleansPreparedPayload() = runTest {
+        var cleaned = false
+        val session = FakeSshSession { command ->
+            when {
+                command.contains("pwd -P") ->
+                    ExecResult(stdout = "/srv/app\n", stderr = "", exitCode = 0)
+                else ->
+                    ExecResult(stdout = "", stderr = "", exitCode = 0)
+            }
+        }
+        val connector = CountingConnector(session)
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = connector,
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
+        )
+
+        val result = gateway.importFile(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            folderPath = "/srv/app",
+            payload = FolderImportPayload(
+                remoteName = "note.txt",
+                length = 4L,
+                openStream = { "note".byteInputStream() },
+                cleanup = { cleaned = true },
+            ),
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("/srv/app/note.txt", result.getOrThrow())
+        assertEquals(
+            listOf("42:/tmp/pocketshell-test-key|purpose=${SshFolderListGateway.LEASE_PURPOSE_IMPORT}"),
+            connector.credentialIds,
+        )
+        assertEquals("/srv/app/note.txt", session.uploadedRemotePath)
+        assertTrue("prepared import payload must be cleaned after gateway returns", cleaned)
+    }
+
     private class CountingConnector(
         private val session: FakeSshSession,
     ) : SshLeaseConnector {
         var connectCount: Int = 0
+        val credentialIds: MutableList<String> = mutableListOf()
 
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             connectCount += 1
+            credentialIds += target.leaseKey.credentialId
             return Result.success(session)
         }
     }
@@ -161,6 +208,7 @@ class FolderListGatewaySshLeaseTest {
     ) : SshSession {
         val execCommands: MutableList<String> = mutableListOf()
         var closed: Boolean = false
+        var uploadedRemotePath: String? = null
 
         override val isConnected: Boolean
             get() = !closed
@@ -193,7 +241,11 @@ class FolderListGatewaySshLeaseTest {
             length: Long,
             name: String,
             remotePath: String,
-        ): String = error("not used")
+        ): String {
+            input.readBytes()
+            uploadedRemotePath = remotePath
+            return remotePath
+        }
 
         override fun close() {
             closed = true

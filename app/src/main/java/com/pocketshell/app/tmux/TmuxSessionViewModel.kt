@@ -128,7 +128,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -2071,6 +2070,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private val portDetector: PortDetector = PortDetector()
     private val panePortDetectorJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val panePortDetectorClients: MutableMap<String, TmuxClient> = ConcurrentHashMap()
+    private val panePortDetectorGenerations: MutableMap<String, Long> = ConcurrentHashMap()
     private val scannedConversationPortEventKeys: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
 
@@ -3450,7 +3450,39 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: return false
         val client = clientRef ?: return false
         val session = sessionRef ?: return false
-        if (client.disconnected.value) return false
+        if (client.disconnected.value) {
+            Log.w(
+                ISSUE_235_LIFECYCLE_TAG,
+                "tmux-post-grace-held-foreground-disconnected-schedule-reconnect " +
+                    "generation=$connectGeneration " + targetLogFields(target),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "foreground_reattach",
+                "source" to "app_lifecycle",
+                "outcome" to "post_grace_hold_disconnected_reconnect",
+                "cause" to "session_foreground_service",
+                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+                "generation" to connectGeneration,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "clientHash" to System.identityHashCode(client),
+            )
+            unregisterCurrentClient()
+            scheduleAutoReconnect(
+                target = target,
+                reason = "Session connection was lost while PocketShell was backgrounded.",
+                trigger = TmuxConnectTrigger.LifecycleReattach,
+                diagnosticFields = arrayOf(
+                    "source" to "post_grace_session_hold",
+                    "clientDisconnected" to true,
+                ),
+            )
+            return true
+        }
 
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
@@ -5133,6 +5165,7 @@ public class TmuxSessionViewModel @Inject constructor(
         panePortDetectorJobs.values.forEach { it.cancel() }
         panePortDetectorJobs.clear()
         panePortDetectorClients.clear()
+        panePortDetectorGenerations.clear()
         paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
@@ -5247,6 +5280,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // never trusts a stale binding.
         paneProducerClients.clear()
         paneOutputActivityJobs.clear()
+        panePortDetectorJobs.values.forEach { it.cancel() }
+        panePortDetectorJobs.clear()
+        panePortDetectorClients.clear()
+        panePortDetectorGenerations.clear()
         paneInputQueues.clear()
         paneInputQueues.putAll(runtime.paneInputQueues)
         paneInputJobs.clear()
@@ -9047,6 +9084,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     paneOutputActivityJobs.remove(p.paneId)?.cancel()
                     panePortDetectorJobs.remove(p.paneId)?.cancel()
                     panePortDetectorClients.remove(p.paneId)
+                    panePortDetectorGenerations.remove(p.paneId)
                     paneInputJobs.remove(p.paneId)?.cancel()
                     paneInputQueues.remove(p.paneId)?.close()
                     existing.terminalState.detachExternalProducer()
@@ -9142,6 +9180,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #448: stop the new-port detector for a removed pane.
             panePortDetectorJobs.remove(paneId)?.cancel()
             panePortDetectorClients.remove(paneId)
+            panePortDetectorGenerations.remove(paneId)
             paneAgentJobs.remove(paneId)?.cancel()
             conversationLoadWatchdogJobs.remove(paneId)?.cancel()
             paneAgentTailGenerations.remove(paneId)
@@ -9221,6 +9260,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneOutputActivityJobs.remove(paneId)?.cancel()
             panePortDetectorJobs.remove(paneId)?.cancel()
             panePortDetectorClients.remove(paneId)
+            panePortDetectorGenerations.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             attachTerminalProducerForPane(
@@ -9261,18 +9301,26 @@ public class TmuxSessionViewModel @Inject constructor(
      * and foreground-gated (the flow is only collected while attached).
      */
     private fun startPortDetectionForPane(paneId: String, client: TmuxClient) {
+        val guard = currentRuntimeGuardForClient(client) ?: return
         val existingJob = panePortDetectorJobs[paneId]
-        if (existingJob?.isActive == true && panePortDetectorClients[paneId] === client) return
+        if (
+            existingJob?.isActive == true &&
+            panePortDetectorClients[paneId] === client &&
+            panePortDetectorGenerations[paneId] == guard.generation
+        ) {
+            return
+        }
         if (existingJob != null) {
             panePortDetectorJobs.remove(paneId)
             existingJob.cancel()
         }
         panePortDetectorClients[paneId] = client
-        val guard = currentRuntimeGuardForClient(client)
+        panePortDetectorGenerations[paneId] = guard.generation
         val job = bridgeScope.launch {
             client.outputFor(paneId).collect { event ->
                 if (panePortDetectorClients[paneId] !== client) return@collect
-                if (guard == null || !isCurrentRuntime(guard)) return@collect
+                if (panePortDetectorGenerations[paneId] != guard.generation) return@collect
+                if (!isCurrentRuntime(guard)) return@collect
                 if (!appActive) return@collect
                 // Issue #877: the UTF-8 decode + 7-regex PortDetector.scan over
                 // the 4 KB tail is the per-`%output` main-thread work that froze
@@ -9290,6 +9338,7 @@ public class TmuxSessionViewModel @Inject constructor(
             if (panePortDetectorJobs[paneId] === job) {
                 panePortDetectorJobs.remove(paneId)
                 panePortDetectorClients.remove(paneId)
+                panePortDetectorGenerations.remove(paneId)
             }
         }
     }
@@ -9404,6 +9453,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorJobs.remove(overflow.paneId)?.cancel()
         panePortDetectorClients.remove(overflow.paneId)
+        panePortDetectorGenerations.remove(overflow.paneId)
         runCatching { existing.terminalState.detachExternalProducer() }
 
         val errored = existing.copy(surfaceError = true)
@@ -9454,6 +9504,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneOutputActivityJobs.remove(paneId)?.cancel()
         panePortDetectorJobs.remove(paneId)?.cancel()
         panePortDetectorClients.remove(paneId)
+        panePortDetectorGenerations.remove(paneId)
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
         runCatching { existing.terminalState.detachExternalProducer() }
@@ -13907,12 +13958,15 @@ public class TmuxSessionViewModel @Inject constructor(
                             "pane" to paneId,
                             "bytes" to batch.bytes.size,
                         )
-                        sendDequeuedInputBatch(
+                        val sent = sendDequeuedInputBatch(
                             client = targetClient,
                             paneId = paneId,
                             batch = batch,
                             queue = newQueue,
                         )
+                        if (!sent) {
+                            delay(TMUX_INPUT_SEND_RETRY_DELAY_MS)
+                        }
                     }
                 }
             }
@@ -13925,7 +13979,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         batch: TmuxPaneInputBatch,
         queue: TmuxPaneInputQueue,
-    ) {
+    ): Boolean {
         var lastFailure: Throwable? = null
         repeat(TMUX_INPUT_SEND_MAX_ATTEMPTS) { attempt ->
             if (attempt > 0) delay(TMUX_INPUT_SEND_RETRY_DELAY_MS)
@@ -13941,12 +13995,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     "clientHash" to System.identityHashCode(client),
                     "currentClientHash" to currentClient?.let { System.identityHashCode(it) },
                 )
-                return
+                queue.requeueFront(batch)
+                return false
             }
             val outcome = runCatching { sendInputBytesToPane(client, paneId, batch.bytes) }
             if (outcome.isSuccess) {
                 queue.recordSent(batch)
-                return
+                return true
             }
             lastFailure = outcome.exceptionOrNull()
             if (lastFailure is CancellationException) throw lastFailure
@@ -13989,6 +14044,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             )
         }
+        queue.recordDropped(batch)
+        return true
     }
 
     private suspend fun sendInputBytesToPane(
@@ -15311,10 +15368,12 @@ public class TmuxSessionViewModel @Inject constructor(
         _projectRoots.value = emptyList()
         val producerJobsToJoin = paneProducerJobs.values.toList()
         val outputActivityJobsToJoin = paneOutputActivityJobs.values.toList()
+        val portDetectorJobsToJoin = panePortDetectorJobs.values.toList()
         val agentJobsToJoin = paneAgentJobs.values.toList()
         val inputJobsToJoin = paneInputJobs.values.toList()
         for (job in producerJobsToJoin) job.cancelAndJoin()
         for (job in outputActivityJobsToJoin) job.cancelAndJoin()
+        for (job in portDetectorJobsToJoin) job.cancelAndJoin()
         for (job in agentJobsToJoin) job.cancelAndJoin()
         for (job in inputJobsToJoin) job.cancelAndJoin()
         for ((_, queue) in paneInputQueues) {
@@ -15328,6 +15387,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
+        panePortDetectorJobs.clear()
+        panePortDetectorClients.clear()
+        panePortDetectorGenerations.clear()
         // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
@@ -15459,6 +15521,9 @@ public class TmuxSessionViewModel @Inject constructor(
             job.cancel()
         }
         for ((_, job) in paneOutputActivityJobs) {
+            job.cancel()
+        }
+        for ((_, job) in panePortDetectorJobs) {
             job.cancel()
         }
         for ((_, job) in paneAgentJobs) {
@@ -16417,8 +16482,9 @@ internal class TmuxPaneInputQueue(
     private val maxPendingBytes: Int,
     private val maxBatchBytes: Int,
 ) {
-    private val channel = Channel<TmuxPaneInputSegment>(TMUX_INPUT_MAX_PENDING_CHUNKS)
+    private val signal = Channel<Unit>(capacity = 1)
     private val lock = Any()
+    private val pending = ArrayDeque<TmuxPaneInputSegment>()
     private var pendingBytes: Int = 0
     private var totalEnqueuedBytes: Long = 0L
     private var totalSentBytes: Long = 0L
@@ -16430,6 +16496,9 @@ internal class TmuxPaneInputQueue(
     private var maxObservedSendLatencyNs: Long = 0L
 
     fun write(buffer: ByteArray, offset: Int, length: Int) {
+        if (length > maxPendingBytes) {
+            throw IOException("tmux pane input queue write exceeds pending byte budget")
+        }
         var written = 0
         while (written < length) {
             val chunkLength = minOf(maxPendingBytes, TMUX_INPUT_CHUNK_BYTES, length - written)
@@ -16440,19 +16509,25 @@ internal class TmuxPaneInputQueue(
     }
 
     suspend fun takeBatch(): TmuxPaneInputBatch? {
-        val first = channel.receiveCatching().getOrNull() ?: return null
-        onDequeued(first.bytes.size)
+        signal.receiveCatching().getOrNull() ?: return null
+        val first = synchronized(lock) {
+            pending.removeFirstOrNull()
+        } ?: return null
         val out = java.io.ByteArrayOutputStream(maxBatchBytes)
         out.write(first.bytes)
         var chunks = 1
         val firstEnqueuedAtNs = first.enqueuedAtNs
 
         while (out.size() + TMUX_INPUT_CHUNK_BYTES <= maxBatchBytes) {
-            val next = channel.tryReceive().getOrNull() ?: break
-            onDequeued(next.bytes.size)
+            val next = synchronized(lock) {
+                pending.firstOrNull()?.takeIf { out.size() + it.bytes.size <= maxBatchBytes }?.also {
+                    pending.removeFirst()
+                }
+            } ?: break
             out.write(next.bytes)
             chunks += 1
         }
+        signalIfPending()
         return TmuxPaneInputBatch(
             bytes = out.toByteArray(),
             chunks = chunks,
@@ -16461,12 +16536,24 @@ internal class TmuxPaneInputQueue(
     }
 
     fun recordSent(batch: TmuxPaneInputBatch) = synchronized(lock) {
+        pendingBytes -= batch.bytes.size
         totalSentBytes += batch.bytes.size.toLong()
         sentBatchCount += 1
         maxObservedBatchBytes = maxOf(maxObservedBatchBytes, batch.bytes.size)
         maxObservedBatchChunks = maxOf(maxObservedBatchChunks, batch.chunks)
         val latencyNs = System.nanoTime() - batch.firstEnqueuedAtNs
         maxObservedSendLatencyNs = maxOf(maxObservedSendLatencyNs, latencyNs)
+    }
+
+    fun recordDropped(batch: TmuxPaneInputBatch) = synchronized(lock) {
+        pendingBytes -= batch.bytes.size
+    }
+
+    fun requeueFront(batch: TmuxPaneInputBatch) {
+        synchronized(lock) {
+            pending.addFirst(TmuxPaneInputSegment(batch.bytes, batch.firstEnqueuedAtNs))
+        }
+        signal.trySend(Unit)
     }
 
     fun snapshot(): TmuxInputStressMetrics = synchronized(lock) {
@@ -16483,31 +16570,43 @@ internal class TmuxPaneInputQueue(
     }
 
     fun close() {
-        channel.close()
+        signal.close()
     }
 
     private fun enqueue(bytes: ByteArray) {
         val segment = TmuxPaneInputSegment(bytes, System.nanoTime())
         synchronized(lock) {
+            if (pendingBytes + bytes.size > maxPendingBytes) {
+                throw IOException("tmux pane input queue pending byte budget exceeded")
+            }
             pendingBytes += bytes.size
             totalEnqueuedBytes += bytes.size.toLong()
+            pending.addLast(segment)
             maxObservedPendingBytes = maxOf(maxObservedPendingBytes, pendingBytes)
             maxObservedPendingChunks = maxOf(
                 maxObservedPendingChunks,
                 (pendingBytes + maxBatchBytes - 1) / maxBatchBytes,
             )
         }
-        val result = channel.trySendBlocking(segment)
+        val result = signal.trySend(Unit)
+        if (result.isFailure && result.exceptionOrNull() == null) {
+            return
+        }
         if (result.isFailure) {
-            onDequeued(bytes.size)
+            synchronized(lock) {
+                if (pending.remove(segment)) {
+                    pendingBytes -= bytes.size
+                    totalEnqueuedBytes -= bytes.size.toLong()
+                }
+            }
             throw IOException("tmux pane input queue is closed")
         }
     }
 
-    private fun onDequeued(bytes: Int) = synchronized(lock) {
-        pendingBytes -= bytes
+    private fun signalIfPending() {
+        val hasPending = synchronized(lock) { pending.isNotEmpty() }
+        if (hasPending) signal.trySend(Unit)
     }
-
 }
 
 /**

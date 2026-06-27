@@ -917,29 +917,34 @@ private fun HeaderAction(
  * type/extension so the receiving app accepts it.
  */
 private fun shareFile(context: Context, shareable: Shareable) {
-    val file = shareable.resolveFile(context)
-    if (file == null) {
-        Toast.makeText(context, "Nothing to share", Toast.LENGTH_SHORT).show()
-        return
+    val appContext = context.applicationContext
+    saveScope.launch {
+        val file = shareable.resolveFile(appContext)
+        withContext(Dispatchers.Main) {
+            if (file == null) {
+                Toast.makeText(appContext, "Nothing to share", Toast.LENGTH_SHORT).show()
+                return@withContext
+            }
+            val uri = runCatching {
+                FileProvider.getUriForFile(appContext, appContext.packageName + ".fileprovider", file)
+            }.getOrNull()
+            if (uri == null) {
+                Toast.makeText(appContext, "Couldn't prepare the file to share", Toast.LENGTH_SHORT).show()
+                return@withContext
+            }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = shareable.mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, file.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            appContext.startActivity(
+                Intent.createChooser(intent, "Share ${file.name}").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }
     }
-    val uri = runCatching {
-        FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
-    }.getOrNull()
-    if (uri == null) {
-        Toast.makeText(context, "Couldn't prepare the file to share", Toast.LENGTH_SHORT).show()
-        return
-    }
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = shareable.mimeType
-        putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_SUBJECT, file.name)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    context.startActivity(
-        Intent.createChooser(intent, "Share ${file.name}").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        },
-    )
 }
 
 /**
@@ -949,26 +954,31 @@ private fun shareFile(context: Context, shareable: Shareable) {
  * the `.fileprovider` URI.
  */
 private fun copyFileToClipboard(context: Context, shareable: Shareable) {
-    val file = shareable.resolveFile(context)
-    if (file == null) {
-        Toast.makeText(context, "Nothing to copy", Toast.LENGTH_SHORT).show()
-        return
+    val appContext = context.applicationContext
+    saveScope.launch {
+        val file = shareable.resolveFile(appContext)
+        withContext(Dispatchers.Main) {
+            if (file == null) {
+                Toast.makeText(appContext, "Nothing to copy", Toast.LENGTH_SHORT).show()
+                return@withContext
+            }
+            val uri = runCatching {
+                FileProvider.getUriForFile(appContext, appContext.packageName + ".fileprovider", file)
+            }.getOrNull()
+            if (uri == null) {
+                Toast.makeText(appContext, "Couldn't prepare the file to copy", Toast.LENGTH_SHORT).show()
+                return@withContext
+            }
+            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            if (clipboard == null) {
+                Toast.makeText(appContext, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
+                return@withContext
+            }
+            val clip = ClipData.newUri(appContext.contentResolver, file.name, uri)
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(appContext, "Copied ${file.name} to clipboard", Toast.LENGTH_SHORT).show()
+        }
     }
-    val uri = runCatching {
-        FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
-    }.getOrNull()
-    if (uri == null) {
-        Toast.makeText(context, "Couldn't prepare the file to copy", Toast.LENGTH_SHORT).show()
-        return
-    }
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-    if (clipboard == null) {
-        Toast.makeText(context, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
-        return
-    }
-    val clip = ClipData.newUri(context.contentResolver, file.name, uri)
-    clipboard.setPrimaryClip(clip)
-    Toast.makeText(context, "Copied ${file.name} to clipboard", Toast.LENGTH_SHORT).show()
 }
 
 /**

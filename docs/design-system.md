@@ -619,16 +619,16 @@ cheap inner loop. Run it for migration PRs that affect app screens or sheets.
 Run targeted connected tests when a slice touches a covered surface:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix design-tmux \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest
 
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix design-composer \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.composer.PromptComposerVisualScreenshotTest
 
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix design-folder \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.projects.FolderContextActionSheetScreenshotTest
 
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix design-costs \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.costs.CostsScreenScreenshotTest
 ```
 

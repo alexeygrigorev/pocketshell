@@ -47,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 data class StartDirectoryAutocompleteTarget(
@@ -139,21 +140,26 @@ class StartDirectoryAutocompleteController(
         job = scope.launch {
             delay(debounceMs)
             val query = value
-            var suggestions: List<String> = emptyList()
-            try {
-                suggestions = suggest(query)
+            val suggestions: List<String> = try {
+                val requested = if (requestTimeoutMs == null) {
+                    suggest(query)
+                } else {
+                    withTimeoutOrNull(requestTimeoutMs) {
+                        suggest(query)
+                    }.orEmpty()
+                }
+                requested
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Throwable) {
-                suggestions = emptyList()
-            } finally {
-                if (latestInput == query) {
-                    _state.value = StartDirectoryAutocompleteUiState(
-                        suggestions = suggestions.distinct(),
-                        loading = false,
-                        highlightedIndex = 0,
-                    )
-                }
+                emptyList()
+            }
+            if (latestInput == query) {
+                _state.value = StartDirectoryAutocompleteUiState(
+                    suggestions = suggestions.distinct(),
+                    loading = false,
+                    highlightedIndex = 0,
+                )
             }
         }
     }

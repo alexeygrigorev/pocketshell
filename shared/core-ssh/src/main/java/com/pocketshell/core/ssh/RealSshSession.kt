@@ -40,6 +40,7 @@ import java.io.OutputStream
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
 import java.util.logging.Logger
@@ -105,6 +106,16 @@ internal class RealSshSession(
      * connect/enumeration latency.
      */
     private val dispatcher = TransportDispatcher()
+
+    /**
+     * Exec stdout/stderr drains must run concurrently per command, but the pool
+     * cannot grow with every exec call. Each permit represents one exec whose two
+     * stream readers may occupy the bounded per-session pool.
+     */
+    private val execDrainPermits = Semaphore(EXEC_DRAIN_MAX_CONCURRENT_EXECS)
+    private val execDrainExecutor = Executors.newFixedThreadPool(EXEC_DRAIN_MAX_CONCURRENT_EXECS * 2) { runnable ->
+        Thread(runnable, "pocketshell-exec-drain").apply { isDaemon = true }
+    }
 
     /**
      * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
@@ -584,16 +595,12 @@ internal class RealSshSession(
     }
 
     private fun readExecOutputConcurrently(command: Command): ExecOutput {
-        val executor = Executors.newFixedThreadPool(2) { runnable ->
-            Thread(runnable, "pocketshell-exec-drain").apply { isDaemon = true }
+        execDrainPermits.acquire()
+        val stdout = execDrainExecutor.submit<String> {
+            command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout").toString(Charsets.UTF_8)
         }
-        val stdout = executor.submit<String> {
-            command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout")
-                .toString(Charsets.UTF_8)
-        }
-        val stderr = executor.submit<String> {
-            command.errorStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stderr")
-                .toString(Charsets.UTF_8)
+        val stderr = execDrainExecutor.submit<String> {
+            command.errorStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stderr").toString(Charsets.UTF_8)
         }
         return try {
             ExecOutput(
@@ -601,7 +608,9 @@ internal class RealSshSession(
                 stderr = awaitExecDrain(stderr),
             )
         } finally {
-            executor.shutdownNow()
+            stdout.cancel(true)
+            stderr.cancel(true)
+            execDrainPermits.release()
         }
     }
 
@@ -1580,9 +1589,10 @@ internal class RealSshSession(
                     CLOSE_LOGGER.log(
                         Level.INFO,
                         "[$CLOSE_LOG_TAG] close() timed out after ${SESSION_CLOSE_TIMEOUT_MS}ms; " +
-                            "forcing dispatcher shutdown",
+                            "forcing dispatcher shutdown and raw SSH disconnect",
                     )
                     dispatcher.closeNow()
+                    forceDisconnectRawClient()
                 }
             }
         } catch (e: TransportException) {
@@ -1628,8 +1638,19 @@ internal class RealSshSession(
                 "[$CLOSE_LOG_TAG] swallowed RuntimeException during close(): ${e.message}",
             )
         } finally {
+            execDrainExecutor.shutdownNow()
             teardownScope.cancel()
         }
+    }
+
+    private fun forceDisconnectRawClient() {
+        runCatching { client.disconnect() }
+            .onFailure { e ->
+                CLOSE_LOGGER.log(
+                    Level.INFO,
+                    "[$CLOSE_LOG_TAG] swallowed raw SSH disconnect failure after dispatcher timeout: ${e.message}",
+                )
+            }
     }
 
     private fun ensureConnected() {
@@ -1906,6 +1927,8 @@ internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
 internal const val EXEC_READ_TIMEOUT_MS: Long = 30_000L
 
 internal const val EXEC_STREAM_MAX_BYTES: Int = 8 * 1024 * 1024
+
+internal const val EXEC_DRAIN_MAX_CONCURRENT_EXECS: Int = 4
 
 private val EXEC_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".exec")
 

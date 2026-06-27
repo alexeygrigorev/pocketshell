@@ -54,6 +54,10 @@ class RealSshSessionTeardownOrderingTest {
             elapsedMs < 3_500L,
         )
         assertFalse("close must mark the session disconnected", session.isConnected)
+        assertTrue(
+            "forced close must hard-disconnect the raw SSH client",
+            client.rawDisconnected.await(1, TimeUnit.SECONDS),
+        )
 
         withTimeout(5_000L) {
             exec.await()
@@ -119,12 +123,10 @@ class RealSshSessionTeardownOrderingTest {
     private class WedgedStartSessionClient : SSHClient() {
         val startSessionEntered = CountDownLatch(1)
         val startSessionInterrupted = AtomicBoolean(false)
+        val rawDisconnected = CountDownLatch(1)
 
-        @Volatile
-        private var disconnected = false
-
-        override fun isConnected(): Boolean = !disconnected
-        override fun isAuthenticated(): Boolean = !disconnected
+        override fun isConnected(): Boolean = rawDisconnected.count != 0L
+        override fun isAuthenticated(): Boolean = rawDisconnected.count != 0L
 
         override fun startSession(): Session {
             startSessionEntered.countDown()
@@ -143,7 +145,7 @@ class RealSshSessionTeardownOrderingTest {
         }
 
         override fun disconnect() {
-            disconnected = true
+            rawDisconnected.countDown()
         }
     }
 

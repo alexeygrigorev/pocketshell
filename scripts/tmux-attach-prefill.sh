@@ -26,6 +26,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
@@ -226,7 +228,9 @@ run_logged "02-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build
 run_logged "03-docker-ssh-readiness" wait_for_ssh_fixture
 
 if [[ "$BUILD_APKS" == "1" ]]; then
-  run_logged "04-build-apks" ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  run_logged "04-build-apks" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-tmux-attach-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+    ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 else
   [[ -f "$APP_APK" ]] || fail "app APK missing at $APP_APK"
   [[ -f "$TEST_APK" ]] || fail "test APK missing at $TEST_APK"

@@ -381,6 +381,7 @@ data class FolderImportPayload(
     val remoteName: String,
     val length: Long?,
     val openStream: () -> InputStream?,
+    val cleanup: () -> Unit = {},
 )
 
 /**
@@ -665,9 +666,10 @@ class SshFolderListGateway internal constructor(
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
+        leasePurpose: String? = null,
         block: suspend (SshSession) -> T,
     ): Result<T> {
-        val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase)
+        val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase, leasePurpose)
         // Issue #680: a refresh probe over a pooled lease whose transport went
         // STALE between acquire and the exec (sshj's `isConnected` lies until
         // its keepalive trips, so `ensureConnected()` can throw "SSH session is
@@ -912,13 +914,14 @@ class SshFolderListGateway internal constructor(
     private fun HostEntity.toSshLeaseTarget(
         keyPath: String,
         passphrase: CharArray?,
+        leasePurpose: String? = null,
     ): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$id:$keyPath",
+                credentialId = buildCredentialId(id, keyPath, leasePurpose),
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
@@ -1492,25 +1495,34 @@ class SshFolderListGateway internal constructor(
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String> {
-        return withLeaseSession(host, keyPath, passphrase) { session ->
-            val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
-            if (mkdir.exitCode != 0) {
-                throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())
+        return try {
+            withLeaseSession(
+                host = host,
+                keyPath = keyPath,
+                passphrase = passphrase,
+                leasePurpose = LEASE_PURPOSE_IMPORT,
+            ) { session ->
+                val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
+                if (mkdir.exitCode != 0) {
+                    throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())
+                }
+                val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
+                    .getOrThrow()
+                val remotePath = childPath(resolvedFolderPath, payload.remoteName)
+                val input = payload.openStream()
+                    ?: throw RuntimeException("Couldn't read selected file.")
+                input.use { stream ->
+                    session.uploadStream(
+                        input = stream,
+                        length = payload.length ?: -1L,
+                        name = payload.remoteName,
+                        remotePath = remotePath,
+                    )
+                }
+                remotePath
             }
-            val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
-                .getOrThrow()
-            val remotePath = childPath(resolvedFolderPath, payload.remoteName)
-            val input = payload.openStream()
-                ?: throw RuntimeException("Couldn't read selected file.")
-            input.use { stream ->
-                session.uploadStream(
-                    input = stream,
-                    length = payload.length ?: -1L,
-                    name = payload.remoteName,
-                    remotePath = remotePath,
-                )
-            }
-            remotePath
+        } finally {
+            payload.cleanup()
         }
     }
 
@@ -1777,6 +1789,18 @@ class SshFolderListGateway internal constructor(
          * `ConnectError` instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
+
+        internal const val LEASE_PURPOSE_IMPORT: String = "folder-import"
+
+        internal fun buildCredentialId(
+            hostId: Long,
+            keyPath: String,
+            leasePurpose: String?,
+        ): String {
+            val base = "$hostId:$keyPath"
+            val purpose = leasePurpose?.trim()?.takeIf { it.isNotEmpty() } ?: return base
+            return "$base|purpose=$purpose"
+        }
 
         /**
          * Issue #758 — DETERMINISTIC test injection of a poll-time stale-channel

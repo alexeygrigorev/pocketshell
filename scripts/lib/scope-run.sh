@@ -59,6 +59,57 @@
 # The <unit> should be UNIQUE per invocation (include suffix/serial/pid) so
 # parallel lanes get distinct sibling scopes that never collide.
 
+pocketshell_unit_token() {
+  local token="${1//[^A-Za-z0-9._-]/_}"
+  [[ -n "$token" ]] || token="default"
+  printf '%s' "$token"
+}
+
+pocketshell_shell_join() {
+  local arg quoted joined=""
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    joined+=" $quoted"
+  done
+  printf '%s' "${joined# }"
+}
+
+pocketshell_should_wrap_sg_kvm() {
+  case "${POCKETSHELL_EMULATOR_SG_KVM:-auto}" in
+    0 | false | FALSE | no | NO)
+      return 1
+      ;;
+    1 | true | TRUE | yes | YES)
+      command -v sg >/dev/null 2>&1 || return 1
+      getent group kvm >/dev/null 2>&1 || return 1
+      return 0
+      ;;
+  esac
+
+  [[ -e /dev/kvm ]] || return 1
+  [[ -r /dev/kvm && -w /dev/kvm ]] && return 1
+  command -v sg >/dev/null 2>&1 || return 1
+  local group_entry user
+  group_entry="$(getent group kvm 2>/dev/null || true)"
+  [[ -n "$group_entry" ]] || return 1
+  user="$(id -un 2>/dev/null || true)"
+  [[ -n "$user" ]] || return 1
+  if id -nG 2>/dev/null | tr ' ' '\n' | grep -Fxq kvm; then
+    return 0
+  fi
+  [[ ",${group_entry##*:}," == *",$user,"* ]] || return 1
+  return 0
+}
+
+pocketshell_build_sg_kvm_command() {
+  local -n _pocketshell_out="$1"
+  shift
+  _pocketshell_out=("$@")
+  if pocketshell_should_wrap_sg_kvm; then
+    _pocketshell_out=(sg kvm -c "$(pocketshell_shell_join "$@")")
+  fi
+}
+
 # robust.systemd_available() equivalent: systemd-run on PATH AND a reachable
 # user systemd manager. `systemctl --user is-system-running` returns one of
 # running/degraded/starting/... with exit 0/1 when the bus is reachable, and

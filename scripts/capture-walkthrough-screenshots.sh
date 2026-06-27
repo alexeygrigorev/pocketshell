@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
@@ -336,6 +338,7 @@ run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR"
 run_logged "09-stop-gradle-daemons" ./gradlew --stop
 run_logged "10-build-walkthrough-visual-apks" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
   ./gradlew --no-daemon --no-build-cache :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 install_apks "11-install-walkthrough-visual-apks"
 run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAIN_TEST_CLASS"

@@ -60,7 +60,7 @@ terminal release evidence. Run this connected benchmark when release risk
 includes tmux session switching, SSH reuse, or terminal first-frame latency:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix warm-switch \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest#sameHostWarmSwitchBenchmarkReportsRepeatedStats
 ```
 

@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -120,6 +121,7 @@ Environment overrides:
   CORE_TERMINAL_CONNECTED_ATTEMPTS=2
   PRE_RELEASE_MANAGE_EMULATOR=0
   PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save"
+  POCKETSHELL_EMULATOR_SG_KVM=auto
 USAGE
 }
 
@@ -428,7 +430,8 @@ for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
   '$ADB' logcat -c >/dev/null 2>&1 || true
 
   set +e
-  ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace 2>&1 | tee "\$attempt_log"
+  '$ROOT_DIR/scripts/cgroup-run.sh' --unit "pocketshell-pre-release-core-terminal-\$attempt-$$" -- \
+    ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace 2>&1 | tee "\$attempt_log"
   status=\${PIPESTATUS[0]}
   set -e
 
@@ -464,8 +467,11 @@ set -euo pipefail
 
 diagnostics='$RUN_DIR/emulator-readiness-diagnostics.log'
 managed_emulator_log='$RUN_DIR/emulator-readiness-managed-emulator.log'
+managed_emulator_pid='$RUN_DIR/emulator-readiness-managed-emulator.pid'
+managed_emulator_scope='$RUN_DIR/emulator-readiness-managed-emulator.scope'
 manage_emulator='$PRE_RELEASE_MANAGE_EMULATOR'
 avd_name='$AVD_NAME'
+source '$ROOT_DIR/scripts/lib/scope-run.sh'
 
 list_emulator_processes() {
   ps -eo pid=,comm=,args= |
@@ -504,6 +510,8 @@ record_diagnostics() {
     printf 'avd=%s\n' "\$avd_name"
     printf 'manage_emulator=%s\n' "\$manage_emulator"
     printf 'managed_start_args=%s\n' '$PRE_RELEASE_EMULATOR_START_ARGS'
+    printf 'managed_emulator_pid=%s\n' "\$managed_emulator_pid"
+    printf 'managed_emulator_scope=%s\n' "\$managed_emulator_scope"
     printf '\n== adb devices ==\n'
     '$ADB' devices -l || true
     printf '\n== adb get-state ==\n'
@@ -544,7 +552,13 @@ start_managed_emulator() {
 
   printf 'No ADB devices and no emulator process for AVD %s; starting managed emulator.\n' "\$avd_name" >&2
   printf '[%s] starting managed emulator for AVD %s\n' "\$(date -Is)" "\$avd_name" >> "\$managed_emulator_log"
-  nohup '$EMULATOR' -avd "\$avd_name" $PRE_RELEASE_EMULATOR_START_ARGS >> "\$managed_emulator_log" 2>&1 &
+  read -r -a start_args <<< '$PRE_RELEASE_EMULATOR_START_ARGS'
+  declare -a emulator_cmd=()
+  pocketshell_build_sg_kvm_command emulator_cmd '$EMULATOR' -avd "\$avd_name" "\${start_args[@]}"
+  local scope_unit
+  scope_unit="pocketshell-pre-release-avd-\$(pocketshell_unit_token "\$avd_name")-\$(pocketshell_unit_token '$RUN_ID')-$$"
+  pocketshell_scope_start_background "\$scope_unit" "\$managed_emulator_log" "\$managed_emulator_pid" "\${emulator_cmd[@]}"
+  printf '%s.scope\n' "\$scope_unit" > "\$managed_emulator_scope"
 }
 
 '$ADB' devices -l || true
@@ -1309,7 +1323,7 @@ if ! "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then
 fi
 
 run_bash_step "gradle-compile-unit" \
-  "./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && ./gradlew $GRADLE_FLAGS assembleDebug check -x lint -x lintDebug --stacktrace"
+  "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS assembleDebug check -x lint -x lintDebug --stacktrace"
 
 run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
 # Issue #150: wait on the compose `healthcheck:` block via
@@ -1355,6 +1369,7 @@ update_emulator_serial
 run_bash_step "connected-terminal-input" "$(core_terminal_connected_input_script)"
 
 run_step "build-app-test-apks" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-app-test-apks" -- \
   ./gradlew $GRADLE_FLAGS :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
@@ -1388,7 +1403,9 @@ for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
   fi
 done
 
-run_step "build-debug-apk" ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktrace
+run_step "build-debug-apk" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-debug-apk" -- \
+  ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 
 run_step "update-install-debug-apk" "$ROOT_DIR/scripts/install-update-apk.sh" "$APK_PATH"

@@ -1492,7 +1492,7 @@ internal class RealTmuxClient(
                 )
                 val waitingForBegin = synchronized(responseCorrelationLock) {
                     val waiting = pendingCmd.commandNumber < 0L
-                    if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain) {
+                    if (!waiting || effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain) {
                         abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted)
                     } else {
                         pendingQueue.remove(pendingCmd)

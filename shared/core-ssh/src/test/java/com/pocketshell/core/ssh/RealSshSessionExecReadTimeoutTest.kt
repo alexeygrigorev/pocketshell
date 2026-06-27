@@ -1,6 +1,9 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import net.schmizz.sshj.SSHClient
@@ -24,6 +27,7 @@ import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Reproduce-first regression for #935 S4-2: [RealSshSession.exec]'s Phase-2
@@ -106,6 +110,39 @@ class RealSshSessionExecReadTimeoutTest {
     }
 
     @Test
+    fun `exec stream drains use a bounded per-session worker pool`() = runBlocking {
+        val baselineDrainThreads = execDrainThreadCount()
+        val streamReadsStarted = CountDownLatch(EXEC_DRAIN_MAX_CONCURRENT_EXECS * 2)
+        val commands = List(EXEC_DRAIN_MAX_CONCURRENT_EXECS + 4) {
+            BlockingDrainsCommand(streamReadsStarted)
+        }
+        val session = RealSshSession(
+            QueueingClient(commands),
+            execReadTimeoutMs = 30_000L,
+        )
+        val execs = commands.mapIndexed { index, _ ->
+            async(Dispatchers.IO) {
+                runCatching { session.exec("blocked-drain-$index") }
+            }
+        }
+
+        try {
+            assertTrue(
+                "the bounded set of drain workers must start both streams",
+                streamReadsStarted.await(5, TimeUnit.SECONDS),
+            )
+            val activeDrainThreads = execDrainThreadCount() - baselineDrainThreads
+            assertTrue(
+                "exec drain workers must be capped per session; active=$activeDrainThreads",
+                activeDrainThreads <= EXEC_DRAIN_MAX_CONCURRENT_EXECS * 2,
+            )
+        } finally {
+            execs.forEach { it.cancelAndJoin() }
+            session.close()
+        }
+    }
+
+    @Test
     fun `exec caps buffered stdout`() = runBlocking {
         val command = LargeStdoutCommand()
         val session = RealSshSession(
@@ -131,6 +168,9 @@ class RealSshSessionExecReadTimeoutTest {
         }
     }
 
+    private fun execDrainThreadCount(): Int =
+        Thread.getAllStackTraces().keys.count { it.name.startsWith("pocketshell-exec-drain") }
+
     private class ConnectedClient(
         private val sessionChannel: Session,
     ) : SSHClient() {
@@ -144,6 +184,25 @@ class RealSshSessionExecReadTimeoutTest {
         override fun disconnect() {
             // No socket is opened by this test client; flip the flag so
             // `session.isConnected` reports the post-close state.
+            disconnected = true
+        }
+    }
+
+    private class QueueingClient(
+        private val commands: List<Session.Command>,
+    ) : SSHClient() {
+        private val nextCommand = AtomicInteger(0)
+
+        @Volatile
+        var disconnected: Boolean = false
+            private set
+
+        override fun isConnected(): Boolean = !disconnected
+        override fun isAuthenticated(): Boolean = !disconnected
+        override fun startSession(): Session =
+            RecordingSessionChannel(commands[nextCommand.getAndIncrement()])
+
+        override fun disconnect() {
             disconnected = true
         }
     }
@@ -235,6 +294,51 @@ class RealSshSessionExecReadTimeoutTest {
         override fun getExitStatus(): Int = 0
         override fun getExitWasCoreDumped(): Boolean = false
         override fun signal(signal: Signal) = Unit
+    }
+
+    private class BlockingDrainsCommand(
+        streamReadsStarted: CountDownLatch,
+    ) : FakeChannel(), Session.Command {
+        private val stdout = BlockingDrainInputStream(streamReadsStarted)
+        private val stderr = BlockingDrainInputStream(streamReadsStarted)
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = stderr
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+
+        override fun close() {
+            super.close()
+            stdout.close()
+            stderr.close()
+        }
+    }
+
+    private class BlockingDrainInputStream(
+        private val readStarted: CountDownLatch,
+    ) : InputStream() {
+        @Volatile
+        private var closed = false
+
+        override fun read(): Int = blockUntilClosed()
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int = blockUntilClosed()
+
+        private fun blockUntilClosed(): Int {
+            readStarted.countDown()
+            while (!closed) {
+                if (Thread.interrupted()) throw java.io.InterruptedIOException("drain interrupted")
+                Thread.sleep(10L)
+            }
+            return -1
+        }
+
+        override fun close() {
+            closed = true
+        }
     }
 
     /**

@@ -150,6 +150,32 @@ class FileExplorerLeaseTest {
         leaseManager.close()
     }
 
+    @Test
+    fun downloadWritesDestinationAfterTransferLeaseIsReleased() = runBlocking {
+        val browseSession = FakeSshSession()
+        val transferSession = FakeSshSession()
+        val leaseManager = SshLeaseManager(
+            connector = SequenceConnector(listOf(browseSession, transferSession)),
+            idleTtlMillis = 0L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+        var writeSawReleasedTransfer = false
+
+        vm.downloadFile(ready.entries.first { it.type == RemoteEntry.Type.FILE }) {
+            writeSawReleasedTransfer = transferSession.closed
+        }
+        vm.transfer.awaitSuccess()
+
+        assertTrue(
+            "SAF destination write must run after the transfer lease is released",
+            writeSawReleasedTransfer,
+        )
+        leaseManager.close()
+    }
+
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
         predicate: (FileExplorerUiState.Ready) -> Boolean = { true },
     ): FileExplorerUiState.Ready {

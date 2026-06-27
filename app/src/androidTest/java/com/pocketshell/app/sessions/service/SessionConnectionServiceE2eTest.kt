@@ -1,0 +1,296 @@
+package com.pocketshell.app.sessions.service
+
+import android.app.Notification
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.test.core.app.ActivityScenario
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BackgroundGraceTestOverride
+import com.pocketshell.app.MainActivity
+import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
+import com.pocketshell.core.tmux.protocol.ControlEvent
+import dagger.hilt.android.EntryPointAccessors
+import java.io.BufferedReader
+import java.io.FileInputStream
+import java.io.InputStreamReader
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * API-35 emulator proof for the session foreground-service envelope.
+ *
+ * This registers a live entry in the production [ActiveTmuxClients] singleton,
+ * so [SessionServiceController] starts the real foreground service exactly as a
+ * live session does. The client is an in-process [TmuxClient] double; the JVM
+ * regression pins the destructive post-grace Stop branch, while this on-device
+ * test proves the Android surface: notification/channel, partial wakelock, Stop
+ * release, and lifecycle teardown signal.
+ */
+@RunWith(AndroidJUnit4::class)
+class SessionConnectionServiceE2eTest {
+
+    @get:Rule
+    val permissions = PreGrantPermissionsRule()
+
+    private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val context: Context = ApplicationProvider.getApplicationContext()
+    private val notificationManager: NotificationManager =
+        context.getSystemService(NotificationManager::class.java)
+
+    private var scenario: ActivityScenario<MainActivity>? = null
+    private var clientRegistration: ActiveTmuxClients.Registration? = null
+    private var lifecycleRegistration: ActiveTmuxClients.LifecycleRegistration? = null
+
+    @After
+    fun cleanup() {
+        BackgroundGraceTestOverride.setForTest(null)
+        runCatching { scenario?.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED) }
+        scenario?.close()
+        scenario = null
+        val registry = entryPoint().activeTmuxClients()
+        clientRegistration?.let { runCatching { registry.unregister(it) } }
+        lifecycleRegistration?.let { runCatching { registry.unregisterLifecycleHooks(it) } }
+        clientRegistration = null
+        lifecycleRegistration = null
+        notificationManager.cancelAll()
+    }
+
+    @Test
+    fun liveSessionServicePostsWakeLockAndNotification_thenStopAfterGraceTearsDown() {
+        assertEquals(
+            "API 35 evidence must run on Android 15",
+            35,
+            android.os.Build.VERSION.SDK_INT,
+        )
+        grantNotifications()
+        notificationManager.cancelAll()
+        BackgroundGraceTestOverride.setForTest(SHORT_GRACE_MS)
+        scenario = ActivityScenario.launch(MainActivity::class.java)
+
+        val registry = entryPoint().activeTmuxClients()
+        val fakeClient = ConnectedTmuxClient()
+        val backgroundTeardown = CountDownLatch(1)
+        lifecycleRegistration = registry.registerLifecycleHooks(
+            hostId = HOST_ID,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = {
+                    fakeClient.markDisconnected()
+                    backgroundTeardown.countDown()
+                },
+                onForeground = {},
+            ),
+        )
+        clientRegistration = registry.register(
+            hostId = HOST_ID,
+            hostName = "FGS Host",
+            hostname = "fgs.example",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key",
+            client = fakeClient,
+        )
+
+        val posted = waitForSessionNotification()
+        assertNotNull("live registry entry must start the session foreground notification", posted)
+        val notification = posted!!.notification
+        assertEquals("pocketshell_session_status_v1", notification.channelId)
+        val channel = notificationManager.getNotificationChannel(notification.channelId)
+        assertNotNull("session notification channel must exist", channel)
+        assertEquals(NotificationManager.IMPORTANCE_DEFAULT, channel!!.importance)
+        assertNull("session notification channel must be silent", channel.sound)
+        assertFalse("session notification channel must not vibrate", channel.shouldVibrate())
+        assertTrue(
+            "session notification must be ongoing",
+            notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
+        )
+        assertTrue(
+            "session notification must be non-clearable",
+            notification.flags and Notification.FLAG_NO_CLEAR != 0,
+        )
+        assertTrue(
+            "session notification must include Stop",
+            notification.actions?.any { it.title?.toString() == "Stop" } == true,
+        )
+        waitForWakeLockHeld()
+
+        scenario!!.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+        Thread.sleep(SHORT_GRACE_MS + 500L)
+        assertEquals(
+            "session hold must suppress the normal grace teardown until Stop",
+            1L,
+            backgroundTeardown.count,
+        )
+        assertFalse("client is still live before notification Stop", fakeClient.disconnected.value)
+
+        context.startService(
+            Intent(context, SessionConnectionService::class.java).apply {
+                action = SessionConnectionService.ACTION_STOP
+            },
+        )
+
+        assertTrue(
+            "notification Stop after grace must fan out the destructive background teardown",
+            backgroundTeardown.await(5, TimeUnit.SECONDS),
+        )
+        waitForSessionNotificationGone()
+        waitForWakeLockReleased()
+        assertTrue("test client must be marked disconnected by the teardown hook", fakeClient.disconnected.value)
+    }
+
+    private fun grantNotifications() {
+        val pkg = context.packageName
+        runShellCommand("pm grant $pkg android.permission.POST_NOTIFICATIONS")
+        val deadline = System.currentTimeMillis() + 5_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (
+                context.checkSelfPermission("android.permission.POST_NOTIFICATIONS") ==
+                    PackageManager.PERMISSION_GRANTED &&
+                notificationManager.areNotificationsEnabled()
+            ) {
+                return
+            }
+            Thread.sleep(POLL_MS)
+        }
+        assertEquals(
+            PackageManager.PERMISSION_GRANTED,
+            context.checkSelfPermission("android.permission.POST_NOTIFICATIONS"),
+        )
+        assertTrue(notificationManager.areNotificationsEnabled())
+    }
+
+    private fun waitForSessionNotification(): android.service.notification.StatusBarNotification? {
+        val deadline = System.currentTimeMillis() + 10_000L
+        var posted = sessionNotification()
+        while (posted == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(POLL_MS)
+            posted = sessionNotification()
+        }
+        return posted
+    }
+
+    private fun waitForSessionNotificationGone() {
+        val deadline = System.currentTimeMillis() + 10_000L
+        var posted = sessionNotification()
+        while (posted != null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(POLL_MS)
+            posted = sessionNotification()
+        }
+        assertNull(
+            "session notification must clear after Stop; active titles=" +
+                notificationManager.activeNotifications.map {
+                    it.notification.extras.getCharSequence("android.title")
+                },
+            posted,
+        )
+    }
+
+    private fun sessionNotification() =
+        notificationManager.activeNotifications.firstOrNull {
+            it.notification.extras
+                .getCharSequence("android.title")
+                ?.toString() == "Session connected"
+        }
+
+    private fun waitForWakeLockHeld() {
+        val deadline = System.currentTimeMillis() + 10_000L
+        while (System.currentTimeMillis() < deadline) {
+            if (currentWakeLocksDump().contains(WAKE_LOCK_TAG)) return
+            Thread.sleep(POLL_MS)
+        }
+        error("session wakelock '$WAKE_LOCK_TAG' was not visible in dumpsys power")
+    }
+
+    private fun waitForWakeLockReleased() {
+        val deadline = System.currentTimeMillis() + 10_000L
+        var dump = currentWakeLocksDump()
+        while (dump.contains(WAKE_LOCK_TAG) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(POLL_MS)
+            dump = currentWakeLocksDump()
+        }
+        assertFalse("session wakelock must be released after Stop", dump.contains(WAKE_LOCK_TAG))
+    }
+
+    private fun currentWakeLocksDump(): String {
+        val dump = runShellCommand("dumpsys power")
+        val start = dump.indexOf("Wake Locks:")
+        if (start < 0) return dump
+        val end = dump.indexOf("Suspend Blockers:", start).takeIf { it >= 0 } ?: dump.length
+        return dump.substring(start, end)
+    }
+
+    private fun entryPoint(): TestAccessEntryPoint =
+        EntryPointAccessors.fromApplication(context.applicationContext, TestAccessEntryPoint::class.java)
+
+    private fun runShellCommand(command: String): String {
+        val pfd = instrumentation.uiAutomation.executeShellCommand(command)
+        return FileInputStream(pfd.fileDescriptor).use { input ->
+            BufferedReader(InputStreamReader(input)).use { it.readText() }
+        }.also { pfd.close() }
+    }
+
+    private class ConnectedTmuxClient : TmuxClient {
+        private val disconnectedState = MutableStateFlow(false)
+        private val disconnectEventState = MutableStateFlow<TmuxDisconnectEvent?>(null)
+
+        override val events: Flow<ControlEvent> = emptyFlow()
+        override val disconnected: StateFlow<Boolean> = disconnectedState.asStateFlow()
+        override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = disconnectEventState.asStateFlow()
+        override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()
+
+        override suspend fun connect() = Unit
+
+        override suspend fun sendCommand(cmd: String): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override fun outputFor(paneId: String): Flow<ControlEvent.Output> = emptyFlow()
+
+        override fun close() {
+            markDisconnected()
+        }
+
+        override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override suspend fun detachCleanly(timeoutMs: Long) {
+            markDisconnected()
+        }
+
+        fun markDisconnected() {
+            disconnectedState.value = true
+        }
+    }
+
+    private companion object {
+        const val HOST_ID: Long = 1_021_001L
+        const val SHORT_GRACE_MS: Long = 500L
+        const val POLL_MS: Long = 100L
+        const val WAKE_LOCK_TAG: String = "PocketShell:session"
+    }
+}

@@ -69,6 +69,7 @@
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!--
         Android 11+ package visibility: SpeechRecognizer availability checks
@@ -299,6 +300,22 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled auto-forward on." />
+        </service>
+
+        <!--
+            Issue #977: foreground service for the main interactive SSH/tmux
+            session. It mirrors the port-forwarding specialUse carve-out, but is
+            scoped to live attached tmux clients and pairs the foreground
+            notification with a PARTIAL_WAKE_LOCK so keepalives can run while the
+            app is backgrounded / dozing.
+        -->
+        <service
+            android:name=".sessions.service.SessionConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps an actively attached user SSH/tmux session connected while PocketShell is backgrounded, with a visible persistent notification." />
         </service>
 
         <!--

@@ -3,6 +3,7 @@ package com.pocketshell.app.testaccess
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.LastSessionStore
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.tmux.SessionLifecycleSignals
 import com.pocketshell.core.storage.AppDatabase
@@ -97,4 +98,11 @@ internal interface TestAccessEntryPoint {
      * construction-time `readSnapshot()`).
      */
     fun settingsRepository(): SettingsRepository
+
+    /**
+     * Issue #1021: the singleton live tmux-client registry so the session
+     * foreground-service connected proof can drive the same start/stop signal
+     * production uses, without launching a full SSH/tmux journey.
+     */
+    fun activeTmuxClients(): ActiveTmuxClients
 }

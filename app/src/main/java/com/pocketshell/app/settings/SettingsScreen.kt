@@ -59,6 +59,7 @@ import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -454,25 +455,8 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
 }
 
 /**
- * The right-aligned `›` disclosure chevron carried by every navigation row
- * (Import host, Usage, Crash reports, …). Tokenised onto
- * [PocketShellType.bodyDense] so the glyph rides the dense-row type rung
- * instead of a raw `22.sp` literal (#479 Slice D); the muted secondary
- * colour keeps it quiet next to the row title.
- */
-@Composable
-private fun NavChevron() {
-    Text(
-        text = "›",
-        color = PocketShellColors.TextSecondary,
-        style = PocketShellType.bodyDense,
-        fontWeight = FontWeight.Bold,
-    )
-}
-
-/**
  * A disclosure navigation row inside a [SectionCard] — title + optional
- * prose description + a right-aligned `›` chevron that routes deeper
+ * prose description + a right-aligned navigation chevron that routes deeper
  * (Import host, Usage & quota, Crash reports). The actionable line is the
  * shared [ListRow] so the row inherits the design language's dense
  * 44/8/12 density and the 48dp touch floor (#479 Slice D); the prose
@@ -489,7 +473,7 @@ private fun SettingsNavRow(
 ) {
     ListRow(
         title = title,
-        trailing = { NavChevron() },
+        trailing = { NavigationChevron() },
         onClick = onClick,
         modifier = Modifier.testTag(testTag),
     )
@@ -1771,7 +1755,7 @@ private fun DiagnosticsSection(
                 } else {
                     "Share diagnostics JSONL"
                 },
-                trailing = { NavChevron() },
+                trailing = { NavigationChevron() },
                 onClick = {
                     if (shareState !is DiagnosticsShareState.Preparing) {
                         onShareLog()
@@ -1888,7 +1872,7 @@ private fun WorkspaceRootsSection(
                     ListRow(
                         title = host.name,
                         subtitle = "${host.username}@${host.hostname}:${host.port}",
-                        trailing = { NavChevron() },
+                        trailing = { NavigationChevron() },
                         onClick = { onPickHost(host.id, host.name) },
                         modifier = Modifier.testTag(watchedFoldersSettingsHostRowTag(host.id)),
                     )

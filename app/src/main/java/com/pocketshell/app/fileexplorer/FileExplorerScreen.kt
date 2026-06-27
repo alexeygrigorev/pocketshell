@@ -51,6 +51,7 @@ import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -573,7 +574,7 @@ private fun ReadyPanel(
                     title = "..",
                     subtitle = "Parent folder",
                     leading = { FileTypeIcon(iconClass = FileIconClass.FOLDER) },
-                    trailing = { Chevron() },
+                    trailing = { RowNavigationChevron() },
                     onClick = onUp,
                     modifier = Modifier.testTag(FILE_EXPLORER_UP_TAG),
                 )
@@ -620,7 +621,7 @@ private fun ReadyPanel(
                     }
                 }
             } else {
-                { Chevron() }
+                { RowNavigationChevron() }
             }
             ListRow(
                 title = entry.name,
@@ -671,16 +672,12 @@ private fun StatusGlyphCell(glyph: String) {
 
 /** The navigational chevron in the trailing slot for a folder / symlink row. */
 @Composable
-private fun Chevron() {
+private fun RowNavigationChevron() {
     Box(
         modifier = Modifier.size(PocketShellDensity.tapTargetMin),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "›",
-            color = PocketShellColors.TextMuted,
-            style = MaterialTheme.typography.titleMedium,
-        )
+        NavigationChevron(tint = PocketShellColors.TextMuted)
     }
 }
 

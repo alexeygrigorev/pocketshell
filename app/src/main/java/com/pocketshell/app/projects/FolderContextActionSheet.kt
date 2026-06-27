@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SheetHeader
@@ -169,12 +170,7 @@ private fun FolderContextRow(
             subtitle = description,
             onClick = onClick,
             trailing = {
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                NavigationChevron()
             },
         )
     }

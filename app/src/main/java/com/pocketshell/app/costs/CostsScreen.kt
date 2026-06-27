@@ -39,6 +39,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -404,8 +405,8 @@ private fun ActionsSection(onExportCsv: () -> Unit, onClearLog: () -> Unit) {
 
 /**
  * An "Export CSV" / "Clear log" action row. Mirrors the Settings nav-row pattern
- * (#479 Slice C1/D): the actionable line is the shared [ListRow] with a `›`
- * disclosure chevron in the [trailing] slot, and the prose description renders
+ * (#479 Slice C1/D): the actionable line is the shared [ListRow] with a
+ * navigation chevron in the [trailing] slot, and the prose description renders
  * below it on the `labelSmall`(11) caption rung (mono [ListRow] subtitles are
  * reserved for paths/IDs, so a prose description does not belong in that slot).
  */
@@ -414,12 +415,7 @@ private fun ActionRow(label: String, description: String, testTag: String, onCli
     ListRow(
         title = label,
         trailing = {
-            Text(
-                text = "›",
-                color = PocketShellColors.TextSecondary,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.Bold,
-            )
+            NavigationChevron()
         },
         onClick = onClick,
         modifier = Modifier.testTag(testTag),

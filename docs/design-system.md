@@ -417,8 +417,9 @@ Don't:
 - Hand-roll a `Text("›")` / `Text("v")` glyph pair, or draw two separate
   triangle `Path`s for the two states — that is the #840 "two different icons"
   bug. Hard-cut (D22): there is no second disclosure affordance.
-- Confuse it with the navigation drill-in chevron (`›` on nav `ListRow`s) or the
-  dropdown trigger (`▾`) — those are different, deliberate affordances.
+- Confuse it with the navigation drill-in chevron (`NavigationChevron` on nav
+  `ListRow`s) or the dropdown trigger (`▾`) — those are different, deliberate
+  affordances.
 
 ### Empty, Loading, And Error States
 

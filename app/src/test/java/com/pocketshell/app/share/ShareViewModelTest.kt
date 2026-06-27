@@ -480,6 +480,62 @@ class ShareViewModelTest {
     }
 
     @Test
+    fun startUploadSurfacesLiveByteProgressDetailWhileTransferring() = runTest {
+        // Issue #1037 acceptance ("show progress"): the share UI must show bytes
+        // MOVING during a transfer (not just a static up-front total), surfaced
+        // through UploadState.Running.detail. The uploader emits progress ticks
+        // and we snapshot the live detail synchronously after each one.
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 1037L, name = "hetzner")
+        val observedRunningDetails = mutableListOf<String>()
+        val progressUploader = object : ShareItemUploader {
+            override suspend fun upload(
+                host: HostEntity,
+                keyEntity: SshKeyEntity,
+                item: ShareableItem,
+                target: ShareTarget,
+                onProgress: ((com.pocketshell.core.ssh.SshUploadProgress) -> Unit)?,
+            ): Result<String> {
+                fun tick(transferred: Long) {
+                    onProgress?.invoke(
+                        com.pocketshell.core.ssh.SshUploadProgress(
+                            bytesTransferred = transferred,
+                            totalBytes = 4_800_000L,
+                        ),
+                    )
+                    (vm.uploadState.value as? UploadState.Running)?.detail?.let {
+                        observedRunningDetails += it
+                    }
+                }
+                tick(0L)
+                tick(2_400_000L)
+                tick(4_800_000L)
+                return Result.success("~/inbox/pocketshell/${item.displayName}.txt")
+            }
+        }
+        vm.uploader = progressUploader
+        vm.setItem(ShareableItem.TextItem(text = "report body", displayName = "report"))
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the upload to succeed, state=${vm.uploadState.value}",
+            vm.uploadState.value is UploadState.Success,
+        )
+        assertTrue(
+            "expected a live mid-transfer detail showing 0 B moving toward 4.6 MB, got " +
+                "$observedRunningDetails",
+            observedRunningDetails.any { it.contains("0 B") && it.contains("4.6 MB") },
+        )
+        assertTrue(
+            "expected a live detail showing ~half (2.3 MB) of 4.6 MB transferred, got " +
+                "$observedRunningDetails",
+            observedRunningDetails.any { it.contains("2.3 MB") && it.contains("4.6 MB") },
+        )
+    }
+
+    @Test
     fun startUploadWithSingleItemKeepsSinglePathSuccess() = runTest {
         val vm = newVm(ActiveTmuxClients())
         val host = seededHost(id = 31L, name = "hetzner")
@@ -1698,10 +1754,22 @@ class ShareViewModelTest {
             keyEntity: SshKeyEntity,
             item: ShareableItem,
             target: ShareTarget,
+            onProgress: ((com.pocketshell.core.ssh.SshUploadProgress) -> Unit)?,
         ): Result<String> {
             val name = item.displayName.orEmpty()
             uploadedNames += name
             uploadedTargets += target
+            // Emit a couple of byte-progress ticks (issue #1037) so tests can
+            // observe the live UploadState.Running detail update mid-transfer.
+            onProgress?.invoke(
+                com.pocketshell.core.ssh.SshUploadProgress(bytesTransferred = 0L, totalBytes = 100L),
+            )
+            onProgress?.invoke(
+                com.pocketshell.core.ssh.SshUploadProgress(bytesTransferred = 50L, totalBytes = 100L),
+            )
+            onProgress?.invoke(
+                com.pocketshell.core.ssh.SshUploadProgress(bytesTransferred = 100L, totalBytes = 100L),
+            )
             return if (name in failNames) {
                 Result.failure(IllegalStateException("Permission denied"))
             } else if (name in blankNames) {

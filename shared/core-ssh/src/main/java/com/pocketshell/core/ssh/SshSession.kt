@@ -4,6 +4,11 @@ import kotlinx.coroutines.Job
 import java.io.File
 import java.io.InputStream
 
+public data class SshUploadProgress(
+    val bytesTransferred: Long,
+    val totalBytes: Long,
+)
+
 /**
  * Live SSH connection to a single host. Obtain instances via
  * [SshConnection.connect].
@@ -121,6 +126,12 @@ public interface SshSession : AutoCloseable {
      */
     public suspend fun uploadFile(file: File, remotePath: String): String
 
+    public suspend fun uploadFile(
+        file: File,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String = uploadFile(file, remotePath)
+
     /**
      * Read the contents of a remote file at [remotePath] into memory.
      *
@@ -178,6 +189,14 @@ public interface SshSession : AutoCloseable {
         name: String,
         remotePath: String,
     ): String
+
+    public suspend fun uploadStream(
+        input: InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String = uploadStream(input, length, name, remotePath)
 
     /**
      * List the entries of remote directory [remotePath] (issue #528 — file

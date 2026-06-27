@@ -1239,7 +1239,9 @@ Release build steps:
    local `main` and confirm the checkout is clean and `HEAD` equals
    `origin/main` before creating or pushing any tag. A direct `main` push here
    is only allowed through the documented admin/emergency bypass.
-6. From that stable pushed `main`, run the emulator-only release validation:
+6. From that stable pushed `main`, run the emulator-only release validation.
+   Run it locally or through GitHub Actions, but the release summary must name
+   the exact commit that will be tagged:
    - `scripts/pre-release-confidence-gate.sh`
    - `scripts/phone-walkthrough.sh terminal-lab`
    - `scripts/phone-walkthrough.sh tmux-existing-session`
@@ -1264,7 +1266,10 @@ Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:
 
 1. Open Actions -> Release Emulator Validation -> Run workflow.
-2. Choose the release branch or `main`; optionally provide a `run_id`.
+2. Choose `main` for taggable release evidence after the version bump PR has
+   merged. A release-branch run is pre-merge evidence unless that exact commit
+   becomes `origin/main`; if the merge changes the SHA, rerun validation on
+   `main`. Optionally provide a `run_id`.
 3. Wait for the workflow to finish, then read the job summary.
 4. Download the `release-emulator-validation-<run-id>` artifact for logs,
    screenshots, and the release summary.
@@ -1280,7 +1285,8 @@ local emulator is unavailable:
 The manual workflow is validation evidence only. It does not create or push the
 release tag, does not replace the guarded tag helper, and does not weaken the
 stable-main rule: the tag still must point at a reviewed commit already pushed
-to `main`.
+to `main`. Before tagging, confirm the downloaded summary's `Commit SHA` equals
+the reviewed `origin/main` commit.
 
 The release issue and tag notes must attach or link all emulator-only evidence
 directories:

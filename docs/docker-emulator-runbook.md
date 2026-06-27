@@ -407,7 +407,8 @@ release summary. The tested debug APK is included inside that artifact at
 written under `build/release-emulator-validation/<run-id>/app-debug.apk`.
 Inspect the visual-audit screenshots before using the artifact as release
 evidence. The manual workflow does not push the tag and does not relax the
-stable-main tag rule.
+stable-main tag rule. A GitHub Actions summary is taggable only when its
+`Commit SHA` equals the reviewed `origin/main` commit being tagged.
 
 ## APK Pre-Release Gate
 

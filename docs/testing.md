@@ -566,7 +566,14 @@ That wrapper requires `HEAD == origin/main`, then runs the confidence gate,
 `scripts/phone-walkthrough.sh setup-detection`, and visual-audit screenshot
 capture. It writes `build/release-emulator-validation/<run-id>/summary.md`
 with the artifact directories that must be attached or linked in the issue and
-tag notes. Push the tag only through:
+tag notes.
+
+A GitHub Actions Release Emulator Validation summary is acceptable release
+evidence only when its `Commit SHA` is the commit being tagged. If the run was
+on a release branch and the merge to `main` changes the SHA, rerun validation
+on `main`.
+
+Push the tag only through:
 
 ```bash
 scripts/push-release-tag.sh --visual-audit-inspected <tag> build/release-emulator-validation/<run-id>/summary.md

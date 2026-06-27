@@ -465,22 +465,41 @@ fun FolderListScreen(
             codexProfiles = codexProfiles,
             onCreate = { choice ->
                 pickerFolder = null
-                val newName = derivedSessionName(
-                    choice = choice,
-                    homeDirectory = conventionalRemoteHome(username),
-                    existingNames = knownSessionNames(state),
-                )
-                viewModel.createSession(
-                    sessionName = newName,
-                    cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(claudeProfiles, codexProfiles),
-                    // Epic #821 Workstream A: record the picked kind onto the
-                    // new tree node immediately (no detection round-trip).
-                    chosenKind = choice.sessionAgentKind,
-                    onResolved = { resolved ->
-                        onSessionCreated(resolved, choice.startDirectory)
-                    },
-                )
+                fun createPickedSession(cwd: String) {
+                    val resolvedChoice = choice.copy(
+                        startDirectory = cwd,
+                        createStartDirectory = null,
+                    )
+                    val newName = derivedSessionName(
+                        choice = resolvedChoice,
+                        homeDirectory = conventionalRemoteHome(username),
+                        existingNames = knownSessionNames(state),
+                    )
+                    viewModel.createSession(
+                        sessionName = newName,
+                        cwd = cwd,
+                        startCommand = resolvedChoice.startCommand(claudeProfiles, codexProfiles),
+                        // Epic #821 Workstream A: record the picked kind onto the
+                        // new tree node immediately (no detection round-trip).
+                        chosenKind = resolvedChoice.sessionAgentKind,
+                        onResolved = { resolved ->
+                            onSessionCreated(resolved, cwd)
+                        },
+                    )
+                }
+
+                val missingFolder = choice.createStartDirectory
+                if (missingFolder != null) {
+                    viewModel.createEmptyProject(
+                        parentPath = missingFolder.parentPath,
+                        folderName = missingFolder.folderName,
+                        onCreated = { createdPath ->
+                            createPickedSession(createdPath)
+                        },
+                    )
+                } else {
+                    createPickedSession(choice.startDirectory)
+                }
             },
         )
     }
@@ -567,6 +586,19 @@ fun FolderListScreen(
             onCreateEmptyProject = {
                 rootAddSheet = null
                 emptyProjectFolder = PickerTarget(path = root.path, label = root.label)
+            },
+            onCreateNamedProject = { folderName ->
+                rootAddSheet = null
+                viewModel.createEmptyProject(
+                    parentPath = root.path,
+                    folderName = folderName,
+                    onCreated = { path ->
+                        pickerFolder = PickerTarget(
+                            path = path,
+                            label = FolderListViewModel.defaultLabelForPath(path),
+                        )
+                    },
+                )
             },
             onCloneGitProject = {
                 rootAddSheet = null

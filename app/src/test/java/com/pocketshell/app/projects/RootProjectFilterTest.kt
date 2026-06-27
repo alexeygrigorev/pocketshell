@@ -119,4 +119,37 @@ class RootProjectFilterTest {
         assertTrue(RootProjectFilter.filter(candidates, "xyzq").isEmpty())
         assertFalse(RootProjectFilter.filter(candidates, "pocket").isEmpty())
     }
+
+    @Test
+    fun createOfferBuildsMissingChildUnderRoot() {
+        val root = FolderTreeRoot(
+            path = "/home/alexey/git",
+            label = "git",
+            folders = emptyList(),
+            isWatched = true,
+        )
+        val offer = rootProjectCreateOffer(
+            root = root,
+            candidates = listOf(candidate("/home/alexey/git/pocketshell", "pocketshell")),
+            query = "new.project",
+        )
+
+        assertEquals("new.project", offer?.folderName)
+        assertEquals("/home/alexey/git/new.project", offer?.path)
+    }
+
+    @Test
+    fun createOfferRejectsKnownOrUnsafeFolderNames() {
+        val root = FolderTreeRoot(
+            path = "/home/alexey/git",
+            label = "git",
+            folders = emptyList(),
+            isWatched = true,
+        )
+        val candidates = listOf(candidate("/home/alexey/git/pocketshell", "pocketshell"))
+
+        assertEquals(null, rootProjectCreateOffer(root, candidates, "pocketshell"))
+        assertEquals(null, rootProjectCreateOffer(root, candidates, "../bad"))
+        assertEquals(null, rootProjectCreateOffer(root, candidates, "nested/bad"))
+    }
 }

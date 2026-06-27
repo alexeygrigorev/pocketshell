@@ -220,6 +220,45 @@ class FolderListViewModelCreateSessionTest {
     }
 
     @Test
+    fun createMissingFolderThenStartsSessionInResolvedPath() = runTest {
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha")),
+            createdProjectPath = "/home/alexey/git/new.project",
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            var createdPath: String? = null
+            var resolvedSession: String? = null
+            vm.createEmptyProject(
+                parentPath = "/home/alexey/git",
+                folderName = "new.project",
+                onCreated = { path ->
+                    createdPath = path
+                    vm.createSession(
+                        sessionName = "git-new.project",
+                        cwd = path,
+                        startCommand = null,
+                        onResolved = { resolvedSession = it },
+                    )
+                },
+            )
+            runCurrent()
+
+            assertEquals("/home/alexey/git", gateway.createdProjectParentPath)
+            assertEquals("new.project", gateway.createdProjectFolderName)
+            assertEquals("/home/alexey/git/new.project", createdPath)
+            assertEquals("git-new.project", resolvedSession)
+            assertEquals("/home/alexey/git/new.project", gateway.lastCreateCwd)
+            assertEquals(setOf("alpha", "git-new.project"), readySessionNames(vm))
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
     fun failedCreateDoesNotInsertARow() = runTest {
         val gateway = StubGateway(rows = listOf(sessionRow("alpha")), createSucceeds = false)
         val vm = newViewModel(gateway)
@@ -308,7 +347,12 @@ class FolderListViewModelCreateSessionTest {
         // When true, a successful create makes the gateway's probe start
         // reporting the created session (i.e. the probe observed it).
         @Volatile var reportCreatedSession: Boolean = false,
+        @Volatile var createdProjectPath: String = "/home/alexey/git/new-project",
     ) : FolderListGateway {
+        var createdProjectParentPath: String? = null
+        var createdProjectFolderName: String? = null
+        var lastCreateCwd: String? = null
+
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
@@ -327,6 +371,7 @@ class FolderListViewModelCreateSessionTest {
             if (!createSucceeds) {
                 return Result.failure(RuntimeException("tmux refused to create '$sessionName'"))
             }
+            lastCreateCwd = cwd
             if (reportCreatedSession) {
                 rows = rows + FolderSessionRow(
                     sessionName = sessionName,
@@ -345,7 +390,11 @@ class FolderListViewModelCreateSessionTest {
             passphrase: CharArray?,
             parentPath: String,
             folderName: String,
-        ): Result<String> = error("not used")
+        ): Result<String> {
+            createdProjectParentPath = parentPath
+            createdProjectFolderName = folderName
+            return Result.success(createdProjectPath)
+        }
 
         override suspend fun importFile(
             host: HostEntity,

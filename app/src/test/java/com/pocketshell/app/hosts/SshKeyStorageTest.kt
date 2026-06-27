@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -87,6 +88,62 @@ class SshKeyStorageTest {
         assertTrue(first.id != second.id)
         assertTrue(first.privateKeyPath != second.privateKeyPath)
         assertEquals(2, files.size)
+    }
+
+    @Test
+    fun hasPrivateKeyPassphrase_detectsEncryptedPemHeaders() {
+        val encrypted = """
+            -----BEGIN RSA PRIVATE KEY-----
+            Proc-Type: 4,ENCRYPTED
+            DEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF
+            abc
+            -----END RSA PRIVATE KEY-----
+        """.trimIndent()
+
+        assertTrue(SshKeyStorage.hasPrivateKeyPassphrase(encrypted))
+    }
+
+    @Test
+    fun hasPrivateKeyPassphrase_detectsPkcs8EncryptedPrivateKeyHeader() {
+        val encrypted = """
+            -----BEGIN ENCRYPTED PRIVATE KEY-----
+            abc
+            -----END ENCRYPTED PRIVATE KEY-----
+        """.trimIndent()
+
+        assertTrue(SshKeyStorage.hasPrivateKeyPassphrase(encrypted))
+    }
+
+    @Test
+    fun hasPrivateKeyPassphrase_detectsOpenSshEncryptionFromDecodedHeader() {
+        val encrypted = openSshPrivateKey(cipherName = "aes256-ctr", kdfName = "bcrypt")
+        val unencrypted = openSshPrivateKey(cipherName = "none", kdfName = "none")
+
+        assertTrue(SshKeyStorage.hasPrivateKeyPassphrase(encrypted))
+        assertFalse(SshKeyStorage.hasPrivateKeyPassphrase(unencrypted))
+    }
+
+    private fun openSshPrivateKey(cipherName: String, kdfName: String): String {
+        val bytes = java.io.ByteArrayOutputStream().apply {
+            write("openssh-key-v1\u0000".toByteArray(Charsets.US_ASCII))
+            writeOpenSshString(cipherName)
+            writeOpenSshString(kdfName)
+        }.toByteArray()
+        val body = java.util.Base64.getEncoder()
+            .encodeToString(bytes)
+            .chunked(64)
+            .joinToString("\n")
+        return """
+            -----BEGIN OPENSSH PRIVATE KEY-----
+            $body
+            -----END OPENSSH PRIVATE KEY-----
+        """.trimIndent()
+    }
+
+    private fun java.io.ByteArrayOutputStream.writeOpenSshString(value: String) {
+        val bytes = value.toByteArray(Charsets.US_ASCII)
+        write(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
+        write(bytes)
     }
 
     private companion object {

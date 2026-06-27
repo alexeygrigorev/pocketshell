@@ -39,6 +39,18 @@ implementers/reviewers, integrate, file issues) or ends the turn. "I'll poll it
 every few minutes" is the banned anti-pattern. Every agent that needs to wait on
 CI uses `scripts/watch-ci.py`, never a hand-rolled poll loop or an LLM-turn wait.
 
+**The orchestrator NEVER runs the CI watcher itself — not even in a background
+shell (locked directive, 2026-06-27).** Watching CI is the on-call's job, full
+stop. The orchestrator does not launch `scripts/watch-ci.py` (foreground OR
+`run_in_background`), and does not poll a run with one-off `gh run view` checks
+to decide its next step. It dispatches an `oncall-engineer` (`run_in_background:
+true`) that owns the watch end-to-end and reports the verdict back; the
+orchestrator acts on that report (e.g. merge on green) and otherwise keeps the
+backlog moving. A single quick `gh run view` to confirm a run *registered*
+right after dispatch is fine; standing in for the watcher is not. If the
+orchestrator finds itself running `watch-ci.py` or repeatedly checking a run's
+status, that is the process miss — hand it to the on-call.
+
 **Trivial/docs-only changes go straight to `main` (locked directive,
 2026-06-27).** Do not open a PR for one-line fixes, spelling/formatting cleanups,
 small process/doc updates, or other no-behavior changes where review would add

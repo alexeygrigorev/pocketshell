@@ -33,7 +33,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.atomic.AtomicBoolean
@@ -981,8 +980,7 @@ internal class RealTmuxClient(
                 append('\n')
             }
             withContext(Dispatchers.IO) {
-                sh.stdin.write(command.toByteArray(Charsets.UTF_8))
-                sh.stdin.flush()
+                sh.writeStdin(command.toByteArray(Charsets.UTF_8))
             }
         } catch (t: Throwable) {
             readerJob?.cancel()
@@ -1087,7 +1085,7 @@ internal class RealTmuxClient(
             val writeResult = CompletableDeferred<Unit>()
             val writeJob = clientScope.launch {
                 try {
-                    writeLine(sh.stdin, chained)
+                    writeLine(sh, chained)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
@@ -1259,7 +1257,7 @@ internal class RealTmuxClient(
             val writeResult = CompletableDeferred<Unit>()
             val writeJob = clientScope.launch {
                 try {
-                    writeLine(sh.stdin, chained)
+                    writeLine(sh, chained)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
@@ -1364,7 +1362,7 @@ internal class RealTmuxClient(
             val writeResult = CompletableDeferred<Unit>()
             val writeJob = clientScope.launch {
                 try {
-                    writeLine(sh.stdin, cmd)
+                    writeLine(sh, cmd)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
@@ -2083,12 +2081,9 @@ internal class RealTmuxClient(
      * needs. Flushes so the bytes hit the wire immediately (sshj uses a
      * buffered output stream under the hood).
      */
-    private suspend fun writeLine(stdin: OutputStream, line: String) =
-        withContext(Dispatchers.IO) {
-            stdin.write(line.toByteArray(Charsets.UTF_8))
-            stdin.write('\n'.code)
-            stdin.flush()
-        }
+    private suspend fun writeLine(shell: SshShell, line: String) {
+        shell.writeStdin("$line\n".toByteArray(Charsets.UTF_8))
+    }
 
     private companion object {
         private const val DEFAULT_SESSION_NAME = "pocketshell"

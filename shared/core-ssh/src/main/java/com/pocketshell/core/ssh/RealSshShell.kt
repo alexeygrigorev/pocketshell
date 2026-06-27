@@ -72,6 +72,17 @@ internal class RealSshShell(
     override val stderr: InputStream
         get() = activityStderr
 
+    override suspend fun writeStdin(bytes: ByteArray) {
+        // The tmux control client is coroutine/cancellation driven. Use the
+        // suspending dispatcher path so cancellation while queued behind another
+        // transport op removes the waiter instead of parking a Dispatchers.IO
+        // thread inside runBlockingDispatch.
+        dispatcher.run {
+            shell.outputStream.write(bytes)
+            shell.outputStream.flush()
+        }
+    }
+
     override fun close() {
         // Order matters: close the shell-level resource first so any in-flight
         // `read` returns -1 promptly, then drop the parent session channel.

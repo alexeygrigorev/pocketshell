@@ -7,6 +7,7 @@ import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalOutput
 import com.termux.view.TerminalRenderer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,14 +49,13 @@ class TerminalRendererDirtyOracleTest {
         override fun onColorsChanged() = Unit
     }
 
-    private val ESC = ""
-
     private data class Step(
         val bytes: ByteArray,
         val selY1: Int = -1,
         val selY2: Int = -1,
         val selX1: Int = -1,
         val selX2: Int = -1,
+        val assertAfter: (TerminalEmulator) -> Unit = {},
     )
 
     private fun b(s: String) = s.toByteArray(Charsets.UTF_8)
@@ -110,6 +110,7 @@ class TerminalRendererDirtyOracleTest {
 
         steps.forEachIndexed { index, step ->
             if (step.bytes.isNotEmpty()) terminal.append(step.bytes, step.bytes.size)
+            step.assertAfter(terminal)
 
             val curRow = terminal.cursorRow
             val curCol = terminal.cursorCol
@@ -170,9 +171,19 @@ class TerminalRendererDirtyOracleTest {
     fun reverseVideoToggle() {
         val steps = listOf(
             Step(b("alpha\r\nbeta\r\ngamma\r\n")),
-            Step(b("${ESC}[?5h")),
+            Step(
+                b("${ESC}[?5h"),
+                assertAfter = { terminal ->
+                    assertTrue("DECSET ?5h must enable reverse video", terminal.isReverseVideo)
+                },
+            ),
             Step(b("more text after reverse\r\n")),
-            Step(b("${ESC}[?5l")),
+            Step(
+                b("${ESC}[?5l"),
+                assertAfter = { terminal ->
+                    assertFalse("DECRST ?5l must disable reverse video", terminal.isReverseVideo)
+                },
+            ),
             Step(b("text after reverse off\r\n")),
         )
         runOracle("reverse-video", 50, 8, steps)
@@ -183,7 +194,16 @@ class TerminalRendererDirtyOracleTest {
         val steps = listOf(
             Step(b("${ESC}[31mred line${ESC}[0m\r\n")),
             Step(b("${ESC}[32mgreen line${ESC}[0m\r\n")),
-            Step(b("${ESC}]4;1;rgb:00/00/ff${ESC}\\")),
+            Step(
+                b("${ESC}]4;1;rgb:00/00/ff${ESC}\\"),
+                assertAfter = { terminal ->
+                    assertEquals(
+                        "OSC 4 must update palette index 1",
+                        0xFF0000FF.toInt(),
+                        terminal.mColors.mCurrentColors[1],
+                    )
+                },
+            ),
             Step(b("${ESC}[33myellow line${ESC}[0m\r\n")),
         )
         runOracle("palette-change", 50, 8, steps)
@@ -193,10 +213,20 @@ class TerminalRendererDirtyOracleTest {
     fun altScreenSwitch() {
         val steps = listOf(
             Step(b("primary one\r\nprimary two\r\nprimary three\r\n")),
-            Step(b("${ESC}[?1049h")),
+            Step(
+                b("${ESC}[?1049h"),
+                assertAfter = { terminal ->
+                    assertTrue("DECSET ?1049h must switch to the alternate buffer", terminal.isAlternateBufferActive)
+                },
+            ),
             Step(b("${ESC}[H${ESC}[2Jalt content row\r\n")),
             Step(b("more alt content\r\n")),
-            Step(b("${ESC}[?1049l")),
+            Step(
+                b("${ESC}[?1049l"),
+                assertAfter = { terminal ->
+                    assertFalse("DECRST ?1049l must restore the main buffer", terminal.isAlternateBufferActive)
+                },
+            ),
             Step(b("back on primary\r\n")),
         )
         runOracle("alt-screen", 50, 10, steps)
@@ -206,11 +236,39 @@ class TerminalRendererDirtyOracleTest {
     fun cursorMoves() {
         val steps = listOf(
             Step(b("line one\r\nline two\r\nline three\r\n")),
-            Step(b("${ESC}[1;1H")),
-            Step(b("${ESC}[2;5H")),
-            Step(b("${ESC}[3;1H")),
-            Step(b("${ESC}[?25l")),
-            Step(b("${ESC}[?25h")),
+            Step(
+                b("${ESC}[1;1H"),
+                assertAfter = { terminal ->
+                    assertEquals("CSI 1;1H must move cursor to row 0", 0, terminal.cursorRow)
+                    assertEquals("CSI 1;1H must move cursor to column 0", 0, terminal.cursorCol)
+                },
+            ),
+            Step(
+                b("${ESC}[2;5H"),
+                assertAfter = { terminal ->
+                    assertEquals("CSI 2;5H must move cursor to row 1", 1, terminal.cursorRow)
+                    assertEquals("CSI 2;5H must move cursor to column 4", 4, terminal.cursorCol)
+                },
+            ),
+            Step(
+                b("${ESC}[3;1H"),
+                assertAfter = { terminal ->
+                    assertEquals("CSI 3;1H must move cursor to row 2", 2, terminal.cursorRow)
+                    assertEquals("CSI 3;1H must move cursor to column 0", 0, terminal.cursorCol)
+                },
+            ),
+            Step(
+                b("${ESC}[?25l"),
+                assertAfter = { terminal ->
+                    assertFalse("DECRST ?25l must hide the cursor", terminal.shouldCursorBeVisible())
+                },
+            ),
+            Step(
+                b("${ESC}[?25h"),
+                assertAfter = { terminal ->
+                    assertTrue("DECSET ?25h must show the cursor", terminal.shouldCursorBeVisible())
+                },
+            ),
         )
         runOracle("cursor-moves", 40, 6, steps)
     }
@@ -317,6 +375,7 @@ class TerminalRendererDirtyOracleTest {
         // re-marked dirty by peekDirtyRows for blink, which is unrelated to #721).
         val seed = b("${ESC}[?25lline one\r\nline two\r\nline three\r\nline four\r\nline five\r\n")
         terminal.append(seed, seed.size)
+        assertFalse("DECRST ?25l in the seed must hide the cursor", terminal.shouldCursorBeVisible())
         renderer.render(terminal, scratchCanvas, 0, -1, -1, -1, -1)
 
         // NEGATIVE CONTROL — a no-op reattach WITHOUT the force: the buffer content did
@@ -351,5 +410,6 @@ class TerminalRendererDirtyOracleTest {
 
     private companion object {
         const val TEXT_SIZE_PX = 28
+        const val ESC = "\u001B"
     }
 }

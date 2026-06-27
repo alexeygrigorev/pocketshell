@@ -1762,11 +1762,9 @@ public class PromptComposerViewModel @Inject constructor(
         }
         val uploader = outboundAttachmentUploader
         if (uploader == null) {
-            outboundQueueStore.markFailed(id, lastError = "Attachment upload unavailable")
+            outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(item.sessionKey)
-            clearStrandedSendInFlight(
-                error = "Attachment upload failed: reconnect, then send again or discard the draft.",
-            )
+            clearStrandedSendInFlight()
             return false
         }
         // Issue #929: `markUploading` lost the claim race (row no longer exactly
@@ -1787,16 +1785,15 @@ public class PromptComposerViewModel @Inject constructor(
             Result.failure(t)
         }
         val uploadedPaths = result.getOrElse { error ->
-            outboundQueueStore.markFailed(id, lastError = attachmentErrorMessage(error))
+            outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            clearStrandedSendInFlight(error = attachmentErrorMessage(error))
+            clearStrandedSendInFlight()
             return false
         }.filter { it.isNotBlank() }
         if (uploadedPaths.size != sidecars.size) {
-            val message = "Attachment upload failed: uploaded ${uploadedPaths.size} of ${sidecars.size} files."
-            outboundQueueStore.markFailed(id, lastError = message)
+            outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
-            clearStrandedSendInFlight(error = message)
+            clearStrandedSendInFlight()
             return false
         }
         val uploadedSidecarRefs = sidecars.mapIndexed { index, ref ->

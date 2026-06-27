@@ -3499,6 +3499,103 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun issue987_attachmentUploadDropKeepsQueuedRowAndComposerClear() = runTest {
+        // Reproduces the #987 attachment gap: after Send, a normal dropped SSH
+        // connection during sidecar upload used to stamp an upload error and
+        // leave a Failed row. Canonical behaviour is the same as text: the row
+        // stays queued, the composer stays clear, and reconnect flush retries it.
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        var uploadAttempts = 0
+        vm.setOutboundAttachmentSidecarUploader {
+            uploadAttempts++
+            Result.failure(IllegalStateException("No live SSH session"))
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        val local = localAttachmentFile("drop-upload.txt", "queued bytes")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("send with attachment")
+        vm.attachFiles(
+            count = 1,
+            previews = listOf(PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain")),
+        ) {
+            Result.success(listOf("~/.pocketshell/attachments/old/drop-upload.txt"))
+        }
+        settleUntil { vm.uiState.value.attachments.isNotEmpty() }
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        settleUntil { uploadAttempts == 1 && !vm.uiState.value.sendInFlight }
+
+        assertTrue("upload drop must not emit a text-only send", sent.isEmpty())
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertNull("drop status is represented by the queued row only", vm.uiState.value.error)
+        val row = queue.itemsFor("1/session-a").single()
+        assertEquals(OutboundState.Queued, row.state)
+        assertNull(row.lastError)
+        assertEquals(
+            PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE,
+            outboundQueueStateLabel(row),
+        )
+        assertEquals(listOf(row.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
+    fun issue987_sidecarFlushWithoutLiveUploaderStaysQueuedForReconnect() = runTest {
+        // Reproduces the no-live-session reconnect path for an already queued
+        // attachment row. The flush must not hard-fail the row or surface a
+        // separate composer banner; it waits in the queue for the next reconnect.
+        var uploadClaims = 0
+        val queue = object : InMemoryOutboundQueueStore() {
+            override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? {
+                uploadClaims++
+                return super.markUploading(id, lastAttemptAtMs)
+            }
+        }
+        val sidecars = newSidecarStore()
+        val item = OutboundItem(
+            id = "queued-no-live-uploader",
+            sessionKey = "1/session-a",
+            cleanText = "send queued attachment",
+            attachments = listOf(DurableAttachmentRef("stale-local", "drop-upload.txt", "text/plain")),
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(item)
+        sidecars.stage(
+            outboundItemId = item.id,
+            uris = listOf(Uri.fromFile(localAttachmentFile("drop-upload.txt", "queued bytes"))),
+        )
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        assertEquals(item.id, vm.retryNextOutboundItem())
+        settleUntil { uploadClaims == 1 && !vm.uiState.value.sendInFlight }
+
+        assertTrue(sent.isEmpty())
+        assertNull(vm.uiState.value.error)
+        val row = queue.item(item.id)!!
+        assertEquals(OutboundState.Queued, row.state)
+        assertNull(row.lastError)
+        assertEquals(
+            PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE,
+            outboundQueueStateLabel(row),
+        )
+        assertEquals(listOf(item.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
     fun retryNextOutboundItemUploadsPersistedSidecarsBeforeClaimingQueuedRow() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore()

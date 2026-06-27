@@ -8,15 +8,47 @@ The multi-orchestrator experiment is paused. The active orchestrator should not
 spend startup time discovering peer orchestrators or negotiating shared
 ownership unless the maintainer explicitly restarts that experiment.
 
+**Never babysit CI — delegate it to the on-call, who runs a blocking watcher
+(locked directive, 2026-06-25).** The orchestrator does NOT sit in a poll-and-
+wait loop watching a CI run; that wastes tokens (every poll is an LLM turn).
+Instead, dispatch an **`oncall-engineer`** (`run_in_background: true`) that runs
+the committed **`scripts/watch-ci.py`** watcher ONCE (a single blocking call,
+near-zero tokens). The watcher polls the run, exits 0 when the required checks
+pass, exits non-zero on a real failure, and **stops itself on a hang / no-
+progress / max-wall-clock timeout** so nothing waits forever. The harness wakes
+the **on-call** (not the orchestrator) when the watcher exits; the on-call then
+acts: green -> ping `main` to tag; infra flake (captured signature) -> re-run
+the failed job and re-watch; real failure -> fix it if small and commit-bound,
+else report to `main`. **If something breaks, the on-call fixes it, not the
+orchestrator.** The orchestrator, meanwhile, keeps the backlog moving (dispatch
+implementers/reviewers, integrate, file issues) or ends the turn. "I'll poll it
+every few minutes" is the banned anti-pattern. Every agent that needs to wait on
+CI uses `scripts/watch-ci.py`, never a hand-rolled poll loop or an LLM-turn wait.
+
+**Trivial/docs-only changes go straight to `main` (locked directive,
+2026-06-27).** Do not open a PR for one-line fixes, spelling/formatting cleanups,
+small process/doc updates, or other no-behavior changes where review would add
+process noise rather than risk control. Make the edit from the root checkout
+while it remains on synced `main`, run the narrow local check that fits the
+change (`git diff --check` is enough for docs/process text unless a rendered
+artifact is touched), commit, and push `main` directly. Do not run the full
+required-check matrix or queue emulator CI for these trivial/no-behavior
+changes; the emulator jobs are expensive and can sit queued long enough to stall
+the backlog for no useful signal. PRs are for meaningful features, behavioral
+fixes, risky refactors, release changes, or anything that needs
+implementer/reviewer evidence and required CI.
+
 Use GitHub issues as the durable backlog and release record. Keep product work
 isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 
 - **Per-issue worktrees** (`.worktrees/issue-<N>/` off current `origin/main`)
   isolate each piece of work; see "Agent Worktrees" below for mechanics.
-- **One integration PR to `main` at a time.** Rebase the integration worktree on
-  the latest `origin/main`, run the verification gate, push the issue branch,
-  and merge only after the required GitHub checks are green. Never blind-apply a
-  stale-based patch.
+- **One meaningful integration PR to `main` at a time.** For feature/code/risky
+  issue slices, rebase the integration worktree on the latest `origin/main`, run
+  the verification gate, push the issue branch, and merge only after the
+  required GitHub checks are green. Never blind-apply a stale-based patch.
+  Trivial/docs-only direct-to-main commits use the locked exception above
+  instead of creating a PR.
 - **Integrate in a clean worktree**, not the polluted root, when assembling and
   testing a merge.
 - **The orchestrator stays on a synced `main`.** Fast-forward the local `main`
@@ -182,11 +214,14 @@ epic; follow-up issues are filed from its findings.
 
 **Adopted:**
 - **G7 — pre-merge CI-green enforcement (#816).** `main` is protected by a
-  PR-to-main flow. The required `Tests` checks are blocking before a slice
-  reaches `main`: `Unit tests`, `Python utility tests (pocketshell)`,
-  `Integration tests (Docker)`, and
-  `Emulator journey subset (load-bearing, Docker agents)`. A red required check
-  stops the merge; do not bypass it as a normal workflow.
+  PR-to-main flow for meaningful feature/code/risky slices. The required
+  `Tests` checks are blocking before that kind of slice reaches `main`: `Unit
+  tests`, `Python utility tests (pocketshell)`, `Integration tests (Docker)`,
+  and `Emulator journey subset (load-bearing, Docker agents)`. A red required
+  check stops that merge; do not bypass it as a normal workflow. The locked
+  trivial/docs-only direct-to-main lane is not a feature-slice bypass; it is the
+  normal path for no-behavior process/doc cleanups and one-line fixes. Do not
+  spend full CI or emulator queue capacity on that lane.
 
 **Pending maintainer sign-off (higher-cost, NOT yet adopted):**
 - **G8 — second adversarial reviewer** for the worst-reopen areas
@@ -319,7 +354,8 @@ CI policy after issue-branch push:
 ### Protected `main` checks
 
 `main` uses branch protection / a repository ruleset to require PR-based merges
-and these exact `Tests` workflow check names:
+for meaningful feature/code/risky slices and these exact `Tests` workflow check
+names:
 
 - `Unit tests`
 - `Python utility tests (pocketshell)`
@@ -329,6 +365,12 @@ and these exact `Tests` workflow check names:
 The required checks must be strict against the latest `main`, so a PR is updated
 or rebased before merge when `main` moves. The orchestrator must inspect a red or
 cancelled required check before rerunning anything; no blind CI reruns.
+
+Trivial/docs-only direct-to-main commits are allowed by maintainer directive.
+They must stay no-behavior, keep the root checkout on synced `main`, and run the
+narrow local check that fits the changed files before pushing. They do not need
+the required PR checks, and they must not queue emulator CI unless the changed
+artifact itself depends on emulator/render evidence.
 
 The repository owner may keep an admin/emergency bypass outside the normal
 workflow so a solo-maintainer release blocker cannot deadlock. Any bypassed push
@@ -532,6 +574,9 @@ untrusted third party.
    - Orchestrator runs the verification checklist one last time.
    - Orchestrator commits on the issue branch, opens/updates the PR, waits for
      required checks, merges through GitHub, and lets the PR close the issue.
+
+This per-issue PR flow is for meaningful issue slices. Trivial/docs-only
+maintainer/process cleanups use the direct-to-main lane instead.
 
 ## Parallel Work
 
@@ -1273,7 +1318,9 @@ release as an update.
 - Body explains what changed and why
 - Link the issue with `Closes #N`
 - Prefer one issue per commit
-- Commit only after reviewer `APPROVED` and orchestrator verification
+- Commit meaningful issue/product work only after reviewer `APPROVED` and
+  orchestrator verification. Trivial/docs-only direct-to-main commits follow the
+  narrow-validation exception above.
 
 ## Direct Orchestrator Work
 
@@ -1283,6 +1330,9 @@ The orchestrator may do direct work for:
 - One-shot CLI commands
 - Reviewing agent output
 - Process and documentation updates
+- Trivial one-line fixes and docs/process-only changes committed directly from a
+  clean, synced `main`, with only cheap relevant validation. Do not open a PR or
+  queue full/emulator CI for these no-behavior changes.
 - Repository hygiene outside an active issue implementation
 
 Before an implementer/reviewer loop starts, very small code changes may be done directly. After the loop starts, code changes stay with implementers.

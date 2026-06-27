@@ -49,9 +49,12 @@ core, black screen, terminal/ANR, composer, tree, process learnings) →
   needs reviewer emulator evidence. Terminal reviewers must inspect the
   authoritative viewport screenshots, visible terminal text, timings, and
   Docker/emulator logs required by [process.md](process.md#terminal-artifact-review).
-- Commit only after reviewer `APPROVED` and the orchestrator's final
-  verification checklist in [process.md](process.md). Make one small commit
-  after each approved task.
+- Commit meaningful issue/product work only after reviewer `APPROVED` and the
+  orchestrator's final verification checklist in [process.md](process.md). Make
+  one small commit after each approved task. Trivial one-line fixes and
+  docs/process-only changes may be committed directly from synced `main` with
+  cheap relevant validation only; do not open a PR or queue emulator CI for
+  no-behavior process/doc cleanup.
 - Release tags come only after the version bump is committed to `main`, pushed,
   and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
   commits.

@@ -61,6 +61,22 @@ public class SshLeaseManager(
     // Virtual-time unit tests inject a `StandardTestDispatcher(testScheduler)`
     // to step the bound deterministically.
     private val connectTimeoutContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
+    // Issue #687: context the bounded connect's ABORT (the off-path
+    // `connectAbortScope.launch { dial.cancel() }` that fires on timeout/expiry)
+    // runs on. Defaults to [Dispatchers.IO] so the abort runs on a REAL
+    // background thread: cancelling a wedged dial can drive a blocking
+    // `invokeOnCancellation` cleanup (disconnecting the half-open transport to
+    // unpark the socket read), and that blocking cleanup MUST NOT run on the
+    // caller's resume thread — firing it off-path on the IO pool is what lets
+    // the acquire return its bounded failure even while cleanup is still
+    // tearing the socket down. Kept SEPARATE from [connectTimeoutContext] only
+    // so virtual-time unit tests can pin the abort to the SAME test scheduler
+    // as the dial: cancelling a coroutine that lives on a `TestCoroutineScheduler`
+    // from a real `Dispatchers.IO` thread is a cross-thread mutation of a
+    // scheduler kotlinx documents as single-thread-only — a heisenbug under CI
+    // load. Production stays on real [Dispatchers.IO]; only the test injects a
+    // `StandardTestDispatcher(testScheduler)`.
+    private val abortTimeoutContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) : AutoCloseable {
     private val mutex = Mutex()
@@ -90,7 +106,7 @@ public class SshLeaseManager(
     private val lastPublishedState: MutableMap<SshLeaseKey, SshLeaseConnectionState> =
         hashMapOf()
     private val connectScope = CoroutineScope(SupervisorJob() + connectTimeoutContext)
-    private val connectAbortScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connectAbortScope = CoroutineScope(SupervisorJob() + abortTimeoutContext)
 
     public val stateEvents: SharedFlow<SshLeaseStateEvent> = _stateEvents.asSharedFlow()
 

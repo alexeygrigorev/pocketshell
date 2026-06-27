@@ -1,6 +1,7 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -86,7 +87,18 @@ class SshLeaseAcquireBoundCharacterizationTest {
     @Test
     fun `a wedged handshake whose cancellation cleanup blocks still returns the bounded failure`() = runTest {
         val connector = BlockingCancelCleanupConnector()
-        val manager = leaseManager(connector, connectTimeoutMillis = 2_000)
+        // This connector's `invokeOnCancellation` BLOCKS (it parks on a real
+        // CountDownLatch to model a cancellation cleanup that disconnects a
+        // wedged transport). The abort therefore MUST run on a real background
+        // thread — running it on the test scheduler would block the test
+        // thread inside the very `runCurrent()` that must still resolve the
+        // acquire. This is exactly the off-the-acquire-path behaviour the test
+        // pins down, so it deliberately keeps the production real-IO abort.
+        val manager = leaseManager(
+            connector,
+            connectTimeoutMillis = 2_000,
+            abortTimeoutContext = Dispatchers.IO,
+        )
 
         try {
             val acquire = async { manager.acquire(TARGET) }
@@ -181,6 +193,17 @@ class SshLeaseAcquireBoundCharacterizationTest {
         connectTimeoutMillis: Long,
         idleTtlMillis: Long = 60_000,
         maxIdleLeases: Int = 2,
+        // The owned-dial ABORT (`connectAbortScope.launch { dial.cancel() }`)
+        // defaults to the SAME virtual scheduler as the dial. Cancelling a
+        // coroutine that lives on a `TestCoroutineScheduler` from a real
+        // `Dispatchers.IO` thread is a cross-thread mutation of a
+        // single-thread-only scheduler — the heisenbug that flaked this class
+        // under CI load. Pinning the abort to the test scheduler makes the
+        // cancellation + its `cancellationObserved` countdown happen
+        // deterministically inside `runCurrent()`. A test whose cancellation
+        // cleanup BLOCKS (it must run off the test thread) overrides this with
+        // real `Dispatchers.IO`.
+        abortTimeoutContext: kotlin.coroutines.CoroutineContext = StandardTestDispatcher(testScheduler),
     ): SshLeaseManager =
         SshLeaseManager(
             connector = connector,
@@ -191,6 +214,7 @@ class SshLeaseAcquireBoundCharacterizationTest {
             // Drive the bound on the SAME virtual scheduler so advanceTimeBy
             // deterministically trips it (production uses real-time Dispatchers.IO).
             connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            abortTimeoutContext = abortTimeoutContext,
             nowMillis = { testScheduler.currentTime },
         )
 

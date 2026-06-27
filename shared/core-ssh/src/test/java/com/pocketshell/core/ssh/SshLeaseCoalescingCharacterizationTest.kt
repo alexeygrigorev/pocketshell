@@ -185,6 +185,13 @@ class SshLeaseCoalescingCharacterizationTest {
             idleTtlMillis = idleTtlMillis,
             maxIdleLeases = maxIdleLeases,
             connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            // Pin the owned-dial ABORT to the same virtual scheduler as the
+            // dial: cancelling a test-scheduler coroutine from a real
+            // Dispatchers.IO thread is a cross-thread mutation of a
+            // single-thread-only scheduler (the CI-load heisenbug). No
+            // connector here blocks in cancellation, so the test scheduler is
+            // safe and deterministic.
+            abortTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 

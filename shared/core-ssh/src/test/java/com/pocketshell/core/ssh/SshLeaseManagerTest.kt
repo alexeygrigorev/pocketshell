@@ -154,6 +154,11 @@ class SshLeaseManagerTest {
             connector = QueueLeaseConnector(session),
             scope = this,
             connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            // Pin the owned-dial ABORT to the same virtual scheduler as the
+            // dial: cancelling a test-scheduler coroutine from a real
+            // Dispatchers.IO thread is a cross-thread mutation of a
+            // single-thread-only scheduler (the CI-load heisenbug).
+            abortTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 
@@ -1075,6 +1080,11 @@ class SshLeaseManagerTest {
             idleTtlMillis = idleTtlMillis,
             maxIdleLeases = maxIdleLeases,
             connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            // Pin the owned-dial ABORT to the same virtual scheduler as the
+            // dial: cancelling a test-scheduler coroutine from a real
+            // Dispatchers.IO thread is a cross-thread mutation of a
+            // single-thread-only scheduler (the CI-load heisenbug).
+            abortTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 

@@ -16,6 +16,7 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -28,6 +29,8 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -3100,27 +3103,39 @@ class PromptComposerViewModelTest {
         }
     }
 
-    private suspend fun waitForSidecarsCleared(
+    private suspend fun yieldToRealDispatchers() {
+        withContext(Dispatchers.IO) {
+            yield()
+        }
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.waitForSidecarsCleared(
         store: OutboundAttachmentSidecarStore,
         outboundItemId: String,
     ) {
         repeat(100) {
+            advanceUntilIdle()
             if (store.refsFor(outboundItemId).isEmpty()) return
-            Thread.sleep(10)
+            runCurrent()
+            if (store.refsFor(outboundItemId).isEmpty()) return
+            yieldToRealDispatchers()
         }
+        advanceUntilIdle()
         assertTrue(store.refsFor(outboundItemId).isEmpty())
     }
 
-    private fun kotlinx.coroutines.test.TestScope.waitForSendCount(
+    private suspend fun kotlinx.coroutines.test.TestScope.waitForSendCount(
         sent: List<PromptComposerViewModel.SendRequest>,
         count: Int,
     ) {
         repeat(100) {
+            advanceUntilIdle()
+            if (sent.size >= count) return
             runCurrent()
             if (sent.size >= count) return
-            Thread.sleep(10)
+            yieldToRealDispatchers()
         }
-        runCurrent()
+        advanceUntilIdle()
         assertEquals(count, sent.size)
     }
 
@@ -6276,15 +6291,15 @@ class PromptComposerViewModelTest {
      * settled outcome. Drive the virtual clock AND yield to the real IO threads
      * until [predicate] holds (or the bound elapses).
      */
-    private fun kotlinx.coroutines.test.TestScope.settleUntil(
+    private suspend fun kotlinx.coroutines.test.TestScope.settleUntil(
         predicate: () -> Boolean,
     ) {
-        repeat(200) {
+        repeat(1_000) {
             advanceUntilIdle()
             if (predicate()) return
             runCurrent()
             if (predicate()) return
-            Thread.sleep(5)
+            yieldToRealDispatchers()
         }
         advanceUntilIdle()
     }
@@ -6294,7 +6309,7 @@ class PromptComposerViewModelTest {
      * sidecar-backed dispatch. Returns once the attachment send has resolved
      * (either dispatched a request, or failed and settled `sendInFlight`).
      */
-    private fun kotlinx.coroutines.test.TestScope.attachAndSendForWedge(
+    private suspend fun kotlinx.coroutines.test.TestScope.attachAndSendForWedge(
         vm: PromptComposerViewModel,
         sent: List<PromptComposerViewModel.SendRequest>,
         target: PromptComposerViewModel.SendTargetSnapshot,
@@ -6313,6 +6328,7 @@ class PromptComposerViewModelTest {
             Result.success(listOf("~/.pocketshell/attachments/old/$fileName"))
         }
         settleUntil { vm.uiState.value.attachments.isNotEmpty() }
+        assertTrue(vm.uiState.value.attachments.isNotEmpty())
         val before = sent.size
         vm.requestSend(withEnter = true, sendTarget = target)
         // Resolve = either a request reached the session, or the send failed and
@@ -6324,7 +6340,7 @@ class PromptComposerViewModelTest {
      * After an attachment send has resolved, assert the pipeline is NOT wedged:
      * `sendInFlight` is clear and a subsequent PLAIN send reaches the session.
      */
-    private fun kotlinx.coroutines.test.TestScope.assertSubsequentPlainSendWorks(
+    private suspend fun kotlinx.coroutines.test.TestScope.assertSubsequentPlainSendWorks(
         vm: PromptComposerViewModel,
         sent: MutableList<PromptComposerViewModel.SendRequest>,
         target: PromptComposerViewModel.SendTargetSnapshot,

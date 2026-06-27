@@ -372,6 +372,16 @@ CI policy after issue-branch push:
   merged PRs naturally validates at the newest batch head. Run heavy PR-scoped
   evidence manually only when the changed area itself needs Docker/emulator
   proof before merge.
+- Plan against the GitHub Actions concurrency budget. This repo has 20
+  concurrent jobs available; a full `Tests` workflow can occupy roughly four
+  jobs, so about five PRs with running Actions can saturate the account. Do not
+  keep many small, already-reviewed PRs open just to run independent heavy
+  workflows. Once their cheap required checks are green and final review is
+  satisfied, merge compatible small slices one by one and let the current
+  `main` heavy run validate the batch head. Keep batches coherent: avoid mixing
+  unrelated high-risk changes when a failure would be hard to bisect, and run a
+  targeted manual heavy check before merge when the specific PR needs that
+  evidence.
 - If a pipeline is merely running, the orchestrator's default next action is to
   keep the backlog moving locally. Only release cuts, red CI investigation, or a
   direct dependency on that exact pipeline justify blocking on it.
@@ -976,7 +986,9 @@ After an issue is reviewer-approved and the orchestrator verification checklist
 passes, commit that finished task on its issue branch, open/update its PR, and
 carry it through required cheap green checks before moving on to unrelated work.
 Prefer one small commit per approved issue or tightly coupled issue group so
-rollback remains practical.
+rollback remains practical. For small, compatible, already-approved PRs, batching
+several merges under one `main` heavy CI run is preferred over consuming the
+20-job Actions budget with separate Docker/emulator workflows.
 
 Do not batch approved work together with unapproved in-flight work. If files
 overlap between approved and unapproved issues, either wait for the overlapping

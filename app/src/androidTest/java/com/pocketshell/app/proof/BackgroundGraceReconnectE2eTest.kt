@@ -195,8 +195,14 @@ class BackgroundGraceReconnectE2eTest {
         BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
         val postStart = SystemClock.elapsedRealtime()
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        // The grace deadline elapsing is recorded by `background_grace_elapsed`
+        // carrying `deadlineElapsed=true` (the connection-stability hardening
+        // renamed the old `teardown` field to `deadlineElapsed`; the matching JVM
+        // contract lives in BackgroundGraceControllerTest). The GENUINE teardown is
+        // proven independently on the next line by `terminal_background_teardown`,
+        // so this wait only confirms the deadline fired.
         waitForDiagnostic("background_grace_elapsed", "post-grace elapsed") {
-            it.fields["teardown"] == true
+            it.fields["deadlineElapsed"] == true
         }
         waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
         waitForClientCountAtMost(0, "post-grace detached")
@@ -288,8 +294,12 @@ class BackgroundGraceReconnectE2eTest {
         BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
         val postStart = SystemClock.elapsedRealtime()
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        // See the matching wait in
+        // quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect: the
+        // grace deadline is recorded with `deadlineElapsed=true`, and the genuine
+        // teardown is proven by the `terminal_background_teardown` wait below.
         waitForDiagnostic("background_grace_elapsed", "post-grace elapsed") {
-            it.fields["teardown"] == true
+            it.fields["deadlineElapsed"] == true
         }
         waitForDiagnostic("terminal_background_teardown", "post-grace teardown")
         waitForClientCountAtMost(0, "post-grace detached")

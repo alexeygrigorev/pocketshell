@@ -218,7 +218,12 @@ epic; follow-up issues are filed from its findings.
   `Tests` checks are blocking before that kind of slice reaches `main`: `Unit
   tests`, `Python utility tests (pocketshell)`, `Integration tests (Docker)`,
   and `Emulator journey subset (load-bearing, Docker agents)`. A red required
-  check stops that merge; do not bypass it as a normal workflow. The locked
+  check stops that merge; do not bypass it as a normal workflow. Required checks
+  must pass on the PR head, but GitHub's strict "branch must be up to date"
+  switch stays OFF because no-behavior direct-to-main commits would otherwise
+  invalidate every open PR and queue the expensive emulator job for no signal.
+  The orchestrator updates/rebases a PR before merge when `main` changed code,
+  workflow behavior, dependencies, or files that overlap the PR. The locked
   trivial/docs-only direct-to-main lane is not a feature-slice bypass; it is the
   normal path for no-behavior process/doc cleanups and one-line fixes. Do not
   spend full CI or emulator queue capacity on that lane.
@@ -362,9 +367,13 @@ names:
 - `Integration tests (Docker)`
 - `Emulator journey subset (load-bearing, Docker agents)`
 
-The required checks must be strict against the latest `main`, so a PR is updated
-or rebased before merge when `main` moves. The orchestrator must inspect a red or
-cancelled required check before rerunning anything; no blind CI reruns.
+The required checks must pass on the PR head. Do not enable GitHub's strict
+"branch must be up to date" requirement as a blanket rule: it makes a
+docs/process-only direct push force every open PR through another full
+Docker/emulator run. Instead, the orchestrator updates or rebases a PR before
+merge when the intervening `main` commits changed code, workflow behavior,
+dependencies, or files that overlap the PR. The orchestrator must inspect a red
+or cancelled required check before rerunning anything; no blind CI reruns.
 
 Trivial/docs-only direct-to-main commits are allowed by maintainer directive.
 They must stay no-behavior, keep the root checkout on synced `main`, and run the

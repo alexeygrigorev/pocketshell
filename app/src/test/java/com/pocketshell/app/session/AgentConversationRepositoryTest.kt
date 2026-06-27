@@ -723,6 +723,62 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun readRecordedAgentSourceReadsSessionScopedTmuxOption() = runTest {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
+        val session = FakeSshSession(recordedSourceOutput = "$source\n")
+
+        val recordedSource = AgentConversationRepository().readRecordedAgentSource(session, "\$3")
+
+        assertEquals(source, recordedSource)
+        val command = session.execCommands.single()
+        assertTrue(command.contains("show-options -v"))
+        assertTrue(command.contains("@ps_agent_source"))
+        assertTrue("must target the pane's session; got $command", command.contains("'\$3'"))
+    }
+
+    @Test
+    fun readRecordedAgentSourceAcceptsSourceFromCurrentGeneration() = runTest {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/current.jsonl"
+        val session = FakeSshSession(
+            recordedSourceGenerationOutput = "launch-2\n",
+            recordedSourceOutput = "launch-2\t$source\n",
+        )
+
+        val recordedSource = AgentConversationRepository().readRecordedAgentSource(session, "\$3")
+
+        assertEquals(source, recordedSource)
+    }
+
+    @Test
+    fun readRecordedAgentSourceIsNullWhenOptionIsBlank() = runTest {
+        val session = FakeSshSession(recordedSourceOutput = "\n")
+
+        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$9"))
+    }
+
+    @Test
+    fun readRecordedAgentSourceIgnoresSourceFromStaleGeneration() = runTest {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/stale.jsonl"
+        val session = FakeSshSession(
+            recordedSourceGenerationOutput = "new-launch\n",
+            recordedSourceOutput = "old-launch\t$source\n",
+        )
+
+        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$3"))
+    }
+
+    @Test
+    fun readRecordedAgentSourceRejectsRawSourceWhenGenerationIsCurrent() = runTest {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/raw.jsonl"
+        val session = FakeSshSession(
+            recordedSourceGenerationOutput = "current-launch\n",
+            recordedSourceOutput = "$source\n",
+        )
+
+        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$3"))
+    }
+
+    @Test
     fun recordedClaudeSessionBindsToRecordedKindEvenWhenABusierCodexSiblingExists() = runTest {
         // The maintainer's #807/#819/#820 cluster: a session PocketShell
         // launched as CLAUDE, but a busier Codex rollout in the SAME cwd flushed
@@ -767,6 +823,39 @@ class AgentConversationRepositoryTest {
         assertEquals(
             "/home/testuser/.claude/projects/-workspace-proj/claude-sess.jsonl",
             detection?.sourcePath,
+        )
+    }
+
+    @Test
+    fun recordedClaudeSessionPrefersRecordedSourceOverNewerSameKindSibling() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val ownPath = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
+        val siblingPath = "/home/testuser/.claude/projects/-workspace-proj/busier.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 120}|/workspace/proj|$ownPath
+                claude|$now|/workspace/proj|$siblingPath
+            """.trimIndent(),
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+            recordedKind = AgentKind.ClaudeCode,
+            recordedSource = ownPath,
+        )
+
+        assertEquals(
+            "an exact @ps_agent_source match must beat same-kind mtime selection",
+            ownPath,
+            detection?.sourcePath,
+        )
+        assertEquals("own", detection?.sessionId)
+        assertFalse(
+            "the exact-source shortcut should not need a process scan",
+            session.execCommands.any { it.contains("ps -eo pid,ppid,tty,comm,args") },
         )
     }
 
@@ -975,6 +1064,32 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun recordedOpenCodeSessionPrefersRecordedSourceOverNewerSameKindSibling() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val ownPath = "/home/testuser/.local/share/opencode/opencode.db#own"
+        val siblingPath = "/home/testuser/.local/share/opencode/opencode.db#busier"
+        val session = FakeSshSession(
+            detectionOutput = """
+                opencode|${now - 120}|/workspace/proj|$ownPath
+                opencode|$now|/workspace/proj|$siblingPath
+            """.trimIndent(),
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/3",
+            paneCommand = "node",
+            recordedKind = AgentKind.OpenCode,
+            recordedSource = ownPath,
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals(ownPath, detection?.sourcePath)
+        assertEquals("own", detection?.sessionId)
+    }
+
+    @Test
     fun recordedCodexSessionPicksProcessOwnedRolloutNotTheBusierSibling() = runTest {
         // Codex has no session-id-in-path, so even within the recorded Codex
         // kind a busier same-cwd sibling rollout would win an mtime race. The
@@ -1052,6 +1167,41 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun recordedCodexSessionDoesNotTrustExactSourceWithoutOwnershipEvidence() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val recordedButUnowned = "/home/testuser/.codex/sessions/2026/06/18/rollout-sibling.jsonl"
+        val ownCandidate = "/home/testuser/.codex/sessions/2026/06/18/rollout-mine.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|$now|/workspace/proj|$recordedButUnowned
+                codex|${now - 60}|/workspace/proj|$ownCandidate
+            """.trimIndent(),
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex --here",
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+            recordedKind = AgentKind.Codex,
+            recordedSource = recordedButUnowned,
+        )
+
+        assertEquals(
+            "an exact @ps_agent_source must not bypass Codex /proc fd ownership; " +
+                "with ambiguous same-cwd rollouts and no owner signal, refuse to bind",
+            null,
+            detection,
+        )
+        assertTrue(
+            "Codex must still run the process-owned rollout check",
+            session.execCommands.any { it.contains("/proc/") && it.contains(".codex/sessions/") },
+        )
+    }
+
+    @Test
     fun recordedCodexSessionConsidersProcessOwnedRolloutOutsideMminEnumeration() = runTest {
         // Issue #819 follow-up: Codex can keep a live rollout fd open after the
         // JSONL mtime has aged beyond the `find -mmin -120` candidate window.
@@ -1097,6 +1247,7 @@ class AgentConversationRepositoryTest {
         val sourcePath = "/home/testuser/.claude/projects/-workspace-proj/sess-abc.jsonl"
         val session = FakeSshSession(
             recordedKindOutput = "claude\n",
+            recordedSourceOutput = "$sourcePath\n",
             detectionOutput = "claude|$now|/workspace/proj|$sourcePath",
             hostWideProcessOutput = "1001 1 pts/7 claude claude",
             // The folded window section: PATH must equal the resolved source so
@@ -1118,6 +1269,7 @@ class AgentConversationRepositoryTest {
         )
 
         assertEquals(AgentKind.ClaudeCode, open.recordedKind)
+        assertEquals(sourcePath, open.recordedSource)
         assertFalse("Claude resolves fully in one round-trip; no Codex pass", open.needsCodexResolution)
         assertEquals(AgentKind.ClaudeCode, open.detection?.agent)
         assertEquals("sess-abc", open.detection?.sessionId)
@@ -1133,6 +1285,7 @@ class AgentConversationRepositoryTest {
             "the one exec must carry the @ps_agent_kind read, the candidate enumeration, " +
                 "and the Claude window fold; got ${session.execCommands}",
             session.execCommands.single().contains("@ps_agent_kind") &&
+                session.execCommands.single().contains("@ps_agent_source") &&
                 session.execCommands.single().contains("claude_dir=") &&
                 session.execCommands.single().contains("@@PS_CLAUDE_WINDOW@@"),
         )
@@ -2043,6 +2196,8 @@ class AgentConversationRepositoryTest {
         private val agentLogOutput: String = "",
         private val jsonlTailOutput: String = "",
         private val recordedKindOutput: String = "",
+        private val recordedSourceGenerationOutput: String = "",
+        private val recordedSourceOutput: String = "",
         private val procFdOutput: String = "",
         // Issue #828: when set, the single-round-trip recorded-open exec emits a
         // folded Claude window section (PATH=<path>, wc -l, sentinel, tail) after
@@ -2070,6 +2225,10 @@ class AgentConversationRepositoryTest {
                 command.contains("@@PS_RECORDED_KIND@@") -> buildString {
                     append(recordedKindOutput.trim())
                     append("\n@@PS_RECORDED_KIND@@\n")
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
                     append(detectionOutput)
                     append("\n@@PS_CLAUDE_WINDOW@@\n")
                     if (foldedClaudePath.isNotBlank()) {
@@ -2080,6 +2239,12 @@ class AgentConversationRepositoryTest {
                     }
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
+                command.contains("@@PS_RECORDED_SOURCE_GENERATION@@") -> buildString {
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                }
+                command.contains("show-options -v") && command.contains("@ps_agent_source") -> recordedSourceOutput
                 command.contains("/proc/") && command.contains(".codex/sessions/") -> procFdOutput
                 command.contains("claude_dir=") -> detectionOutput
                 command.contains("ps -eo pid,ppid,tty,comm,args") -> hostWideProcessOutput

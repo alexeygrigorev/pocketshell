@@ -1989,7 +1989,9 @@ public class TmuxSessionViewModel @Inject constructor(
     // from "read = foreign/null" (present-but-null) so a foreign session is not
     // re-probed on every reconcile either. Cleared with the other per-runtime
     // detection maps on park/restore/clear so a different session never inherits
-    // a stale recorded kind.
+    // a stale recorded kind/source. Issue #821 branch 1 carries the sibling
+    // `@ps_agent_source` exact transcript identity through the same cache so
+    // later opens/retries do not fall back to same-kind mtime selection.
     private val sessionRecordedKindCache: MutableMap<String, RecordedKindCacheEntry> =
         ConcurrentHashMap()
     // Epic #821 slice A2: per-tmux-session cache of the ONE-SHOT FOREIGN kind
@@ -10824,9 +10826,36 @@ public class TmuxSessionViewModel @Inject constructor(
      * a `null` map value would be indistinguishable from "no entry", so a
      * foreign session would be re-probed (a wasted `readRecordedAgentKind`
      * round-trip) on every reconcile — defeating the cache for exactly the
-     * sessions that have no recorded kind to find.
+     * sessions that have no recorded kind to find. [source] is the optional
+     * exact `@ps_agent_source` transcript path captured by the host-side launch
+     * watcher for sessions PocketShell started.
      */
-    private class RecordedKindCacheEntry(val kind: AgentKind?)
+    private class RecordedKindCacheEntry(
+        val kind: AgentKind?,
+        val source: String?,
+        val sourceGenerationScoped: Boolean,
+    )
+
+    private suspend fun recordedSourceForCachedKind(
+        session: SshSession,
+        sessionTarget: String,
+        cachedKind: RecordedKindCacheEntry,
+    ): String? {
+        val recordedKind = cachedKind.kind ?: return null
+        cachedKind.source?.takeIf { cachedKind.sourceGenerationScoped }?.let { return it }
+        val key = sessionTarget.trim()
+        if (key.isEmpty()) return null
+        val refreshedSource = agentRepository.readRecordedAgentSourceOption(
+            session = session,
+            sessionTarget = key,
+        )
+        sessionRecordedKindCache[key] = RecordedKindCacheEntry(
+            kind = recordedKind,
+            source = refreshedSource.source,
+            sourceGenerationScoped = refreshedSource.generationScoped,
+        )
+        return refreshedSource.source
+    }
 
     /**
      * Epic #821 slice A2: box for the per-session ONE-SHOT FOREIGN kind guess.
@@ -11070,12 +11099,18 @@ public class TmuxSessionViewModel @Inject constructor(
                     // Cache HIT — kind already known, no `@ps_agent_kind` exec.
                     val recordedKind = cachedKind.kind
                     if (recordedKind != null) {
+                        val recordedSource = recordedSourceForCachedKind(
+                            session = session,
+                            sessionTarget = sessionTarget,
+                            cachedKind = cachedKind,
+                        )
                         agentRepository.detectRecordedSessionForPane(
                             session = session,
                             cwd = cwd,
                             paneTty = tty,
                             paneCommand = command,
                             recordedKind = recordedKind,
+                            recordedSource = recordedSource,
                         )
                     } else {
                         // Epic #821 slice A2: FOREIGN session (no recorded kind).
@@ -11105,7 +11140,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                     sessionRecordedKindCache.putIfAbsent(
                         sessionTarget.trim(),
-                        RecordedKindCacheEntry(open.recordedKind),
+                        RecordedKindCacheEntry(
+                            kind = open.recordedKind,
+                            source = open.recordedSource,
+                            sourceGenerationScoped = open.recordedSourceGenerationScoped,
+                        ),
                     )
                     when {
                         open.recordedKind == null ->
@@ -11128,6 +11167,7 @@ public class TmuxSessionViewModel @Inject constructor(
                                 paneTty = tty,
                                 paneCommand = command,
                                 recordedKind = open.recordedKind,
+                                recordedSource = open.recordedSource,
                             )
                         // Recorded Claude/OpenCode: resolved in the one round-trip.
                         // Claude also carries the prefetched first window.
@@ -12701,12 +12741,21 @@ public class TmuxSessionViewModel @Inject constructor(
         // recorded-source resolution scoped to the known kind so we re-bind the
         // same engine's transcript without re-classifying.
         val detection = runCatching {
+            val cachedEntry = sessionRecordedKindCache[pane.sessionId.trim()]
+            val cachedSource = cachedEntry?.let {
+                recordedSourceForCachedKind(
+                    session = session,
+                    sessionTarget = pane.sessionId,
+                    cachedKind = it,
+                )
+            }
             agentRepository.detectRecordedSessionForPane(
                 session = session,
                 cwd = pane.cwd,
                 paneTty = pane.paneTty,
                 paneCommand = pane.currentCommand,
                 recordedKind = currentDetection.agent,
+                recordedSource = cachedSource ?: currentDetection.sourcePath,
             )
         }.getOrNull()
         if (!isCurrentRuntime(refreshGuard)) return

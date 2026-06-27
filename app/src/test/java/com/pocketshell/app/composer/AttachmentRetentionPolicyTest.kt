@@ -124,6 +124,21 @@ class AttachmentRetentionPolicyTest {
         assertFalse(commands.single().contains("rm -f"))
     }
 
+    @Test
+    fun dryRunCommandsShellQuoteFileNames() {
+        val commands = RemoteAttachmentPruner.buildDeleteCommands(
+            remoteDir = ".pocketshell/attachments/host-1",
+            names = listOf("quote's \$file.txt"),
+            dryRun = true,
+            batchSize = 50,
+        )
+
+        assertEquals(
+            listOf("printf 'would-delete\\t%s\\n' '~/.pocketshell/attachments/host-1/quote'\\''s \$file.txt'"),
+            commands,
+        )
+    }
+
     private fun file(name: String, modifiedMillis: Long): RemoteEntry =
         RemoteEntry(
             name = name,

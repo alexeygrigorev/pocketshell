@@ -1,5 +1,7 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -44,6 +46,21 @@ public interface SshShell : AutoCloseable {
      * non-PTY callers can read it independently.
      */
     public val stderr: InputStream
+
+    /**
+     * Coroutine-friendly stdin write for control-channel callers that need
+     * cancellation to unpark a queued/blocking write. The default preserves the
+     * blocking-stream contract for test doubles and simple implementations; the
+     * sshj-backed shell overrides this to route through its suspending
+     * transport dispatcher without parking a caller IO thread behind the
+     * dispatcher's mutex.
+     */
+    public suspend fun writeStdin(bytes: ByteArray) {
+        runInterruptible(Dispatchers.IO) {
+            stdin.write(bytes)
+            stdin.flush()
+        }
+    }
 
     /**
      * Tear down the shell channel. Idempotent. Subsequent reads on the

@@ -61,6 +61,7 @@ import com.pocketshell.uikit.components.FileTypeIcon
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
+import com.pocketshell.uikit.components.NavigationChevron
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.Pill
@@ -3654,11 +3655,7 @@ class DesignRenders {
     @Composable
     private fun FileExplorerChevron() {
         Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-            Text(
-                text = "›",
-                color = PocketShellColors.TextMuted,
-                fontSize = 18.sp,
-            )
+            NavigationChevron(tint = PocketShellColors.TextMuted)
         }
     }
 

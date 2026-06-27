@@ -5602,22 +5602,48 @@ class TmuxSessionViewModelTest {
                 }
             }
 
-            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
-                    runCurrent()
-                    delay(10)
+            // Issue #1042 follow-up (CI-only flake, PR #1045): the live `%output`
+            // drain feeds the REAL SshTerminalBridge, whose tail render runs on a
+            // wall-clock background thread and whose budgeted main-thread drain
+            // reposts a `postDelayed` continuation that a bare `idle()` never fires.
+            // The old pump here was bounded ONLY by the virtual `runTest` clock
+            // (`delay(10)` + a virtual `withTimeoutOrNull`), so the entire loop
+            // elapsed in ~0 wall-clock time and gave the background feed no real
+            // time to drain — under a contended JVM (CI) the sender stayed suspended
+            // behind the full SharedFlow buffer and `completed` flaked false (the
+            // pre-existing real-dispatcher-vs-virtual-clock race the sibling
+            // `codexLike...` test documents; #1042's network-change-only diff cannot
+            // reach this path). Pump on the WALL clock instead: advance the looper a
+            // frame (`idleFor(16ms)`) so the budgeted continuations fire, drive the
+            // virtual scheduler (`runCurrent()`) so the sender coroutine progresses,
+            // and give the background thread real time (`Thread.sleep`). This
+            // STRENGTHENS the assertion — a genuine stall still exhausts the deadline
+            // and `completed` stays false.
+            var completed = false
+            val drainDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
+            do {
+                shadowOf(Looper.getMainLooper())
+                    .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                runCurrent()
+                if (!sender.isActive) {
+                    completed = true
+                    break
                 }
+                Thread.sleep(20)
+            } while (System.currentTimeMillis() < drainDeadline)
+            if (completed) {
                 sender.await()
-                true
-            } ?: false
+            } else {
+                sender.cancel()
+            }
 
             assertTrue(
                 "tmux %output flood must not stall terminal pane output",
                 completed,
             )
             advanceUntilIdle()
-            shadowOf(Looper.getMainLooper()).idle()
+            shadowOf(Looper.getMainLooper())
+                .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
 
             assertTrue(
                 "tmux %output flood should still publish best-effort side-channel chunks",
@@ -5699,30 +5725,39 @@ class TmuxSessionViewModelTest {
                     }
                 }
 
-                val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                    while (sender.isActive) {
-                        // Issue #803/#804: the off-main live `%output` drain is now
-                        // frame-paced — the MainThreadDrainScheduler `postDelayed`s its
-                        // continuation one frame (16ms) out between bounded parse turns
-                        // so the looper is guaranteed a servicing gap (the ANR fix).
-                        // Under the Robolectric PAUSED looper a plain `idle()` only runs
-                        // tasks already DUE, so it never fires those delayed
-                        // continuations and the 64KB process queue stays full, blocking
-                        // the real off-main producer forever. Advance the virtual main
-                        // looper one frame per pump (as SshTerminalBridgeTest.
-                        // drainMainLooperUntil does) so the budgeted continuations fire
-                        // and the burst drains. This models a real device looper that
-                        // advances time; it does NOT weaken the assertion — if the burst
-                        // genuinely stalled behind the slow side-channel the loop still
-                        // times out and `completed` stays false.
-                        shadowOf(Looper.getMainLooper())
-                            .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        runCurrent()
-                        delay(10)
+                // Issue #1042 follow-up (CI-only flake, PR #1045): the off-main live
+                // `%output` drain is frame-paced — the MainThreadDrainScheduler
+                // `postDelayed`s its continuation one frame (16ms) out between bounded
+                // parse turns so the looper is guaranteed a servicing gap (the #803/#804
+                // ANR fix). Under the Robolectric PAUSED looper a plain `idle()` only
+                // runs tasks already DUE, so the looper MUST be advanced a frame
+                // (`idleFor(16ms)`) for those delayed continuations to fire and the
+                // burst to drain. The pump ALSO drives the real off-main SshTerminalBridge
+                // feed (a wall-clock background thread). The old budget here was the
+                // virtual `runTest` clock (`delay(10)` + a virtual `withTimeoutOrNull`),
+                // which elapsed in ~0 wall-clock time and starved that background thread
+                // under a contended JVM (CI) — the sender stayed suspended behind the
+                // full SharedFlow buffer and `completed` flaked false. Pump on the WALL
+                // clock instead so the background feed gets real time (`Thread.sleep`),
+                // mirroring the marker loop below. This does NOT weaken the assertion: a
+                // genuine stall still exhausts the deadline and `completed` stays false.
+                var completed = false
+                val drainDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
+                do {
+                    shadowOf(Looper.getMainLooper())
+                        .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    runCurrent()
+                    if (!sender.isActive) {
+                        completed = true
+                        break
                     }
+                    Thread.sleep(20)
+                } while (System.currentTimeMillis() < drainDeadline)
+                if (completed) {
                     sender.await()
-                    true
-                } ?: false
+                } else {
+                    sender.cancel()
+                }
 
                 assertTrue(
                     "Codex-like tmux %output burst must not stall behind a slow terminal side-channel",

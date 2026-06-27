@@ -292,6 +292,12 @@ JOURNEY_CLASSES=(
   # collector parks on a test-controlled CompletableDeferred), so it does not
   # race a wall-clock timeout. It carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"
+  # ADDED (#848 audit / #900): the foreground outbound queue surface was covered
+  # by a connected androidTest but was not in any per-push gate. This pins the
+  # visible queued/failed/in-flight composer rows, collapsed count, delete, and
+  # retry callbacks in the same per-push androidTest lane as the send-feedback
+  # composer proofs. Pure Compose, no Docker fixture.
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
   # PROMOTED (#746): the composer "Not sent" DISCARD + draft session-scoping
   # journey. The maintainer's dogfood report: a "Not sent" draft authored in one
   # session had no Discard control (only Send + the close ×, which PRESERVES the

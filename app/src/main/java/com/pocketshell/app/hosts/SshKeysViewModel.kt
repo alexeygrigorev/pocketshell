@@ -201,6 +201,4 @@ class SshKeysViewModel @Inject constructor(
         }
     }
 
-    internal fun hasPrivateKeyPassphrase(content: String): Boolean =
-        SshKeyStorage.hasPrivateKeyPassphrase(content)
 }

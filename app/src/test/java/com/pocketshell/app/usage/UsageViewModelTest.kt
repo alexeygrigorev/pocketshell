@@ -16,6 +16,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -254,10 +255,12 @@ class UsageViewModelTest {
             """{"provider":"codex","status":"ok","short_term":{"percent_remaining":42.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
         )
         val capturedAt = Instant.parse("2026-06-11T09:00:00Z")
-        val release = CountDownLatch(1)
+        val liveFetchStarted = CompletableDeferred<Unit>()
+        val releaseLiveFetch = CompletableDeferred<Unit>()
         val fetcher = object : HostUsageFetcher {
             override suspend fun fetch(host: HostEntity): HostUsageFetch {
-                release.await()
+                liveFetchStarted.complete(Unit)
+                releaseLiveFetch.await()
                 return HostUsageFetch.Records(liveRecords, Instant.now())
             }
 
@@ -265,20 +268,10 @@ class UsageViewModelTest {
                 HostCachedUsage.Hit(cachedRecords, capturedAt)
         }
 
-        val executor = Executors.newSingleThreadExecutor()
-        val viewModel = UsageViewModel(
-            hostDao = db.hostDao(),
-            fetcher = fetcher,
-            usageScheduler = null,
-            refreshDispatcher = executor.asCoroutineDispatcher(),
-            refreshTimeoutMillis = UsageViewModel.DEFAULT_REFRESH_TIMEOUT_MILLIS,
-        )
+        val viewModel = testViewModel(fetcher, testScheduler)
+        liveFetchStarted.await()
 
         // Cached value visible while the live fetch is still blocked.
-        val deadline = System.currentTimeMillis() + 5_000
-        while (viewModel.state.value.hosts.isEmpty() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(10)
-        }
         val cachedState = viewModel.state.value
         assertTrue("cached records should render before live resolves", cachedState.hosts.isNotEmpty())
         assertTrue("showingCached should be set during cached-first phase", cachedState.showingCached)
@@ -288,18 +281,14 @@ class UsageViewModelTest {
         assertEquals(40.0, cachedState.hosts.single().records.single().windows.single().used, 0.001)
 
         // Release the live fetch; fresh records swap in, provenance clears.
-        release.countDown()
-        val freshDeadline = System.currentTimeMillis() + 5_000
-        while (viewModel.state.value.isRefreshing && System.currentTimeMillis() < freshDeadline) {
-            Thread.sleep(10)
-        }
+        releaseLiveFetch.complete(Unit)
+        advanceUntilIdle()
         val freshState = viewModel.state.value
         assertFalse("refresh should settle after live resolves", freshState.isRefreshing)
         assertFalse(freshState.showingCached)
         // percent_remaining 42.0 → used = 100 - 42 = 58.0
         assertEquals(58.0, freshState.hosts.single().records.single().windows.single().used, 0.001)
         assertEquals("live data clears cached provenance", null, freshState.hosts.single().capturedAt)
-        executor.shutdownNow()
     }
 
     @Test

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
+import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.PocketShellButton
@@ -518,19 +519,15 @@ enum class AgentCli(val command: String) {
         ): String {
             val parts = StringBuilder("pocketshell agent ")
             parts.append(kind)
-            parts.append(" --dir ").append(shellQuote(directory))
+            parts.append(" --dir ").append(shellSingleQuote(directory))
             if (noSkipPermissions) {
                 parts.append(" --no-skip-permissions")
             }
             if (profileName != null) {
-                parts.append(" --profile ").append(shellQuote(profileName))
+                parts.append(" --profile ").append(shellSingleQuote(profileName))
             }
             return parts.toString()
         }
-
-        /** Single-quote a value for safe inclusion in a shell command. */
-        private fun shellQuote(value: String): String =
-            "'" + value.replace("'", "'\\''") + "'"
     }
 }
 

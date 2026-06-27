@@ -87,6 +87,18 @@ import java.io.File
  * no `network_restore_reconnect_start` → the load-bearing assertions FAIL (RED).
  * With the fix the loss surfaces, the lease is held, and the restore drives a fast
  * reconnect (GREEN).
+ *
+ * ISSUE #1042 (cause #1) — the GENUINELY-DEAD-SOCKET preservation guard. #1042 makes
+ * the restore arm LIVENESS-FIRST: it rides through with NO redial when the existing
+ * transport survived the dip. That MUST NOT regress the #997 contract — a genuinely
+ * dead post-outage socket still has to reconnect. So this journey now SYNTHETICALLY
+ * injects a dead transport across the restore (the #780 model — hard inject, no
+ * self-skip): it pins the transport keepalive NOT-proven-alive AND the bounded
+ * restore probe DEAD, so the liveness-first gate fails and the #997 fresh-lease
+ * redial fires — `network_restore_reconnect_start` is still recorded. This is the
+ * guard the brief names ("Do not weaken BareNetworkLossRestoreReconnectE2eTest:
+ * socket-IS-dead ⇒ reconnects"). The companion ride-through (socket SURVIVED ⇒ NO
+ * redial) journey is [MobileSpuriousReconnectE2eTest].
  */
 @RunWith(AndroidJUnit4::class)
 class BareNetworkLossRestoreReconnectE2eTest {
@@ -194,10 +206,23 @@ class BareNetworkLossRestoreReconnectE2eTest {
 
         diagnostics!!.clear()
 
+        // ISSUE #1042: synthetically inject a GENUINELY-DEAD transport across the
+        // restore (the #780 hard-inject model, no self-skip) so the #1042
+        // liveness-first gate must FALL THROUGH to the #997 fresh-lease redial:
+        //   - keepalive NOT proven alive (the link did not survive the dip), and
+        //   - the bounded restore probe reports DEAD.
+        // Without this the live agents:2222 socket would (correctly, per #1042) ride
+        // through with no redial — which is the OTHER journey. Here we are proving the
+        // dead-socket case still reconnects (the #997 contract).
+        val vm = currentViewModel()
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = true
+
         // THE RESTORE: validation returns to the SAME pure-WIFI identity — the
         // airplane-mode round-trip the pre-#997 detector swallowed at `:333`. On
-        // BASE this emits NOTHING. With #997 it emits a NetworkRestored and drives a
-        // FAST reconnect even though the session is in the loss-suspended state.
+        // BASE this emits NOTHING. With #997 it emits a NetworkRestored and (with the
+        // dead transport injected above) drives a FAST fresh-lease reconnect even
+        // though the session is in the loss-suspended state.
         val restoreStart = SystemClock.elapsedRealtime()
         val restored = observer.emitSyntheticSnapshotForTest(
             TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
@@ -232,6 +257,11 @@ class BareNetworkLossRestoreReconnectE2eTest {
                 "events=${diagnostics!!.events.map { it.name }}",
             diagnostics!!.eventsNamed("network_restore_reconnect_start").isNotEmpty(),
         )
+
+        // ISSUE #1042: the redial decision has fired; release the synthetic dead-probe
+        // seam so the freshly-redialled (real, healthy) transport is not immediately
+        // re-declared dead by the periodic liveness probe loop.
+        vm.forceLivenessProbeDeadForTest = false
 
         // LOAD-BEARING #5: the session settles back to a steady Connected state with
         // a painted viewport — the user is recovered, not left in a dead session.

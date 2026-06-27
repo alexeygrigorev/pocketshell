@@ -4862,15 +4862,125 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997: the [ConnectionDecision.ScheduleNetworkReconnectOnRestore] body.
-     * Validation RETURNED after a loss — drive a FAST reconnect via the existing
-     * `scheduleAutoReconnect` ladder (D28: NO new reconnect path). Unlike
-     * [scheduleNetworkReconnect] this does NOT require a `Connected` status (it
-     * recovers a loss-suspended / `Reconnecting` session — the whole point) and it
-     * BYPASSES the proven-alive ride-through (a real loss means the old socket is
-     * already dead). `target` is the held [activeTarget]/[connectingTarget].
+     * Issue #997 / #1042: the [ConnectionDecision.ScheduleNetworkReconnectOnRestore]
+     * body. Validation RETURNED after a loss. Unlike [scheduleNetworkReconnect] this
+     * does NOT require a `Connected` status (it recovers a loss-suspended /
+     * `Reconnecting` session — the whole point). `target` is the held
+     * [activeTarget]/[connectingTarget].
+     *
+     * Issue #1042 (cause #1) makes this LIVENESS-FIRST. The pre-#1042 body redialled
+     * UNCONDITIONALLY (a fresh lease, bypassing the proven-alive gate) on every
+     * restore. On cellular the device dips into no-validated-network constantly
+     * (tunnel, elevator, RAT handover, congestion re-validation) WITHOUT the TCP
+     * socket dying, so that unconditional redial was the maintainer's "constant
+     * reconnects on mobile internet". We now check whether the EXISTING transport
+     * survived the dip before tearing it down:
+     *   1. if the always-on transport keepalive proves the link alive within its
+     *      ride-through window (a sub-budget loss never ages it out), RIDE THROUGH
+     *      synchronously with no redial; otherwise
+     *   2. issue ONE bounded control-channel probe — if it answers, ride through.
+     * Only when the transport does NOT answer (or the bounded probe times out) do we
+     * fall back to the #997 fresh-lease redial. A genuinely dead post-outage socket
+     * therefore STILL reconnects (BareNetworkLossRestoreReconnectE2eTest guards it).
      */
     private fun scheduleNetworkReconnectOnRestore(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        // (1) Fast synchronous ride-through: the keepalive already proves the link
+        // alive within its window, so the brief loss did not kill the socket.
+        if (isTransportKeepAliveProvenAliveRecently()) {
+            rideThroughNetworkRestore(change, target, cause = "transport_proven_alive")
+            return
+        }
+        // (2) The keepalive aged out (a quiet/idle link). Do not blindly redial —
+        // issue ONE bounded probe over the warm control channel; ride through if it
+        // answers, redial only if it does not.
+        viewModelScope.launch {
+            val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
+                runLivenessProbePing()
+            } ?: false
+            if (alive) {
+                rideThroughNetworkRestore(change, target, cause = "probe_answered")
+            } else {
+                forceFreshLeaseRestoreReconnect(change, target)
+            }
+        }
+    }
+
+    /**
+     * Issue #1042 (cause #1): the restore RIDE-THROUGH arm. The existing transport
+     * survived the brief loss (proven alive, or the bounded probe answered), so the
+     * `-CC` client was never torn down. We do NOT redial — we just clear the calm
+     * loss-hold band by flipping back to [ConnectionState.Live] (which re-promotes
+     * the controller via `revealLive` and reopens the liveness-probe gate). No fresh
+     * lease, no visible Reconnecting churn — exactly the spurious-reconnect this
+     * issue kills. Records a `network_restore_ride_through` device trail so the
+     * decision is visible in field logs (not mislabelled as a redial).
+     */
+    private fun rideThroughNetworkRestore(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+        cause: String,
+    ) {
+        val reason = change.reason
+        lifecycleReattachNetworkCoalesce = null
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-restore-ride-through reason=$reason cause=$cause " +
+                targetLogFields(target),
+        )
+        DiagnosticEvents.record(
+            "connection",
+            "network_restore_ride_through",
+            "source" to "network_observer",
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to reason,
+            "cause" to cause,
+            "classification" to "network_restored_transport_alive",
+            "reconnect" to false,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "user" to target.user,
+            "session" to target.sessionName,
+            "generation" to connectGeneration,
+            "clientHash" to clientRef?.let { System.identityHashCode(it) },
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
+        ReconnectCauseTrail.record(
+            stage = "network_reconnect_decision",
+            outcome = "ride_through",
+            cause = cause,
+            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "classification" to "network_restored_transport_alive",
+            "deferredFromBackground" to change.deferredFromBackground,
+        )
+        // Clear the loss-hold "reconnecting" band: the surviving transport is alive,
+        // so flip back to Live (the -CC client was never torn down).
+        setConnectionState(
+            ConnectionState.Live(
+                target.host,
+                target.port,
+                target.user,
+            ),
+        )
+    }
+
+    /**
+     * Issue #997 / #1042: the restore FRESH-LEASE REDIAL arm — the #997 fallback for
+     * a genuinely dead post-outage socket (the transport did not survive the loss,
+     * so neither the keepalive nor the bounded probe answered). Drives a FAST
+     * reconnect via the existing `scheduleAutoReconnect` ladder (D28: NO new reconnect
+     * path). This is the unchanged pre-#1042 restore body — it now runs ONLY past the
+     * liveness gate in [scheduleNetworkReconnectOnRestore].
+     */
+    private fun forceFreshLeaseRestoreReconnect(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
@@ -4891,7 +5001,9 @@ public class TmuxSessionViewModel @Inject constructor(
             "reason" to reason,
             "classification" to "network_restored_fast_reconnect",
             "reconnect" to true,
-            "bypassedProvenAlive" to true,
+            // Issue #1042: the redial now runs only PAST the liveness gate — the
+            // transport did NOT answer (keepalive aged out + bounded probe failed).
+            "transportAnswered" to false,
             "sequence" to change.sequence,
             "hostId" to target.hostId,
             "host" to target.host,
@@ -16063,12 +16175,20 @@ public class TmuxSessionViewModel @Inject constructor(
         data object HoldNetworkLost : ConnectionDecision
 
         /**
-         * Issue #997: validation RETURNED after a loss. Drive a FAST reconnect
-         * via the existing `scheduleAutoReconnect` ladder — even from a
-         * non-Connected (loss-suspended / Reconnecting) state, which the
-         * [ScheduleNetworkReconnect] `Connected`-only gate would have ignored —
-         * and BYPASS the proven-alive ride-through (a real loss means the old
-         * socket is already dead, so there is nothing alive to ride through).
+         * Issue #997 / #1042: validation RETURNED after a loss. Recovers even from
+         * a non-Connected (loss-suspended / Reconnecting) state, which the
+         * [ScheduleNetworkReconnect] `Connected`-only gate would have ignored.
+         *
+         * Issue #1042 (cause #1) makes the recovery LIVENESS-FIRST. The pre-#1042
+         * body redialled UNCONDITIONALLY (bypassing the proven-alive gate on the
+         * assumption "a loss means the socket is dead"). On cellular that fires
+         * constantly even when the TCP socket survived a brief no-validated window
+         * (tunnel, elevator, RAT handover, congestion re-validation). The body now:
+         *   1. rides through with NO redial when the existing transport is proven
+         *      alive (transport keepalive within its window, or a single bounded
+         *      control-channel probe answers), and
+         *   2. forces the #997 fresh-lease redial ONLY when the transport does not
+         *      answer — a genuinely dead post-outage socket still reconnects.
          */
         data object ScheduleNetworkReconnectOnRestore : ConnectionDecision
 
@@ -16150,8 +16270,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
                 // A reconnect ladder is already driving recovery — let it run.
                 if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
-                // Bypass the proven-alive gate: a real loss means the old socket
-                // is dead, so there is nothing alive to ride through.
+                // Issue #1042 (cause #1): the body is LIVENESS-FIRST — it rides
+                // through with no redial when the existing transport is proven
+                // alive (the common brief-cellular-dip case) and only forces the
+                // #997 fresh-lease redial when the transport does not answer.
                 return ConnectionDecision.ScheduleNetworkReconnectOnRestore
             }
             TerminalNetworkChangeKind.ValidatedIdentityChange -> Unit
@@ -17145,6 +17267,15 @@ internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
 
 internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = RUNTIME_HEALTH_PROBE_TIMEOUT_MS
+
+/**
+ * Issue #1042 (cause #1): the small bound on the single control-channel probe the
+ * liveness-first network-restore arm issues when the transport keepalive has aged
+ * out. A surviving link answers well within this; a genuinely dead socket times out
+ * and falls through to the #997 fresh-lease redial. Kept short so a dead socket's
+ * recovery is not noticeably delayed past the old unconditional redial.
+ */
+internal const val RESTORE_LIVENESS_PROBE_BUDGET_MS: Long = 2_000L
 
 /**
  * Classification of a foreground tmux control-channel health probe.

@@ -217,11 +217,16 @@ data class TerminalNetworkChange(
      *   swallowed this entirely (`return null` on any non-validated snapshot), so a
      *   clean drop was only noticed reactively ~90s later by the keepalive.
      * - [TerminalNetworkChangeKind.NetworkRestored] — validation returned after a
-     *   loss. Drives a FAST reconnect even from a non-Connected (loss-suspended)
-     *   state, even when the restored identity equals the pre-loss one (the
-     *   airplane-mode round-trip the pre-#997 detector also swallowed at `:333`).
-     *   A real loss means the old socket is dead, so this BYPASSES the
-     *   proven-alive gate.
+     *   loss. Recovers even from a non-Connected (loss-suspended) state, even when
+     *   the restored identity equals the pre-loss one (the airplane-mode round-trip
+     *   the pre-#997 detector also swallowed at `:333`). Issue #1042 (cause #1)
+     *   makes the recovery LIVENESS-FIRST: a brief no-validated-network window
+     *   (tunnel, elevator, RAT handover, congestion re-validation) does NOT mean
+     *   the TCP socket died — cellular hits those windows constantly — so the VM
+     *   rides through with NO redial when the existing transport is proven alive
+     *   (keepalive within its window, or a single bounded probe answers), and only
+     *   forces the #997 fresh-lease redial when the transport does NOT answer (a
+     *   genuinely dead post-outage socket still reconnects).
      */
     val kind: TerminalNetworkChangeKind = TerminalNetworkChangeKind.ValidatedIdentityChange,
 )
@@ -292,23 +297,44 @@ internal fun TerminalNetworkChange.networkDiagnosticFields(): Array<Pair<String,
  * A genuine handoff that #548 must still catch crosses transports (WIFI→CELLULAR,
  * a VPN coming up/down, ETHERNET↔WIFI). So we now treat two validated snapshots
  * as the SAME network identity when EITHER the handle matches OR the transport
- * sets are identical AND that set is a *pure single-WIFI* network (no cellular /
- * VPN / ethernet on either side). That suppresses the band-steer/mesh reassoc
- * (the spurious case) while a real transport change still flips identity and
- * reconnects. We deliberately scope the relaxation to pure `{WIFI}`: a VPN or a
- * tethered/multi-transport network re-establishing can legitimately need the
- * fresh lease, so those keep the strict handle check.
+ * sets are identical AND that set is a *single benign-reassoc* transport (no VPN /
+ * ethernet / tethering / multi-transport on either side). That suppresses the
+ * band-steer/mesh reassoc (the spurious case) while a real transport change still
+ * flips identity and reconnects.
+ *
+ * Issue #1042 (cause #2 — cellular churn): the relaxation used to be scoped to
+ * pure `{WIFI}` ONLY, so a `{CELLULAR}` RAT/band re-association (or a v4↔v6
+ * dual-stack re-validation) that mints a NEW `networkHandle` while staying on the
+ * SAME single cellular transport was treated as a real handoff → a self-inflicted
+ * fresh-lease redial on a quiet/idle cellular session (the maintainer's "constant
+ * reconnects on mobile internet"). Cellular hits these handle-churning
+ * re-validations FAR more often than Wi-Fi. So we now treat a same-transport-set
+ * reassoc as the same identity for `{WIFI}` *or* `{CELLULAR}` (a dual-stack v4↔v6
+ * flip keeps the same single transport set, so it is covered too). We deliberately
+ * keep the strict handle check for any set carrying VPN / ethernet / multiple
+ * transports: a VPN coming up or a real cross-transport WIFI↔CELLULAR handoff
+ * still flips identity and redials.
  */
 internal fun TerminalNetworkSnapshot.Validated.hasSameNetworkIdentityAs(
     other: TerminalNetworkSnapshot.Validated,
 ): Boolean =
     networkHandle == other.networkHandle ||
-        (isPureWifi() && other.isPureWifi() && transports == other.transports)
+        (transports == other.transports && isBenignReassocTransportSet())
 
-private val PURE_WIFI_TRANSPORTS: Set<String> = setOf("WIFI")
+/**
+ * Issue #1042: the single-transport networks whose supplicant/RAT re-association
+ * mints a new `networkHandle` on a PHYSICALLY STABLE link that SSH almost always
+ * survives — a Wi-Fi band-steer / mesh roam, or a cellular RAT/band/dual-stack
+ * re-validation. A new handle on one of these, with an unchanged transport set, is
+ * a benign reassoc (suppress the redial), NOT a real handoff.
+ */
+private val BENIGN_REASSOC_TRANSPORT_SETS: Set<Set<String>> = setOf(
+    setOf("WIFI"),
+    setOf("CELLULAR"),
+)
 
-private fun TerminalNetworkSnapshot.Validated.isPureWifi(): Boolean =
-    transports == PURE_WIFI_TRANSPORTS
+private fun TerminalNetworkSnapshot.Validated.isBenignReassocTransportSet(): Boolean =
+    transports in BENIGN_REASSOC_TRANSPORT_SETS
 
 internal fun TerminalNetworkSnapshot.hasSameNetworkIdentityAs(
     other: TerminalNetworkSnapshot,

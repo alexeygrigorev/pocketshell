@@ -304,6 +304,17 @@ internal class ShareViewModel internal constructor(
         }
     }
 
+    /**
+     * Apply asynchronous URI metadata refinement without re-running the
+     * text/file dispatch decision. The compare-and-set style guard keeps
+     * late metadata from replacing a newer staged payload.
+     */
+    fun replaceItemsIfCurrent(expected: List<ShareableItem>, updated: List<ShareableItem>) {
+        if (_items.value == expected) {
+            _items.value = updated
+        }
+    }
+
     /** Single-item staging convenience used by tests and callers. */
     fun setItem(item: ShareableItem) = setItems(listOf(item))
 

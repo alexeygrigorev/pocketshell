@@ -19,7 +19,10 @@ import com.pocketshell.app.share.ShareUploader.Companion.extensionForMimeType
 import com.pocketshell.app.share.ShareUploader.Companion.queryUriDisplayName
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * System share-target entry point (issue #138). Receives an
@@ -63,12 +66,29 @@ class ShareActivity : FragmentActivity() {
             }
         }
 
+        resolveSharedUriMetadata(staged)
+
         // Issue #560: when the user picked an active SESSION as the
         // destination, the ViewModel stages the file into that session's
         // attachment scope and emits a one-shot launch event. Hand off to
         // MainActivity into that tmux session with the staged path
         // pre-loaded as a composer chip, then finish this one-shot surface.
         watchSessionLaunch()
+    }
+
+    private fun resolveSharedUriMetadata(staged: List<ShareableItem>) {
+        if (staged.none { it is ShareableItem.UriItem }) return
+        lifecycleScope.launch {
+            val resolved = resolveShareUriDisplayNames(
+                items = staged,
+                queryDisplayName = { uri ->
+                    withContext(Dispatchers.IO) {
+                        queryUriDisplayName(contentResolver, uri)
+                    }
+                },
+            )
+            viewModel.replaceItemsIfCurrent(staged, resolved)
+        }
     }
 
     override fun onStart() {
@@ -109,25 +129,27 @@ class ShareActivity : FragmentActivity() {
         }
 
     /**
-     * Convert the inbound share `Intent` into the staged item list,
-     * resolving display names against this activity's
-     * [ContentResolver]. Thin wrapper over the pure
-     * [decodeShareIntent] free function so the parsing logic is unit
-     * testable without instantiating a Hilt activity.
+     * Convert the inbound share `Intent` into the staged item list.
+     * This deliberately performs only cheap, local parsing so `onCreate`
+     * can render the host picker before any shared URI provider metadata
+     * query runs.
      */
     internal fun decodeShareIntent(intent: Intent?): List<ShareableItem> =
-        decodeShareIntent(intent, contentResolver)
+        com.pocketshell.app.share.decodeShareIntent(intent)
 }
+
+private const val SHARE_URI_METADATA_PER_URI_TIMEOUT_MS = 500L
+private const val SHARE_URI_METADATA_TOTAL_TIMEOUT_MS = 2_000L
 
 /**
  * Convert an inbound Android share `Intent` into a list of internal
  * [ShareableItem]s. Returns an empty list when the intent doesn't carry
  * anything we can route.
  *
- * Pure function (no `Activity` state) — display names are resolved via
- * the supplied [resolver] so this can be exercised in a Robolectric
- * unit test without a live activity. The [ShareActivity] member of the
- * same name simply forwards its `contentResolver`.
+ * Pure function (no `Activity` state) — URI display names are resolved
+ * only from intent extras or URI path fallbacks. ContentResolver metadata
+ * lookup happens later via [resolveShareUriDisplayNames] so a slow
+ * provider cannot block initial UI creation.
  *
  * Supported shapes:
  *
@@ -141,17 +163,14 @@ class ShareActivity : FragmentActivity() {
  *   selecting N screenshots uploaded just one. Now every selected file
  *   is staged and uploaded.
  */
-internal fun decodeShareIntent(
-    intent: Intent?,
-    resolver: android.content.ContentResolver,
-): List<ShareableItem> {
+internal fun decodeShareIntent(intent: Intent?): List<ShareableItem> {
     if (intent == null) return emptyList()
     val mime = intent.type
     return when (intent.action) {
         Intent.ACTION_SEND -> {
             val stream = extractStream(intent)
             if (stream != null) {
-                listOf(buildUriItem(stream, intent, mime, resolver))
+                listOf(buildUriItem(stream, intent, mime))
             } else {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
@@ -178,10 +197,32 @@ internal fun decodeShareIntent(
                 } else {
                     intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
                 }
-            list.orEmpty().map { buildUriItem(it, intent, mime, resolver) }
+            list.orEmpty().map { buildUriItem(it, intent, mime) }
         }
         else -> emptyList()
     }
+}
+
+internal suspend fun resolveShareUriDisplayNames(
+    items: List<ShareableItem>,
+    queryDisplayName: suspend (Uri) -> String?,
+    perUriTimeoutMs: Long = SHARE_URI_METADATA_PER_URI_TIMEOUT_MS,
+    totalTimeoutMs: Long = SHARE_URI_METADATA_TOTAL_TIMEOUT_MS,
+): List<ShareableItem> {
+    if (items.none { it is ShareableItem.UriItem }) return items
+    return withTimeoutOrNull(totalTimeoutMs) {
+        items.map { item ->
+            if (item !is ShareableItem.UriItem) return@map item
+            val resolved = withTimeoutOrNull(perUriTimeoutMs) {
+                queryDisplayName(item.uri)?.takeIf { it.isNotBlank() }
+            }
+            if (resolved == null || resolved == item.displayName) {
+                item
+            } else {
+                item.copy(displayName = resolved)
+            }
+        }
+    } ?: items
 }
 
 private fun extractStream(intent: Intent): Uri? {
@@ -197,11 +238,9 @@ private fun buildUriItem(
     uri: Uri,
     intent: Intent,
     mime: String?,
-    resolver: android.content.ContentResolver,
 ): ShareableItem.UriItem {
-    val resolverName = queryUriDisplayName(resolver, uri)
     val intentName = intent.getStringExtra(Intent.EXTRA_TITLE)
-    val displayName = resolverName ?: intentName ?: uri.lastPathSegment
+    val displayName = intentName ?: uri.lastPathSegment
     val fallback = extensionForMimeType(mime)
     return ShareableItem.UriItem(
         uri = uri,

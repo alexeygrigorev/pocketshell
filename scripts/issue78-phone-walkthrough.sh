@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -92,7 +94,7 @@ collect_diagnostics() {
   "$ADB" devices -l > "$RUN_DIR/adb-devices-final.txt" 2>&1 || true
   "$ADB" logcat -d -v threadtime > "$RUN_DIR/adb-logcat-final.txt" 2>&1 || true
 }
-trap collect_diagnostics EXIT
+trap 'collect_diagnostics; pocketshell_release_all' EXIT
 
 prepare_verify_root() {
   if [[ -e "$ROOT_DIR/app/src/main/java/com/pocketshell/app/terminal/TerminalLabActivity.kt" ]] &&

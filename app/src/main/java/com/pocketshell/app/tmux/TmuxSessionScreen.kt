@@ -400,11 +400,11 @@ public fun TmuxSessionScreen(
     // Issue #626: unified pane list for the cross-session pager.
     val unifiedPanes by viewModel.unifiedPanes.collectAsState()
     // Issue #876: collect the DEBOUNCED display status so a sub-1s reconnect blip
-    // never flashes the "Reconnecting" band/spinner. Steady states
-    // (Connected/Connecting/Switching/Failed/Idle) still surface immediately, so
-    // input-gating (`sessionLive`) and the connecting overlay are unaffected — only
-    // the transient Reconnecting surfacing is held back ~1s.
+    // never flashes the "Reconnecting" band/spinner. Input gating reads the raw
+    // status below so a held display state cannot leave controls live during a
+    // real transport drop.
     val status by viewModel.displayConnectionStatus.collectAsState()
+    val rawStatus by viewModel.connectionStatus.collectAsState()
     // EPIC #687 P1 (#686/#658): the screen is keyed to the TARGET session id —
     // the rendered screen state is a pure function of that id (`RevealStateMachine`),
     // so a late/stale frame from the previous session can NEVER paint.
@@ -449,7 +449,7 @@ public fun TmuxSessionScreen(
     // dead bridge and silently lost — exactly the data-loss the user
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
-    val sessionLive = status is ConnectionStatus.Connected
+    val sessionLive = rawStatus is ConnectionStatus.Connected
     val outboundQueueItems by promptComposerViewModel.outboundQueueItems.collectAsState()
     val outboundQueueAutoFlushController = remember(targetSessionId.value) {
         OutboundQueueAutoFlushController()

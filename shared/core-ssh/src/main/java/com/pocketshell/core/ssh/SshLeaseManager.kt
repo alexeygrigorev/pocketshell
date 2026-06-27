@@ -220,51 +220,56 @@ public class SshLeaseManager(
                 deferred.complete(Result.failure(error))
                 return Result.failure(error)
             }
-            return mutex.withLock {
-                if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
-                if (closed) {
-                    runCatching { session.close() }
-                    retractConnectingHintLocked(key)
-                    deferred.complete(Result.failure(SshLeaseManagerClosedException()))
-                    return@withLock Result.failure(SshLeaseManagerClosedException())
-                }
-                val raced = entries[key]
-                if (raced != null && raced.session.isConnected) {
-                    // A live entry appeared for this key while we were dialing
-                    // (e.g. a different code path acquired directly). Drop our
-                    // redundant transport and reuse the live one; awaiters reuse
-                    // it too via the deferred.
-                    runCatching { session.close() }
-                    raced.closeJob?.cancel()
-                    raced.closeJob = null
-                    raced.idleSinceMillis = null
-                    raced.refCount += 1
-                    emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(Result.success(raced))
-                    Result.success(
-                        SshLease(
-                            key = key,
-                            session = raced.session,
-                            isNewConnection = false,
-                            entryId = raced.id,
-                            releaseAction = ::release,
-                        ),
-                    )
-                } else {
-                    raced?.close()
-                    val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
-                    entries[key] = entry
-                    emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(Result.success(entry))
-                    Result.success(
-                        SshLease(
-                            key = key,
-                            session = session,
-                            isNewConnection = true,
-                            entryId = entry.id,
-                            releaseAction = ::release,
-                        ),
-                    )
+            return withContext(NonCancellable) {
+                mutex.withLock {
+                    if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
+                    if (closed) {
+                        runCatching { session.close() }
+                        retractConnectingHintLocked(key)
+                        deferred.complete(Result.failure(SshLeaseManagerClosedException()))
+                        return@withLock Result.failure(SshLeaseManagerClosedException())
+                    }
+                    val raced = entries[key]
+                    if (raced != null && raced.session.isConnected) {
+                        // A live entry appeared for this key while we were dialing
+                        // (e.g. a different code path acquired directly). Drop our
+                        // redundant transport and reuse the live one; awaiters reuse
+                        // it too via the deferred. Run this registration/close block
+                        // noncancellably so a successful-but-not-yet-registered
+                        // transport cannot leak if the acquiring coroutine is
+                        // cancelled just after boundedConnect returns.
+                        runCatching { session.close() }
+                        raced.closeJob?.cancel()
+                        raced.closeJob = null
+                        raced.idleSinceMillis = null
+                        raced.refCount += 1
+                        emitStateLocked(key, SshLeaseConnectionState.Connected)
+                        deferred.complete(Result.success(raced))
+                        Result.success(
+                            SshLease(
+                                key = key,
+                                session = raced.session,
+                                isNewConnection = false,
+                                entryId = raced.id,
+                                releaseAction = ::release,
+                            ),
+                        )
+                    } else {
+                        raced?.close()
+                        val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
+                        entries[key] = entry
+                        emitStateLocked(key, SshLeaseConnectionState.Connected)
+                        deferred.complete(Result.success(entry))
+                        Result.success(
+                            SshLease(
+                                key = key,
+                                session = session,
+                                isNewConnection = true,
+                                entryId = entry.id,
+                                releaseAction = ::release,
+                            ),
+                        )
+                    }
                 }
             }
         } finally {

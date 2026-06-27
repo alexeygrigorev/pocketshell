@@ -974,7 +974,7 @@ After reviewer approval, the orchestrator runs:
 
 - [ ] `git status` shows only expected files
 - [ ] `git diff` reads sensibly
-- [ ] Build succeeds, usually `./gradlew assembleDebug`
+- [ ] Build succeeds, usually `scripts/cgroup-run.sh -- ./gradlew assembleDebug`
 - [ ] Tests pass for touched code
 - [ ] No secrets or generated build outputs are staged
 - [ ] Acceptance criteria are demonstrably met

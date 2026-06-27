@@ -143,6 +143,55 @@ class RealSshSessionExecReadTimeoutTest {
     }
 
     @Test
+    fun `queued exec waits for a drain permit before opening an exec channel`() = runBlocking {
+        val streamReadsStarted = CountDownLatch(EXEC_DRAIN_MAX_CONCURRENT_EXECS * 2)
+        val commands = List(EXEC_DRAIN_MAX_CONCURRENT_EXECS + 1) {
+            BlockingDrainsCommand(streamReadsStarted)
+        }
+        val client = QueueingClient(commands)
+        val session = RealSshSession(
+            client,
+            execReadTimeoutMs = 30_000L,
+        )
+        val blockers = (0 until EXEC_DRAIN_MAX_CONCURRENT_EXECS).map { index ->
+            async(Dispatchers.IO) {
+                runCatching { session.exec("blocked-drain-$index") }
+            }
+        }
+
+        try {
+            assertTrue(
+                "all drain permits must be occupied before starting the queued exec",
+                streamReadsStarted.await(5, TimeUnit.SECONDS),
+            )
+
+            val queued = async(Dispatchers.IO) {
+                runCatching { session.exec("queued-behind-drain-pool") }
+            }
+            Thread.sleep(250L)
+
+            assertEquals(
+                "local drain-pool saturation must not open another remote exec channel",
+                EXEC_DRAIN_MAX_CONCURRENT_EXECS,
+                client.startSessionCount.get(),
+            )
+            assertFalse(
+                "the queued exec should still be waiting locally for a drain permit",
+                queued.isCompleted,
+            )
+            assertTrue(
+                "local drain-pool saturation must not be treated as a transport failure",
+                session.isConnected,
+            )
+
+            queued.cancelAndJoin()
+        } finally {
+            blockers.forEach { it.cancelAndJoin() }
+            session.close()
+        }
+    }
+
+    @Test
     fun `exec caps buffered stdout`() = runBlocking {
         val command = LargeStdoutCommand()
         val session = RealSshSession(
@@ -192,6 +241,7 @@ class RealSshSessionExecReadTimeoutTest {
         private val commands: List<Session.Command>,
     ) : SSHClient() {
         private val nextCommand = AtomicInteger(0)
+        val startSessionCount = AtomicInteger(0)
 
         @Volatile
         var disconnected: Boolean = false
@@ -199,8 +249,10 @@ class RealSshSessionExecReadTimeoutTest {
 
         override fun isConnected(): Boolean = !disconnected
         override fun isAuthenticated(): Boolean = !disconnected
-        override fun startSession(): Session =
-            RecordingSessionChannel(commands[nextCommand.getAndIncrement()])
+        override fun startSession(): Session {
+            startSessionCount.incrementAndGet()
+            return RecordingSessionChannel(commands[nextCommand.getAndIncrement()])
+        }
 
         override fun disconnect() {
             disconnected = true

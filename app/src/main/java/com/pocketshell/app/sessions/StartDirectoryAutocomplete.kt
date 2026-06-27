@@ -364,9 +364,12 @@ internal fun startDirectoryAutocompleteCommand(request: StartDirectoryAutocomple
         LC_ALL=C
         export LC_ALL
         pocketshell_ac_count=0
-        for pocketshell_ac_path in "${'$'}pocketshell_ac_parent"/"${'$'}pocketshell_ac_prefix"*; do
-          [ -d "${'$'}pocketshell_ac_path" ] || continue
+        find -L "${'$'}pocketshell_ac_parent" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | while IFS= read -r pocketshell_ac_path; do
           pocketshell_ac_name=${'$'}{pocketshell_ac_path##*/}
+          case "${'$'}pocketshell_ac_name" in
+            "${'$'}pocketshell_ac_prefix"*) ;;
+            *) continue ;;
+          esac
           printf '%s/\n' "${'$'}pocketshell_ac_name"
           pocketshell_ac_count=${'$'}((pocketshell_ac_count + 1))
           [ "${'$'}pocketshell_ac_count" -ge ${request.limit} ] && break
@@ -391,5 +394,5 @@ fun startDirectoryAutocompleteSuggestionTag(path: String): String =
     "start-directory-autocomplete:suggestion:${path.hashCode()}"
 
 private const val START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS: Long = 250L
-private val START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS: Long? = null
+private const val START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS: Long = 2_000L
 private const val DEFAULT_START_DIRECTORY_AUTOCOMPLETE_LIMIT: Int = 30

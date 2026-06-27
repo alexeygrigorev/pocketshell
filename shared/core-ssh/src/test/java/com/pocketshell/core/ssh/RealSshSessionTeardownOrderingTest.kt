@@ -69,6 +69,44 @@ class RealSshSessionTeardownOrderingTest {
     }
 
     @Test
+    fun `raw disconnect fallback is bounded after dispatcher close timeout`() = runBlocking {
+        val client = WedgedStartSessionAndRawDisconnectClient()
+        val session = RealSshSession(client)
+        val exec = async(Dispatchers.IO) {
+            runCatching { session.exec("true") }
+        }
+
+        assertTrue(
+            "the synthetic startSession must enter before close queues behind it",
+            client.startSessionEntered.await(5, TimeUnit.SECONDS),
+        )
+
+        val closeThread = Thread({ session.close() }, "ps-test-session-close").apply {
+            isDaemon = true
+            start()
+        }
+        closeThread.join(5_500L)
+
+        assertFalse(
+            "close() must return even when the raw disconnect fallback wedges",
+            closeThread.isAlive,
+        )
+        assertTrue(
+            "the raw fallback disconnect must have been attempted",
+            client.rawDisconnectEntered.await(1, TimeUnit.SECONDS),
+        )
+        assertTrue(
+            "the raw fallback disconnect must be interrupted by a wall-clock ceiling",
+            client.rawDisconnectInterrupted.get(),
+        )
+
+        withTimeout(5_000L) {
+            exec.await()
+        }
+        Unit
+    }
+
+    @Test
     fun `close with active tail queues channel closes before session disconnect`() = runBlocking {
         val events = RecordingEvents()
         val command = BlockingTailCommand(events)
@@ -146,6 +184,52 @@ class RealSshSessionTeardownOrderingTest {
 
         override fun disconnect() {
             rawDisconnected.countDown()
+        }
+    }
+
+    private class WedgedStartSessionAndRawDisconnectClient : SSHClient() {
+        val startSessionEntered = CountDownLatch(1)
+        val startSessionInterrupted = AtomicBoolean(false)
+        val rawDisconnectEntered = CountDownLatch(1)
+        val rawDisconnectInterrupted = AtomicBoolean(false)
+
+        @Volatile
+        private var disconnected = false
+
+        override fun isConnected(): Boolean = !disconnected
+        override fun isAuthenticated(): Boolean = !disconnected
+
+        override fun startSession(): Session {
+            startSessionEntered.countDown()
+            try {
+                while (true) {
+                    if (Thread.interrupted()) {
+                        startSessionInterrupted.set(true)
+                        throw InterruptedException("wedged startSession interrupted")
+                    }
+                    Thread.sleep(10L)
+                }
+            } catch (e: InterruptedException) {
+                startSessionInterrupted.set(true)
+                throw e
+            }
+        }
+
+        override fun disconnect() {
+            disconnected = true
+            rawDisconnectEntered.countDown()
+            try {
+                while (true) {
+                    if (Thread.interrupted()) {
+                        rawDisconnectInterrupted.set(true)
+                        throw InterruptedException("wedged raw disconnect interrupted")
+                    }
+                    Thread.sleep(10L)
+                }
+            } catch (e: InterruptedException) {
+                rawDisconnectInterrupted.set(true)
+                throw e
+            }
         }
     }
 

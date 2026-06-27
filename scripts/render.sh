@@ -44,7 +44,8 @@ START="$(date +%s)"
 
 # recordRoborazziDebug (re)writes the golden PNGs. --rerun-tasks isn't needed:
 # editing a composable invalidates the test task, so a normal record re-renders.
-./gradlew :shared:ui-kit:recordRoborazziDebug --tests "$TESTS_ARG"
+scripts/cgroup-run.sh --unit "pocketshell-render-$(date +%Y%m%d-%H%M%S)-$$" -- \
+  ./gradlew :shared:ui-kit:recordRoborazziDebug --tests "$TESTS_ARG"
 
 END="$(date +%s)"
 echo

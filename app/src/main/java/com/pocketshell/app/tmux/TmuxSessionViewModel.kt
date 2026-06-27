@@ -13951,7 +13951,19 @@ public class TmuxSessionViewModel @Inject constructor(
                 jobs[paneId] = bridgeScope.launch {
                     while (true) {
                         val batch = newQueue.takeBatch() ?: break
-                        val targetClient = client ?: clientRef ?: continue
+                        val targetClient = client ?: clientRef
+                        if (targetClient == null) {
+                            DiagnosticEvents.record(
+                                "connection",
+                                "pane_input_send_deferred",
+                                "pane" to paneId,
+                                "bytes" to batch.bytes.size,
+                                "reason" to "no_current_client",
+                            )
+                            newQueue.requeueFront(batch)
+                            delay(TMUX_INPUT_SEND_RETRY_DELAY_MS)
+                            continue
+                        }
                         DiagnosticEvents.record(
                             "action",
                             "pane_input_batch",
@@ -15359,6 +15371,10 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        layoutChangeCoalescer?.stop()
+        layoutChangeCoalescer = null
+        layoutCoalescerScope?.cancel()
+        layoutCoalescerScope = null
         outputOverflowJob?.cancelAndJoin()
         outputOverflowJob = null
         disconnectedJob?.cancelAndJoin()
@@ -15429,7 +15445,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // block the teardown. The `runCatching` is belt-and-suspenders
         // — the implementation already swallows transport drops mid-
         // detach.
-        runCatching { clientRef?.detachCleanly() }
+        val toDetach = clientRef
+        connectionTmuxPort.setClient(null)
+        runCatching { toDetach?.detachCleanly() }
         clientRef = null
         unregisterCurrentClient()
         when (cacheEviction) {
@@ -15570,6 +15588,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // [TmuxClient.close] below.
         val toDetach = clientRef
         if (toDetach != null) {
+            connectionTmuxPort.setClient(null)
             runCatching {
                 runBlocking(Dispatchers.IO) {
                     withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
@@ -16171,6 +16190,13 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun classifyPassiveTransportDrop(client: TmuxClient): ConnectionDecision {
+        val disconnectEvent = client.disconnectEvent.value
+        if (
+            disconnectEvent?.reason == TmuxDisconnectReason.ExplicitDetach ||
+            disconnectEvent?.intent == "detach_or_replace"
+        ) {
+            return ConnectionDecision.Ignore
+        }
         // Issue #895 (#766 down-payment): STATUS-AGNOSTIC. The old
         // `inlineConnectionStatus !is Connected -> Ignore` gate swallowed a drop
         // that landed during the `Switching` (Attaching) window — the R1

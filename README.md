@@ -203,7 +203,7 @@ Common commands:
 
 ```bash
 scripts/cgroup-run.sh -- ./gradlew assembleDebug
-./gradlew test --stacktrace
+scripts/cgroup-run.sh -- ./gradlew test --stacktrace
 scripts/cgroup-run.sh -- ./gradlew check --stacktrace
 scripts/connected-test.sh
 ```

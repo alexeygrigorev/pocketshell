@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
@@ -76,7 +80,7 @@ collect_diagnostics() {
     printf '\nDiagnostics collected in %s\n' "$RUN_DIR" >&2
   fi
 }
-trap collect_diagnostics EXIT
+trap 'collect_diagnostics; pocketshell_release_all' EXIT
 
 # Issue #150: wait on the compose `healthcheck:` block via
 # `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
@@ -152,7 +156,9 @@ run_logged "06-cold-reset-emulator-app-state" bash -lc \
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
 if [[ "$BUILD_APKS" = "1" ]]; then
-  run_logged "09-build-terminal-lab-apks" ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  run_logged "09-build-terminal-lab-apks" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-terminal-lab-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+    ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 else
   [[ -f "$APP_APK" ]] || fail "BUILD_APKS=0 but app APK is missing at $APP_APK"
   [[ -f "$TEST_APK" ]] || fail "BUILD_APKS=0 but androidTest APK is missing at $TEST_APK"

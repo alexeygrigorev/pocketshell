@@ -1174,9 +1174,8 @@ class TmuxClientTest {
             assertFalse("acquire timeout must not trip disconnected latch", client.disconnected.value)
 
             // Release the original holder so the test tears down without a
-            // parked coroutine. send-keys is fail-open, so fire the primary
-            // timeout and the late-drain timeout.
-            timeoutGate.fireNextTimeout()
+            // parked coroutine. send-keys is fail-open; the late drain is now
+            // a strict wall-clock quarantine bounded by commandTimeoutMs here.
             timeoutGate.fireNextTimeout()
             withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { holder.await() }
             Unit
@@ -1243,7 +1242,6 @@ class TmuxClientTest {
                     yield(); delay(10)
                 }
             }
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1361,7 +1359,6 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "refresh-client -C 62x52\n") { yield(); delay(10) }
             }
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1768,9 +1765,8 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
             }
-            // Primary response timeout, then the fail-open late-drain timeout
-            // (no late response is fed, so the quarantine expires).
-            timeoutGate.fireNextTimeout()
+            // Primary response timeout. No late response is fed, so the strict
+            // wall-clock quarantine expires.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1849,7 +1845,6 @@ class TmuxClientTest {
             shell.feed("%begin 1 10 0\n")
             repeat(10) { yield(); delay(10) }
 
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val timedOut = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
             assertTrue("open response block should time out", timedOut.isFailure)
@@ -1957,8 +1952,8 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "capture-pane -p\n") { yield(); delay(10) }
             }
-            // Primary response timeout, then the fail-open late-drain timeout.
-            timeoutGate.fireNextTimeout()
+            // Primary response timeout; the late drain is a strict wall-clock
+            // quarantine now.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -2276,7 +2271,7 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `best-effort command timeout without late response does not disconnect or mis-correlate next command`() = runBlocking {
+    fun `best-effort command timeout quarantines late stale response before next command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         // Issue #676: deterministic timeout gate (best-effort: primary + late-drain).
@@ -2299,9 +2294,9 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
             }
-            // No late response is fed, so both the primary timeout and the
-            // best-effort late-drain quarantine expire deterministically.
-            timeoutGate.fireNextTimeout()
+            // No response lands inside the strict late-drain window, so the
+            // command times out and reserves the still-owed response block as
+            // stale before the next command can use the FIFO.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -2327,6 +2322,9 @@ class TmuxClientTest {
                 while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
             }
             shell.feed(
+                "%begin 1 9 0\n" +
+                    "late-capture\n" +
+                    "%end 1 9 0\n" +
                 "%begin 1 10 0\n" +
                     "next-ok\n" +
                     "%end 1 10 0\n",
@@ -2369,7 +2367,6 @@ class TmuxClientTest {
                     "stale-open-response\n",
             )
 
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
             assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
@@ -2801,8 +2798,9 @@ class TmuxClientTest {
             }
 
             val collected = scope.async {
-                // 2 outputs + Begin + End
-                client.events.take(4).toList()
+                // Response framing markers stay internal; output notifications
+                // still flow around the response block.
+                client.events.take(2).toList()
             }
             delay(100)
 
@@ -2822,11 +2820,9 @@ class TmuxClientTest {
             val r = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertEquals(listOf("row"), r.output)
             val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { collected.await() }
-            assertEquals(4, events.size)
+            assertEquals(2, events.size)
             assertTrue(events[0] is ControlEvent.Output)
-            assertTrue(events[1] is ControlEvent.Begin)
-            assertTrue(events[2] is ControlEvent.End)
-            assertTrue(events[3] is ControlEvent.Output)
+            assertTrue(events[1] is ControlEvent.Output)
         } finally {
             client.close()
         }

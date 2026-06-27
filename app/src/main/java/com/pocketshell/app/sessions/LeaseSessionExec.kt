@@ -203,7 +203,7 @@ object LeaseSessionExec {
             withContext(NonCancellable) {
                 lease.release()
                 if (poisonedTransport) {
-                    runCatching { leaseManager.disconnect(leaseTarget.leaseKey) }
+                    runCatching { leaseManager.evictIdle(leaseTarget.leaseKey) }
                 }
             }
         }

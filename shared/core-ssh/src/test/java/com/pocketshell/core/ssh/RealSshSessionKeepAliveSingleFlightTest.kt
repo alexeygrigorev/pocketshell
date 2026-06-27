@@ -2,6 +2,7 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import net.schmizz.concurrent.Promise
@@ -90,6 +91,33 @@ class RealSshSessionKeepAliveSingleFlightTest {
         }
     }
 
+    @Test
+    fun `cancelled keepalive send clears provisional single-flight marker`() = runBlocking {
+        val connection = CancelFirstSendConnection()
+        val client = KeepAliveClient(connection)
+        val session = RealSshSession(client)
+
+        try {
+            val first = async(Dispatchers.IO) { session.sendKeepAlive() }
+            assertTrue(connection.firstSendEntered.await(5, TimeUnit.SECONDS))
+
+            first.cancelAndJoin()
+            assertTrue(connection.firstSendInterrupted.await(5, TimeUnit.SECONDS))
+
+            val second = async(Dispatchers.IO) { session.sendKeepAlive() }
+            withTimeout(5_000L) {
+                assertTrue(second.await())
+            }
+            assertEquals(
+                "cancelling a send while it is in dispatcher.run must not strand the marker",
+                2,
+                connection.sendCount.get(),
+            )
+        } finally {
+            session.close()
+        }
+    }
+
     private class KeepAliveClient(
         private val connection: Connection,
     ) : SSHClient() {
@@ -145,6 +173,57 @@ class RealSshSessionKeepAliveSingleFlightTest {
         override fun getKeepAlive(): KeepAlive = throw UnsupportedOperationException("not used")
     }
 
+    private class CancelFirstSendConnection : Connection {
+        val firstSendEntered = CountDownLatch(1)
+        val firstSendInterrupted = CountDownLatch(1)
+        val sendCount = AtomicInteger(0)
+
+        override fun sendGlobalRequest(
+            name: String,
+            wantReply: Boolean,
+            data: ByteArray,
+        ): Promise<SSHPacket, ConnectionException> {
+            assertEquals(KEEPALIVE_REQUEST_NAME, name)
+            assertTrue(wantReply)
+            val count = sendCount.incrementAndGet()
+            if (count == 1) {
+                firstSendEntered.countDown()
+                try {
+                    while (true) {
+                        Thread.sleep(10L)
+                    }
+                } catch (e: InterruptedException) {
+                    firstSendInterrupted.countDown()
+                    throw e
+                }
+            }
+            return ImmediateAnsweredKeepAlivePromise()
+        }
+
+        override fun attach(chan: Channel) = Unit
+        override fun attach(opener: ForwardedChannelOpener) = Unit
+        override fun forget(chan: Channel) = Unit
+        override fun forget(opener: ForwardedChannelOpener) = Unit
+        override fun get(id: Int): Channel = throw UnsupportedOperationException("not used")
+        override fun get(chanType: String): ForwardedChannelOpener =
+            throw UnsupportedOperationException("not used")
+        override fun join() = Unit
+        override fun nextID(): Int = 1
+        override fun sendOpenFailure(
+            recipient: Int,
+            reason: OpenFailException.Reason,
+            message: String,
+        ) = Unit
+        override fun getMaxPacketSize(): Int = 32 * 1024
+        override fun setMaxPacketSize(maxPacketSize: Int) = Unit
+        override fun getWindowSize(): Long = 0L
+        override fun setWindowSize(windowSize: Long) = Unit
+        override fun getTransport(): Transport = throw UnsupportedOperationException("not used")
+        override fun getTimeoutMs(): Int = 0
+        override fun setTimeoutMs(timeout: Int) = Unit
+        override fun getKeepAlive(): KeepAlive = throw UnsupportedOperationException("not used")
+    }
+
     private class BlockingKeepAlivePromise : Promise<SSHPacket, ConnectionException>(
         "keepalive",
         ConnectionException.chainer,
@@ -156,6 +235,16 @@ class RealSshSessionKeepAliveSingleFlightTest {
         override fun retrieve(): SSHPacket {
             retrieveStarted.countDown()
             allowRetrieveToFinish.await(30, TimeUnit.SECONDS)
+            throw ConnectionException("Global request keepalive failed")
+        }
+    }
+
+    private class ImmediateAnsweredKeepAlivePromise : Promise<SSHPacket, ConnectionException>(
+        "keepalive",
+        ConnectionException.chainer,
+        LoggerFactory.DEFAULT,
+    ) {
+        override fun retrieve(): SSHPacket {
             throw ConnectionException("Global request keepalive failed")
         }
     }

@@ -13,6 +13,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.nio.file.Files
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class StartDirectoryAutocompleteTest {
@@ -69,7 +70,36 @@ class StartDirectoryAutocompleteTest {
         assertTrue(command.contains("pocketshell_ac_parent='~/it isn'\\''t'"))
         assertTrue(command.contains("pocketshell_ac_prefix='prefix; rm -rf \$HOME'"))
         assertTrue(command.contains("'~/'*) pocketshell_ac_parent=\$HOME/\${pocketshell_ac_parent#~/} ;;"))
+        assertTrue(command.contains("find -L \"\$pocketshell_ac_parent\" -mindepth 1 -maxdepth 1 -type d -print"))
+        assertTrue(command.contains("\"\$pocketshell_ac_prefix\"*) ;;"))
         assertTrue(command.contains("[ \"\$pocketshell_ac_count\" -ge 7 ] && break"))
+        assertFalse(command.contains("/\"\$pocketshell_ac_prefix\"*"))
+    }
+
+    @Test
+    fun commandTreatsPrefixAsLiteralWhenFilteringFindOutput() {
+        val temp = Files.createTempDirectory("pocketshell-ac").toFile()
+        try {
+            java.io.File(temp, "lit[abc-one").mkdir()
+            java.io.File(temp, "lita-one").mkdir()
+            java.io.File(temp, "lit[abc-file").writeText("not a directory")
+
+            val request = StartDirectoryAutocompleteRequest.from("lit[abc", limit = 5)!!
+            val process = ProcessBuilder("/bin/sh", "-c", startDirectoryAutocompleteCommand(request))
+                .directory(temp)
+                .redirectErrorStream(true)
+                .start()
+            val output = process
+                .inputStream
+                .bufferedReader()
+                .readText()
+            val exitCode = process.waitFor()
+
+            assertEquals(0, exitCode)
+            assertEquals("lit[abc-one/\n", output)
+        } finally {
+            temp.deleteRecursively()
+        }
     }
 
     @Test

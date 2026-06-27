@@ -341,32 +341,43 @@ internal class RealSshSession(
         // its FIFO `globalReqPromises` ATOMICALLY with the write, under sshj's own
         // lock. OpenSSH does not implement the request type, so it answers
         // `SSH_MSG_REQUEST_FAILURE` — which still proves the peer alive (#945).
-        val promise: Promise<SSHPacket, ConnectionException> =
-            runCatching {
-                dispatcher.run {
-                    if (!isConnected) {
-                        null
-                    } else {
-                        client.connection.sendGlobalRequest(
-                            KEEPALIVE_REQUEST_NAME,
-                            /* wantReply = */ true,
-                            EMPTY_PAYLOAD,
-                        )
+        try {
+            val promise: Promise<SSHPacket, ConnectionException> =
+                runCatching {
+                    dispatcher.run {
+                        if (!isConnected) {
+                            null
+                        } else {
+                            client.connection.sendGlobalRequest(
+                                KEEPALIVE_REQUEST_NAME,
+                                /* wantReply = */ true,
+                                EMPTY_PAYLOAD,
+                            )
+                        }
                     }
+                }.getOrElse { t ->
+                    if (t is CancellationException) throw t
+                    // The send itself (write / dispatcher) failed. A REQUEST_FAILURE that
+                    // escaped here still proves the peer answered; otherwise it is a miss.
+                    clearKeepAliveMarker(decision.marker)
+                    return isKeepAliveServerAnswered(t)
+                } ?: run {
+                    clearKeepAliveMarker(decision.marker)
+                    return false
                 }
-            }.getOrElse { t ->
-                if (t is CancellationException) throw t
-                // The send itself (write / dispatcher) failed. A REQUEST_FAILURE that
-                // escaped here still proves the peer answered; otherwise it is a miss.
-                clearKeepAliveMarker(decision.marker)
-                return isKeepAliveServerAnswered(t)
-            } ?: run {
-                clearKeepAliveMarker(decision.marker)
-                return false
-            }
 
-        // Issue #985 — confirm the reply OUTSIDE the mutex with a NON-ORPHANING wait.
-        return awaitKeepAliveReply(promise, decision.marker, decision.before)
+            // Issue #985 — confirm the reply OUTSIDE the mutex with a NON-ORPHANING wait.
+            return awaitKeepAliveReply(promise, decision.marker, decision.before)
+        } finally {
+            // If the caller is cancelled while waiting to enter/run the dispatcher
+            // send, or while handing the sent promise to the observer, the
+            // provisional single-flight marker would otherwise remain pending
+            // forever and suppress all later pings. Once awaitKeepAliveReply
+            // replaces it with the observer job this is a no-op.
+            withContext(NonCancellable) {
+                clearKeepAliveMarker(decision.marker)
+            }
+        }
     }
 
     /**
@@ -423,12 +434,14 @@ internal class RealSshSession(
                 if (isKeepAliveServerAnswered(t)) recordInboundActivity()
             }
         }
-        keepAliveSingleFlightMutex.withLock {
-            if (pendingKeepAliveReply === marker) {
-                pendingKeepAliveReply = observer
+        withContext(NonCancellable) {
+            keepAliveSingleFlightMutex.withLock {
+                if (pendingKeepAliveReply === marker) {
+                    pendingKeepAliveReply = observer
+                }
             }
+            marker.complete()
         }
-        marker.complete()
 
         return awaitKeepAliveActivity(before)
     }
@@ -470,6 +483,7 @@ internal class RealSshSession(
         val callerJob = currentCoroutineContext()[Job]
         val sessionChannelRef = AtomicReference<Session?>()
         val cmdRef = AtomicReference<Command?>()
+        var drainPermitAcquired = false
         val cancelHandle = callerJob?.invokeOnCompletion(onCancelling = true) { cause ->
             if (cause != null) {
                 // Channel close is itself a transport write — serialise it
@@ -484,6 +498,8 @@ internal class RealSshSession(
             }
         }
         return try {
+            acquireExecDrainPermit()
+            drainPermitAcquired = true
             // Phase 1 — open the channel + send the command, serialised against
             // every other transport op (the corruption-prone packets).
             val liveCommand = dispatcher.run {
@@ -541,7 +557,12 @@ internal class RealSshSession(
                         timeoutMs = execReadTimeoutMs,
                         onTimeout = { cause -> SshExecTimeoutException(command, execReadTimeoutMs, cause) },
                     ) {
-                        val output = readExecOutputConcurrently(liveCommand)
+                        val output = try {
+                            readExecOutputConcurrently(liveCommand)
+                        } finally {
+                            execDrainPermits.release()
+                            drainPermitAcquired = false
+                        }
                         liveCommand.join()
                         // Issue #974: a completed exec round-trip is decoded server
                         // bytes — proof the transport is alive. Record it so a busy
@@ -571,6 +592,10 @@ internal class RealSshSession(
             }
         } finally {
             cancelHandle?.dispose()
+            if (drainPermitAcquired) {
+                execDrainPermits.release()
+                drainPermitAcquired = false
+            }
             // Phase 3 — close the channel, serialised through the dispatcher
             // (channel close writes SSH_MSG_CHANNEL_CLOSE on the transport).
             //
@@ -594,8 +619,13 @@ internal class RealSshSession(
         }
     }
 
+    private suspend fun acquireExecDrainPermit() {
+        runInterruptible(Dispatchers.IO) {
+            execDrainPermits.acquire()
+        }
+    }
+
     private fun readExecOutputConcurrently(command: Command): ExecOutput {
-        execDrainPermits.acquire()
         val stdout = execDrainExecutor.submit<String> {
             command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout").toString(Charsets.UTF_8)
         }
@@ -610,7 +640,6 @@ internal class RealSshSession(
         } finally {
             stdout.cancel(true)
             stderr.cancel(true)
-            execDrainPermits.release()
         }
     }
 
@@ -1643,8 +1672,17 @@ internal class RealSshSession(
         }
     }
 
-    private fun forceDisconnectRawClient() {
-        runCatching { client.disconnect() }
+    private suspend fun forceDisconnectRawClient() {
+        runCatching {
+            runInterruptible(Dispatchers.IO) {
+                WallClockCeiling.runUnderWallClockCeiling(
+                    timeoutMs = SESSION_CLOSE_TIMEOUT_MS,
+                    onTimeout = { cause -> TransportOpTimeoutException(SESSION_CLOSE_TIMEOUT_MS, cause) },
+                ) {
+                    client.disconnect()
+                }
+            }
+        }
             .onFailure { e ->
                 CLOSE_LOGGER.log(
                     Level.INFO,

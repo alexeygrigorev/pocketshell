@@ -967,7 +967,7 @@ class ShareViewModelTest {
         assertEquals("live-project", selection.sessionProjects.first().label)
         assertTrue(
             "the command must enumerate all sessions' panes, got ${client.sentCommands}",
-            client.sentCommands.single().startsWith("list-panes -a"),
+            client.sentCommands.first().startsWith("list-panes -a"),
         )
     }
 
@@ -1125,6 +1125,16 @@ class ShareViewModelTest {
                     isError = false,
                 ),
             )
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf(
+                        "work::\$1::101::101::0::::::/home/alexey/git/pocketshell",
+                        "scratch::\$2::202::202::1::::::/home/alexey/git/live",
+                    ),
+                    isError = false,
+                ),
+            )
         }
         registry.register(
             hostId = host.id,
@@ -1146,6 +1156,8 @@ class ShareViewModelTest {
             listOf("scratch", "work"),
             selection.activeSessions.map { it.sessionName },
         )
+        assertEquals("\$2", selection.activeSessions.first().tmuxSessionId)
+        assertEquals(202L, selection.activeSessions.first().sessionCreated)
         assertTrue(
             "the focused session must lead and be flagged focused",
             selection.activeSessions.first().sessionName == "scratch" &&
@@ -1326,6 +1338,100 @@ class ShareViewModelTest {
         val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
         assertEquals("gpu-box", failed.hostName)
         assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
+    }
+
+    @Test
+    fun stageIntoSessionRefusesSameNameSessionWhoseTmuxIdentityChanged() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 56L, name = "gpu-box")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("\$99::999"),
+                    isError = false,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        var openedStagingSession = false
+        vm.connectForStaging = { _, _ ->
+            openedStagingSession = true
+            Result.success(FakeStagingSshSession())
+        }
+        vm.setItem(uriItem("shot.png"))
+
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(
+                sessionName = "scratch",
+                cwd = "/x",
+                label = "scratch",
+                tmuxSessionId = "\$7",
+                sessionCreated = 777L,
+            ),
+        )
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals("gpu-box", failed.hostName)
+        assertTrue(failed.message.contains("no longer active", ignoreCase = true))
+        assertFalse("stale target must fail before opening staging SSH", openedStagingSession)
+        assertTrue(
+            "identity revalidation must target the selected session, got ${client.sentCommands}",
+            client.sentCommands.single().contains("display-message -p -t 'scratch'"),
+        )
+    }
+
+    @Test
+    fun stageIntoSessionRefusesVanishedNameOnlySessionBeforeStaging() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 57L, name = "gpu-box")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("can't find session"),
+                    isError = true,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        var openedStagingSession = false
+        vm.connectForStaging = { _, _ ->
+            openedStagingSession = true
+            Result.success(FakeStagingSshSession())
+        }
+        vm.setItem(uriItem("shot.png"))
+
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+        )
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
+        assertFalse("vanished target must fail before opening staging SSH", openedStagingSession)
+        assertEquals("has-session -t 'scratch'", client.sentCommands.single())
     }
 
     @Test

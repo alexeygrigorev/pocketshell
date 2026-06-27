@@ -840,6 +840,73 @@ class TmuxClientTest {
         }
 
     @Test
+    fun `captureWithCursor timeout before begin quarantines all late batch blocks`() = runBlocking {
+        // A combined capture writes TWO tmux commands in one line. If the line
+        // has reached tmux but neither reply block has begun before the timeout,
+        // both late blocks must be reserved as stale; otherwise the first late
+        // capture block can bind to the next unrelated command.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val timedOut = scope.async {
+                runCatching { client.captureWithCursor("%3", scrollbackLines = 200) }
+            }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().contains("capture-pane")) { yield(); delay(10) }
+            }
+            timeoutGate.fireNextTimeout()
+            assertTrue(
+                "combined capture must time out before any reply block begins",
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { timedOut.await() }.isFailure,
+            )
+            shell.resetStdin()
+
+            val next = scope.async { client.sendCommand("list-sessions") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-sessions\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "%begin 1700000000 10 0\n" +
+                    "late-capture\n" +
+                    "%end 1700000000 10 0\n" +
+                    "%begin 1700000000 11 0\n" +
+                    "9,4\n" +
+                    "%end 1700000000 11 0\n",
+            )
+            repeat(10) { yield(); delay(10) }
+            shell.feed(
+                "%begin 1700000000 12 0\n" +
+                    "next-session\n" +
+                    "%end 1700000000 12 0\n",
+            )
+
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "late combined-capture blocks must not bind to the next command",
+                12L,
+                response.number,
+            )
+            assertEquals(listOf("next-session"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendChainedCommands writes one chained line and drains both blocks in order`() = runBlocking {
         // Issue #692: the folder-list discovery probe fetches list-sessions +
         // list-panes in ONE control-mode round-trip. tmux -CC answers a
@@ -923,6 +990,77 @@ class TmuxClientTest {
             assertFalse(responses[0].isError)
             assertEquals(listOf("sess-a"), responses[0].output)
             assertTrue("trailing block must degrade to an error response", responses[1].isError)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendChainedCommands timeout before begin quarantines all late batch blocks`() = runBlocking {
+        // The first-block timeout fires after the chained line is written but
+        // before tmux emits any %begin. Every command in that written batch is
+        // still owed a response block, so every pending entry must reserve a
+        // stale block before the next command is allowed onto the FIFO.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val timedOut = scope.async {
+                runCatching { client.sendChainedCommands(listOf("list-sessions", "list-panes -a")) }
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-sessions ; list-panes -a\n") {
+                    yield(); delay(10)
+                }
+            }
+            timeoutGate.fireNextTimeout()
+            assertTrue(
+                "chained command must time out before any reply block begins",
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { timedOut.await() }.isFailure,
+            )
+            shell.resetStdin()
+
+            val next = scope.async { client.sendCommand("display-message -p ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "display-message -p ok\n") {
+                    yield(); delay(10)
+                }
+            }
+
+            shell.feed(
+                "%begin 1700000000 20 0\n" +
+                    "late-sessions\n" +
+                    "%end 1700000000 20 0\n" +
+                    "%begin 1700000000 21 0\n" +
+                    "late-panes\n" +
+                    "%end 1700000000 21 0\n",
+            )
+            repeat(10) { yield(); delay(10) }
+            shell.feed(
+                "%begin 1700000000 22 0\n" +
+                    "ok\n" +
+                    "%end 1700000000 22 0\n",
+            )
+
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "late chained-command blocks must not bind to the next command",
+                22L,
+                response.number,
+            )
+            assertEquals(listOf("ok"), response.output)
         } finally {
             client.close()
         }

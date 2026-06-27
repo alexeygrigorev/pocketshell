@@ -1102,7 +1102,11 @@ internal class RealTmuxClient(
                     // Capture itself timed out: tear down both pending entries
                     // and surface a best-effort failure (the caller falls back
                     // to opening the seed gate without a snapshot).
-                    cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                    cleanupCaptureWithCursorPending(
+                        capturePending = capturePending,
+                        cursorPending = cursorPending,
+                        commandWasWritten = writeCompleted,
+                    )
                     writeJob.cancel()
                     throw TmuxClientException(
                         "tmux capture-pane (combined) timed out after ${effectiveTimeoutMs}ms",
@@ -1130,7 +1134,11 @@ internal class RealTmuxClient(
                 }
                 CaptureWithCursor(capture = capture, cursorReply = cursorReply)
             } catch (t: Throwable) {
-                cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                cleanupCaptureWithCursorPending(
+                    capturePending = capturePending,
+                    cursorPending = cursorPending,
+                    commandWasWritten = writeCompleted,
+                )
                 writeJob.cancel()
                 if (!writeCompleted) {
                     close()
@@ -1148,17 +1156,19 @@ internal class RealTmuxClient(
 
     /**
      * Issue #640: remove both pending entries for a combined capture exchange,
-     * accounting for any block tmux has already begun (so its late `%end`
-     * drains as a stale block rather than mis-correlating with a later command).
+     * accounting for blocks tmux has already begun, plus every not-yet-begun
+     * block still owed by a written chained line, so late replies cannot bind
+     * to a later command.
      */
     private fun cleanupCaptureWithCursorPending(
         capturePending: PendingCommand,
         cursorPending: PendingCommand,
+        commandWasWritten: Boolean,
     ) {
         synchronized(responseCorrelationLock) {
             for (pending in listOf(capturePending, cursorPending)) {
                 val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && startedBlock) {
+                if (pendingQueue.remove(pending) && (startedBlock || commandWasWritten)) {
                     staleResponseBlocksToIgnore += 1
                 }
             }
@@ -1271,7 +1281,10 @@ internal class RealTmuxClient(
                     checkpoint.writeCompleted()
                     pendings.first().deferred.await()
                 } ?: run {
-                    cleanupChainedPending(pendings)
+                    cleanupChainedPending(
+                        pendings = pendings,
+                        commandWasWritten = writeCompleted,
+                    )
                     writeJob.cancel()
                     throw TmuxClientException(
                         "tmux chained command (first block) timed out after ${commandTimeoutMs}ms",
@@ -1307,7 +1320,10 @@ internal class RealTmuxClient(
                 }
                 responses
             } catch (t: Throwable) {
-                cleanupChainedPending(pendings)
+                cleanupChainedPending(
+                    pendings = pendings,
+                    commandWasWritten = writeCompleted,
+                )
                 writeJob.cancel()
                 if (!writeCompleted) {
                     close()
@@ -1323,15 +1339,18 @@ internal class RealTmuxClient(
 
     /**
      * Issue #692: remove every still-pending entry for a chained exchange,
-     * accounting for any block tmux has already begun (so its late `%end`
-     * drains as a stale block rather than mis-correlating with a later
-     * command). Mirrors [cleanupCaptureWithCursorPending] for N blocks.
+     * accounting for blocks tmux has already begun, plus every not-yet-begun
+     * block still owed by a written chained line. Mirrors
+     * [cleanupCaptureWithCursorPending] for N blocks.
      */
-    private fun cleanupChainedPending(pendings: List<PendingCommand>) {
+    private fun cleanupChainedPending(
+        pendings: List<PendingCommand>,
+        commandWasWritten: Boolean,
+    ) {
         synchronized(responseCorrelationLock) {
             for (pending in pendings) {
                 val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && startedBlock) {
+                if (pendingQueue.remove(pending) && (startedBlock || commandWasWritten)) {
                     staleResponseBlocksToIgnore += 1
                 }
             }

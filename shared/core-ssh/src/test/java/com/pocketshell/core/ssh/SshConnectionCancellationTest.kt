@@ -7,6 +7,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -14,6 +15,8 @@ import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class SshConnectionCancellationTest {
 
@@ -33,8 +36,40 @@ class SshConnectionCancellationTest {
         connector.connectEntered.await()
         job.cancelAndJoin()
 
+        assertTrue(connector.client.disconnectEntered.await(5, TimeUnit.SECONDS))
         assertEquals(1, connector.client.disconnectCount)
         assertTrue(connector.client.closed)
+    }
+
+    @Test
+    fun `cancel during handshake does not wait for a blocking disconnect cleanup`() = runTest {
+        val connector = FakeConnector(
+            connectMode = ConnectMode.HangUntilCancelled,
+            blockDisconnect = true,
+        )
+        val job = launch {
+            SshConnection.connect(
+                host = "example.test",
+                port = 22,
+                user = "me",
+                key = SshKey.Pem("key"),
+                connector = connector,
+            )
+        }
+
+        connector.connectEntered.await()
+        job.cancel()
+
+        withTimeout(1_000L) {
+            job.join()
+        }
+        assertTrue(
+            "disconnect cleanup should be running off the cancellation path",
+            connector.client.disconnectEntered.await(5, TimeUnit.SECONDS),
+        )
+
+        connector.client.allowDisconnectToFinish.countDown()
+        assertTrue(connector.client.disconnectFinished.await(5, TimeUnit.SECONDS))
     }
 
     @Test
@@ -55,6 +90,7 @@ class SshConnectionCancellationTest {
         connector.releaseConnect.complete(Unit)
         job.join()
 
+        assertTrue(connector.client.disconnectEntered.await(5, TimeUnit.SECONDS))
         assertTrue("expected cancellation cleanup to disconnect the client", connector.client.disconnectCount >= 1)
         assertTrue("expected late success session to be closed", connector.client.sessionClosed)
     }
@@ -85,8 +121,9 @@ class SshConnectionCancellationTest {
 
     private class FakeConnector(
         private val connectMode: ConnectMode,
+        private val blockDisconnect: Boolean = false,
     ) : SshConnection.SshConnector<FakeClient> {
-        val client = FakeClient()
+        val client = FakeClient(blockDisconnect)
         val connectEntered = CompletableDeferred<Unit>()
         val releaseConnect = CompletableDeferred<Unit>()
 
@@ -131,16 +168,26 @@ class SshConnectionCancellationTest {
         }
     }
 
-    private class FakeClient {
-        var knownHostsApplied: Boolean = false
-        var authenticated: Boolean = false
-        var closed: Boolean = false
-        var sessionClosed: Boolean = false
-        var disconnectCount: Int = 0
+    private class FakeClient(
+        private val blockDisconnect: Boolean = false,
+    ) {
+        @Volatile var knownHostsApplied: Boolean = false
+        @Volatile var authenticated: Boolean = false
+        @Volatile var closed: Boolean = false
+        @Volatile var sessionClosed: Boolean = false
+        @Volatile var disconnectCount: Int = 0
+        val disconnectEntered = CountDownLatch(1)
+        val allowDisconnectToFinish = CountDownLatch(1)
+        val disconnectFinished = CountDownLatch(1)
 
         fun disconnect() {
+            disconnectEntered.countDown()
+            if (blockDisconnect) {
+                allowDisconnectToFinish.await(30, TimeUnit.SECONDS)
+            }
             disconnectCount += 1
             closed = true
+            disconnectFinished.countDown()
         }
     }
 

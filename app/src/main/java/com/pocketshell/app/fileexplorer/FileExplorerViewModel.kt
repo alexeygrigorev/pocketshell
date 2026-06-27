@@ -2,14 +2,12 @@ package com.pocketshell.app.fileexplorer
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.app.sessions.LeaseSessionExec
+import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.SshFileNotFoundException
 import com.pocketshell.core.ssh.SshFileTooLargeException
-import com.pocketshell.core.ssh.SshKey
-import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
-import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshNotADirectoryException
 import com.pocketshell.core.ssh.SshPermissionDeniedException
 import com.pocketshell.core.ssh.SshSession
@@ -20,13 +18,11 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.io.InputStream
 import javax.inject.Inject
 
@@ -449,47 +445,12 @@ class FileExplorerViewModel @Inject constructor(
     private suspend fun <T> withLeaseSession(
         req: Request,
         block: suspend (SshSession) -> T,
-    ): Result<T> {
-        val target = req.toSshLeaseTarget()
-        val first = runLeaseAttempt(target, block)
-        val error = first.exceptionOrNull()
-        if (error == null || !isStaleChannelSymptom(error)) {
-            return first
-        }
-        // The eviction inside runLeaseAttempt already discarded the poisoned
-        // transport, so this second acquire dials a fresh connection.
-        return runLeaseAttempt(target, block)
-    }
-
-    private suspend fun <T> runLeaseAttempt(
-        target: SshLeaseTarget,
-        block: suspend (SshSession) -> T,
-    ): Result<T> {
-        val lease = try {
-            sshLeaseManager.acquire(target)
-                .getOrElse { return Result.failure(it) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            return Result.failure(t)
-        }
-        var poisonedTransport = false
-        return try {
-            Result.success(block(lease.session))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            poisonedTransport = isStaleChannelSymptom(t)
-            Result.failure(t)
-        } finally {
-            withContext(NonCancellable) {
-                lease.release()
-                if (poisonedTransport) {
-                    runCatching { sshLeaseManager.disconnect(target.leaseKey) }
-                }
-            }
-        }
-    }
+    ): Result<T> =
+        LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = req.toLeaseSessionTarget(),
+            block = block,
+        )
 
     /**
      * Build the lease target keyed IDENTICALLY to the session / folder / tmux
@@ -498,83 +459,15 @@ class FileExplorerViewModel @Inject constructor(
      * warm transport those screens already opened, so the explorer's SFTP/exec
      * channel rides the existing connection instead of dialing its own.
      */
-    private fun Request.toSshLeaseTarget(): SshLeaseTarget =
-        SshLeaseTarget(
-            leaseKey = SshLeaseKey(
-                host = hostname,
-                port = port,
-                user = username,
-                credentialId = "$hostId:$keyPath",
-                knownHostsId = "accept-all",
-            ),
-            key = SshKey.Path(File(keyPath)),
+    private fun Request.toLeaseSessionTarget(): LeaseSessionTarget =
+        LeaseSessionTarget(
+            hostId = hostId,
+            hostname = hostname,
+            port = port,
+            username = username,
+            keyPath = keyPath,
             passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
         )
-
-    /**
-     * Issue #697 / #680: the family of transient probe failures that must HEAL +
-     * RETRY on a fresh lease rather than surface a persistent error. Mirrors
-     * [com.pocketshell.app.projects.FolderListGateway.isStaleChannelSymptom]:
-     * a channel "open failed" against a live transport, a sshj
-     * `TransportException` / `BY_APPLICATION` teardown of a silently-dead pooled
-     * transport, or an `ensureConnected()` "SSH session is not connected" probe
-     * failure when the pooled lease's `isConnected` flipped false between acquire
-     * and the exec.
-     */
-    private fun isStaleChannelSymptom(cause: Throwable?): Boolean =
-        matchesCauseMessage(cause) { message ->
-            message.contains("open failed", ignoreCase = true) ||
-                message.contains("failed to open SSH shell", ignoreCase = true) ||
-                message.contains("SSH session is not connected", ignoreCase = true) ||
-                message.contains("transport endpoint is not connected", ignoreCase = true)
-        } || isTransportDisconnected(cause)
-
-    /**
-     * The transport-DEAD variant: the pooled SSH transport silently died, so the
-     * probe fails with a sshj `TransportException` carrying disconnect reason
-     * `BY_APPLICATION` ("Disconnected"). Matched on class simple name + reason /
-     * message text (no sshj compile-time dep), walking the cause chain.
-     */
-    private fun isTransportDisconnected(cause: Throwable?): Boolean {
-        var current: Throwable? = cause
-        val seen = HashSet<Throwable>()
-        while (current != null && seen.add(current)) {
-            if (current.javaClass.simpleName == "TransportException") {
-                val reasonName = runCatching {
-                    current!!.javaClass.getMethod("getDisconnectReason").invoke(current)?.toString()
-                }.getOrNull()
-                if (reasonName != null && reasonName.contains("BY_APPLICATION", ignoreCase = true)) {
-                    return true
-                }
-                val message = current.message
-                if (message != null &&
-                    (
-                        message.contains("BY_APPLICATION", ignoreCase = true) ||
-                            message.contains("Disconnected", ignoreCase = true)
-                        )
-                ) {
-                    return true
-                }
-            }
-            current = current.cause
-        }
-        return false
-    }
-
-    private inline fun matchesCauseMessage(
-        cause: Throwable?,
-        predicate: (String) -> Boolean,
-    ): Boolean {
-        var current: Throwable? = cause
-        val seen = HashSet<Throwable>()
-        while (current != null && seen.add(current)) {
-            val message = current.message
-            if (message != null && predicate(message)) return true
-            current = current.cause
-        }
-        return false
-    }
 
     /**
      * Shorten an absolute remote path for the success banner: collapse the

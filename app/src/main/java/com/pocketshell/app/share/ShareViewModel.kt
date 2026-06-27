@@ -461,6 +461,21 @@ internal class ShareViewModel internal constructor(
         _targetSelection.value = null
         _uploadState.value = UploadState.Running(host.name)
         viewModelScope.launch {
+            val liveEntry = activeTmuxClients.clients.value[host.id]
+            if (liveEntry == null || !isSessionTargetCurrent(liveEntry.client, session)) {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_stage_into_session_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "cause" to "StaleSessionTarget",
+                )
+                val message = staleSessionTargetMessage(host, session)
+                android.util.Log.w(LOG_TAG, "share into session aborted: $message")
+                _uploadState.value = UploadState.Failed(host.name, message)
+                notifyShareFailure(host.name, message)
+                return@launch
+            }
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
                 DiagnosticEvents.record(
@@ -646,21 +661,76 @@ internal class ShareViewModel internal constructor(
                 if (name != focusedSession) add(name)
             }
         }
+        val identitiesBySession = resolveSessionIdentities(host, ordered)
 
         val sessions = mutableListOf<ActiveSessionTarget>()
         for (sessionName in ordered) {
             if (sessionName.isBlank()) continue
             val cwd = activePanes[sessionName]?.cwd?.trim().orEmpty()
             val normalised = cwd.takeIf { it.startsWith("/") }?.trimEnd('/')?.ifBlank { "/" }.orEmpty()
+            val identity = identitiesBySession[sessionName]
             sessions += ActiveSessionTarget(
                 sessionName = sessionName,
                 cwd = normalised,
                 label = sessionName,
                 focused = sessionName == focusedSession,
+                tmuxSessionId = identity?.tmuxSessionId,
+                sessionCreated = identity?.sessionCreated,
             )
         }
         return sessions
     }
+
+    private suspend fun resolveSessionIdentities(
+        host: HostEntity,
+        sessionNames: List<String>,
+    ): Map<String, ActiveSessionIdentity> {
+        if (sessionNames.isEmpty()) return emptyMap()
+        val entry = activeTmuxClients.clients.value[host.id] ?: return emptyMap()
+        val wanted = sessionNames.toSet()
+        return runCatching {
+            val response = entry.client.sendCommand(SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND)
+            if (response.isError) return@runCatching emptyMap()
+            SshFolderListGateway.parseListSessionsRows(response.output.joinToString("\n"))
+                .asSequence()
+                .filter { it.sessionName in wanted }
+                .mapNotNull { row ->
+                    val id = row.tmuxSessionId ?: return@mapNotNull null
+                    val created = row.sessionCreated ?: return@mapNotNull null
+                    row.sessionName to ActiveSessionIdentity(id, created)
+                }
+                .toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    private suspend fun isSessionTargetCurrent(
+        client: TmuxClient,
+        session: ActiveSessionTarget,
+    ): Boolean {
+        val escaped = escapeSingleQuoted(session.sessionName)
+        val expectedId = session.tmuxSessionId
+        val expectedCreated = session.sessionCreated
+        if (expectedId != null && expectedCreated != null) {
+            val response = runCatching {
+                client.sendCommand(
+                    "display-message -p -t '$escaped' '#{session_id}::#{session_created}'",
+                )
+            }.getOrNull() ?: return false
+            if (response.isError) return false
+            val actual = response.output.firstOrNull()?.trim().orEmpty()
+            return actual == "$expectedId::$expectedCreated"
+        }
+        val response = runCatching {
+            client.sendCommand("has-session -t '$escaped'")
+        }.getOrNull() ?: return false
+        return !response.isError
+    }
+
+    private fun staleSessionTargetMessage(
+        host: HostEntity,
+        session: ActiveSessionTarget,
+    ): String =
+        "Session ${session.sessionName} is no longer active on ${host.name} — save to inbox instead"
 
     /**
      * Issue #473: upload every staged item to [host], routing to either
@@ -1164,7 +1234,7 @@ internal class ShareViewModel internal constructor(
      */
     fun submitPassphrase(passphrase: CharArray) {
         if (passphrase.isEmpty()) return
-        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill(' ')
+        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill('\u0000')
         retryLastShareAction()
     }
 
@@ -1174,7 +1244,7 @@ internal class ShareViewModel internal constructor(
     }
 
     private fun clearPendingPassphrase() {
-        pendingPassphrase.getAndSet(null)?.fill(' ')
+        pendingPassphrase.getAndSet(null)?.fill('\u0000')
     }
 
     /**
@@ -1469,12 +1539,24 @@ internal data class TargetSelection(
  * @property label the user-visible session label (the session name).
  * @property focused true for the host's currently-focused session, which
  *   the picker lists first.
+ * @property tmuxSessionId stable tmux `#{session_id}` captured when the picker
+ *   was rendered. Rechecked before staging so a stale same-name target is not
+ *   treated as the original session.
+ * @property sessionCreated tmux `#{session_created}` paired with
+ *   [tmuxSessionId] to distinguish recreated same-name sessions.
  */
 internal data class ActiveSessionTarget(
     val sessionName: String,
     val cwd: String,
     val label: String,
     val focused: Boolean = false,
+    val tmuxSessionId: String? = null,
+    val sessionCreated: Long? = null,
+)
+
+private data class ActiveSessionIdentity(
+    val tmuxSessionId: String,
+    val sessionCreated: Long,
 )
 
 private class ShareStageIntoSessionTimeoutException(

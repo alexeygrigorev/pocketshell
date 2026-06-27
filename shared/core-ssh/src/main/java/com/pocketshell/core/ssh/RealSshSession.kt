@@ -296,6 +296,15 @@ internal class RealSshSession(
     override suspend fun sendKeepAlive(): Boolean {
         if (!isConnected) return false
 
+        // Single-flight must gate the WIRE SEND, not just the reply observer.
+        // If a prior keepalive promise is still pending, sending another global
+        // request would enqueue a second sshj promise behind the unresolved one.
+        // Count this tick against the same bounded no-activity budget, but do
+        // not put a new packet on the transport.
+        if (pendingKeepAliveReply?.isCompleted == false) {
+            return awaitKeepAliveActivity(lastInboundActivityNanos)
+        }
+
         // Issue #983 — split the op so the single-writer mutex is held ONLY for the
         // wire write, never for the multi-second reply wait. The
         // `keepalive@openssh.com` global request (wantReply=true) is the only
@@ -357,7 +366,7 @@ internal class RealSshSession(
      * `retrieve()` job is still pending. On a genuinely dead peer the job blocks
      * forever, so treating "pending" as "not a miss" would silently break dead-peer
      * detection and the 90s teardown would never fire. The single-flight guard
-     * ([pendingKeepAliveReply]) only suppresses launching a DUPLICATE `retrieve()`,
+     * ([pendingKeepAliveReply]) suppresses duplicate wire requests/retrieves,
      * never the miss.
      */
     private suspend fun awaitKeepAliveReply(
@@ -365,11 +374,10 @@ internal class RealSshSession(
     ): Boolean {
         val before = lastInboundActivityNanos
 
-        // Single-flight: only launch a NEW unbounded retrieve when the prior one has
-        // completed. A still-pending reply job means the previous promise's consumer
-        // is still alive (so its queue slot is not abandoned); we do not need — and
-        // must not — stack a second retrieve. We DO still run the local no-activity
-        // budget below, so a dead peer with a perpetually-pending job is still a miss.
+        // Only launch a NEW unbounded retrieve when the prior one has completed.
+        // A still-pending reply job means the previous promise's consumer is still
+        // alive (so its queue slot is not abandoned); callers with a pending job
+        // are gated before the wire send and run only the local no-activity budget.
         val existing = pendingKeepAliveReply
         if (existing == null || existing.isCompleted) {
             pendingKeepAliveReply = scope.launch {
@@ -390,6 +398,10 @@ internal class RealSshSession(
             }
         }
 
+        return awaitKeepAliveActivity(before)
+    }
+
+    private suspend fun awaitKeepAliveActivity(before: Long): Boolean {
         // Locally wait up to KEEPALIVE_REPLY_TIMEOUT_MS for the inbound-activity
         // timestamp to advance (a reply OR any reader byte). "No inbound activity
         // within the budget" IS the liveness question, and it leaves the promise
@@ -946,12 +958,11 @@ internal class RealSshSession(
                 if (exit != 0) {
                     val stderr = runCatching {
                         runInterruptible(Dispatchers.IO) {
-                            runTransferStepWithStallTimeout(
+                            readTransferStderrCappedBlocking(
+                                input = command.errorStream,
                                 operation = "reading remote `cat` stderr",
                                 timeoutMs = downloadStallTimeoutMs,
-                            ) {
-                                command.errorStream.readBytes().toString(Charsets.UTF_8)
-                            }
+                            )
                         }
                     }.getOrDefault("").trim()
                     // `cat` on a missing/unreadable file exits non-zero; map a
@@ -1184,7 +1195,13 @@ internal class RealSshSession(
             val exit = command!!.exitStatus ?: -1
             if (exit != 0) {
                 val stderr = runCatching {
-                    command!!.errorStream.readBytes().toString(Charsets.UTF_8)
+                    runInterruptible(Dispatchers.IO) {
+                        readTransferStderrCappedBlocking(
+                            input = command!!.errorStream,
+                            operation = "reading remote upload `cat` stderr",
+                            timeoutMs = uploadStallTimeoutMs,
+                        )
+                    }
                 }.getOrDefault("")
                 throw SshException(
                     "Remote `cat` exited with status $exit while writing $tempRemotePath: ${stderr.trim()}",
@@ -1325,6 +1342,32 @@ internal class RealSshSession(
             output.flush()
         }
         return total
+    }
+
+    private fun readTransferStderrCappedBlocking(
+        input: InputStream,
+        operation: String,
+        timeoutMs: Long,
+    ): String {
+        val buffer = ByteArray(4 * 1024)
+        val out = java.io.ByteArrayOutputStream()
+        var total = 0
+        input.use {
+            while (total < TRANSFER_STDERR_MAX_BYTES) {
+                if (Thread.interrupted()) throw InterruptedException("SSH transfer stderr read interrupted")
+                val limit = minOf(buffer.size, TRANSFER_STDERR_MAX_BYTES - total)
+                val read = runTransferStepWithStallTimeout(operation, timeoutMs) {
+                    it.read(buffer, 0, limit)
+                }
+                if (read < 0) {
+                    return out.toString(Charsets.UTF_8.name())
+                }
+                out.write(buffer, 0, read)
+                total += read
+            }
+        }
+        return out.toString(Charsets.UTF_8.name()) +
+            "\n[stderr truncated after $TRANSFER_STDERR_MAX_BYTES bytes]"
     }
 
     private fun <T> runTransferStepWithStallTimeout(
@@ -1778,6 +1821,13 @@ internal const val UPLOAD_STALL_TIMEOUT_MS: Long = 60_000L
  * wait that makes no progress for this long is treated as a wedged transfer.
  */
 internal const val DOWNLOAD_STALL_TIMEOUT_MS: Long = 60_000L
+
+/**
+ * Maximum stderr bytes captured from transfer helper commands (`cat` upload /
+ * download). Diagnostics stay useful while a noisy or malicious remote cannot
+ * grow memory unbounded when reporting a non-zero transfer exit.
+ */
+private const val TRANSFER_STDERR_MAX_BYTES: Int = 64 * 1024
 
 /**
  * Wall-clock ceiling for removing a partial upload's temp file after a failed

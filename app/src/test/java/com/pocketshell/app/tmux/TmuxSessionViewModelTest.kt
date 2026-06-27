@@ -38,6 +38,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.core.tmux.TmuxClientException
@@ -63,6 +64,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
@@ -5999,6 +6001,59 @@ class TmuxSessionViewModelTest {
             vm.panes.value.single().terminalState,
         )
     }
+
+    @Test
+    fun terminalSurfaceFailureClearsProducerClientWhenAttachProducerFailsSoReconcileRetries() =
+        runTest(scheduler) {
+            val vm = newVm()
+            val backingClient = FakeTmuxClient()
+            val client = OutputFailingTmuxClient(backingClient)
+            vm.attachClientForTest(client)
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+            )
+            advanceUntilIdle()
+
+            val clientIdentity = System.identityHashCode(client)
+            assertEquals(
+                "precondition: pane producer starts bound to the live client",
+                clientIdentity,
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            val originalState = vm.panes.value.single().terminalState
+
+            client.failOutputFor = true
+            vm.reportTerminalSurfaceFailureForTest(
+                paneId = "%0",
+                cause = RuntimeException("surface reset"),
+            )
+            advanceUntilIdle()
+
+            assertNull(
+                "failed terminal producer reattach must clear the client binding so " +
+                    "the next reconcile retries instead of assuming the producer is live",
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            assertNotSame(
+                "surface failure still replaces the local TerminalSurfaceState",
+                originalState,
+                vm.panes.value.single().terminalState,
+            )
+
+            client.failOutputFor = false
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "a later reconcile must retry and restore the producer-client binding",
+                clientIdentity,
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertFalse(backingClient.disconnectedSignal.value)
+        }
 
     @Test
     fun repeatedTerminalSurfaceFailuresStopAtErrorStateInsteadOfReconnectStorm() = runTest(scheduler) {
@@ -16731,6 +16786,17 @@ class TmuxSessionViewModelTest {
         override suspend fun delete(host: com.pocketshell.core.storage.entity.HostEntity) =
             error("not used")
         override suspend fun deleteById(id: Long) = error("not used")
+    }
+
+    private class OutputFailingTmuxClient(
+        private val delegate: FakeTmuxClient,
+    ) : TmuxClient by delegate {
+        var failOutputFor: Boolean = false
+
+        override fun outputFor(paneId: String): Flow<ControlEvent.Output> {
+            if (failOutputFor) throw RuntimeException("outputFor failed")
+            return delegate.outputFor(paneId)
+        }
     }
 
     /**

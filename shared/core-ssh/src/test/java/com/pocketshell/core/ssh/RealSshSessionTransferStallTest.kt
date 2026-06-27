@@ -95,6 +95,42 @@ class RealSshSessionTransferStallTest {
         }
     }
 
+    @Test
+    fun `upload non-zero stderr is byte capped instead of reading forever`() = runBlocking {
+        val upload = NonZeroUploadCommand(InfiniteStderrInputStream())
+        val client = ScriptedClient { command ->
+            when {
+                command.startsWith("cat > ") -> upload
+                command.startsWith("rm -f ") -> CompletedCommand(stdout = { "" })
+                else -> error("unexpected command: $command")
+            }
+        }
+        val session = RealSshSession(client, uploadStallTimeoutMs = 120L)
+
+        try {
+            val thrown = withTimeout(5_000L) {
+                try {
+                    session.uploadStream(
+                        input = ByteArrayInputStream(byteArrayOf(1, 2, 3)),
+                        length = 3L,
+                        name = "bad.bin",
+                        remotePath = "/tmp/bad.bin",
+                    )
+                    throw AssertionError("non-zero upload cat must fail")
+                } catch (e: SshException) {
+                    e
+                }
+            }
+
+            assertTrue(
+                "upload stderr should be capped and visibly truncated: ${thrown.message}",
+                thrown.message?.contains("stderr truncated after") == true,
+            )
+        } finally {
+            session.close()
+        }
+    }
+
     private class ScriptedClient(
         private val commandFactory: (String) -> Session.Command,
     ) : SSHClient() {
@@ -142,6 +178,21 @@ class RealSshSessionTransferStallTest {
         override fun getExitErrorMessage(): String? = null
         override fun getExitSignal(): Signal? = null
         override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+    }
+
+    private class NonZeroUploadCommand(
+        private val stderr: InputStream,
+    ) : FakeChannel(), Session.Command {
+        private val bytes = ByteArrayOutputStream()
+
+        override fun getOutputStream(): OutputStream = bytes
+        override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getErrorStream(): InputStream = stderr
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 1
         override fun getExitWasCoreDumped(): Boolean = false
         override fun signal(signal: Signal) = Unit
     }
@@ -224,6 +275,17 @@ class RealSshSessionTransferStallTest {
             val count = minOf(bytesPerChunk, len)
             b.fill(0x5a, off, off + count)
             emitted += 1
+            return count
+        }
+    }
+
+    private class InfiniteStderrInputStream : InputStream() {
+        override fun read(): Int = 'x'.code
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val count = len
+            b.fill('x'.code.toByte(), off, off + count)
             return count
         }
     }

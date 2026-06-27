@@ -72,7 +72,37 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `diagnostics distinguish within-grace foreground from elapsed teardown`() = runTest {
+    fun `foreground after deadline runs elapsed action before foreground when timer has not resumed`() = runTest {
+        val events = mutableListOf<String>()
+        val controller = controller(events)
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis)
+
+        assertFalse(
+            "deadline has passed even though the timer continuation has not resumed",
+            controller.isGracePendingForTest(),
+        )
+
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            listOf("teardown", "foreground:resumedWithinGrace=false"),
+            events,
+        )
+
+        runCurrent()
+        assertEquals(
+            "the cancelled timer must not run the elapsed action a second time",
+            listOf("teardown", "foreground:resumedWithinGrace=false"),
+            events,
+        )
+    }
+
+    @Test
+    fun `diagnostics distinguish within-grace foreground from elapsed deadline`() = runTest {
         val diagnostics = installRecordingDiagnosticSink()
         try {
             val controller = BackgroundGraceController(
@@ -113,7 +143,8 @@ class BackgroundGraceControllerTest {
             runCurrent()
 
             val elapsed = diagnostics.eventsNamed("background_grace_elapsed").single()
-            assertEquals(true, elapsed.fields["teardown"])
+            assertEquals(true, elapsed.fields["deadlineElapsed"])
+            assertEquals(null, elapsed.fields["teardown"])
             assertEquals("grace_timeout", elapsed.fields["trigger"])
             val postGraceForeground = diagnostics.eventsNamed("background_grace_foreground").last()
             assertEquals(false, postGraceForeground.fields["resumedWithinGrace"])
@@ -121,7 +152,7 @@ class BackgroundGraceControllerTest {
             val allGraceTrail = diagnostics.eventsNamed("cause_trail")
                 .filter { it.fields["stage"] == "background_grace" }
             assertEquals(
-                listOf("start", "foreground_preserved", "start", "elapsed_teardown", "foreground_reattach_needed"),
+                listOf("start", "foreground_preserved", "start", "elapsed", "foreground_reattach_needed"),
                 allGraceTrail.map { it.fields["outcome"] },
             )
             assertEquals("post_grace", allGraceTrail.last().fields["cause"])
@@ -1338,6 +1369,7 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "foreground:resumedWithinGrace=$resumedWithinGrace"
             },
+            nowMillis = { currentTime },
         )
 
     private fun terminalNetworkChange(

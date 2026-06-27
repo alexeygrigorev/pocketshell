@@ -7,7 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * App-scoped, DI-ready SSH connection lease pool keyed by host and credential
@@ -38,8 +39,8 @@ public class SshLeaseManager(
     // is NOT a kotlinx suspension point, so a wedged/slow peer can pin the
     // acquire even when the caller wraps it in `withTimeout` — `withTimeout`
     // cancels the coroutine but the cancellation cannot interrupt the in-flight
-    // blocking read. This bound runs the connect as a child the lease can
-    // CANCEL on expiry; cancelling that child propagates into
+    // blocking read. This bound runs the connect as a manager-owned dial job the
+    // lease can CANCEL on expiry; cancelling that job propagates into
     // `SshConnection.connect`'s `invokeOnCancellation`, which DISCONNECTS the
     // half-open transport and unparks the blocking read (the same close-to-heal
     // trick `SshFolderListGateway.execBounded` uses for reads). Without this the
@@ -87,6 +88,8 @@ public class SshLeaseManager(
     // edge (transport gone), so a fresh dial after a close re-emits `Connected`.
     private val lastPublishedState: MutableMap<SshLeaseKey, SshLeaseConnectionState> =
         hashMapOf()
+    private val connectScope = CoroutineScope(SupervisorJob() + connectTimeoutContext)
+    private val connectAbortScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     public val stateEvents: SharedFlow<SshLeaseStateEvent> = _stateEvents.asSharedFlow()
 
@@ -288,8 +291,8 @@ public class SshLeaseManager(
      * NOT a kotlinx suspension point. A wedged/slow peer can therefore pin the
      * acquire indefinitely: ordinary coroutine cancellation (what `withTimeout`
      * does) unparks at the next suspension point, but the in-flight blocking
-     * read has none. We run the dial as a CHILD coroutine and, on bound expiry,
-     * CANCEL that child. Cancelling it propagates into
+     * read has none. We run the dial as a manager-owned job and, on bound expiry,
+     * CANCEL that job. Cancelling it propagates into
      * [SshConnection.connect]'s `suspendCancellableCoroutine`, whose
      * `invokeOnCancellation` disconnects the half-open client — closing the
      * socket is what tears down the transport and unparks the blocking read
@@ -300,18 +303,18 @@ public class SshLeaseManager(
      *
      * On the healthy path the child completes well within the bound and the
      * timeout coroutine is cancelled, so this adds no latency. Cancellation of
-     * the acquire itself still flows straight through (the child is cancelled
-     * with the parent), preserving the #620 coalescing cleanup contract.
+     * the acquire itself still schedules cancellation of the owned dial job,
+     * preserving the #620 coalescing cleanup contract.
      */
     private suspend fun boundedConnect(target: SshLeaseTarget): Result<SshSession> =
         withContext(connectTimeoutContext) {
-            // Dial as a child of this withContext scope. The connector already
-            // returns Result, so a normal connect failure is a value, not a
-            // thrown child failure; a defensively caught throw is folded into a
-            // failure Result too so a misbehaving connector can never crash the
-            // lease scope.
-            val dial = async {
-                try {
+            // Dial outside this withContext's structured child tree. Timeout
+            // expiry must be able to return even when the connector's cancellation
+            // cleanup blocks inside disconnect(); a regular child would keep the
+            // parent scope from completing until that cleanup returned.
+            val abandoned = AtomicBoolean(false)
+            val dial = connectScope.async {
+                val result = try {
                     connector.connect(target)
                 } catch (ce: kotlinx.coroutines.CancellationException) {
                     throw ce // never swallow cancellation
@@ -320,20 +323,31 @@ public class SshLeaseManager(
                     // failure Result must not crash the lease scope.
                     Result.failure(t)
                 }
-            }
-            withTimeoutOrNull(connectTimeoutMillis) { dial.await() }
-                ?: run {
-                    // Stop awaiting the wedged handshake so this coroutine can
-                    // resume; cancelling the child fires
-                    // SshConnection.connect's invokeOnCancellation, which
-                    // disconnects the half-open transport and unparks the
-                    // blocking read. NonCancellable + cancelAndJoin guards the
-                    // cleanup so the disconnect actually runs and the child is
-                    // fully settled (never left dangling) before we return,
-                    // even if the acquire itself is racing cancellation.
-                    withContext(NonCancellable) { dial.cancelAndJoin() }
-                    Result.failure(SshLeaseConnectTimeoutException(target.leaseKey, connectTimeoutMillis))
+                if (abandoned.get()) {
+                    result.getOrNull()?.close()
                 }
+                result
+            }
+            try {
+                withTimeoutOrNull(connectTimeoutMillis) { dial.await() }
+                    ?: run {
+                        // Stop awaiting the wedged handshake so this coroutine can
+                        // resume; cancelling the detached dial fires
+                        // SshConnection.connect's invokeOnCancellation, which
+                        // disconnects the half-open transport and unparks the
+                        // blocking read. Do NOT cancel on this coroutine: a
+                        // blocking cancellation handler would make the timeout
+                        // path hang. Fire it from the abort scope and return.
+                        abandoned.set(true)
+                        connectAbortScope.launch { dial.cancel() }
+                        Result.failure(SshLeaseConnectTimeoutException(target.leaseKey, connectTimeoutMillis))
+                    }
+            } finally {
+                if (!dial.isCompleted) {
+                    abandoned.set(true)
+                    connectAbortScope.launch { dial.cancel() }
+                }
+            }
         }
 
     /**
@@ -498,6 +512,8 @@ public class SshLeaseManager(
         }
         pendingToWake.forEach { it.complete(null) }
         toClose.forEach { it.close() }
+        connectScope.cancel()
+        connectAbortScope.cancel()
     }
 
     private suspend fun release(key: SshLeaseKey, entryId: Long) {

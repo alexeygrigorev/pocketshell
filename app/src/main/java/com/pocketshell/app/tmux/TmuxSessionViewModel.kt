@@ -1192,6 +1192,10 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun currentClientIdentityForTest(): Int? =
         clientRef?.let { System.identityHashCode(it) }
 
+    @androidx.annotation.VisibleForTesting
+    internal fun paneProducerClientIdentityForTest(paneId: String): Int? =
+        paneProducerClients[paneId]?.let { System.identityHashCode(it) }
+
     /**
      * Issue #895 (switch-while-black) test seam: force the inline connection
      * state to [ConnectionState.Attaching] so a regression test can drive a
@@ -9024,6 +9028,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // closed client must be replaced.
                 if (client != null && paneProducerClients[p.paneId] !== client) {
                     paneProducerJobs.remove(p.paneId)?.cancel()
+                    paneProducerClients.remove(p.paneId)
                     paneOutputActivityJobs.remove(p.paneId)?.cancel()
                     panePortDetectorJobs.remove(p.paneId)?.cancel()
                     paneInputJobs.remove(p.paneId)?.cancel()
@@ -9182,6 +9187,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // (re)attached — cold attach, warm switch, surface recreate.
             startPortDetectionForPane(paneId = paneId, client = client)
         }.onFailure { cause ->
+            paneProducerClients.remove(paneId)
             Log.w(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-terminal-producer-attach-failed pane=$paneId",
@@ -9194,6 +9200,7 @@ public class TmuxSessionViewModel @Inject constructor(
         for (pane in paneRows.values) {
             val paneId = pane.paneId
             paneProducerJobs.remove(paneId)?.cancel()
+            paneProducerClients.remove(paneId)
             paneOutputActivityJobs.remove(paneId)?.cancel()
             panePortDetectorJobs.remove(paneId)?.cancel()
             paneInputJobs.remove(paneId)?.cancel()
@@ -9493,6 +9500,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
         paneProducerJobs.remove(paneId)?.cancel()
+        paneProducerClients.remove(paneId)
         paneOutputActivityJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
@@ -9562,6 +9570,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val existing = paneRows[paneId] ?: return
         paneSurfaceRecoveryTimestamps.remove(paneId)
         paneProducerJobs.remove(paneId)?.cancel()
+        paneProducerClients.remove(paneId)
         paneOutputActivityJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()

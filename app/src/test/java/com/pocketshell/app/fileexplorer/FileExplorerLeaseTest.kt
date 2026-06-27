@@ -4,6 +4,7 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.RemoteListing
+import com.pocketshell.core.ssh.SshExecTimeoutException
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
@@ -97,6 +98,29 @@ class FileExplorerLeaseTest {
         leaseManager.close()
     }
 
+    @Test
+    fun browseRetriesOnceWhenLeaseExecTimesOutAsStale() = runBlocking {
+        val wedged = FakeSshSession(
+            listDirectoryFailure = SshExecTimeoutException("ls", 30_000L),
+        )
+        val healthy = FakeSshSession()
+        val connector = SequenceConnector(listOf(wedged, healthy))
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+
+        assertEquals("/srv", ready.currentPath)
+        assertEquals("stale timeout must evict and retry on a fresh lease", 2, connector.connectCount)
+        assertTrue("timed-out transport must be evicted", wedged.closed)
+        assertFalse("healthy retry transport must remain warm", healthy.closed)
+        leaseManager.close()
+    }
+
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
         predicate: (FileExplorerUiState.Ready) -> Boolean = { true },
     ): FileExplorerUiState.Ready {
@@ -136,12 +160,26 @@ class FileExplorerLeaseTest {
         }
     }
 
+    private class SequenceConnector(
+        private val sessions: List<FakeSshSession>,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val session = sessions.getOrNull(connectCount) ?: sessions.last()
+            connectCount += 1
+            return Result.success(session)
+        }
+    }
+
     /**
      * Minimal in-memory remote filesystem: any directory lists one subfolder +
      * one file; `cd … && pwd -P` echoes the requested absolute path so
      * canonicalize succeeds.
      */
-    private class FakeSshSession : SshSession {
+    private class FakeSshSession(
+        private val listDirectoryFailure: Throwable? = null,
+    ) : SshSession {
         var closed: Boolean = false
 
         override val isConnected: Boolean
@@ -157,8 +195,9 @@ class FileExplorerLeaseTest {
             }
         }
 
-        override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing =
-            RemoteListing(
+        override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing {
+            listDirectoryFailure?.let { throw it }
+            return RemoteListing(
                 entries = listOf(
                     RemoteEntry(
                         name = "sub",
@@ -175,6 +214,7 @@ class FileExplorerLeaseTest {
                 ),
                 truncated = false,
             )
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
 

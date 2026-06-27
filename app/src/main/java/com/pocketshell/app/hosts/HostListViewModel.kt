@@ -47,6 +47,8 @@ import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,10 +61,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.IdentityHashMap
 import javax.inject.Inject
@@ -1592,13 +1594,16 @@ class HostListViewModel internal constructor(
     private fun expectedPocketshellVersion(): String = currentVersionName().orEmpty()
 
     private fun closeBootstrapSession() {
-        bootstrapSession?.let { closeSession(it) }
+        val session = bootstrapSession ?: return
         bootstrapSession = null
+        closeSession(session)
     }
 
     private fun closeSession(session: SshSession) {
-        runCatching {
-            runBlocking { sessionOpener.close(session) }
+        CoroutineScope(Dispatchers.IO).launch {
+            withTimeoutOrNull(BOOTSTRAP_SESSION_CLOSE_TIMEOUT_MS) {
+                runCatching { sessionOpener.close(session) }
+            }
         }
     }
 
@@ -1723,6 +1728,7 @@ class HostListViewModel internal constructor(
     private companion object {
         /** 24-hour cache window — re-probe after this. */
         const val BOOTSTRAP_CACHE_MS: Long = 24L * 60L * 60L * 1000L
+        const val BOOTSTRAP_SESSION_CLOSE_TIMEOUT_MS: Long = 3_000L
     }
 
     private fun probeLockFor(hostId: Long): Mutex =
@@ -1824,10 +1830,12 @@ internal class LeaseBackedHostSessionOpener(
             }
             lease
         }
-        if (lease != null) {
-            lease.release()
-        } else {
-            session.close()
+        withContext(Dispatchers.IO) {
+            if (lease != null) {
+                lease.release()
+            } else {
+                session.close()
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -20,6 +21,8 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * EPIC #687 (lease-acquire bounding slice) — pins the bound that stops a
@@ -33,7 +36,7 @@ import java.io.InputStream
  * `PsFolderProbe` and even the downstream reconcile timeout never fires.
  *
  * The fix: the lease bounds the OWNED connect itself (`connectTimeoutMillis`),
- * running it as a child it can cancel; cancelling that child propagates into
+ * running it as a manager-owned job it can cancel; cancelling that job propagates into
  * `SshConnection.connect`'s `invokeOnCancellation`, which disconnects the
  * half-open transport and unparks the blocking read. On expiry the acquire
  * surfaces a bounded [SshLeaseConnectTimeoutException] instead of hanging.
@@ -71,10 +74,39 @@ class SshLeaseAcquireBoundCharacterizationTest {
             "the failure is the bounded timeout type, got ${error?.javaClass?.name}",
             error is SshLeaseConnectTimeoutException,
         )
-        // The bound CANCELS the child connect, which is the signal that
+        // The bound CANCELS the owned connect job, which is the signal that
         // propagates into SshConnection.connect's invokeOnCancellation to
         // disconnect the half-open transport and unpark the blocking read.
-        assertTrue("the wedged connect child was cancelled to unpark the read", connector.connectCancelled)
+        assertTrue("the wedged connect job was cancelled to unpark the read", connector.connectCancelled)
+    }
+
+    @Test
+    fun `a wedged handshake whose cancellation cleanup blocks still returns the bounded failure`() = runTest {
+        val connector = BlockingCancelCleanupConnector()
+        val manager = leaseManager(connector, connectTimeoutMillis = 2_000)
+
+        try {
+            val acquire = async { manager.acquire(TARGET) }
+            runCurrent()
+            assertTrue("the lease entered its owned connect", connector.connectEntered)
+
+            advanceTimeBy(2_001)
+            runCurrent()
+
+            assertTrue(
+                "acquire must return on the lease timeout even while cancellation cleanup is blocked",
+                acquire.isCompleted,
+            )
+            val result = acquire.await()
+            assertTrue(result.isFailure)
+            assertTrue(result.exceptionOrNull() is SshLeaseConnectTimeoutException)
+            assertTrue(
+                "the cancellation cleanup should have been started off the acquire path",
+                connector.cleanupEntered.await(5, TimeUnit.SECONDS),
+            )
+        } finally {
+            connector.allowCleanupToFinish.countDown()
+        }
     }
 
     @Test
@@ -174,6 +206,21 @@ class SshLeaseAcquireBoundCharacterizationTest {
                 throw e
             }
         }
+    }
+
+    private class BlockingCancelCleanupConnector : SshLeaseConnector {
+        @Volatile var connectEntered: Boolean = false
+        val cleanupEntered = CountDownLatch(1)
+        val allowCleanupToFinish = CountDownLatch(1)
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> =
+            suspendCancellableCoroutine { continuation ->
+                connectEntered = true
+                continuation.invokeOnCancellation {
+                    cleanupEntered.countDown()
+                    allowCleanupToFinish.await(30, TimeUnit.SECONDS)
+                }
+            }
     }
 
     private class ImmediateLeaseConnector(private val session: FakeSshSession) : SshLeaseConnector {

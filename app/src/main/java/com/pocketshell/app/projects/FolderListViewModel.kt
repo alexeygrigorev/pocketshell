@@ -41,6 +41,7 @@ import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -61,7 +62,6 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -2757,9 +2757,7 @@ class FolderListViewModel internal constructor(
         emitJob = null
         warmJob?.cancel()
         warmReleaseJob?.cancel()
-        runBlocking {
-            releaseWarmLease()
-        }
+        releaseWarmLeaseAsync()
         watchedFoldersJob?.cancel()
         lifecycleObserver?.let { observer ->
             // `removeObserver` is main-thread-affine; `onCleared` runs on
@@ -2823,11 +2821,29 @@ class FolderListViewModel internal constructor(
     }
 
     private suspend fun releaseWarmLease() {
-        withContext(NonCancellable) {
-            val lease = warmLease ?: return@withContext
-            warmLease = null
-            warmSessionReady.value = false
-            lease.release()
+        val lease = takeWarmLeaseForRelease() ?: return
+        releaseWarmLeaseBounded(lease)
+    }
+
+    private fun releaseWarmLeaseAsync() {
+        val lease = takeWarmLeaseForRelease() ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            releaseWarmLeaseBounded(lease)
+        }
+    }
+
+    private fun takeWarmLeaseForRelease(): SshLease? {
+        val lease = warmLease ?: return null
+        warmLease = null
+        warmSessionReady.value = false
+        return lease
+    }
+
+    private suspend fun releaseWarmLeaseBounded(lease: SshLease) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) {
+                lease.release()
+            }
         }
     }
 
@@ -2885,6 +2901,7 @@ class FolderListViewModel internal constructor(
         // on a stale foreground/resume ([HostTreeModel.RECONCILE_STALENESS_MS])
         // and on the explicit pull-to-refresh swipe — never on a tight loop.
         const val WARM_RELEASE_DELAY_MS: Long = 10_000L
+        const val WARM_LEASE_RELEASE_TIMEOUT_MS: Long = 3_000L
 
         /**
          * Epic #821 slice C (issue #837): bound on how long the cold-start

@@ -343,6 +343,11 @@ class App : Application() {
         // preserve a user-visible terminal while the OS sees an explicit
         // foreground service + wakelock.
         sessionServiceController.observeActiveSessions()
+        graceLifecycleScope.launch {
+            sessionServiceController.notificationStopRequests().collect {
+                backgroundGraceController.onSessionHoldStoppedByNotification()
+            }
+        }
         StartupTiming.mark("session-service-lifecycle-observed")
 
         // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
@@ -991,6 +996,8 @@ internal class BackgroundGraceController(
     private var graceJob: Job? = null
     private var backgroundCycleId: Long = 0L
     private var backgroundStartedAtMs: Long = 0L
+    private var backgrounded: Boolean = false
+    private var holdStopTeardownDispatched: Boolean = false
 
     /**
      * True once [onGraceElapsed] has actually run for the current
@@ -1014,9 +1021,12 @@ internal class BackgroundGraceController(
         // A second ON_STOP without an intervening ON_START should not
         // restart the window — keep the original deadline.
         if (graceJob?.isActive == true) return
+        if (backgrounded && teardownFired) return
         backgroundCycleId += 1L
         backgroundStartedAtMs = nowMillis()
+        backgrounded = true
         teardownFired = false
+        holdStopTeardownDispatched = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
         DiagnosticEvents.record(
             "app",
@@ -1067,6 +1077,7 @@ internal class BackgroundGraceController(
         graceJob = null
         val resumedWithinGrace = pending?.isActive == true && !teardownFired
         val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
+        backgrounded = false
         if (resumedWithinGrace) {
             pending?.cancel()
         }
@@ -1103,6 +1114,39 @@ internal class BackgroundGraceController(
                 pending?.join()
             }
             onForeground(resumedWithinGrace)
+        }
+    }
+
+    fun onSessionHoldStoppedByNotification() {
+        if (!backgrounded || !teardownFired || graceJob?.isActive == true) return
+        if (holdStopTeardownDispatched) return
+        holdStopTeardownDispatched = true
+        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
+        Log.i(
+            GRACE_LIFECYCLE_TAG,
+            "grace-window-session-hold-stop-after-elapsed teardown elapsedMs=$elapsedMs",
+        )
+        DiagnosticEvents.record(
+            "app",
+            "background_grace_session_hold_stop",
+            "teardown" to true,
+            "elapsedMs" to elapsedMs,
+            "millis" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
+            "source" to "session_notification",
+            "trigger" to "stop_action",
+        )
+        ReconnectCauseTrail.record(
+            stage = "background_grace",
+            outcome = "session_hold_stop_teardown",
+            cause = "session_notification_stop",
+            trigger = "stop_action",
+            "elapsedMs" to elapsedMs,
+            "graceMs" to graceMillis,
+            "backgroundCycleId" to backgroundCycleId,
+        )
+        scope.launch {
+            onGraceElapsed()
         }
     }
 

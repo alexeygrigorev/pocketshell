@@ -12,8 +12,11 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -39,10 +42,13 @@ class SessionServiceController @Inject constructor(
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val _snapshot = MutableStateFlow(SessionConnectionSnapshot.Empty)
+    private val _notificationStopRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     private var observeJob: Job? = null
     private var holdStoppedByUser: Boolean = false
 
     fun flowOfSnapshot(): StateFlow<SessionConnectionSnapshot> = _snapshot.asStateFlow()
+
+    fun notificationStopRequests(): SharedFlow<Unit> = _notificationStopRequests.asSharedFlow()
 
     fun observeActiveSessions() {
         if (observeJob?.isActive == true) return
@@ -92,9 +98,11 @@ class SessionServiceController @Inject constructor(
         !holdStoppedByUser && currentSnapshot().isHoldingConnection
 
     fun stopHoldingFromNotification(requestServiceStop: Boolean = true) {
+        if (holdStoppedByUser) return
         if (!currentSnapshot().isHoldingConnection) return
         holdStoppedByUser = true
         _snapshot.value = SessionConnectionSnapshot.Empty
+        _notificationStopRequests.tryEmit(Unit)
         if (requestServiceStop) {
             SessionConnectionService.stop(appContext)
         }

@@ -7,6 +7,7 @@ import com.pocketshell.app.tmux.FakeTmuxClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runCurrent
@@ -134,6 +135,12 @@ class SessionServiceControllerTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
         val controller = controller(activeClients, testScheduler)
+        val stopRequests = mutableListOf<Unit>()
+        val stopCollector = launch {
+            controller.notificationStopRequests().collect {
+                stopRequests += Unit
+            }
+        }
 
         controller.observeActiveSessions()
         runCurrent()
@@ -159,6 +166,19 @@ class SessionServiceControllerTest {
         val stopped = shadow.nextStartedService
         assertNotNull(stopped)
         assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
+        assertEquals(
+            "notification Stop must notify App so a post-grace background hold can enter teardown",
+            1,
+            stopRequests.size,
+        )
+
+        controller.stopHoldingFromNotification()
+        runCurrent()
+        assertEquals(
+            "duplicate Stop delivery must not duplicate the App teardown event",
+            1,
+            stopRequests.size,
+        )
 
         client.disconnectedSignal.value = true
         runCurrent()
@@ -169,6 +189,7 @@ class SessionServiceControllerTest {
         assertNotNull("a fresh live-client transition after all-clear may start the hold again", restarted)
         assertEquals(SessionConnectionService.ACTION_START, restarted?.action)
         assertTrue(controller.isHoldingSessionConnection())
+        stopCollector.cancel()
     }
 
     @Test

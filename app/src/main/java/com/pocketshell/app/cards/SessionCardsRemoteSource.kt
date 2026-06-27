@@ -1,8 +1,15 @@
 package com.pocketshell.app.cards
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -15,6 +22,17 @@ import javax.inject.Inject
  * ticks back over the existing warm [SshSession] (D21: no new connection).
  */
 public class SessionCardsRemoteSource @Inject constructor() {
+    private var execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS
+    private var execDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    internal constructor(execReadTimeoutMs: Long) : this() {
+        this.execReadTimeoutMs = execReadTimeoutMs
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setExecDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        execDispatcher = dispatcher
+    }
 
     public data class Feed(
         val session: String,
@@ -86,11 +104,11 @@ public class SessionCardsRemoteSource @Inject constructor() {
         val target = tmuxSessionName.trim()
         if (target.isEmpty()) return Feed.Empty
         return try {
-            val result = session.exec(
+            val result = session.execCardRpcBounded(
                 PocketshellCommand.wrap(
                     "push get --json --session ${shellQuote(target)}",
                 ),
-            )
+            ) ?: return Feed.Empty
             if (result.exitCode != 0) return Feed.Empty
             parseFeed(result.stdout)
         } catch (e: CancellationException) {
@@ -115,13 +133,13 @@ public class SessionCardsRemoteSource @Inject constructor() {
         if (target.isEmpty() || cardId.isBlank() || itemId.isBlank()) return false
         val doneFlag = if (checked) "--done" else "--undone"
         return try {
-            val result = session.exec(
+            val result = session.execCardRpcBounded(
                 PocketshellCommand.wrap(
                     "push check --id ${shellQuote(cardId)} " +
                         "--item ${shellQuote(itemId)} " +
                         "$doneFlag --session ${shellQuote(target)}",
                 ),
-            )
+            ) ?: return false
             result.exitCode == 0
         } catch (e: CancellationException) {
             throw e
@@ -145,12 +163,12 @@ public class SessionCardsRemoteSource @Inject constructor() {
         if (target.isEmpty() || cardId.isBlank()) return false
         val readFlag = if (read) "--read" else "--unread"
         return try {
-            val result = session.exec(
+            val result = session.execCardRpcBounded(
                 PocketshellCommand.wrap(
                     "push read --id ${shellQuote(cardId)} " +
                         "$readFlag --session ${shellQuote(target)}",
                 ),
-            )
+            ) ?: return false
             result.exitCode == 0
         } catch (e: CancellationException) {
             throw e
@@ -170,10 +188,12 @@ public class SessionCardsRemoteSource @Inject constructor() {
     private fun JSONArray?.toCards(): List<SessionCard> {
         if (this == null) return emptyList()
         val out = ArrayList<SessionCard>(length())
+        val seenIds = LinkedHashSet<String>()
         for (i in 0 until length()) {
             val row = optJSONObject(i) ?: continue
             val id = row.optString("id").takeIf { it.isNotBlank() } ?: continue
             val type = row.optString("type").takeIf { it.isNotBlank() } ?: continue
+            if (!seenIds.add(id)) continue
             val title = row.optString("title", "").takeIf { it.isNotBlank() }
             val createdAt = row.optString("created_at", "").takeIf { it.isNotBlank() }
             val updatedAt = row.optString("updated_at", "").takeIf { it.isNotBlank() }
@@ -271,8 +291,22 @@ public class SessionCardsRemoteSource @Inject constructor() {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
+    private suspend fun SshSession.execCardRpcBounded(command: String): ExecResult? =
+        withContext(execDispatcher) {
+            val deferred = async { exec(command) }
+            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
+                ?: run {
+                    deferred.cancel()
+                    withContext(NonCancellable) {
+                        runCatching { close() }
+                    }
+                    null
+                }
+        }
+
     public companion object {
         public const val TYPE_CHECKLIST: String = "checklist"
         public const val TYPE_NOTE: String = "note"
+        private const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
     }
 }

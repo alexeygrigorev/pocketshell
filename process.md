@@ -352,9 +352,13 @@ Minimum pre-push gate:
   compile for touched Android/Kotlin modules, and the focused unit/instrumented
   tests that cover the changed behavior.
 - For UI, terminal, SSH, tmux, share, voice, update, or release flows, the gate
-  must include the fastest reliable local proof available: focused JVM tests
-  first, then emulator/Docker only for the user-facing path that actually needs
-  it. Do not replace a missing local proof with "CI will tell us."
+  must include the fastest reliable local proof available, starting with focused
+  JVM tests. Do not start a local emulator as routine verification: the
+  authoritative connected/emulator gate is CI/CD. A local emulator run is allowed
+  only when we are debugging a CI/CD emulator failure or making a connected test
+  run correctly under the CI/CD emulator path. Do not replace a missing local
+  proof with "CI will tell us"; use non-emulator local evidence and the batched
+  CI/CD emulator run.
 - If a local focused check is infeasible, the orchestrator must write down why
   and what narrower evidence was used. That exception should be rare.
 
@@ -372,6 +376,10 @@ CI policy after issue-branch push:
   merged PRs naturally validates at the newest batch head. Run heavy PR-scoped
   evidence manually only when the changed area itself needs Docker/emulator
   proof before merge.
+- Do not use the developer workstation as a second emulator CI lane. Local
+  emulator runs are opt-in debugging tools for CI/CD compatibility only. Before
+  starting one, verify that no local AVD/qemu/connected-test run is already
+  active, and stop it when the debugging pass is done.
 - Plan against the GitHub Actions concurrency budget. This repo has 20
   concurrent jobs available; a full `Tests` workflow can occupy roughly four
   jobs, so about five PRs with running Actions can saturate the account. Do not
@@ -638,7 +646,7 @@ Parallelism is issue-scoped, not role-skipping:
 - Concurrent-agent cap: **up to 5 high-effort background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). Low-effort/explorer capacity may differ, but the default backlog lane uses high-effort agents and plans around five. When the cap is reached and more work is queued, prefer read-only research/Explore spikes (no filesystem contention, no CI pressure) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
 - Do not let the agent cap become an Actions cap violation. With the current 20-job GitHub Actions budget, five PRs running the full `Tests` workflow can saturate the account. Keep all five agents useful, but batch small compatible changes and avoid having all five produce independent CI-heavy PRs at the same time.
 - Push for parallelism actively: when an agent completes, the orchestrator's next step is normally "what else can dispatch right now?" not "wait for the next user message." Independent research (audits, spikes, library feasibility) is especially good for filling capacity because it doesn't compete for the AVD.
-- Emulator-touching work is the contention bottleneck, not the agent count itself. **Run every connected/emulator test through `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672). It (a) wraps the run in the shared AVD `flock` (`scripts/lib/avd-lock.sh`) and (b) builds + installs with a per-worktree `applicationIdSuffix` (`-PpocketshellAppIdSuffix=i<issue>`) so the APK installs as `com.pocketshell.app.i<issue>` and **coexists** with sibling agents' APKs on the one emulator instead of `adb install` SIGKILL-ing them mid-run. This is what makes parallel agents safe — prefer it over serializing. `--cleanup-suffixes` sweeps leftover `com.pocketshell.app.i*` (it spares the base package). A raw `./gradlew connectedDebugAndroidTest` (no wrapper) still races siblings; only fall back to it (with retry-once on a `Process crashed`/signal-9 SIGKILL, which is a sibling install, not an assertion failure) when the wrapper is unavailable. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
+- Emulator-touching work is the contention bottleneck, not the agent count itself. Do not start local emulator work for routine confidence; use CI/CD's batched emulator lane unless the task is explicitly debugging a CI/CD emulator failure or making a connected test run on CI/CD. When a local emulator run is justified, **run every connected/emulator test through `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672). It (a) wraps the run in the shared AVD `flock` (`scripts/lib/avd-lock.sh`) and (b) builds + installs with a per-worktree `applicationIdSuffix` (`-PpocketshellAppIdSuffix=i<issue>`) so the APK installs as `com.pocketshell.app.i<issue>` and **coexists** with sibling agents' APKs on the one emulator instead of `adb install` SIGKILL-ing them mid-run. This is what makes parallel agents safe — prefer it over serializing. `--cleanup-suffixes` sweeps leftover `com.pocketshell.app.i*` (it spares the base package). A raw `./gradlew connectedDebugAndroidTest` (no wrapper) still races siblings; only fall back to it (with retry-once on a `Process crashed`/signal-9 SIGKILL, which is a sibling install, not an assertion failure) when the wrapper is unavailable. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
 - For **parallel emulator+Docker journey lanes**, a single `agents` fixture on host port 2222 is shared state — two lanes corrupt each other's tmux. Run journey lanes through `scripts/connected-test.sh --pool --suffix i<issue> <gradle args>` (#724) instead: it self-allocates a full lane — a free emulator serial AND a distinct `agents` fixture port (`2222 2243 2244 2245`), each its own isolated container — so concurrent lanes claim distinct `(emulator, port)` fixtures and never collide. Warm/inspect/tear the fixture pool with `scripts/agents-pool.sh up|status|down [PORT...]`. Single-lane and CI runs (one emulator + `agents` on 2222) are unchanged when `--pool` is omitted. See [docs/testing.md](docs/testing.md#agents-fixture-pool--parallel-journey-lanes-issue-724) for the full pool detail.
 
 ### Choosing the right agent type
@@ -762,7 +770,9 @@ the same as one created by the raw commands above.
   new work.
 - Respect file ownership across parallel issues — the brief lists which
   files belong to other live issues and must not be touched.
-- Run connected/emulator tests through
+- Run connected/emulator tests locally only when the brief explicitly calls for
+  debugging CI/CD emulator behavior or making a CI-bound connected test pass.
+  In that case, run them through
   `scripts/connected-test.sh --suffix i<issue> <gradle args>` (#672) — it
   holds the shared AVD lock and installs your APK under a per-worktree
   `applicationId` (`com.pocketshell.app.i<issue>`) so you coexist with
@@ -787,8 +797,9 @@ the same as one created by the raw commands above.
 - Review inside the implementer's worktree (path provided in the brief).
   Do not pull the diff into `main` to inspect — that pollutes the
   orchestrator's checkout.
-- Run build, unit tests, and the emulator/Docker workbench from inside the
-  worktree. Run connected/emulator tests through
+- Run build and unit tests from inside the worktree. Run connected/emulator
+  tests locally only when the review is specifically about CI/CD emulator
+  behavior or a CI-bound connected test. In that case, run them through
   `scripts/connected-test.sh --suffix i<issue> <gradle args>` (#672) so your
   install coexists with sibling agents on the shared AVD instead of
   SIGKILL-ing them; a `Process crashed`/signal-9 with fewer tests than

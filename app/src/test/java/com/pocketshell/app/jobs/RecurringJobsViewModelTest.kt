@@ -2,22 +2,28 @@ package com.pocketshell.app.jobs
 
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
+import kotlin.math.max
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecurringJobsViewModelTest {
@@ -191,6 +197,113 @@ class RecurringJobsViewModelTest {
         )
     }
 
+    @Test
+    fun staleRefreshResultCannotOverwriteNewlyBoundSession() = runTest(scheduler) {
+        val oldListStarted = CompletableDeferred<Unit>()
+        val releaseOldList = CompletableDeferred<Unit>()
+        val oldSession = FakeSshSession(
+            pathAware("pocketshell jobs list --session 'alpha'") to ScriptedExec(
+                result = listOutput(id = 1, sessionName = "alpha"),
+                started = oldListStarted,
+                release = releaseOldList,
+                waitNonCancellable = true,
+            ),
+        )
+        val newSession = FakeSshSession(
+            pathAware("pocketshell jobs list --session 'bravo'") to listOutput(id = 2, sessionName = "bravo"),
+        )
+        val connector = DirectLeaseConnector(
+            "old.local" to oldSession,
+            "new.local" to newSession,
+        )
+        val viewModel = RecurringJobsViewModel(
+            remoteSource = remoteSource,
+            connector = connector,
+        )
+
+        viewModel.load(
+            hostId = 1L,
+            hostName = "Old",
+            hostname = "old.local",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key-old",
+            passphrase = null,
+            sessionName = "alpha",
+        )
+        advanceUntilIdle()
+        oldListStarted.await()
+
+        viewModel.load(
+            hostId = 2L,
+            hostName = "New",
+            hostname = "new.local",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key-new",
+            passphrase = null,
+            sessionName = "bravo",
+        )
+        advanceUntilIdle()
+
+        assertEquals("New", viewModel.state.value.hostName)
+        assertEquals("bravo", viewModel.state.value.sessionName)
+        assertEquals(listOf(2), viewModel.state.value.jobs.map { it.id })
+
+        releaseOldList.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals("New", viewModel.state.value.hostName)
+        assertEquals("bravo", viewModel.state.value.sessionName)
+        assertEquals(listOf(2), viewModel.state.value.jobs.map { it.id })
+    }
+
+    @Test
+    fun jobsCommandsAreSerializedAcrossRefreshAndMutation() = runTest(scheduler) {
+        val refreshStarted = CompletableDeferred<Unit>()
+        val releaseRefresh = CompletableDeferred<Unit>()
+        val session = FakeSshSession(
+            pathAware("pocketshell jobs list --session 'codex'") to listOf(
+                listOutput(id = 1, sessionName = "codex"),
+                ScriptedExec(
+                    result = listOutput(id = 1, sessionName = "codex"),
+                    started = refreshStarted,
+                    release = releaseRefresh,
+                    waitNonCancellable = true,
+                ),
+                listOutput(id = 2, sessionName = "codex"),
+            ),
+            pathAware("pocketshell jobs add 'codex' --every '5m' --message 'continue'") to
+                ExecResult("Created job 2\n", "", 0),
+        )
+        val viewModel = newViewModel(session)
+
+        viewModel.load(
+            hostId = 1L,
+            hostName = "Lab",
+            hostname = "lab.local",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key",
+            passphrase = null,
+            sessionName = "codex",
+        )
+        advanceUntilIdle()
+
+        viewModel.refresh()
+        advanceUntilIdle()
+        refreshStarted.await()
+
+        viewModel.add(RecurringJobDraft(sessionName = "codex", every = "5m", message = "continue"))
+        advanceUntilIdle()
+
+        releaseRefresh.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, session.maxConcurrentExecs)
+        assertEquals(listOf(2), viewModel.state.value.jobs.map { it.id })
+    }
+
     /**
      * Build a VM whose connector borrows from a REAL [SshLeaseManager] wrapping
      * [connector]. This exercises the actual #699 warm-lease path: acquire →
@@ -199,7 +312,7 @@ class RecurringJobsViewModelTest {
      */
     private fun newViewModel(
         session: SshSession,
-        connector: CountingConnector = CountingConnector(session),
+        connector: SshLeaseConnector = CountingConnector(session),
     ): RecurringJobsViewModel =
         RecurringJobsViewModel(
             remoteSource = remoteSource,
@@ -230,14 +343,46 @@ class RecurringJobsViewModelTest {
         }
     }
 
+    private class DirectLeaseConnector(
+        vararg sessions: Pair<String, SshSession>,
+    ) : RecurringJobsViewModel.RecurringJobsSshConnector {
+        private val sessionsByHost = sessions.toMap()
+
+        override suspend fun acquire(target: RecurringJobsViewModel.Target): Result<SshLease> {
+            val session = sessionsByHost[target.hostname]
+                ?: return Result.failure(IllegalArgumentException("No session for ${target.hostname}"))
+            return Result.success(fakeLease(target.toLeaseTarget().leaseKey, session))
+        }
+
+        private fun fakeLease(key: SshLeaseKey, session: SshSession): SshLease {
+            val releaseAction = { _: SshLeaseKey, _: Long, _: kotlin.coroutines.Continuation<Unit> -> Unit }
+            val constructor = SshLease::class.java.declaredConstructors.single()
+            return constructor.newInstance(key, session, false, 0L, releaseAction) as SshLease
+        }
+    }
+
+    private data class ScriptedExec(
+        val result: ExecResult,
+        val started: CompletableDeferred<Unit>? = null,
+        val release: CompletableDeferred<Unit>? = null,
+        val waitNonCancellable: Boolean = false,
+    )
+
     private class FakeSshSession(
         vararg scripted: Pair<String, Any>,
     ) : SshSession {
-        private val canned: Map<String, ArrayDeque<ExecResult>> =
+        private val canned: Map<String, ArrayDeque<ScriptedExec>> =
             scripted.associate { (command, value) ->
                 val results = when (value) {
-                    is ExecResult -> listOf(value)
-                    is List<*> -> value.filterIsInstance<ExecResult>()
+                    is ExecResult -> listOf(ScriptedExec(value))
+                    is ScriptedExec -> listOf(value)
+                    is List<*> -> value.map {
+                        when (it) {
+                            is ExecResult -> ScriptedExec(it)
+                            is ScriptedExec -> it
+                            else -> error("Unsupported fake result type: ${it?.javaClass?.simpleName}")
+                        }
+                    }
                     else -> error("Unsupported fake result type: ${value::class.java.simpleName}")
                 }
                 command to ArrayDeque(results)
@@ -245,13 +390,32 @@ class RecurringJobsViewModelTest {
 
         val recorded = mutableListOf<String>()
         var closed: Boolean = false
+        var maxConcurrentExecs: Int = 0
+            private set
+        private var activeExecs: Int = 0
 
         override val isConnected: Boolean
             get() = !closed
 
         override suspend fun exec(command: String): ExecResult {
             recorded += command
-            return canned[command]?.removeFirstOrNull() ?: ExecResult("", "missing stub for $command", 127)
+            val next = canned[command]?.removeFirstOrNull() ?: return ExecResult("", "missing stub for $command", 127)
+            activeExecs += 1
+            maxConcurrentExecs = max(maxConcurrentExecs, activeExecs)
+            next.started?.complete(Unit)
+            try {
+                val release = next.release
+                if (release != null) {
+                    if (next.waitNonCancellable) {
+                        withContext(NonCancellable) { release.await() }
+                    } else {
+                        release.await()
+                    }
+                }
+                return next.result
+            } finally {
+                activeExecs -= 1
+            }
         }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job =

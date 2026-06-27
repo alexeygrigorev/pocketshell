@@ -11,13 +11,18 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import javax.inject.Inject
@@ -47,7 +52,11 @@ public class RecurringJobsViewModel @Inject constructor(
     public val state: StateFlow<RecurringJobsScreenState> = _state.asStateFlow()
 
     private var target: Target? = null
+    private var targetGeneration: Long = 0L
     private var lease: SshLease? = null
+    private var leaseTarget: Target? = null
+    private var commandMutex = Mutex()
+    private val activeOperations = mutableSetOf<Job>()
 
     public fun load(
         hostId: Long,
@@ -61,6 +70,9 @@ public class RecurringJobsViewModel @Inject constructor(
     ) {
         val next = Target(hostId, hostName, hostname, port, username, keyPath, passphrase, sessionName)
         if (next == target) return
+        targetGeneration += 1L
+        cancelActiveOperations()
+        commandMutex = Mutex()
         target = next
         releaseLease()
         _state.value = RecurringJobsScreenState(
@@ -74,25 +86,11 @@ public class RecurringJobsViewModel @Inject constructor(
 
     public fun refresh() {
         val currentTarget = target ?: return
-        viewModelScope.launch {
-            val currentSession = ensureSession(currentTarget) ?: return@launch
-            _state.value = _state.value.copy(loading = true, error = null)
-            when (val result = remoteSource.list(currentSession, currentTarget.sessionName)) {
-                is RecurringJobsCommandResult.Jobs -> {
-                    _state.value = _state.value.copy(jobs = result.jobs, loading = false, error = null)
-                }
-                RecurringJobsCommandResult.Success -> {
-                    _state.value = _state.value.copy(loading = false, error = null)
-                }
-                RecurringJobsCommandResult.ToolMissing -> {
-                    _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
-                }
-                is RecurringJobsCommandResult.DaemonUnavailable -> {
-                    _state.value = _state.value.copy(loading = false, error = jobsDaemonUnavailableMessage(result.reason))
-                }
-                is RecurringJobsCommandResult.Failed -> {
-                    _state.value = _state.value.copy(loading = false, error = result.reason)
-                }
+        val generation = targetGeneration
+        val mutex = commandMutex
+        launchOperation {
+            mutex.withLock {
+                refreshLocked(currentTarget, generation)
             }
         }
     }
@@ -120,24 +118,82 @@ public class RecurringJobsViewModel @Inject constructor(
 
     private fun mutate(block: suspend (SshSession) -> RecurringJobsCommandResult) {
         val currentTarget = target ?: return
-        viewModelScope.launch {
-            val currentSession = ensureSession(currentTarget) ?: return@launch
-            _state.value = _state.value.copy(loading = true, error = null)
-            when (val result = block(currentSession)) {
-                RecurringJobsCommandResult.Success -> refresh()
-                is RecurringJobsCommandResult.Jobs -> {
-                    _state.value = _state.value.copy(jobs = result.jobs, loading = false, error = null)
-                }
-                RecurringJobsCommandResult.ToolMissing -> {
-                    _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
-                }
-                is RecurringJobsCommandResult.DaemonUnavailable -> {
-                    _state.value = _state.value.copy(loading = false, error = jobsDaemonUnavailableMessage(result.reason))
-                }
-                is RecurringJobsCommandResult.Failed -> {
-                    _state.value = _state.value.copy(loading = false, error = result.reason)
+        val generation = targetGeneration
+        val mutex = commandMutex
+        launchOperation {
+            mutex.withLock {
+                val currentSession = ensureSession(currentTarget, generation) ?: return@withLock
+                if (!isCurrentOperation(currentTarget, generation)) return@withLock
+                _state.value = _state.value.copy(loading = true, error = null)
+                when (val result = block(currentSession)) {
+                    RecurringJobsCommandResult.Success -> refreshLocked(currentTarget, generation, currentSession)
+                    else -> {
+                        if (isCurrentOperation(currentTarget, generation)) {
+                            applyCommandResult(result)
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    private fun launchOperation(block: suspend () -> Unit) {
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                block()
+            } finally {
+                currentCoroutineContext()[Job]?.let { activeOperations -= it }
+            }
+        }
+        activeOperations += job
+        job.start()
+    }
+
+    private fun cancelActiveOperations() {
+        activeOperations.forEach { it.cancel() }
+        activeOperations.clear()
+    }
+
+    private suspend fun refreshLocked(
+        currentTarget: Target,
+        generation: Long,
+        session: SshSession? = null,
+    ) {
+        val currentSession = session ?: ensureSession(currentTarget, generation) ?: return
+        if (!isCurrentOperation(currentTarget, generation)) return
+        _state.value = _state.value.copy(loading = true, error = null)
+        val result = remoteSource.list(currentSession, currentTarget.sessionName)
+        if (isCurrentOperation(currentTarget, generation)) {
+            applyCommandResult(result)
+        }
+    }
+
+    private fun applyCommandResult(result: RecurringJobsCommandResult) {
+        when (result) {
+            is RecurringJobsCommandResult.Jobs -> {
+                _state.value = _state.value.copy(jobs = result.jobs, loading = false, error = null)
+            }
+            RecurringJobsCommandResult.Success -> {
+                _state.value = _state.value.copy(loading = false, error = null)
+            }
+            RecurringJobsCommandResult.ToolMissing -> {
+                _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
+            }
+            is RecurringJobsCommandResult.DaemonUnavailable -> {
+                _state.value = _state.value.copy(loading = false, error = jobsDaemonUnavailableMessage(result.reason))
+            }
+            is RecurringJobsCommandResult.Failed -> {
+                _state.value = _state.value.copy(loading = false, error = result.reason)
+            }
+        }
+    }
+
+    private fun isCurrentOperation(currentTarget: Target, generation: Long): Boolean =
+        target === currentTarget && targetGeneration == generation
+
+    private fun applyConnectError(currentTarget: Target, generation: Long, error: String) {
+        if (isCurrentOperation(currentTarget, generation)) {
+            _state.value = _state.value.copy(loading = false, error = error)
         }
     }
 
@@ -149,26 +205,30 @@ public class RecurringJobsViewModel @Inject constructor(
      * host transport is reused — no extra handshake) and its [SshSession] is
      * reused for every jobs read/write. Released in [onCleared] / [load].
      */
-    private suspend fun ensureSession(target: Target): SshSession? {
-        lease?.let { if (it.session.isConnected) return it.session }
+    private suspend fun ensureSession(target: Target, generation: Long): SshSession? {
+        if (!isCurrentOperation(target, generation)) return null
+        lease?.let {
+            if (leaseTarget === target && it.session.isConnected) return it.session
+            if (leaseTarget === target) releaseLease()
+        }
         // A stale lease (transport dropped) is released before re-acquiring so
         // the next acquire opens or reuses a healthy transport.
-        releaseLease()
         return try {
-            connector.acquire(target).getOrElse { error ->
-                _state.value = _state.value.copy(
-                    loading = false,
-                    error = "connect failed: ${error.message}",
-                )
+            val acquired = connector.acquire(target).getOrElse { error ->
+                applyConnectError(target, generation, "connect failed: ${error.message}")
                 return null
-            }.also { lease = it }.session
+            }
+            if (!isCurrentOperation(target, generation)) {
+                releaseDetachedLease(acquired)
+                return null
+            }
+            lease = acquired
+            leaseTarget = target
+            acquired.session
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
-            _state.value = _state.value.copy(
-                loading = false,
-                error = "error: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
-            )
+            applyConnectError(target, generation, "error: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
             null
         }
     }
@@ -181,8 +241,15 @@ public class RecurringJobsViewModel @Inject constructor(
     private fun releaseLease() {
         val toRelease = lease ?: return
         lease = null
+        leaseTarget = null
         viewModelScope.launch(Dispatchers.IO + NonCancellable) {
             runCatching { toRelease.release() }
+        }
+    }
+
+    private fun releaseDetachedLease(lease: SshLease) {
+        viewModelScope.launch(Dispatchers.IO + NonCancellable) {
+            runCatching { lease.release() }
         }
     }
 
@@ -195,6 +262,8 @@ public class RecurringJobsViewModel @Inject constructor(
         // transport itself stays pooled (idle-TTL) for the next surface.
         val toRelease = lease
         lease = null
+        leaseTarget = null
+        cancelActiveOperations()
         if (toRelease != null) {
             runCatching {
                 runBlocking(Dispatchers.IO + NonCancellable) {

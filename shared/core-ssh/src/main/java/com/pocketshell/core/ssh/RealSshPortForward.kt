@@ -190,9 +190,9 @@ internal class RealSshPortForward(
             while (running.get()) {
                 val n = src.read(buf)
                 if (n < 0) break
+                counter.addAndGet(n.toLong())
                 dst.write(buf, 0, n)
                 dst.flush()
-                counter.addAndGet(n.toLong())
             }
         } catch (_: IOException) {
             // Either side closed; normal termination of the copy loop.

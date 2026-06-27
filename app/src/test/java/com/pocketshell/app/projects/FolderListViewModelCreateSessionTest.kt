@@ -21,7 +21,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -247,6 +249,77 @@ class FolderListViewModelCreateSessionTest {
         }
     }
 
+    @Test
+    fun duplicateCreateClickWhileInFlightIsIgnoredAndExposesBusyState() = runTest {
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha")),
+            createDelayMs = 500L,
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = null,
+                onResolved = {},
+            )
+            vm.createSession(
+                sessionName = "beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = null,
+                onResolved = {},
+            )
+            runCurrent()
+
+            assertEquals("duplicate create taps must not enqueue another remote create", 1, gateway.createCalls)
+            assertTrue((vm.state.value as FolderListUiState.Ready).isCreatingSession)
+
+            advanceTimeBy(500L)
+            runCurrent()
+
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+            assertEquals(1, gateway.createCalls)
+            assertEquals(false, (vm.state.value as FolderListUiState.Ready).isCreatingSession)
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun createSessionTimesOutAndClearsBusyState() = runTest {
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha")),
+            createDelayMs = FolderListViewModel.CREATE_SESSION_ACTION_TIMEOUT_MS + 1L,
+        )
+        val vm = newViewModel(gateway)
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = null,
+                onResolved = {},
+            )
+            runCurrent()
+            assertTrue((vm.state.value as FolderListUiState.Ready).isCreatingSession)
+
+            advanceTimeBy(FolderListViewModel.CREATE_SESSION_ACTION_TIMEOUT_MS)
+            runCurrent()
+
+            val failed = vm.state.value as FolderListUiState.Failed
+            assertTrue(failed.message.contains("creating the session took longer"))
+            assertEquals(1, gateway.createCalls)
+            assertEquals(false, vm.state.value is FolderListUiState.Ready)
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun bind(vm: FolderListViewModel) {
         vm.bind(
             hostId = HOST.id,
@@ -308,7 +381,10 @@ class FolderListViewModelCreateSessionTest {
         // When true, a successful create makes the gateway's probe start
         // reporting the created session (i.e. the probe observed it).
         @Volatile var reportCreatedSession: Boolean = false,
+        @Volatile var createDelayMs: Long = 0L,
     ) : FolderListGateway {
+        @Volatile var createCalls: Int = 0
+
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
@@ -324,6 +400,10 @@ class FolderListViewModelCreateSessionTest {
             cwd: String,
             startCommand: String?,
         ): Result<String> {
+            createCalls += 1
+            if (createDelayMs > 0L) {
+                delay(createDelayMs)
+            }
             if (!createSucceeds) {
                 return Result.failure(RuntimeException("tmux refused to create '$sessionName'"))
             }

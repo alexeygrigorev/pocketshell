@@ -988,6 +988,65 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `sendCommand bounds the acquire and does not close when the mutex is wedged`() = runBlocking {
+        // Issue #470: bare sendCommand had an unbounded sendMutex acquire while
+        // sendChainedCommands/captureWithCursor were already bounded. A stuck
+        // owner must not park the caller forever, and because this caller has
+        // not written anything yet, the acquire timeout must not close a healthy
+        // shell.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 200L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val holder = scope.async { runCatching { client.sendCommand("send-keys -t %0 Enter") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                runCatching { client.sendCommand("list-sessions") }
+            }
+
+            assertTrue("expected acquire timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind and acquire failure",
+                ex.message?.contains("tmux command `list-sessions` acquire wedged") == true,
+            )
+            assertEquals(
+                "acquire timeout must not write the blocked command",
+                "send-keys -t %0 Enter\n",
+                shell.stdinAsString(),
+            )
+            assertFalse("acquire timeout must not close the shell", shell.closed)
+            assertFalse("acquire timeout must not trip disconnected latch", client.disconnected.value)
+
+            // Release the original holder so the test tears down without a
+            // parked coroutine. send-keys is fail-open, so fire the primary
+            // timeout and the late-drain timeout.
+            timeoutGate.fireNextTimeout()
+            timeoutGate.fireNextTimeout()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { holder.await() }
+            Unit
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `setWindowSizeLatest sends window option command and shell-quotes target`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

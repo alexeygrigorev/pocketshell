@@ -152,4 +152,49 @@ class StartDirectoryAutocompleteTest {
         assertTrue(controller.state.value.suggestions.isEmpty())
         assertFalse(controller.state.value.loading)
     }
+
+    @Test
+    fun controllerTimesOutSlowSuggestionAndClearsLoading() = runTest {
+        val controller = StartDirectoryAutocompleteController(
+            scope = this,
+            debounceMs = 0L,
+            requestTimeoutMs = 100L,
+            suggest = {
+                delay(1_000L)
+                listOf("/srv/app/")
+            },
+        )
+
+        controller.onInputChanged("/srv/a")
+        runCurrent()
+        assertTrue(controller.state.value.loading)
+
+        advanceTimeBy(100L)
+        runCurrent()
+
+        assertEquals(emptyList<String>(), controller.state.value.suggestions)
+        assertFalse(controller.state.value.loading)
+    }
+
+    @Test
+    fun controllerDisposeClearsLoading() = runTest {
+        val controller = StartDirectoryAutocompleteController(
+            scope = this,
+            debounceMs = 0L,
+            suggest = {
+                delay(1_000L)
+                listOf("/srv/app/")
+            },
+        )
+
+        controller.onInputChanged("/srv/a")
+        runCurrent()
+        assertTrue(controller.state.value.loading)
+
+        controller.dispose()
+        runCurrent()
+
+        assertEquals(emptyList<String>(), controller.state.value.suggestions)
+        assertFalse(controller.state.value.loading)
+    }
 }

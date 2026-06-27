@@ -14,6 +14,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -124,6 +125,96 @@ class HostTmuxSessionsGatewayTest {
     }
 
     @Test
+    fun liveClientTimeoutFallsBackToLeaseEnumeration() = runTest {
+        val client = FakeTmuxClient().apply {
+            suspendForeverOnCommandPrefix = "list-sessions"
+        }
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = client,
+        )
+        val session = FakeSshSession(
+            responses = ArrayDeque(
+                listOf(
+                    ExecResult(stdout = "", stderr = "not found", exitCode = 127),
+                    ExecResult(stdout = "lease::100::300::0\n", stderr = "", exitCode = 0),
+                ),
+            ),
+        )
+        val connector = CountingConnector(Result.success(session))
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 30_000L,
+        )
+        val gateway = SshHostTmuxSessionsGateway(
+            parser = parser,
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = manager,
+            leaseBlockTimeoutMs = 250L,
+            liveEnumTimeoutMs = 250L,
+        )
+
+        try {
+            val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+            assertTrue(result is HostTmuxSessionListResult.Sessions)
+            assertEquals(
+                listOf("lease"),
+                (result as HostTmuxSessionListResult.Sessions).rows.map { it.name },
+            )
+            assertEquals(1, connector.connectCount)
+            assertEquals(1, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
+            assertEquals(
+                listOf(
+                    "list-sessions -F " +
+                        "'#{session_name}::#{session_created}::#{session_activity}::" +
+                        "#{session_attached}::#{session_path}'",
+                ),
+                client.sentCommands,
+            )
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
+    fun wedgedLeaseEnumerationSurfacesConnectFailedInsteadOfHanging() = runTest {
+        val first = FakeSshSession(blockForever = true)
+        val second = FakeSshSession(blockForever = true)
+        val connector = SequenceConnector(listOf(first, second))
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 30_000L,
+        )
+        val gateway = SshHostTmuxSessionsGateway(
+            parser = parser,
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = manager,
+            leaseBlockTimeoutMs = 250L,
+            liveEnumTimeoutMs = 250L,
+        )
+
+        val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+        assertTrue(result is HostTmuxSessionListResult.ConnectFailed)
+        val cause = (result as HostTmuxSessionListResult.ConnectFailed).cause
+        assertTrue(
+            "wedged lease enumeration should surface the bounded timeout, got ${cause::class.java.name}",
+            cause is LeaseSessionBlockTimeoutException,
+        )
+        assertEquals(2, connector.connectCount)
+        assertTrue(first.closed)
+        assertTrue(second.closed)
+    }
+
+    @Test
     fun connectFailureMapsToConnectFailed() = runTest {
         val cause = SshException("connection refused")
         val gateway = SshHostTmuxSessionsGateway(
@@ -180,9 +271,22 @@ class HostTmuxSessionsGatewayTest {
         }
     }
 
+    private class SequenceConnector(
+        private val sessions: List<SshSession>,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val session = sessions[connectCount.coerceAtMost(sessions.lastIndex)]
+            connectCount += 1
+            return Result.success(session)
+        }
+    }
+
     private class FakeSshSession(
         private val responses: ArrayDeque<ExecResult> = ArrayDeque(),
         private val cancelOnExec: Boolean = false,
+        private val blockForever: Boolean = false,
     ) : SshSession {
         val execCommands: MutableList<String> = mutableListOf()
         var closed: Boolean = false
@@ -193,6 +297,9 @@ class HostTmuxSessionsGatewayTest {
         override suspend fun exec(command: String): ExecResult {
             if (cancelOnExec) {
                 throw CancellationException("cancelled during picker list")
+            }
+            if (blockForever) {
+                awaitCancellation()
             }
             execCommands += command
             return responses.removeFirstOrNull()

@@ -65,16 +65,25 @@
 #       but never returns pinned the coroutine and `Loading` never resolved.
 #       Advisory + baselined; the bound + regression test is the #847 hotfix.
 #
+#   J1 (HARD-FAIL on a NEW occurrence) — an androidTest `*E2eTest` /
+#       `*DockerTest` class that is not wired into `scripts/ci-journey-suite.sh`
+#       and has no local `// CI_JOURNEY_SUITE_JUSTIFIED:` reason. The per-push
+#       journey suite is the load-bearing connected-test net; new journey-shaped
+#       classes must either join it or say, next to the class, why they are
+#       intentionally local/nightly/backlog-only. Current known unwired classes
+#       are baselined, and stale J1 baseline entries hard-fail so the baseline
+#       only shrinks as classes are promoted or removed.
+#
 # A BASELINE allowlist records the offenders the audits catalogued but that are
 # intentionally NOT rewritten here (the rewrites are per-issue follow-up work).
 # Those are reported as KNOWN-baseline (advisory) so this guard does not redden
 # CI for tests it is not this PR's job to fix, while any NEW unjustified
-# occurrence (A5, C1) hard-fails. Removing a file from a baseline (because its
+# occurrence (A5, C1, J1) hard-fails. Removing a file from a baseline (because its
 # test was converted to the deterministic / fault-covering model) is the
 # intended direction of travel; a stale baseline entry is pruned + noted.
 #
 # Usage:
-#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1 smell
+#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1 smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
 #
 # This is intentionally a grep-guard, not a custom lint rule, for affordability
@@ -100,6 +109,8 @@ done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/test' 2>/dev/null |
 # Connect-path production RPC sources (#850 AWAIT1). These are the warm-session
 # RPC seams consumed on the connect / cold-start path.
 RPC_SOURCE_ROOT="app/src/main/java/com/pocketshell/app"
+ANDROID_TEST_ROOT="app/src/androidTest/java"
+CI_JOURNEY_SUITE="scripts/ci-journey-suite.sh"
 
 # Collect all test .kt files once.
 collect_test_files() {
@@ -154,6 +165,99 @@ FAKE1_BASELINE=(
 AWAIT1_BASELINE=(
 )
 
+# --------------------------------------------------------------------------
+# BASELINE — J1 (#848 follow-up): current androidTest `*E2eTest` /
+# `*DockerTest` classes that are intentionally not in the per-push
+# ci-journey-suite yet. New journey-shaped classes must be wired into
+# scripts/ci-journey-suite.sh or carry a local
+# `// CI_JOURNEY_SUITE_JUSTIFIED:` reason in their source. Stale entries are a
+# hard failure so this list is removed when a class is promoted or deleted.
+# --------------------------------------------------------------------------
+J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
+  "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"
+  "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
+  "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"
+  "com.pocketshell.app.costs.CostsScreenE2eTest"
+  "com.pocketshell.app.crash.ShareAllReportsDockerTest"
+  "com.pocketshell.app.env.EnvScreenE2eTest"
+  "com.pocketshell.app.fileexplorer.FileExplorerDockerTest"
+  "com.pocketshell.app.fileviewer.FileViewerDockerTest"
+  "com.pocketshell.app.fileviewer.LinkTapParsingDockerTest"
+  "com.pocketshell.app.fileviewer.TerminalFilePathTapToViewerDockerTest"
+  "com.pocketshell.app.git.GitHistoryDockerTest"
+  "com.pocketshell.app.hosts.DefaultHostLaunchE2eTest"
+  "com.pocketshell.app.hosts.HostAndFolderListScrollE2eTest"
+  "com.pocketshell.app.hosts.HostEditFromKebabE2eTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest"
+  "com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest"
+  "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest"
+  "com.pocketshell.app.portfwd.ForwardingResumeOnLaunchE2eTest"
+  "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"
+  "com.pocketshell.app.projects.AgentLaunchCommandDockerTest"
+  "com.pocketshell.app.projects.FolderListGatewayDockerTest"
+  "com.pocketshell.app.projects.FolderListGatewayStaleChannelHealDockerTest"
+  "com.pocketshell.app.projects.FolderListKillSessionDockerTest"
+  "com.pocketshell.app.projects.FolderListOutOfBandSessionDockerTest"
+  "com.pocketshell.app.projects.FolderListSessionResumeDockerTest"
+  "com.pocketshell.app.projects.FolderListTreeStopSessionDockerTest"
+  "com.pocketshell.app.projects.WatchedFoldersE2eTest"
+  "com.pocketshell.app.proof.BackgroundResumeSocketDeathE2eTest"
+  "com.pocketshell.app.proof.CodexOverflowNoReconnectE2eTest"
+  "com.pocketshell.app.proof.CodexRedrawOverflowReconnectE2eTest"
+  "com.pocketshell.app.proof.CodexWindowStartupControlSequenceE2eTest"
+  "com.pocketshell.app.proof.ColdInstallE2eTest"
+  "com.pocketshell.app.proof.DisconnectBlackholeE2eTest"
+  "com.pocketshell.app.proof.DisconnectFlapSoakE2eTest"
+  "com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
+  "com.pocketshell.app.proof.FastResumeReconnectE2eTest"
+  "com.pocketshell.app.proof.MultiHostSessionE2eTest"
+  "com.pocketshell.app.proof.NavigatorBackForegroundNoSshE2eTest"
+  "com.pocketshell.app.proof.NetworkLatencyModelE2eTest"
+  "com.pocketshell.app.proof.NoBackgroundWorkE2eTest"
+  "com.pocketshell.app.proof.PacketLossNetworkFaultE2eTest"
+  "com.pocketshell.app.proof.ProjectSwitcherDropdownE2eTest"
+  "com.pocketshell.app.proof.RideThroughInterruptionE2eTest"
+  "com.pocketshell.app.proof.SessionSwipeSwitchE2eTest"
+  "com.pocketshell.app.proof.SilentMidSessionDropDetectionE2eTest"
+  "com.pocketshell.app.proof.SshReconnectE2eTest"
+  "com.pocketshell.app.proof.StaleLeaseSwitchRecoveryE2eTest"
+  "com.pocketshell.app.proof.StrictModeNoNetworkOnMainE2eTest"
+  "com.pocketshell.app.proof.SystemBackForegroundE2eTest"
+  "com.pocketshell.app.proof.TmuxBracketedPasteDictationE2eTest"
+  "com.pocketshell.app.proof.TmuxDetachOnBackgroundE2eTest"
+  "com.pocketshell.app.proof.TmuxExternalUpdateDockerTest"
+  "com.pocketshell.app.proof.TmuxKeyBarCtrlComboE2eTest"
+  "com.pocketshell.app.proof.TmuxOrphanClientCleanupE2eTest"
+  "com.pocketshell.app.proof.TmuxSessionSwitchE2eTest"
+  "com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest"
+  "com.pocketshell.app.proof.TmuxTerminalSurfaceFailureE2eTest"
+  "com.pocketshell.app.proof.WarmLeaseReuseBatchCDockerTest"
+  "com.pocketshell.app.proof.WarmLeaseReuseDockerTest"
+  "com.pocketshell.app.proof.WithinGraceResumeRideThroughE2eTest"
+  "com.pocketshell.app.release.UpdateCheckSchedulerE2eTest"
+  "com.pocketshell.app.session.ConversationToolResultPairingE2eTest"
+  "com.pocketshell.app.session.ShowKeyboardChipE2eTest"
+  "com.pocketshell.app.sessions.service.SessionConnectionServiceE2eTest"
+  "com.pocketshell.app.settings.ConversationFontSizeSettingE2eTest"
+  "com.pocketshell.app.settings.DiagnosticsRecordingIndicatorE2eTest"
+  "com.pocketshell.app.settings.SettingsAboutFooterE2eTest"
+  "com.pocketshell.app.settings.SettingsPersistenceE2eTest"
+  "com.pocketshell.app.settings.SettingsSectionOrderE2eTest"
+  "com.pocketshell.app.share.SharePasteIntoSessionE2eTest"
+  "com.pocketshell.app.snippets.SnippetPickerTmuxZOrderDockerTest"
+  "com.pocketshell.app.terminal.TerminalLabDockerTest"
+  "com.pocketshell.app.tmux.ConversationOpenLatencyRttDockerTest"
+  "com.pocketshell.app.tmux.Issue887TerminalFixedUnderImeE2eTest"
+  "com.pocketshell.app.tmux.TmuxAttachPrefillDockerTest"
+  "com.pocketshell.app.tmux.TmuxAttachTimeoutDockerTest"
+  "com.pocketshell.app.tmux.TmuxDetectedPortForwardDockerTest"
+  "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest"
+  "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest"
+  "com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest"
+  "com.pocketshell.app.usage.UsageScreenE2eTest"
+  "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"
+)
+
 in_list() {
   local file="$1"; shift
   local b
@@ -168,6 +272,24 @@ in_list() {
 # --------------------------------------------------------------------------
 is_code_line() {
   ! printf '%s' "$1" | grep -Eq '^[[:space:]]*(\*|//|import |/\*)'
+}
+
+android_class_file_for() {
+  local fqcn="$1"
+  local rel="${fqcn//.//}"
+  printf '%s/%s.kt\n' "$ANDROID_TEST_ROOT" "$rel"
+}
+
+android_test_fqcn_for_file() {
+  local file="$1"
+  local rel="${file#"$ANDROID_TEST_ROOT"/}"
+  rel="${rel%.kt}"
+  printf '%s\n' "${rel//\//.}"
+}
+
+has_ci_journey_suite_justification() {
+  local file="$1"
+  grep -Eq 'CI_JOURNEY_SUITE_JUSTIFIED:[[:space:]]*[^[:space:]]' "$file"
 }
 
 # --------------------------------------------------------------------------
@@ -467,6 +589,79 @@ scan_await1() {
 }
 
 # --------------------------------------------------------------------------
+# J1 scan (#848 follow-up) — androidTest `*E2eTest` / `*DockerTest` classes
+# must be in the per-push ci-journey-suite, locally justified, or part of the
+# current unwired baseline.
+# --------------------------------------------------------------------------
+declare -a J1_WIRED=()
+declare -a J1_NEW=()
+declare -a J1_KNOWN=()
+declare -a J1_JUSTIFIED=()
+declare -a J1_STALE_BASELINE=()
+declare -a J1_PARSER_FAILURE=()
+declare -a J1_WIRED_ANDROID_TEST_CLASSES=()
+declare -A J1_WIRED_ANDROID_TEST_SEEN=()
+
+parse_ci_journey_suite_classes() {
+  if [[ ! -f "$CI_JOURNEY_SUITE" ]]; then
+    J1_PARSER_FAILURE+=("missing $CI_JOURNEY_SUITE")
+    return
+  fi
+
+  local fqcn
+  while IFS= read -r fqcn; do
+    [[ -z "${fqcn:-}" ]] && continue
+    if [[ -z "${J1_WIRED_ANDROID_TEST_SEEN[$fqcn]:-}" ]]; then
+      J1_WIRED_ANDROID_TEST_CLASSES+=("$fqcn")
+      J1_WIRED_ANDROID_TEST_SEEN[$fqcn]=1
+    fi
+  done < <(
+    sed -nE \
+      -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
+      -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
+      "$CI_JOURNEY_SUITE"
+  )
+
+  if [[ "${#J1_WIRED_ANDROID_TEST_CLASSES[@]}" -eq 0 ]]; then
+    J1_PARSER_FAILURE+=("no androidTest classes parsed from $CI_JOURNEY_SUITE")
+  fi
+}
+
+scan_j1() {
+  parse_ci_journey_suite_classes
+
+  local file fqcn
+  while IFS= read -r file; do
+    [[ -z "${file:-}" ]] && continue
+    fqcn="$(android_test_fqcn_for_file "$file")"
+    if in_list "$fqcn" "${J1_WIRED_ANDROID_TEST_CLASSES[@]}"; then
+      J1_WIRED+=("$fqcn")
+    elif has_ci_journey_suite_justification "$file"; then
+      J1_JUSTIFIED+=("$fqcn")
+    elif in_list "$fqcn" "${J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]}"; then
+      J1_KNOWN+=("$fqcn")
+    else
+      J1_NEW+=("$fqcn")
+    fi
+  done < <(
+    find "$ANDROID_TEST_ROOT" -type f \
+      \( -name '*E2eTest.kt' -o -name '*DockerTest.kt' \) \
+      2>/dev/null | sort
+  )
+
+  for fqcn in "${J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]}"; do
+    file="$(android_class_file_for "$fqcn")"
+    if [[ ! -f "$file" ]]; then
+      J1_STALE_BASELINE+=("$fqcn -> missing source file")
+    elif in_list "$fqcn" "${J1_WIRED_ANDROID_TEST_CLASSES[@]}"; then
+      J1_STALE_BASELINE+=("$fqcn -> now wired into $CI_JOURNEY_SUITE")
+    elif has_ci_journey_suite_justification "$file"; then
+      J1_STALE_BASELINE+=("$fqcn -> now has local CI_JOURNEY_SUITE_JUSTIFIED")
+    fi
+  done
+}
+
+# --------------------------------------------------------------------------
 # Validate baselines: prune entries whose file no longer exists.
 # --------------------------------------------------------------------------
 declare -a STALE_BASELINE=()
@@ -479,12 +674,14 @@ scan_a4
 scan_c1
 scan_fake1
 scan_await1
+scan_j1
 
 echo "=============================================================="
 echo " Test-validity guard (issue #657 / F4; extended #848 / #850)"
 echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
+echo " CI journey suite: $CI_JOURNEY_SUITE (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} androidTest class entr(y/ies) parsed)"
 echo "=============================================================="
 
 print_list() {
@@ -517,6 +714,12 @@ print_list "FAKE1 — NEW connect-path test with an always-answering fake (no fa
 print_list "FAKE1 — KNOWN baseline (always-answering connect fake; #847/#849) [advisory]" "${FAKE1_KNOWN[@]:-}"
 print_list "AWAIT1 — NEW unbounded connect-path RPC await (no withTimeout) [advisory]" "${AWAIT1_FINDINGS[@]:-}"
 print_list "AWAIT1 — KNOWN baseline (unbounded connect RPC; #847) [advisory]" "${AWAIT1_KNOWN[@]:-}"
+print_list "J1 — WIRED androidTest E2e/Docker classes in ci-journey-suite.sh [advisory]" "${J1_WIRED[@]:-}"
+print_list "J1 — NEW androidTest E2e/Docker class missing ci-journey-suite coverage or local justification [HARD FAIL]" "${J1_NEW[@]:-}"
+print_list "J1 — KNOWN unwired androidTest E2e/Docker baseline (#848 follow-up) [advisory]" "${J1_KNOWN[@]:-}"
+print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisory]" "${J1_JUSTIFIED[@]:-}"
+print_list "J1 — STALE unwired baseline entry [HARD FAIL]" "${J1_STALE_BASELINE[@]:-}"
+print_list "J1 — PARSER failure reading ci-journey-suite.sh [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
 
 if [[ "${#STALE_BASELINE[@]}" -gt 0 ]]; then
   echo
@@ -537,11 +740,18 @@ echo "        never-returns/hang, timeout) so Loading must still resolve"
 echo "        (the v0.4.10 #847 gap; fixture work tracked in #849)."
 echo " AWAIT1 bound the warm-session RPC with withTimeout so a"
 echo "        non-returning exec cannot pin the cold-start coroutine (#847)."
+echo " J1     wire the androidTest journey into scripts/ci-journey-suite.sh"
+echo "        or add a local // CI_JOURNEY_SUITE_JUSTIFIED: reason."
 echo "--------------------------------------------------------------"
 
-# Collect the HARD-FAIL categories (A5 + C1).
+# Collect the HARD-FAIL categories (A5 + C1 + J1).
 real_hard_fail=()
-for x in "${A5_NEW[@]:-}" "${C1_NEW[@]:-}"; do
+for x in \
+  "${A5_NEW[@]:-}" \
+  "${C1_NEW[@]:-}" \
+  "${J1_NEW[@]:-}" \
+  "${J1_STALE_BASELINE[@]:-}" \
+  "${J1_PARSER_FAILURE[@]:-}"; do
   [[ -n "$x" ]] && real_hard_fail+=("$x")
 done
 
@@ -553,12 +763,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848)::A NEW load-bearing self-skip was found. An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), and a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture)."
+  echo "::error title=Test-validity guard (issue #657/#848)::A NEW load-bearing self-skip or ungated androidTest journey was found. An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), and a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason. Remove stale J1 baselines when a class is promoted or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} new unjustified hard-fail occurrence(s) (A5 + C1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips (A5 + C1)."
+echo "PASS: no new unjustified load-bearing self-skips or ungated androidTest journeys (A5 + C1 + J1)."
 exit 0

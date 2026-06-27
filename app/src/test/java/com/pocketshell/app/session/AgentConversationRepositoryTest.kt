@@ -860,6 +860,36 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun recordedClaudeSessionFallsBackToNewestSameKindSiblingWhenRecordedSourceIsAbsent() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val ownPath = "/home/testuser/.claude/projects/-workspace-proj/older.jsonl"
+        val siblingPath = "/home/testuser/.claude/projects/-workspace-proj/newer.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 120}|/workspace/proj|$ownPath
+                claude|$now|/workspace/proj|$siblingPath
+            """.trimIndent(),
+        )
+
+        val detection = AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+            recordedKind = AgentKind.ClaudeCode,
+            recordedSource = null,
+        )
+
+        assertEquals(
+            "legacy/foreign sessions with no @ps_agent_source must keep the " +
+                "existing same-kind mtime selector",
+            siblingPath,
+            detection?.sourcePath,
+        )
+        assertEquals("newer", detection?.sessionId)
+    }
+
+    @Test
     fun recordedClaudeSessionResolvesEvenWhenNoAgentProcessIsObservable() = runTest {
         // The recorded kind is authoritative: an idle recorded Claude session
         // (no live `claude` process visible on the TTY right now) must STILL
@@ -1297,6 +1327,61 @@ class AgentConversationRepositoryTest {
         assertEquals(
             listOf("hello agent", "hi back"),
             window.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenPrefetchesGenerationScopedRecordedClaudeSourceOverNewerSibling() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val ownPath = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
+        val siblingPath = "/home/testuser/.claude/projects/-workspace-proj/busier.jsonl"
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            recordedSourceGenerationOutput = "launch-2\n",
+            recordedSourceOutput = "launch-2\t$ownPath\n",
+            detectionOutput = """
+                claude|${now - 120}|/workspace/proj|$ownPath
+                claude|$now|/workspace/proj|$siblingPath
+            """.trimIndent(),
+            foldedClaudeWcOutput = "2",
+            foldedClaudeTail = listOf(
+                """{"type":"user","uuid":"u1","message":{"role":"user","content":"older own"}}""",
+                """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"selected"}}""",
+            ).joinToString("\n"),
+            emulateFoldedClaudePathFromShell = true,
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$3",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertEquals(AgentKind.ClaudeCode, open.recordedKind)
+        assertEquals(ownPath, open.recordedSource)
+        assertEquals(
+            "the generation-scoped exact @ps_agent_source must beat newer " +
+                "same-kind mtime during source selection",
+            ownPath,
+            open.detection?.sourcePath,
+        )
+        val window = open.prefetchedWindow
+        assertNotNull(
+            "the folded Claude window must be read from the parsed recorded " +
+                "source path, not the newer same-kind sibling",
+            window,
+        )
+        assertEquals(
+            listOf("older own", "selected"),
+            window!!.events.filterIsInstance<ConversationEvent.Message>().map { it.text },
+        )
+        val command = session.execCommands.single()
+        assertTrue(
+            "the combined open command must parse @ps_agent_source into a clean " +
+                "path before folding the Claude window; got $command",
+            command.contains("ps_recorded_source_path"),
         )
     }
 
@@ -2207,6 +2292,7 @@ class AgentConversationRepositoryTest {
         private val foldedClaudePath: String = "",
         private val foldedClaudeWcOutput: String = "0",
         private val foldedClaudeTail: String = "",
+        private val emulateFoldedClaudePathFromShell: Boolean = false,
     ) : SshSession {
         val execCommands = mutableListOf<String>()
         val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
@@ -2231,8 +2317,13 @@ class AgentConversationRepositoryTest {
                     append("\n@@PS_RECORDED_SOURCE@@\n")
                     append(detectionOutput)
                     append("\n@@PS_CLAUDE_WINDOW@@\n")
-                    if (foldedClaudePath.isNotBlank()) {
-                        append("PATH=").append(foldedClaudePath).append("\n")
+                    val emulatedFoldedPath = if (emulateFoldedClaudePathFromShell) {
+                        emulatedFoldedClaudePath(command)
+                    } else {
+                        foldedClaudePath
+                    }
+                    if (emulatedFoldedPath.isNotBlank()) {
+                        append("PATH=").append(emulatedFoldedPath).append("\n")
                         append(foldedClaudeWcOutput.trim()).append("\n")
                         append("@@PS_CLAUDE_WINDOW@@\n")
                         append(foldedClaudeTail)
@@ -2273,6 +2364,48 @@ class AgentConversationRepositoryTest {
             }
             return ExecResult(stdout = stdout, stderr = "", exitCode = 0)
         }
+
+        private fun emulatedFoldedClaudePath(command: String): String {
+            val recordedSource = parsedRecordedSource()
+            if (recordedSource.isNotBlank() && command.contains("ps_recorded_source_path")) {
+                return recordedSource
+            }
+            return newestClaudeCandidatePath()
+        }
+
+        private fun parsedRecordedSource(): String {
+            val raw = recordedSourceOutput.trim()
+            if (raw.isBlank()) return ""
+            val generation = recordedSourceGenerationOutput.trim()
+            if (generation.isNotBlank()) {
+                val prefix = "$generation\t"
+                return raw.removePrefix(prefix)
+                    .takeIf { it != raw }
+                    ?.trim()
+                    .orEmpty()
+            }
+            val tabIndex = raw.indexOf('\t')
+            return if (tabIndex >= 0) {
+                raw.substring(tabIndex + 1).trim()
+            } else {
+                raw
+            }
+        }
+
+        private fun newestClaudeCandidatePath(): String =
+            detectionOutput
+                .lineSequence()
+                .mapNotNull { line ->
+                    val parts = line.trim().split("|", limit = 4)
+                    if (parts.size == 4 && parts[0] == "claude") {
+                        parts[1].toLongOrNull()?.let { modifiedAt -> modifiedAt to parts[3] }
+                    } else {
+                        null
+                    }
+                }
+                .maxByOrNull { it.first }
+                ?.second
+                .orEmpty()
 
         override fun tail(path: String, onLine: (String) -> Unit): Job {
             tailCalls += 1

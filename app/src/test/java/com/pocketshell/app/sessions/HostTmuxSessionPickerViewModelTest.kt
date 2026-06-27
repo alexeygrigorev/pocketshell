@@ -5,6 +5,7 @@ import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.storage.entity.HostEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -152,6 +153,22 @@ class HostTmuxSessionPickerViewModelTest {
         vm.cancelLoading()
         runCurrent()
         assertEquals(HostTmuxSessionPickerState.Idle, vm.state.value)
+    }
+
+    @Test
+    fun loadTimeoutProducesRetryableFallbackInsteadOfStayingLoading() = runTest {
+        val gate = CompletableDeferred<HostTmuxSessionListResult>()
+        val vm = HostTmuxSessionPickerViewModel(SuspendingGateway(gate))
+
+        vm.load(request())
+        runCurrent()
+        assertTrue(vm.state.value is HostTmuxSessionPickerState.Loading)
+
+        advanceTimeBy(HostTmuxSessionPickerViewModel.LOAD_TIMEOUT_MS)
+        runCurrent()
+
+        val state = vm.state.value as HostTmuxSessionPickerState.Fallback
+        assertEquals("Timed out while loading tmux sessions. Please retry.", state.message)
     }
 
     @Test

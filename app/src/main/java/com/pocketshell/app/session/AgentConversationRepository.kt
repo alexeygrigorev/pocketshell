@@ -866,6 +866,7 @@ public class AgentConversationRepository internal constructor(
         val kindSentinel = "@@PS_RECORDED_KIND@@"
         val sourceGenerationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
         val sourceSentinel = "@@PS_RECORDED_SOURCE@@"
+        val sourceGenerationSeparator = "\t"
         // The Claude window-fold tail budget mirrors [readEventsWindow]: raw
         // lines = messages * JSONL_RAW_LINES_PER_EVENT, floored at the message
         // count and at 1.
@@ -903,6 +904,29 @@ public class AgentConversationRepository internal constructor(
             append("\n")
             append("printf '%s\\n' $sourceSentinel")
             append("\n")
+            // Parse the raw tmux option into the exact path the host watcher
+            // recorded. New host CLIs write "<generation><tab><path>"; older
+            // hosts wrote just "<path>". Keep this shell-side parse in lockstep
+            // with [recordedAgentSourceOptionFromRaw] so the folded Claude
+            // window reads the exact recorded file instead of falling back to
+            // the newest same-cwd sibling.
+            append(
+                "ps_recorded_source_path=; " +
+                    "if [ -n \"\$ps_recorded_source_generation\" ]; then " +
+                    "ps_recorded_source_prefix=\"\$ps_recorded_source_generation$sourceGenerationSeparator\"; " +
+                    "case \"\$ps_recorded_source\" in " +
+                    "\"\$ps_recorded_source_prefix\"*) " +
+                    "ps_recorded_source_path=\${ps_recorded_source#\"\$ps_recorded_source_prefix\"};; " +
+                    "esac; " +
+                    "else " +
+                    "case \"\$ps_recorded_source\" in " +
+                    "*\"$sourceGenerationSeparator\"*) " +
+                    "ps_recorded_source_path=\${ps_recorded_source#*$sourceGenerationSeparator};; " +
+                    "*) ps_recorded_source_path=\$ps_recorded_source;; " +
+                    "esac; " +
+                    "fi",
+            )
+            append("\n")
             // 2. The SAME candidate enumeration the split path runs.
             append(detectionCommand(normalizedCwd))
             append("\n")
@@ -920,8 +944,8 @@ public class AgentConversationRepository internal constructor(
             append("\n")
             append(
                     "claude_proj=\"\$HOME/.claude/projects/$encodedClaudeCwd\"; " +
-                    "if [ -n \"\$ps_recorded_source\" ] && [ -f \"\$ps_recorded_source\" ]; then " +
-                    "newest=\"\$ps_recorded_source\"; " +
+                    "if [ -n \"\$ps_recorded_source_path\" ] && [ -f \"\$ps_recorded_source_path\" ]; then " +
+                    "newest=\"\$ps_recorded_source_path\"; " +
                     "else " +
                     "newest=\$(" +
                     "find \"\$claude_proj\" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | " +

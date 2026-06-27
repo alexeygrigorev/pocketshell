@@ -2858,6 +2858,10 @@ class TmuxSessionViewModelTest {
         )
         assertTrue("stale client should be closed after silent reattach", deadClient.closed)
         assertTrue("replacement control client should be opened", replacementClient.connectCalled)
+        assertTrue(
+            "silent same-SSH reattach expects the session to exist, so it must probe server liveness",
+            vm.lastProbeServerLivenessForTest(),
+        )
     }
 
     @Test
@@ -5052,6 +5056,68 @@ class TmuxSessionViewModelTest {
                 "VM-level foreground diagnostic must be emitted for the Android wait",
                 1,
                 diagnostics.eventsNamed("foreground_reattach").size,
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun postGraceForegroundWithoutPendingReattachProbesAndReseedsHeldRuntime() = runTest(scheduler) {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            val client = FakeTmuxClient().withSinglePane("work", "%1")
+            val session = FakeSshSession()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+                session = session,
+            )
+            client.emittedEvents.emit(
+                ControlEvent.WindowAdd(sessionId = "work", windowId = "@0", name = "work"),
+            )
+            advanceUntilIdle()
+
+            client.capturePaneResponses.addLast(
+                CommandResponse(number = 4L, output = listOf("post-grace held reseed"), isError = false),
+            )
+            val probeCountBefore =
+                client.sentCommands.count { it == "display-message -p '#{session_name}'" }
+            val captureCountBefore =
+                client.sentCommands.count { it == seedCaptureCommand("%1") }
+
+            vm.onAppForegrounded(resumedWithinGrace = false)
+            assertTrue(
+                "service-held post-grace foreground must not flash a reconnect state while probing",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            advanceUntilIdle()
+
+            assertFalse(
+                "service-held post-grace foreground has no detached runtime to replay",
+                vm.hasPendingReattachForTest(),
+            )
+            assertTrue(
+                "post-grace foreground with a held runtime must probe the control channel",
+                client.sentCommands.count { it == "display-message -p '#{session_name}'" } > probeCountBefore,
+            )
+            assertTrue(
+                "a healthy held runtime must be reseeded instead of no-oping",
+                client.sentCommands.count { it == seedCaptureCommand("%1") } > captureCountBefore,
+            )
+            assertTrue(
+                "the post-grace hold probe must emit a foreground diagnostic",
+                diagnostics.eventsNamed("foreground_reattach").any {
+                    it.fields["outcome"] == "post_grace_hold_probe" &&
+                        it.fields["probeVerdict"] == RuntimeHealthVerdict.HEALTHY.name
+                },
             )
         } finally {
             diagnostics.close()
@@ -11915,13 +11981,12 @@ class TmuxSessionViewModelTest {
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───
     //
     // The connect() path detects "same host, different tmux session"
-    // and routes through [closeCurrentClientKeepSession] +
-    // [runFastSessionSwitch] instead of the full SSH-handshake teardown
-    // + reconnect. Production exercise lives in the connected
-    // TmuxSessionSwitchSameHostReusesSshE2eTest because a unit test
-    // cannot reach into [SshConnection.connect] without a real
-    // network. The unit tests below pin the predicate behaviour, the
-    // teardown-keep-session invariant, and the registry side-effects
+    // and routes through the fast-switch path instead of the full
+    // SSH-handshake teardown + reconnect. Production exercise lives in
+    // the connected TmuxSessionSwitchSameHostReusesSshE2eTest because a
+    // unit test cannot reach into [SshConnection.connect] without a
+    // real network. The unit tests below pin the predicate behaviour,
+    // the teardown-keep-session invariant, and the registry side-effects
     // through the dedicated test seams the VM exposes.
 
     @Test

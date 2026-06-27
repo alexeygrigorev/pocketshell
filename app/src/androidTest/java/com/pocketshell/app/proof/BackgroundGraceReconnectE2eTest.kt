@@ -23,6 +23,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.sessions.service.SessionConnectionService
 import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
@@ -189,6 +190,7 @@ class BackgroundGraceReconnectE2eTest {
         // Post-grace branch: with the same real UI path still open, use a
         // shorter override so the teardown branch is covered without waiting
         // for the user-facing 30s minimum.
+        stopSessionHoldBeforeExpectedTeardown()
         diagnostics!!.clear()
         BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
         val postStart = SystemClock.elapsedRealtime()
@@ -282,6 +284,7 @@ class BackgroundGraceReconnectE2eTest {
         // the post-grace branch of the within-grace test (same proven sequencing),
         // using the short override so the teardown actually fires without a 30s+
         // real-grace wait.
+        stopSessionHoldBeforeExpectedTeardown()
         BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
         val postStart = SystemClock.elapsedRealtime()
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
@@ -862,6 +865,13 @@ class BackgroundGraceReconnectE2eTest {
             .edit()
             .remove("background_grace_millis")
             .commit()
+    }
+
+    private fun stopSessionHoldBeforeExpectedTeardown() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        SessionConnectionService.stop(ctx)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(250L)
     }
 
     private suspend fun seedDockerHost(key: String): String {

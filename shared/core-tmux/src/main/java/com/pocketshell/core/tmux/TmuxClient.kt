@@ -30,7 +30,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -1345,11 +1344,31 @@ internal class RealTmuxClient(
     ): CommandResponse {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
+        // Issue #470: bound the single-flight ACQUIRE itself, matching
+        // sendChainedCommands/captureWithCursor. A wedged current holder used to
+        // leave bare sendCommand callers parked forever before any bytes were
+        // written, outside the command timeout gate. On acquire timeout we have
+        // not touched the wire, so surface a recoverable command failure without
+        // closing an otherwise healthy shell.
+        val acquired = withTimeoutOrNull(commandTimeoutMs) {
+            sendMutex.lock()
+            true
+        }
+        if (acquired != true) {
+            val kind = commandKind(cmd)
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux-command-acquire-wedged kind=$kind timeoutMs=$commandTimeoutMs",
+            )
+            throw TmuxClientException(
+                "tmux command `$kind` acquire wedged after ${commandTimeoutMs}ms",
+            )
+        }
         // Single-flight: tmux only honours one outstanding command at a
         // time. The deferred is registered (queued) BEFORE we write the
         // bytes so we can't lose a response that arrives before we've
         // returned from the write.
-        return sendMutex.withLock {
+        return try {
             if (closed) throw TmuxClientException("client is closed")
             if (!connected) throw TmuxClientException("client is not connected")
             val sh = shell ?: throw TmuxClientException("client has no active shell")
@@ -1411,7 +1430,7 @@ internal class RealTmuxClient(
                 }
                 throw t
             }
-            if (response != null) return@withLock response
+            if (response != null) return response
 
             val kind = commandKind(cmd)
             val exception = TmuxClientException(
@@ -1530,6 +1549,8 @@ internal class RealTmuxClient(
                 timeoutMode = effectiveTimeoutMode,
             )
             throw exception
+        } finally {
+            sendMutex.unlock()
         }
     }
 

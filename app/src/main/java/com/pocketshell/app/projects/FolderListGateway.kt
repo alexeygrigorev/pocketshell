@@ -7,7 +7,7 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
-import com.pocketshell.app.sessions.remoteStartDirectoryExists
+import com.pocketshell.app.sessions.remoteStartDirectoryExistsCommand
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
@@ -1197,7 +1197,7 @@ class SshFolderListGateway internal constructor(
         cwd: String,
         startCommand: String?,
     ): String {
-        if (!remoteStartDirectoryExists(session, cwd)) {
+        if (session.execBounded(remoteStartDirectoryExistsCommand(cwd)).exitCode != 0) {
             throw RuntimeException(
                 startDirectoryMissingMessage(
                     sessionName = sessionName,
@@ -1228,21 +1228,21 @@ class SshFolderListGateway internal constructor(
         // fresh list / suffix instead of silently leaking keystrokes. A plain
         // shell/no-launch create keeps its idempotent attach-or-create semantics.
         if (startCommand != null) {
-            val hasSession = session.exec(
+            val hasSession = session.execBounded(
                 pathAware("tmux has-session -t $quotedName"),
             )
             if (hasSession.exitCode == 0) {
                 throw RuntimeException(launchTargetCollisionMessage(sessionName))
             }
         }
-        val createResult = session.exec(
+        val createResult = session.execBounded(
             pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
         )
         if (createResult.exitCode == TMUXCTL_UNSUPPORTED_EXIT_CODE) {
             // Layer 1: tmuxctl is absent OR too old to know `create-detached`.
             // Fall back to the pre-#726 raw capped-less create so the user still
             // gets a session (just without the memory cap).
-            val fallback = session.exec(
+            val fallback = session.execBounded(
                 pathAware(fallbackCreateSessionCommand(quotedName, quotedCwd)),
             )
             if (fallback.exitCode != 0 && fallback.stderr.isNotBlank()) {
@@ -1284,7 +1284,7 @@ class SshFolderListGateway internal constructor(
                 ensureAgentSubcommandAvailable(session)
             }
             val quotedCommand = shellQuote(startCommand)
-            session.exec(
+            session.execBounded(
                 pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
             )
         }
@@ -1305,7 +1305,7 @@ class SshFolderListGateway internal constructor(
      * never blocks a healthy launch.
      */
     private suspend fun ensureAgentSubcommandAvailable(session: SshSession) {
-        val probe = session.exec(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
+        val probe = session.execBounded(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
         if (!AgentLaunchVersionCheck.isAgentSubcommandMissing(
                 stdout = probe.stdout,
                 stderr = probe.stderr,
@@ -1317,7 +1317,7 @@ class SshFolderListGateway internal constructor(
         // Outdated host: best-effort fetch of the installed version so the hint
         // can be concrete ("this host's pocketshell is 0.3.33").
         val installedVersion = runCatching {
-            val version = session.exec(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
+            val version = session.execBounded(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
             AgentLaunchVersionCheck.parseReportedVersion(
                 version.stdout.ifBlank { version.stderr },
             )

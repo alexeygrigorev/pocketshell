@@ -392,17 +392,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * `commandTimeoutMs` (10 s) so a wedged-but-alive control channel makes the
      * seed surface a best-effort failure FAST and fall through to the blank
      * watchdog on the still-live transport, instead of the (now off-Main, but
-     * still bounded) seed parking for the full 10 s. NOT a constructor parameter,
-     * for the same Hilt-graph reason as the other timeout seams; a unit test
-     * shrinks it via [setSeedCaptureTimeoutForTest] to assert the fall-through
-     * deterministically.
+     * still bounded) seed parking for the full 10 s.
      */
-    private var seedCaptureTimeoutMs: Long = SEED_CAPTURE_TIMEOUT_MS
-
-    @androidx.annotation.VisibleForTesting
-    internal fun setSeedCaptureTimeoutForTest(timeoutMs: Long) {
-        seedCaptureTimeoutMs = timeoutMs
-    }
+    private val seedCaptureTimeoutMs: Long = SEED_CAPTURE_TIMEOUT_MS
 
     /**
      * Issue #576 (Slice A of #792): the dispatcher the structural reconcile's
@@ -1667,14 +1659,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
 
-    // Issue #886: the blank-watchdog tick bound, injectable so a unit test can
-    // exhaust it quickly (the stuck-attach-reveal safety net). Defaults to the
-    // production constant — production behavior is unchanged.
-    private var connectedBlankWatchdogMaxTicks: Int = CONNECTED_BLANK_WATCHDOG_MAX_TICKS
-
-    internal fun setConnectedBlankWatchdogMaxTicksForTest(maxTicks: Int) {
-        connectedBlankWatchdogMaxTicks = maxTicks
-    }
+    // Issue #886: the blank-watchdog tick bound for the stuck-attach-reveal
+    // safety net.
+    private val connectedBlankWatchdogMaxTicks: Int = CONNECTED_BLANK_WATCHDOG_MAX_TICKS
 
     // Issue #886: when false, [armConnectedBlankWatchdog] is suppressed entirely.
     // Used ONLY by the watchdog-in-isolation characterization tests that manually
@@ -3063,6 +3050,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingReattach: PendingReattach? = null
     private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var backgroundDetachJob: Job? = null
+    private var postGraceHeldForegroundProbeJob: Job? = null
     private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
@@ -3408,6 +3396,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // predicate — the #685 trap: the controller edge is the trigger, the inline
         // predicate the gate). The inline foreground event arm is no longer
         // consulted (Slice 2a).
+        if (launchPostGraceHeldForegroundProbeIfNeeded()) return
         connectionManager.observeForeground()
         dispatchPostGraceForegroundArmIfPending()
         // The controller's single grace predicate decided reattach-vs-reconnect:
@@ -3431,6 +3420,100 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun dispatchPostGraceForegroundArmIfPending() {
         if (pendingReattach == null && pausedAutoReconnect == null) return
         onControllerForegrounded()
+    }
+
+    /**
+     * Issue #1021 follow-up: when the foreground service preserved a live terminal past
+     * the App grace deadline, foreground arrives as "post-grace" but there is no
+     * [pendingReattach] to replay because no teardown ran. That must not no-op: probe the
+     * held control channel, reseed if it is alive, or silently re-open the same session if
+     * the held channel went stale while backgrounded.
+     */
+    private fun launchPostGraceHeldForegroundProbeIfNeeded(): Boolean {
+        if (pendingReattach != null || pausedAutoReconnect != null) return false
+        if (postGraceHeldForegroundProbeJob?.isActive == true) return true
+        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
+        val target = activeTarget ?: return false
+        val client = clientRef ?: return false
+        val session = sessionRef ?: return false
+        if (client.disconnected.value) return false
+
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-post-grace-held-foreground-probe generation=$connectGeneration " +
+                targetLogFields(target),
+        )
+        val job = launchContainedTeardown {
+            val verdict = probeRuntimeControlChannel(client, session)
+            val currentTarget = activeTarget
+            if (
+                clientRef !== client ||
+                currentTarget == null ||
+                !sameSessionIdentity(currentTarget, target)
+            ) {
+                return@launchContainedTeardown
+            }
+            ReconnectCauseTrail.record(
+                stage = "foreground_reattach",
+                outcome = "post_grace_hold_probe",
+                cause = "session_foreground_service",
+                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+                "hostId" to target.hostId,
+                "generation" to connectGeneration,
+                "probeVerdict" to verdict.name,
+                "clientHash" to System.identityHashCode(client),
+            )
+            DiagnosticEvents.record(
+                "connection",
+                "foreground_reattach",
+                "source" to "app_lifecycle",
+                "outcome" to "post_grace_hold_probe",
+                "cause" to "session_foreground_service",
+                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
+                "generation" to connectGeneration,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "user" to target.user,
+                "session" to target.sessionName,
+                "probeVerdict" to verdict.name,
+            )
+            if (verdict == RuntimeHealthVerdict.HEALTHY) {
+                connectionManager.observeForegroundReattachLive()
+                projectStatusFromController()
+                reseedActivePaneForReattach(
+                    RuntimeRefreshGuard(
+                        generation = connectGeneration,
+                        target = target,
+                        client = client,
+                    ),
+                )
+                return@launchContainedTeardown
+            }
+
+            val recovered = silentlyReconnectTransportAfterPassiveDisconnect(
+                staleClient = client,
+                target = target,
+                timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+            )
+            if (!recovered) {
+                scheduleAutoReconnect(
+                    target = target,
+                    reason = "Reattaching to ${target.user}@${target.host}:${target.port}.",
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                    diagnosticFields = arrayOf(
+                        "originationCause" to "post_grace_session_hold_probe_${verdict.name.lowercase()}",
+                    ),
+                )
+            }
+        }
+        postGraceHeldForegroundProbeJob = job
+        job.invokeOnCompletion {
+            if (postGraceHeldForegroundProbeJob == job) {
+                postGraceHeldForegroundProbeJob = null
+            }
+        }
+        return true
     }
 
     /**
@@ -7452,7 +7535,12 @@ public class TmuxSessionViewModel @Inject constructor(
         if (forceCleanOutageForTest) return false
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         val startedAtMs = SystemClock.elapsedRealtime()
-        val replacement = createTmuxClient(session, target.sessionName, target.startDirectory)
+        val replacement = createTmuxClient(
+            session,
+            target.sessionName,
+            target.startDirectory,
+            probeServerLiveness = true,
+        )
         return try {
             val ready = withTimeoutOrNull(timeoutMs) {
                 eventsJob?.cancelAndJoin()
@@ -7650,7 +7738,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 val lease = sshLeaseManager.acquire(leaseTarget).getOrThrow()
                 acquiredLease = lease
                 val session = lease.session
-                val newClient = createTmuxClient(session, target.sessionName, target.startDirectory)
+                val newClient = createTmuxClient(
+                    session,
+                    target.sessionName,
+                    target.startDirectory,
+                    probeServerLiveness = true,
+                )
                 replacement = newClient
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
@@ -15185,133 +15278,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private sealed interface RuntimeCacheEviction {
         data object HostWide : RuntimeCacheEviction
         data class TargetRuntime(val key: TmuxRuntimeKey) : RuntimeCacheEviction
-    }
-
-    /**
-     * Issue #178: tear down everything tied to the **tmux client** but
-     * keep the underlying [SshSession] alive so the fast-switch path can
-     * reuse it for a new [TmuxClient].
-     *
-     * Mirrors [closeCurrentConnectionAndJoin] structurally — same
-     * cancel-and-join ordering for the event loop and per-pane jobs to
-     * preserve the issue #151 race-fix — but stops short of
-     * `sessionRef.close()`. We deliberately ALSO leave [sessionRef]
-     * populated; the caller ([runFastSessionSwitch]) consumes it
-     * directly. We DO clear [activeTarget] / [registeredHostId] /
-     * `remoteColumns`/`remoteRows` because the new tmux client will
-     * register a fresh entry, take ownership of the next resize, and
-     * needs a clean slate — same lifecycle reset the slow path uses.
-     *
-     * Bridge / pane / agent / input scratch state is cleared identically
-     * to the slow path: the new tmux session will report its own panes
-     * via `%window-add` and the bootstrap `list-panes`, so retaining
-     * stale per-pane jobs from the previous session would only leak
-     * coroutines onto the now-dead pane IDs.
-     */
-    private suspend fun closeCurrentClientKeepSession() {
-        eventsJob?.cancelAndJoin()
-        eventsJob = null
-        outputOverflowJob?.cancelAndJoin()
-        outputOverflowJob = null
-        passiveDisconnectGraceJob?.cancelAndJoin()
-        passiveDisconnectGraceJob = null
-        disconnectedJob?.cancelAndJoin()
-        disconnectedJob = null
-        projectRootsJob?.cancelAndJoin()
-        projectRootsJob = null
-        _projectRoots.value = emptyList()
-        val producerJobsToJoin = paneProducerJobs.values.toList()
-        val outputActivityJobsToJoin = paneOutputActivityJobs.values.toList()
-        val agentJobsToJoin = paneAgentJobs.values.toList()
-        val inputJobsToJoin = paneInputJobs.values.toList()
-        for (job in producerJobsToJoin) job.cancelAndJoin()
-        for (job in outputActivityJobsToJoin) job.cancelAndJoin()
-        for (job in agentJobsToJoin) job.cancelAndJoin()
-        for (job in inputJobsToJoin) job.cancelAndJoin()
-        for ((_, queue) in paneInputQueues) {
-            queue.close()
-        }
-        paneAgentJobs.clear()
-        paneAgentTailGenerations.clear()
-        paneAgentInputs.clear()
-        paneAgentNullDetections.clear()
-        paneLastOutputAtMs.clear()
-        paneConversationOpenStartedAtMs.clear()
-        sessionRecordedKindCache.clear()
-        sessionForeignKindGuessCache.clear()
-        // Issue #894 (Slice C): drop the durable confirmed-shell verdicts so a
-        // different session never inherits a stale shell verdict.
-        confirmedShellSessionIds.clear()
-        _confirmedShellPaneIds.value = emptySet()
-        paneInputJobs.clear()
-        paneInputQueues.clear()
-        _agentConversations.value = emptyMap()
-        paneProducerJobs.clear()
-        // Issue #959: drop stale per-pane client bindings so a fresh reconnect
-        // re-binds every reused pane's producer/input to the new client.
-        paneProducerClients.clear()
-        paneOutputActivityJobs.clear()
-        for ((_, row) in paneRows) {
-            runCatching { row.terminalState.detachExternalProducer() }
-        }
-        paneRows.clear()
-        _panes.value = emptyList()
-        rebuildUnifiedPanes()
-        // Close the tmux -CC channel. This tears down only the SSH
-        // shell channel inside the live [SshSession] — the session
-        // itself stays open for the next [TmuxClient].
-        //
-        // Issue #215: the same orphan-control-client problem the slow
-        // teardown path fixes applies here too — when a same-host
-        // session switch tears down the previous tmux `-CC` channel
-        // without notifying tmux, the previous client lingers in
-        // `tmux list-clients` for the previous session until tmux
-        // notices the SSH shell channel close on its own. Sending
-        // `detach-client` first removes that delay window and matches
-        // the slow path's contract for "PocketShell promises to leave
-        // a clean server when it tears a tmux client down".
-        //
-        // Issue #257 (perf): the previous version `await`ed
-        // [TmuxClient.detachCleanly] here, putting up to a 1s
-        // `detach-client` + reader-EOF round-trip directly on the
-        // session-switch critical path — the new session could not
-        // start attaching until the OLD client had finished detaching.
-        // Each tmux `-CC` client owns its own SSH shell channel
-        // ([SshSession.startShell] opens a fresh channel and closing one
-        // leaves the parent session + sibling channels alive), so the
-        // new client's [TmuxClient.connect] can open its channel
-        // immediately while the old client's clean detach drains in the
-        // background. We launch the detach fire-and-forget on
-        // [viewModelScope] (cancelled with the VM in [onCleared]) and
-        // null [clientRef] right away so [runFastSessionSwitch] proceeds
-        // without waiting. The #215 clean-server contract is preserved —
-        // the detach still runs, just not blocking the user's switch.
-        val previousClient = clientRef
-        clientRef = null
-        orphanDetachJob?.cancel()
-        // Issue #935 R1: contained — the orphan detach runs `detachCleanly()` IO
-        // against the LEAVING client (a transport mid-teardown during the switch).
-        orphanDetachJob = previousClient?.let { client ->
-            launchContainedTeardown {
-                withContext(NonCancellable) {
-                    runCatching { client.detachCleanly() }
-                }
-            }
-        }
-        unregisterCurrentClient()
-        // Intentionally NOT touching [sessionRef] — that is the
-        // contract of this method. The caller will pass the same
-        // session to the next tmux client.
-        activeTarget = null
-        activeAttachMilestone = null
-        // Keep [connectingTarget] — connect() set it to the new
-        // target before invoking us; clearing it here would lose the
-        // intent.
-        // A fresh attach must capture a fresh phone grid and re-run the
-        // size-mismatch check.
-        remoteColumns = 0
-        remoteRows = 0
-        resetControlClientSizeForAttach()
     }
 
     /**

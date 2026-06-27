@@ -40,12 +40,14 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 data class StartDirectoryAutocompleteTarget(
@@ -119,6 +121,7 @@ class StartDirectoryAutocompleteController(
     private val scope: CoroutineScope,
     private val suggest: suspend (String) -> List<String>,
     private val debounceMs: Long = START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS,
+    private val requestTimeoutMs: Long = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
 ) {
     private val _state = MutableStateFlow(StartDirectoryAutocompleteUiState())
     val state: StateFlow<StartDirectoryAutocompleteUiState> = _state.asStateFlow()
@@ -137,13 +140,21 @@ class StartDirectoryAutocompleteController(
         job = scope.launch {
             delay(debounceMs)
             val query = value
-            val suggestions = runCatching { suggest(query) }.getOrDefault(emptyList())
-            if (latestInput == query) {
-                _state.value = StartDirectoryAutocompleteUiState(
-                    suggestions = suggestions.distinct(),
-                    loading = false,
-                    highlightedIndex = 0,
-                )
+            var suggestions: List<String> = emptyList()
+            try {
+                suggestions = withTimeoutOrNull(requestTimeoutMs) { suggest(query) }.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                suggestions = emptyList()
+            } finally {
+                if (latestInput == query) {
+                    _state.value = StartDirectoryAutocompleteUiState(
+                        suggestions = suggestions.distinct(),
+                        loading = false,
+                        highlightedIndex = 0,
+                    )
+                }
             }
         }
     }
@@ -171,6 +182,7 @@ class StartDirectoryAutocompleteController(
 
     fun dispose() {
         job?.cancel()
+        _state.value = StartDirectoryAutocompleteUiState()
     }
 }
 
@@ -178,16 +190,18 @@ class StartDirectoryAutocompleteController(
 fun rememberStartDirectoryAutocompleteController(
     suggestStartDirectories: (suspend (String) -> List<String>)?,
     debounceMs: Long = START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS,
+    requestTimeoutMs: Long = START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS,
 ): StartDirectoryAutocompleteController? {
     val currentSuggest by rememberUpdatedState(suggestStartDirectories)
     val scope = rememberCoroutineScope()
     val enabled = suggestStartDirectories != null
-    val controller = remember(enabled, debounceMs) {
+    val controller = remember(enabled, debounceMs, requestTimeoutMs) {
         if (enabled) {
             StartDirectoryAutocompleteController(
                 scope = scope,
                 suggest = { query -> currentSuggest?.invoke(query).orEmpty() },
                 debounceMs = debounceMs,
+                requestTimeoutMs = requestTimeoutMs,
             )
         } else {
             null
@@ -372,4 +386,5 @@ fun startDirectoryAutocompleteSuggestionTag(path: String): String =
     "start-directory-autocomplete:suggestion:${path.hashCode()}"
 
 private const val START_DIRECTORY_AUTOCOMPLETE_DEBOUNCE_MS: Long = 250L
+private const val START_DIRECTORY_AUTOCOMPLETE_TIMEOUT_MS: Long = 1_500L
 private const val DEFAULT_START_DIRECTORY_AUTOCOMPLETE_LIMIT: Int = 30

@@ -463,8 +463,8 @@ fun FolderListScreen(
             suggestStartDirectories = suggestStartDirectories,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
+            creating = (state as? FolderListUiState.Ready)?.isCreatingSession == true,
             onCreate = { choice ->
-                pickerFolder = null
                 val newName = derivedSessionName(
                     choice = choice,
                     homeDirectory = conventionalRemoteHome(username),
@@ -478,7 +478,11 @@ fun FolderListScreen(
                     // new tree node immediately (no detection round-trip).
                     chosenKind = choice.sessionAgentKind,
                     onResolved = { resolved ->
+                        pickerFolder = null
                         onSessionCreated(resolved, choice.startDirectory)
+                    },
+                    onFinished = {
+                        pickerFolder = null
                     },
                 )
             },

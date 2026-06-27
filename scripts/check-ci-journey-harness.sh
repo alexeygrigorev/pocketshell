@@ -141,6 +141,7 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.sessions.service.SessionConnectionServiceE2eTest"
   "com.pocketshell.app.session.ConversationToolResultPairingE2eTest"
   "com.pocketshell.app.session.ShowKeyboardChipE2eTest"
+  "com.pocketshell.app.sessions.service.SessionConnectionServiceE2eTest"
   "com.pocketshell.app.settings.ConversationFontSizeSettingE2eTest"
   "com.pocketshell.app.settings.DiagnosticsRecordingIndicatorE2eTest"
   "com.pocketshell.app.settings.SettingsAboutFooterE2eTest"

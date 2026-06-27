@@ -54,7 +54,9 @@ core, black screen, terminal/ANR, composer, tree, process learnings) →
   after each approved task.
 - Release tags come only after the version bump is committed to `main`, pushed,
   and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
-  commits.
+  commits. GitHub Actions validation summaries are acceptable release evidence
+  only when their `Commit SHA` equals the reviewed `origin/main` commit being
+  tagged.
 
 ## "Hetzner" — the maintainer's dev box
 

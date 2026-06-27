@@ -188,6 +188,47 @@ class LeaseSessionExecTest {
     }
 
     @Test
+    fun staleSideBorrowDoesNotDisconnectActiveSharedHolder() = runTest {
+        val sharedSession = FakeSshSession(
+            resultForCommand = { throw IOException("channel open failed") },
+        )
+        val connector = CountingConnector(sharedSession)
+        val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 30_000L)
+        val active = manager.acquire(TARGET.toSshLeaseTarget()).getOrThrow()
+
+        val result = LeaseSessionExec.withSession(manager, TARGET) { it.exec("probe") }
+
+        assertTrue("stale side borrow should fail after one retry on the still-active lease", result.isFailure)
+        assertEquals("active holder should keep the lease from being re-dialed", 1, connector.connectCount)
+        assertFalse("stale side borrow must not close the active holder's transport", sharedSession.closed)
+        assertTrue("active holder should still be usable", active.session.isConnected)
+
+        active.release()
+    }
+
+    @Test
+    fun timeoutSideBorrowDoesNotDisconnectActiveSharedHolder() = runTest {
+        val sharedSession = FakeSshSession(blockForever = true)
+        val connector = CountingConnector(sharedSession)
+        val manager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 30_000L)
+        val active = manager.acquire(TARGET.toSshLeaseTarget()).getOrThrow()
+
+        val result = LeaseSessionExec.withSession(
+            manager,
+            TARGET,
+            blockTimeoutMs = 5_000L,
+        ) { it.exec("wedged") }
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is LeaseSessionBlockTimeoutException)
+        assertEquals("active holder should keep the lease from being re-dialed", 1, connector.connectCount)
+        assertFalse("timed-out side borrow must not close the active holder's transport", sharedSession.closed)
+        assertTrue("active holder should still be usable", active.session.isConnected)
+
+        active.release()
+    }
+
+    @Test
     fun nonStaleFailureDoesNotRetry() = runTest {
         val session = FakeSshSession(
             resultForCommand = { throw IllegalStateException("boom") },

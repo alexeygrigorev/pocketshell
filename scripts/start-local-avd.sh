@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -22,6 +23,7 @@ BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-240}"
 AVD_START_FLAGS="${AVD_START_FLAGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save}"
 AVD_WIPE_DATA="${AVD_WIPE_DATA:-0}"
 AVD_HOLD="${AVD_HOLD:-0}"
+AVD_SCOPE="${AVD_SCOPE:-1}"
 
 usage() {
   cat <<'USAGE'
@@ -31,6 +33,10 @@ Starts the local AVD used for PocketShell connected Android review evidence and
 waits until adb reports sys.boot_completed=1. It writes diagnostics under
 build/local-avd-start/<run-id>/ so an emulator that exits before adb discovery
 leaves actionable logs instead of only a missing device.
+
+New emulator processes are cgroup-scoped by default through
+scripts/lib/scope-run.sh. Set AVD_SCOPE=0 together with
+POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup.
 
 Environment overrides:
   ANDROID_SDK=/home/alexey/Android/Sdk
@@ -43,13 +49,17 @@ Environment overrides:
   AVD_START_FLAGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save"
   AVD_WIPE_DATA=1
   AVD_HOLD=1
+  AVD_SCOPE=0 POCKETSHELL_SCOPE_ALLOW_BARE=1
+  POCKETSHELL_TEST_MEM=8G
+  POCKETSHELL_SCOPE_ALLOW_BARE=1
+  POCKETSHELL_EMULATOR_SG_KVM=auto
 
 Set AVD_HOLD=1 in one terminal when collecting connectedDebugAndroidTest
 evidence. The helper keeps monitoring adb/process state until interrupted, so
 an emulator that exits after boot is reported in the same run directory.
 
 On success, run focused evidence commands such as:
-  ./gradlew --no-daemon :app:connectedDebugAndroidTest \
+  scripts/connected-test.sh --suffix i123 \
     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest
 USAGE
 }
@@ -128,6 +138,8 @@ record_diagnostics() {
     printf 'avd_start_flags=%s\n' "$AVD_START_FLAGS"
     printf 'avd_wipe_data=%s\n' "$AVD_WIPE_DATA"
     printf 'avd_hold=%s\n' "$AVD_HOLD"
+    printf 'avd_scope=%s\n' "$AVD_SCOPE"
+    printf 'pocketshell_test_mem=%s\n' "${POCKETSHELL_TEST_MEM:-8G}"
     printf 'boot_timeout_seconds=%s\n' "$BOOT_TIMEOUT_SECONDS"
     printf '\n== adb devices ==\n'
     "$ADB" devices -l || true
@@ -176,6 +188,7 @@ write_summary() {
     printf 'ADB serial: %s\n' "$serial"
     printf 'Start flags: %s\n' "$AVD_START_FLAGS"
     printf 'Hold mode: %s\n' "$AVD_HOLD"
+    printf 'Cgroup scope: %s\n' "$AVD_SCOPE"
     printf 'Diagnostics: %s\n' "$RUN_DIR/diagnostics.txt"
     printf 'Emulator log: %s\n' "$RUN_DIR/emulator.log"
     printf 'ADB devices: %s\n' "$RUN_DIR/adb-devices.txt"
@@ -224,14 +237,29 @@ fi
 
 if ! has_adb_device && [[ -z "$(list_emulator_processes)" ]]; then
   printf 'Starting AVD %s with flags:%s\n' "$AVD_NAME" " $AVD_START_FLAGS"
+  declare -a emulator_cmd=()
+  pocketshell_build_sg_kvm_command emulator_cmd "$EMULATOR" -avd "$AVD_NAME" "${start_args[@]}"
   {
     printf '[%s] command:' "$(date -Is)"
-    printf ' %q' "$EMULATOR" -avd "$AVD_NAME" "${start_args[@]}"
+    printf ' %q' "${emulator_cmd[@]}"
     printf '\n\n'
   } > "$RUN_DIR/emulator.log"
-  nohup "$EMULATOR" -avd "$AVD_NAME" "${start_args[@]}" >> "$RUN_DIR/emulator.log" 2>&1 &
-  emulator_pid="$!"
-  printf '%s\n' "$emulator_pid" > "$RUN_DIR/emulator.pid"
+  if [[ "$AVD_SCOPE" == "1" ]]; then
+    scope_unit="pocketshell-avd-$(pocketshell_unit_token "$AVD_NAME")-$(pocketshell_unit_token "$RUN_ID")"
+    pocketshell_scope_start_background \
+      "$scope_unit" \
+      "$RUN_DIR/emulator.log" \
+      "$RUN_DIR/emulator.pid" \
+      "${emulator_cmd[@]}"
+    printf '%s\n' "$scope_unit.scope" > "$RUN_DIR/emulator.scope"
+  else
+    if ! pocketshell_scope_allow_bare; then
+      fail "AVD_SCOPE=0 would start AVD '$AVD_NAME' uncapped; set POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup"
+    fi
+    nohup "${emulator_cmd[@]}" >> "$RUN_DIR/emulator.log" 2>&1 &
+    emulator_pid="$!"
+    printf '%s\n' "$emulator_pid" > "$RUN_DIR/emulator.pid"
+  fi
 fi
 
 deadline=$((SECONDS + BOOT_TIMEOUT_SECONDS))

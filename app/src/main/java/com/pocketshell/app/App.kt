@@ -345,7 +345,18 @@ class App : Application() {
         sessionServiceController.observeActiveSessions()
         graceLifecycleScope.launch {
             sessionServiceController.notificationStopRequests().collect {
-                backgroundGraceController.onSessionHoldStoppedByNotification()
+                backgroundGraceController.onSessionHoldStopped(
+                    source = "session_notification",
+                    trigger = "stop_action",
+                )
+            }
+        }
+        graceLifecycleScope.launch {
+            sessionServiceController.sessionHoldEndedRequests().collect {
+                backgroundGraceController.onSessionHoldStopped(
+                    source = "session_service",
+                    trigger = "hold_ended",
+                )
             }
         }
         StartupTiming.mark("session-service-lifecycle-observed")
@@ -996,14 +1007,17 @@ internal class BackgroundGraceController(
     private var graceJob: Job? = null
     private var backgroundCycleId: Long = 0L
     private var backgroundStartedAtMs: Long = 0L
+    private var backgroundDeadlineAtMs: Long = 0L
+    private var backgroundGraceMillisForCycle: Long = graceMillis.coerceAtLeast(0L)
     private var backgrounded: Boolean = false
     private var holdStopTeardownDispatched: Boolean = false
 
     /**
-     * True once [onGraceElapsed] has actually run for the current
-     * background cycle. Distinguishes a within-grace resume (connection
-     * intact) from a post-grace resume (connection torn down, reattach
-     * needed). Reset on the next [onBackground].
+     * True once the grace-elapsed action has been dispatched for the current
+     * background cycle. The action may preserve the connection (for example,
+     * while a session foreground-service hold is active), so this tracks
+     * elapsed/deadline handling rather than a guaranteed destructive teardown.
+     * Reset on the next [onBackground].
      */
     private var teardownFired: Boolean = false
 
@@ -1013,8 +1027,9 @@ internal class BackgroundGraceController(
      * cannot unexpectedly prolong a backgrounded connection.
      */
     fun setGraceMillis(millis: Long) {
-        if (graceJob?.isActive == true || graceMillis == millis) return
-        graceMillis = millis
+        val normalizedMillis = millis.coerceAtLeast(0L)
+        if (backgrounded || graceMillis == normalizedMillis) return
+        graceMillis = normalizedMillis
     }
 
     fun onBackground() {
@@ -1024,14 +1039,17 @@ internal class BackgroundGraceController(
         if (backgrounded && teardownFired) return
         backgroundCycleId += 1L
         backgroundStartedAtMs = nowMillis()
+        backgroundGraceMillisForCycle = graceMillis.coerceAtLeast(0L)
+        backgroundDeadlineAtMs = backgroundStartedAtMs + backgroundGraceMillisForCycle
         backgrounded = true
         teardownFired = false
         holdStopTeardownDispatched = false
-        Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
+        Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$backgroundGraceMillisForCycle")
         DiagnosticEvents.record(
             "app",
             "background_grace_start",
-            "millis" to graceMillis,
+            "millis" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
             "backgroundCycleId" to backgroundCycleId,
             "source" to "process_lifecycle",
             "trigger" to "on_stop",
@@ -1041,46 +1059,116 @@ internal class BackgroundGraceController(
             outcome = "start",
             cause = "process_background",
             trigger = "on_stop",
-            "graceMs" to graceMillis,
+            "graceMs" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
             "backgroundCycleId" to backgroundCycleId,
         )
         graceJob = scope.launch {
-            delay(graceMillis)
-            teardownFired = true
-            val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
-            Log.i(GRACE_LIFECYCLE_TAG, "grace-window-elapsed teardown")
-            DiagnosticEvents.record(
-                "app",
-                "background_grace_elapsed",
-                "teardown" to true,
-                "elapsedMs" to elapsedMs,
-                "millis" to graceMillis,
-                "backgroundCycleId" to backgroundCycleId,
-                "source" to "timer",
-                "trigger" to "grace_timeout",
-            )
-            ReconnectCauseTrail.record(
-                stage = "background_grace",
-                outcome = "elapsed_teardown",
-                cause = "grace_timeout",
-                trigger = "timer",
-                "elapsedMs" to elapsedMs,
-                "graceMs" to graceMillis,
-                "backgroundCycleId" to backgroundCycleId,
-            )
-            onGraceElapsed()
+            delay(backgroundGraceMillisForCycle)
+            dispatchGraceElapsedIfNeeded(source = "timer", trigger = "grace_timeout")
         }
     }
 
     fun onForeground() {
         val pending = graceJob
         graceJob = null
-        val resumedWithinGrace = pending?.isActive == true && !teardownFired
-        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
+        val foregroundAtMs = nowMillis()
+        val hadBackgroundCycle = backgroundCycleId > 0L
+        val resumedWithinGrace = backgrounded && !teardownFired && foregroundAtMs < backgroundDeadlineAtMs
+        val elapsedMs = elapsedMs(foregroundAtMs)
         backgrounded = false
         if (resumedWithinGrace) {
             pending?.cancel()
+        } else if (!teardownFired && pending?.isActive == true) {
+            pending.cancel()
         }
+        scope.launch {
+            if (!resumedWithinGrace) {
+                if (!teardownFired && hadBackgroundCycle && foregroundAtMs >= backgroundDeadlineAtMs) {
+                    dispatchGraceElapsedIfNeeded(
+                        source = "process_lifecycle",
+                        trigger = "deadline_before_on_start",
+                    )
+                } else {
+                    pending?.join()
+                }
+            }
+            recordForeground(resumedWithinGrace = resumedWithinGrace, elapsedMs = elapsedMs)
+            onForeground(resumedWithinGrace)
+        }
+    }
+
+    fun onSessionHoldStoppedByNotification() {
+        onSessionHoldStopped(source = "session_notification", trigger = "stop_action")
+    }
+
+    fun onSessionHoldStopped(source: String, trigger: String) {
+        if (!backgrounded || !teardownFired || graceJob?.isActive == true) return
+        if (holdStopTeardownDispatched) return
+        holdStopTeardownDispatched = true
+        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
+        Log.i(
+            GRACE_LIFECYCLE_TAG,
+            "grace-window-session-hold-stop-after-elapsed teardown elapsedMs=$elapsedMs",
+        )
+        DiagnosticEvents.record(
+            "app",
+            "background_grace_session_hold_stop",
+            "teardownRequested" to true,
+            "elapsedMs" to elapsedMs,
+            "millis" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
+            "backgroundCycleId" to backgroundCycleId,
+            "source" to source,
+            "trigger" to trigger,
+        )
+        ReconnectCauseTrail.record(
+            stage = "background_grace",
+            outcome = "session_hold_stop_teardown",
+            cause = source,
+            trigger = trigger,
+            "elapsedMs" to elapsedMs,
+            "graceMs" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
+            "backgroundCycleId" to backgroundCycleId,
+        )
+        scope.launch {
+            onGraceElapsed()
+        }
+    }
+
+    private suspend fun dispatchGraceElapsedIfNeeded(source: String, trigger: String): Boolean {
+        if (teardownFired) return false
+        teardownFired = true
+        val now = nowMillis()
+        val elapsedMs = elapsedMs(now)
+        Log.i(GRACE_LIFECYCLE_TAG, "grace-window-deadline-elapsed")
+        DiagnosticEvents.record(
+            "app",
+            "background_grace_elapsed",
+            "deadlineElapsed" to true,
+            "elapsedMs" to elapsedMs,
+            "millis" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
+            "backgroundCycleId" to backgroundCycleId,
+            "source" to source,
+            "trigger" to trigger,
+        )
+        ReconnectCauseTrail.record(
+            stage = "background_grace",
+            outcome = "elapsed",
+            cause = "grace_deadline",
+            trigger = trigger,
+            "elapsedMs" to elapsedMs,
+            "graceMs" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
+            "backgroundCycleId" to backgroundCycleId,
+        )
+        onGraceElapsed()
+        return true
+    }
+
+    private fun recordForeground(resumedWithinGrace: Boolean, elapsedMs: Long) {
         Log.i(
             GRACE_LIFECYCLE_TAG,
             "grace-window-foreground resumedWithinGrace=$resumedWithinGrace elapsedMs=$elapsedMs",
@@ -1092,7 +1180,8 @@ internal class BackgroundGraceController(
             "resumedWithinGrace" to resumedWithinGrace,
             "withinGrace" to resumedWithinGrace,
             "elapsedMs" to elapsedMs,
-            "millis" to graceMillis,
+            "millis" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
             "backgroundCycleId" to backgroundCycleId,
             "source" to "process_lifecycle",
             "trigger" to "on_start",
@@ -1105,53 +1194,19 @@ internal class BackgroundGraceController(
             trigger = "on_start",
             "withinGrace" to resumedWithinGrace,
             "elapsedMs" to elapsedMs,
-            "graceMs" to graceMillis,
+            "graceMs" to backgroundGraceMillisForCycle,
+            "deadlineMs" to backgroundDeadlineAtMs,
             "backgroundCycleId" to backgroundCycleId,
             *diagnosticFields.toTypedArray(),
         )
-        scope.launch {
-            if (!resumedWithinGrace) {
-                pending?.join()
-            }
-            onForeground(resumedWithinGrace)
-        }
     }
 
-    fun onSessionHoldStoppedByNotification() {
-        if (!backgrounded || !teardownFired || graceJob?.isActive == true) return
-        if (holdStopTeardownDispatched) return
-        holdStopTeardownDispatched = true
-        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
-        Log.i(
-            GRACE_LIFECYCLE_TAG,
-            "grace-window-session-hold-stop-after-elapsed teardown elapsedMs=$elapsedMs",
-        )
-        DiagnosticEvents.record(
-            "app",
-            "background_grace_session_hold_stop",
-            "teardown" to true,
-            "elapsedMs" to elapsedMs,
-            "millis" to graceMillis,
-            "backgroundCycleId" to backgroundCycleId,
-            "source" to "session_notification",
-            "trigger" to "stop_action",
-        )
-        ReconnectCauseTrail.record(
-            stage = "background_grace",
-            outcome = "session_hold_stop_teardown",
-            cause = "session_notification_stop",
-            trigger = "stop_action",
-            "elapsedMs" to elapsedMs,
-            "graceMs" to graceMillis,
-            "backgroundCycleId" to backgroundCycleId,
-        )
-        scope.launch {
-            onGraceElapsed()
-        }
-    }
+    private fun elapsedMs(now: Long = nowMillis()): Long =
+        (now - backgroundStartedAtMs).coerceAtLeast(0L)
 
-    /** Test seam: true while the grace timer is counting down. */
-    internal fun isGracePendingForTest(): Boolean = graceJob?.isActive == true
+    /** Test seam: true while the current background cycle is still inside its deadline. */
+    internal fun isGracePendingForTest(): Boolean =
+        backgrounded && !teardownFired && nowMillis() < backgroundDeadlineAtMs
 }
 
 internal class SshLeaseLifecycleDispatcher(

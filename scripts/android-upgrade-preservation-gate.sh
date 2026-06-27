@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -64,7 +65,8 @@ install_apk() {
 }
 
 if [[ "$BUILD_NEW_APK" == "1" ]]; then
-  ./gradlew $GRADLE_FLAGS :app:assembleDebug
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-new-apk" -- \
+    ./gradlew $GRADLE_FLAGS :app:assembleDebug
 fi
 
 if [[ -z "$OLD_APK_PATH" ]]; then
@@ -74,10 +76,8 @@ if [[ -z "$OLD_APK_PATH" ]]; then
   fi
   old_worktree="$RUN_DIR/old-$OLD_REF"
   git worktree add --detach "$old_worktree" "$OLD_REF"
-  (
-    cd "$old_worktree"
-    ./gradlew $GRADLE_FLAGS :app:assembleDebug
-  )
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-old-apk" -- \
+    "$old_worktree/gradlew" $GRADLE_FLAGS -p "$old_worktree" :app:assembleDebug
   built_old_apk="$RUN_DIR/old-app-debug-$OLD_REF.apk"
   cp "$old_worktree/app/build/outputs/apk/debug/app-debug.apk" "$built_old_apk"
   git worktree remove --force "$old_worktree"

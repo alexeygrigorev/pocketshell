@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Self-test for scripts/check-test-validity.sh (issue #850).
 #
-# For each NEW detector added in #850 (C1, FAKE1, AWAIT1) and the pre-existing
-# A5, this driver plants a BAD fixture (the smell) and a GOOD fixture (the
+# For each detector added for #848/#850 (C1, FAKE1, AWAIT1, J1) and the
+# pre-existing A5, this driver plants a BAD fixture (the smell) and a GOOD fixture (the
 # corrective shape), runs the guard, and asserts the bad fixture is reported as
 # a finding while the good fixture is NOT — the red->green proof for the
 # detector itself. It also asserts the guard HARD-FAILS (exit 1) when an
-# unjustified hard-fail smell (A5 / C1) is planted, and PASSES (exit 0) when
+# unjustified hard-fail smell (A5 / C1 / J1) is planted, and PASSES (exit 0) when
 # only the corrective shapes are present.
 #
 # Fixtures are planted under throwaway subdirectories of the REAL scanned test
@@ -48,7 +48,7 @@ note_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 # Assert a path appears (mode=present) or does not appear (mode=absent) as a
 # FINDING in the named report section. `section` is a substring of the section
-# header line (e.g. "C1 — NEW", "FAKE1 — NEW", "AWAIT1 — NEW"). A GOOD fixture
+# header line (e.g. "C1 — NEW", "FAKE1 — NEW", "AWAIT1 — NEW", "J1 — NEW"). A GOOD fixture
 # may legitimately appear in an advisory JUSTIFIED/KNOWN list — "absent" here
 # means "not listed as a finding in THIS section", not "absent from the whole
 # report".
@@ -138,6 +138,42 @@ assert_exit 1 "C1 unjustified skip hard-fails the guard"
 # Remove the BAD C1 so subsequent FAKE1/AWAIT1 (advisory) checks can confirm a
 # clean exit-0 with only advisory findings present.
 rm -f "$ANDROID_FIX_DIR/C1BadJourneyTest.kt"
+
+# --------------------------------------------------------------------------
+# J1 — androidTest E2e/Docker class missing ci-journey-suite coverage.
+# --------------------------------------------------------------------------
+echo
+echo "[J1] unwired androidTest journey class"
+
+# BAD: a new journey-shaped androidTest class that is not wired into
+# scripts/ci-journey-suite.sh and has no local reason for staying out.
+cat > "$ANDROID_FIX_DIR/J1BadUnwiredE2eTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class J1BadUnwiredE2eTest {
+    fun journey() {
+        // Load-bearing connected journey proof, but not in ci-journey-suite.
+    }
+}
+KT
+
+# GOOD: the same unwired shape with a local source-level justification.
+cat > "$ANDROID_FIX_DIR/J1GoodJustifiedDockerTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+// CI_JOURNEY_SUITE_JUSTIFIED: opt-in Docker fixture runs only in nightly.
+class J1GoodJustifiedDockerTest {
+    fun journey() {
+        // Local/nightly-only fixture; the comment above is the required reason.
+    }
+}
+KT
+
+assert_report present "J1BadUnwiredE2eTest" "J1 — NEW" "J1 fires on an unwired androidTest journey"
+assert_report absent  "J1GoodJustifiedDockerTest" "J1 — NEW" "J1 spares a local ci-journey-suite justification"
+assert_exit 1 "J1 unwired androidTest journey hard-fails the guard"
+
+# Remove the BAD J1 so advisory checks can still prove guard-mode exit 0 when
+# no hard-fail smells remain.
+rm -f "$ANDROID_FIX_DIR/J1BadUnwiredE2eTest.kt"
 
 # --------------------------------------------------------------------------
 # FAKE1 — connect-path RPC test with an always-answering fake (no fault case).

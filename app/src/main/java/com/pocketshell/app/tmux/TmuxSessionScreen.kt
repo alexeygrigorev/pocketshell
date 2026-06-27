@@ -149,10 +149,10 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
-import com.pocketshell.app.cards.ChecklistCardsSheet
-import com.pocketshell.app.cards.ChecklistChip
-import com.pocketshell.app.cards.SessionCardsRemoteSource
-import com.pocketshell.app.cards.checklistChipState
+import com.pocketshell.app.cards.SessionCardFeedChip
+import com.pocketshell.app.cards.SessionCardFeedSheet
+import com.pocketshell.app.cards.SessionCardInteractions
+import com.pocketshell.app.cards.cardFeedChipState
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.snippets.snippetDispatchText
@@ -400,11 +400,11 @@ public fun TmuxSessionScreen(
     // Issue #626: unified pane list for the cross-session pager.
     val unifiedPanes by viewModel.unifiedPanes.collectAsState()
     // Issue #876: collect the DEBOUNCED display status so a sub-1s reconnect blip
-    // never flashes the "Reconnecting" band/spinner. Steady states
-    // (Connected/Connecting/Switching/Failed/Idle) still surface immediately, so
-    // input-gating (`sessionLive`) and the connecting overlay are unaffected — only
-    // the transient Reconnecting surfacing is held back ~1s.
+    // never flashes the "Reconnecting" band/spinner. Input gating reads the raw
+    // status below so a held display state cannot leave controls live during a
+    // real transport drop.
     val status by viewModel.displayConnectionStatus.collectAsState()
+    val rawStatus by viewModel.connectionStatus.collectAsState()
     // EPIC #687 P1 (#686/#658): the screen is keyed to the TARGET session id —
     // the rendered screen state is a pure function of that id (`RevealStateMachine`),
     // so a late/stale frame from the previous session can NEVER paint.
@@ -449,7 +449,7 @@ public fun TmuxSessionScreen(
     // dead bridge and silently lost — exactly the data-loss the user
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
-    val sessionLive = status is ConnectionStatus.Connected
+    val sessionLive = rawStatus is ConnectionStatus.Connected
     val outboundQueueItems by promptComposerViewModel.outboundQueueItems.collectAsState()
     val outboundQueueAutoFlushController = remember(targetSessionId.value) {
         OutboundQueueAutoFlushController()
@@ -480,15 +480,15 @@ public fun TmuxSessionScreen(
         }
     }
     val sessionCardsState by viewModel.sessionCards.collectAsState()
-    val checklistCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
+    val sessionCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
         if (sessionCardsState.targetKey == activeSessionCardsTargetKey) {
-            sessionCardsState.feed.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
+            sessionCardsState.feed.cards
         } else {
             emptyList()
         }
     }
-    val sessionChecklistChipState = remember(checklistCards) {
-        checklistChipState(checklistCards)
+    val sessionCardFeedChipState = remember(sessionCards) {
+        cardFeedChipState(sessionCards)
     }
     LaunchedEffect(sessionLive, activeSessionCardsTargetKey) {
         if (sessionLive) viewModel.refreshActiveSessionCards()
@@ -727,7 +727,20 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
-    var showChecklistSheet by remember(activeSessionCardsTargetKey) { mutableStateOf(false) }
+    var showCardFeedSheet by remember(activeSessionCardsTargetKey) { mutableStateOf(false) }
+    val sessionCardInteractions = remember(viewModel) {
+        object : SessionCardInteractions {
+            override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
+                viewModel.toggleChecklistItem(
+                    cardId = cardId,
+                    itemId = itemId,
+                    checked = checked,
+                )
+            }
+
+            override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
+        }
+    }
 
     // Issue #560: a share-into-session launch carries staged remote
     // attachment path(s). Seed them into the shared composer VM as #544
@@ -959,7 +972,7 @@ public fun TmuxSessionScreen(
         sessionDrawerOpen = showSessionSwitcher || showSessionDrawer,
         micSheetOpen = showMicSheet,
         snippetPickerOpen = showSnippetPicker,
-        checklistSheetOpen = showChecklistSheet,
+        cardFeedSheetOpen = showCardFeedSheet,
         onDismissDialog = { dialogMode = null },
         onDismissSessionDrawer = {
             showSessionSwitcher = false
@@ -968,7 +981,7 @@ public fun TmuxSessionScreen(
         },
         onDismissMicSheet = { showMicSheet = false },
         onDismissSnippetPicker = { showSnippetPicker = false },
-        onDismissChecklistSheet = { showChecklistSheet = false },
+        onDismissCardFeedSheet = { showCardFeedSheet = false },
         onBack = onBack,
     )
 
@@ -2246,13 +2259,13 @@ public fun TmuxSessionScreen(
                             showHotkeysPanel = true
                         }
                     },
-                    leadingChipContent = if (controlsInputEnabled) sessionChecklistChipState?.let { state ->
+                    leadingChipContent = if (controlsInputEnabled) sessionCardFeedChipState?.let { state ->
                         {
-                            ChecklistChip(
+                            SessionCardFeedChip(
                                 state = state,
                                 onClick = {
                                     viewModel.refreshActiveSessionCards()
-                                    showChecklistSheet = true
+                                    showCardFeedSheet = true
                                 },
                             )
                         }
@@ -2706,17 +2719,11 @@ public fun TmuxSessionScreen(
         )
     }
 
-    if (showChecklistSheet) {
-        ChecklistCardsSheet(
-            cards = checklistCards,
-            onToggle = { cardId, itemId, checked ->
-                viewModel.toggleChecklistItem(
-                    cardId = cardId,
-                    itemId = itemId,
-                    checked = checked,
-                )
-            },
-            onDismiss = { showChecklistSheet = false },
+    if (showCardFeedSheet) {
+        SessionCardFeedSheet(
+            cards = sessionCards,
+            interactions = sessionCardInteractions,
+            onDismiss = { showCardFeedSheet = false },
         )
     }
 
@@ -6337,12 +6344,12 @@ internal fun TmuxSessionBackHandler(
     sessionDrawerOpen: Boolean,
     micSheetOpen: Boolean,
     snippetPickerOpen: Boolean,
-    checklistSheetOpen: Boolean = false,
+    cardFeedSheetOpen: Boolean = false,
     onDismissDialog: () -> Unit,
     onDismissSessionDrawer: () -> Unit,
     onDismissMicSheet: () -> Unit,
     onDismissSnippetPicker: () -> Unit,
-    onDismissChecklistSheet: () -> Unit = {},
+    onDismissCardFeedSheet: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     BackHandler {
@@ -6351,7 +6358,7 @@ internal fun TmuxSessionBackHandler(
             sessionDrawerOpen -> onDismissSessionDrawer()
             micSheetOpen -> onDismissMicSheet()
             snippetPickerOpen -> onDismissSnippetPicker()
-            checklistSheetOpen -> onDismissChecklistSheet()
+            cardFeedSheetOpen -> onDismissCardFeedSheet()
             else -> onBack()
         }
     }

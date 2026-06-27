@@ -65,6 +65,28 @@ class SessionCardRenderersTest {
     }
 
     @Test
+    fun cardFeedChipCountsChecklistAndUnknownCards() {
+        val state = cardFeedChipState(
+            listOf(
+                SessionCardsRemoteSource.ChecklistCard(
+                    id = "c", title = null, createdAt = null, updatedAt = null,
+                    items = listOf(SessionCardsRemoteSource.ChecklistItem("i", "Build")),
+                    checkedIds = emptySet(),
+                ),
+                SessionCardsRemoteSource.UnknownCard(
+                    id = "future",
+                    type = "approval",
+                    title = "Approve?",
+                    createdAt = null,
+                    updatedAt = null,
+                ),
+            ),
+        )
+
+        assertEquals(SessionCardFeedChipUiState(cardCount = 2), state)
+    }
+
+    @Test
     fun cardFeedChipNullForEmptyFeed() {
         assertTrue(cardFeedChipState(emptyList()) == null)
     }

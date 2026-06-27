@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
@@ -90,7 +94,7 @@ collect_diagnostics() {
   "$ADB" devices -l > "$RUN_DIR/adb-devices-final.txt" 2>&1 || true
   "$ADB" logcat -d -v threadtime > "$RUN_DIR/adb-logcat-final.txt" 2>&1 || true
 }
-trap collect_diagnostics EXIT
+trap 'collect_diagnostics; pocketshell_release_all' EXIT
 
 prepare_verify_root() {
   if [[ -e "$ROOT_DIR/app/src/main/java/com/pocketshell/app/terminal/TerminalLabActivity.kt" ]] &&
@@ -232,7 +236,9 @@ run_logged "01-docker-agents-up" docker compose -f "$ROOT_DIR/$COMPOSE_FILE" up 
 wait_for_docker_ssh
 wait_for_emulator
 wait_for_pocketshell_idle "03b-wait-for-shared-emulator-idle"
-run_logged "04-build-apks" "$VERIFY_ROOT/gradlew" --no-daemon --no-build-cache -p "$VERIFY_ROOT" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+run_logged "04-build-apks" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-issue78-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+  "$VERIFY_ROOT/gradlew" --no-daemon --no-build-cache -p "$VERIFY_ROOT" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 wait_for_pocketshell_idle "05-wait-before-install"
 install_apks
 wait_for_pocketshell_idle "06c-wait-before-issue78-instrumentation"

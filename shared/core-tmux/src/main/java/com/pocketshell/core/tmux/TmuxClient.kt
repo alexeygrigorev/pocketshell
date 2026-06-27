@@ -30,7 +30,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
@@ -1083,27 +1082,31 @@ internal class RealTmuxClient(
             }
 
             val writeResult = CompletableDeferred<Unit>()
+            val writeCompleted = AtomicBoolean(false)
             val writeJob = clientScope.launch {
                 try {
                     writeLine(sh, chained)
+                    writeCompleted.set(true)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
                 }
             }
-            var writeCompleted = false
 
             try {
                 val capture = commandTimeoutGate.run(effectiveTimeoutMs) { checkpoint ->
                     writeResult.await()
-                    writeCompleted = true
                     checkpoint.writeCompleted()
                     capturePending.deferred.await()
                 } ?: run {
                     // Capture itself timed out: tear down both pending entries
                     // and surface a best-effort failure (the caller falls back
                     // to opening the seed gate without a snapshot).
-                    cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                    cleanupCaptureWithCursorPending(
+                        capturePending = capturePending,
+                        cursorPending = cursorPending,
+                        commandWasWritten = writeCompleted.get(),
+                    )
                     writeJob.cancel()
                     throw TmuxClientException(
                         "tmux capture-pane (combined) timed out after ${effectiveTimeoutMs}ms",
@@ -1119,21 +1122,22 @@ internal class RealTmuxClient(
                     ?.output
                     ?.firstOrNull()
                 if (cursorReply == null) {
-                    // Stop waiting on the cursor block: drop it from the queue so
-                    // a late reply is treated as a stale block to ignore rather
-                    // than mis-correlating with the NEXT command on the wire.
+                    // Stop waiting on the cursor block: discard a not-yet-begun
+                    // late block or drain an already-open one so it cannot
+                    // mis-correlate with the NEXT command on the wire.
                     synchronized(responseCorrelationLock) {
-                        val stillWaitingForBegin = cursorPending.commandNumber < 0L
-                        if (pendingQueue.remove(cursorPending) && stillWaitingForBegin) {
-                            staleResponseBlocksToIgnore += 1
-                        }
+                        abandonPendingResponse(cursorPending, commandWasWritten = true)
                     }
                 }
                 CaptureWithCursor(capture = capture, cursorReply = cursorReply)
             } catch (t: Throwable) {
-                cleanupCaptureWithCursorPending(capturePending, cursorPending)
+                cleanupCaptureWithCursorPending(
+                    capturePending = capturePending,
+                    cursorPending = cursorPending,
+                    commandWasWritten = writeCompleted.get(),
+                )
                 writeJob.cancel()
-                if (!writeCompleted) {
+                if (!writeCompleted.get()) {
                     close()
                     throw TmuxClientException(
                         "failed to write tmux combined capture command: ${t.message}",
@@ -1149,19 +1153,18 @@ internal class RealTmuxClient(
 
     /**
      * Issue #640: remove both pending entries for a combined capture exchange,
-     * accounting for any block tmux has already begun (so its late `%end`
-     * drains as a stale block rather than mis-correlating with a later command).
+     * accounting for blocks tmux has already begun, plus every not-yet-begun
+     * block still owed by a written chained line, so late replies cannot bind
+     * to a later command.
      */
     private fun cleanupCaptureWithCursorPending(
         capturePending: PendingCommand,
         cursorPending: PendingCommand,
+        commandWasWritten: Boolean,
     ) {
         synchronized(responseCorrelationLock) {
             for (pending in listOf(capturePending, cursorPending)) {
-                val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && startedBlock) {
-                    staleResponseBlocksToIgnore += 1
-                }
+                abandonPendingResponse(pending, commandWasWritten = commandWasWritten)
             }
         }
     }
@@ -1255,24 +1258,27 @@ internal class RealTmuxClient(
             }
 
             val writeResult = CompletableDeferred<Unit>()
+            val writeCompleted = AtomicBoolean(false)
             val writeJob = clientScope.launch {
                 try {
                     writeLine(sh, chained)
+                    writeCompleted.set(true)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
                 }
             }
-            var writeCompleted = false
 
             try {
                 val first = commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
                     writeResult.await()
-                    writeCompleted = true
                     checkpoint.writeCompleted()
                     pendings.first().deferred.await()
                 } ?: run {
-                    cleanupChainedPending(pendings)
+                    cleanupChainedPending(
+                        pendings = pendings,
+                        commandWasWritten = writeCompleted.get(),
+                    )
                     writeJob.cancel()
                     throw TmuxClientException(
                         "tmux chained command (first block) timed out after ${commandTimeoutMs}ms",
@@ -1294,10 +1300,7 @@ internal class RealTmuxClient(
                         responses += response
                     } else {
                         synchronized(responseCorrelationLock) {
-                            val stillWaitingForBegin = pending.commandNumber < 0L
-                            if (pendingQueue.remove(pending) && stillWaitingForBegin) {
-                                staleResponseBlocksToIgnore += 1
-                            }
+                            abandonPendingResponse(pending, commandWasWritten = true)
                         }
                         responses += CommandResponse(
                             number = -1L,
@@ -1308,9 +1311,12 @@ internal class RealTmuxClient(
                 }
                 responses
             } catch (t: Throwable) {
-                cleanupChainedPending(pendings)
+                cleanupChainedPending(
+                    pendings = pendings,
+                    commandWasWritten = writeCompleted.get(),
+                )
                 writeJob.cancel()
-                if (!writeCompleted) {
+                if (!writeCompleted.get()) {
                     close()
                     throw TmuxClientException(
                         "failed to write tmux chained command: ${t.message}",
@@ -1324,18 +1330,37 @@ internal class RealTmuxClient(
 
     /**
      * Issue #692: remove every still-pending entry for a chained exchange,
-     * accounting for any block tmux has already begun (so its late `%end`
-     * drains as a stale block rather than mis-correlating with a later
-     * command). Mirrors [cleanupCaptureWithCursorPending] for N blocks.
+     * accounting for blocks tmux has already begun, plus every not-yet-begun
+     * block still owed by a written chained line. Mirrors
+     * [cleanupCaptureWithCursorPending] for N blocks.
      */
-    private fun cleanupChainedPending(pendings: List<PendingCommand>) {
+    private fun cleanupChainedPending(
+        pendings: List<PendingCommand>,
+        commandWasWritten: Boolean,
+    ) {
         synchronized(responseCorrelationLock) {
             for (pending in pendings) {
-                val startedBlock = pending.commandNumber >= 0L
-                if (pendingQueue.remove(pending) && startedBlock) {
-                    staleResponseBlocksToIgnore += 1
-                }
+                abandonPendingResponse(pending, commandWasWritten = commandWasWritten)
             }
+        }
+    }
+
+    private fun abandonPendingResponse(
+        pending: PendingCommand,
+        commandWasWritten: Boolean,
+    ) {
+        if (pending.commandNumber >= 0L) {
+            pending.abandoned = true
+            pending.deferred.completeExceptionally(
+                TmuxClientException("tmux command abandoned while response block was open"),
+            )
+            return
+        }
+        if (pendingQueue.remove(pending) && commandWasWritten) {
+            staleResponseBlocksToIgnore += 1
+            pending.deferred.completeExceptionally(
+                TmuxClientException("tmux command abandoned before response block began"),
+            )
         }
     }
 
@@ -1345,11 +1370,31 @@ internal class RealTmuxClient(
     ): CommandResponse {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
+        // Issue #470: bound the single-flight ACQUIRE itself, matching
+        // sendChainedCommands/captureWithCursor. A wedged current holder used to
+        // leave bare sendCommand callers parked forever before any bytes were
+        // written, outside the command timeout gate. On acquire timeout we have
+        // not touched the wire, so surface a recoverable command failure without
+        // closing an otherwise healthy shell.
+        val acquired = withTimeoutOrNull(commandTimeoutMs) {
+            sendMutex.lock()
+            true
+        }
+        if (acquired != true) {
+            val kind = commandKind(cmd)
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux-command-acquire-wedged kind=$kind timeoutMs=$commandTimeoutMs",
+            )
+            throw TmuxClientException(
+                "tmux command `$kind` acquire wedged after ${commandTimeoutMs}ms",
+            )
+        }
         // Single-flight: tmux only honours one outstanding command at a
         // time. The deferred is registered (queued) BEFORE we write the
         // bytes so we can't lose a response that arrives before we've
         // returned from the write.
-        return sendMutex.withLock {
+        return try {
             if (closed) throw TmuxClientException("client is closed")
             if (!connected) throw TmuxClientException("client is not connected")
             val sh = shell ?: throw TmuxClientException("client has no active shell")
@@ -1360,20 +1405,20 @@ internal class RealTmuxClient(
             }
 
             val writeResult = CompletableDeferred<Unit>()
+            val writeCompleted = AtomicBoolean(false)
             val writeJob = clientScope.launch {
                 try {
                     writeLine(sh, cmd)
+                    writeCompleted.set(true)
                     writeResult.complete(Unit)
                 } catch (t: Throwable) {
                     writeResult.completeExceptionally(t)
                 }
             }
-            var writeCompleted = false
 
             val response = try {
                 commandTimeoutGate.run(commandTimeoutMs) { checkpoint ->
                     writeResult.await()
-                    writeCompleted = true
                     checkpoint.writeCompleted()
                     deferred.await()
                 }
@@ -1393,14 +1438,10 @@ internal class RealTmuxClient(
                 // (`staleResponseBlocksToIgnore += 1`) so a cancelled-after-write
                 // command leaves the FIFO consistent.
                 synchronized(responseCorrelationLock) {
-                    val stillWaitingForBegin = pendingCmd.commandNumber < 0L
-                    val removed = pendingQueue.remove(pendingCmd)
-                    if (writeCompleted && removed && stillWaitingForBegin) {
-                        staleResponseBlocksToIgnore += 1
-                    }
+                    abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted.get())
                 }
                 writeJob.cancel()
-                if (!writeCompleted) {
+                if (!writeCompleted.get()) {
                     val kind = commandKind(cmd)
                     Log.w(
                         ISSUE_244_DIAG_TAG,
@@ -1411,13 +1452,14 @@ internal class RealTmuxClient(
                 }
                 throw t
             }
-            if (response != null) return@withLock response
+            if (response != null) return response
 
             val kind = commandKind(cmd)
             val exception = TmuxClientException(
                 "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
             )
-            val effectiveTimeoutMode = if (writeCompleted) {
+            val wasWritten = writeCompleted.get()
+            val effectiveTimeoutMode = if (wasWritten) {
                 timeoutMode
             } else {
                 CommandTimeoutMode.FatalClose
@@ -1425,16 +1467,16 @@ internal class RealTmuxClient(
             recordCommandTimeout(
                 kind = kind,
                 timeoutMode = effectiveTimeoutMode,
-                writeCompleted = writeCompleted,
+                writeCompleted = wasWritten,
             )
             if (effectiveTimeoutMode != CommandTimeoutMode.FatalClose) {
+                val lateDrainMs = bestEffortLateResponseDrainMs()
                 Log.w(
                     ISSUE_244_DIAG_TAG,
                     "tmux-command-${effectiveTimeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
-                        "lateDrainMs=$BEST_EFFORT_LATE_RESPONSE_DRAIN_MS",
+                        "lateDrainMs=$lateDrainMs",
                 )
-                val lateResponse = commandTimeoutGate.run(BEST_EFFORT_LATE_RESPONSE_DRAIN_MS) { checkpoint ->
-                    checkpoint.writeCompleted()
+                val lateResponse = withTimeoutOrNull(lateDrainMs) {
                     deferred.await()
                 }
                 if (lateResponse != null) {
@@ -1451,10 +1493,7 @@ internal class RealTmuxClient(
                 )
                 val waitingForBegin = synchronized(responseCorrelationLock) {
                     val waiting = pendingCmd.commandNumber < 0L
-                    if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waiting) {
-                        staleResponseBlocksToIgnore += 1
-                    }
-                    pendingQueue.remove(pendingCmd)
+                    abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted.get())
                     waiting
                 }
                 if (effectiveTimeoutMode == CommandTimeoutMode.FailOpenDrain && waitingForBegin) {
@@ -1510,9 +1549,7 @@ internal class RealTmuxClient(
                     // for it, count that block as stale so the reader discards it
                     // instead of binding it to the next command (FIFO desync).
                     val waitingForBegin = pendingCmd.commandNumber < 0L
-                    if (pendingQueue.remove(pendingCmd) && waitingForBegin) {
-                        staleResponseBlocksToIgnore += 1
-                    }
+                    abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted.get())
                 }
                 throw exception
             }
@@ -1522,7 +1559,7 @@ internal class RealTmuxClient(
                 "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs transportProvenAlive=false",
             )
             synchronized(responseCorrelationLock) {
-                pendingQueue.remove(pendingCmd)
+                abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted.get())
             }
             closeInternal(
                 ReaderExitIntent.CommandTimeout,
@@ -1530,6 +1567,8 @@ internal class RealTmuxClient(
                 timeoutMode = effectiveTimeoutMode,
             )
             throw exception
+        } finally {
+            sendMutex.unlock()
         }
     }
 
@@ -1800,6 +1839,10 @@ internal class RealTmuxClient(
                         val match = inflight
                         if (ignoredResponseNumber == event.number) {
                             ignoredResponseNumber = -1L
+                        } else if (match?.abandoned == true && match.commandNumber == event.number) {
+                            // The waiter timed out or was cancelled after `%begin`.
+                            // Drain the open block to its close marker, then let the
+                            // next `%begin` bind to the next queued command.
                         } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
@@ -1817,6 +1860,9 @@ internal class RealTmuxClient(
                         val match = inflight
                         if (ignoredResponseNumber == event.number) {
                             ignoredResponseNumber = -1L
+                        } else if (match?.abandoned == true && match.commandNumber == event.number) {
+                            // See the `%end` branch: this closes an abandoned
+                            // response block without poisoning the FIFO.
                         } else if (match != null && match.commandNumber == event.number) {
                             match.deferred.complete(
                                 CommandResponse(
@@ -1848,12 +1894,9 @@ internal class RealTmuxClient(
                     }
                     else -> Unit
                 }
-                // Always forward non-output events to the bus so external
-                // observers (UI, session-list updater, etc.) see the same
-                // structural events the response-correlator just consumed.
-                // Pane output fanout is deliberately non-blocking: terminal
-                // rendering and diagnostic collectors must not starve this
-                // reader loop and delay command-response parsing.
+                // Forward public events without ever suspending the reader.
+                // Response framing markers are internal to correlation and are
+                // deliberately not exposed to UI collectors.
                 if (event is ControlEvent.Output) {
                     // Issue #105 diagnostics. We log BEFORE and AFTER the
                     // emit so a reviewer reading logcat can tell apart:
@@ -1877,7 +1920,7 @@ internal class RealTmuxClient(
                         "tmux-output-bus-emit pane=${event.paneId} bytes=${event.data.size}",
                     )
                 } else {
-                    eventBus.emit(event)
+                    emitPublicEvent(event)
                 }
             }
         } finally {
@@ -1969,6 +2012,31 @@ internal class RealTmuxClient(
         }
     }
 
+    private fun emitPublicEvent(event: ControlEvent) {
+        if (event is ControlEvent.Begin || event is ControlEvent.End || event is ControlEvent.Error) {
+            return
+        }
+        if (!eventBus.tryEmit(event)) {
+            val dropped = eventBusDroppedEvents.incrementAndGet()
+            if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
+                TmuxClientDiagnostics.record(
+                    "tmux_client_eventbus_overflow",
+                    commonDiagnosticFields() + mapOf(
+                        "session" to sessionName,
+                        "event" to event.javaClass.simpleName,
+                        "droppedEvents" to dropped,
+                        "capacity" to EVENT_BUFFER,
+                    ),
+                )
+            }
+            Log.w(
+                ISSUE_105_DIAG_TAG,
+                "tmux-eventbus-drop event=${event.javaClass.simpleName} " +
+                    "droppedEvents=$dropped capacity=$EVENT_BUFFER",
+            )
+        }
+    }
+
     private fun recordCommandTimeout(
         kind: String,
         timeoutMode: CommandTimeoutMode,
@@ -1985,6 +2053,9 @@ internal class RealTmuxClient(
             ),
         )
     }
+
+    private fun bestEffortLateResponseDrainMs(): Long =
+        BEST_EFFORT_LATE_RESPONSE_DRAIN_MS.coerceAtMost(commandTimeoutMs).coerceAtLeast(1L)
 
     /**
      * Issue #979: a `FatalClose` command timed out, but the transport-liveness
@@ -2313,6 +2384,8 @@ internal class RealTmuxClient(
     ) {
         @Volatile
         var commandNumber: Long = -1L
+        @Volatile
+        var abandoned: Boolean = false
         val output: MutableList<String> = mutableListOf()
     }
 }

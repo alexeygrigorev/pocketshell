@@ -29,6 +29,12 @@ class ListDirectoryParseTest {
     }
 
     @Test
+    fun `buildListDirCommand caps remote output before parsing when maxEntries is provided`() {
+        val cmd = buildListDirCommand("/var/log", maxEntries = 4)
+        assertTrue("remote output is capped to requested rows plus sentinels", cmd.contains("sed -n '1,6p'"))
+    }
+
+    @Test
     fun `buildListDirCommand expands a leading tilde for HOME-relative dirs`() {
         // Issue #558 bug 3: a `~/...` directory must expand to $HOME.
         val cmd = buildListDirCommand("~/git/pocketshell")

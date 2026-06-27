@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.InetAddress
@@ -170,18 +171,21 @@ public class AutoForwarder(
         stopped = true
         loopJob?.cancel()
         loopJob = null
-        // Close tunnels synchronously — these don't suspend, so there's no
-        // need to launch into a scope that may have just been cancelled.
-        synchronized(this) {
-            tunnels.values.forEach { runCatching { it.close() } }
-            tunnels.clear()
-            manualPorts.clear()
-            processNames.clear()
-            localPortMap.clear()
-            failedPorts.clear()
-            priorTotalBytes.clear()
+
+        val tunnelsToClose = runBlocking {
+            mutex.withLock {
+                val captured = tunnels.values.toList()
+                tunnels.clear()
+                manualPorts.clear()
+                processNames.clear()
+                localPortMap.clear()
+                failedPorts.clear()
+                priorTotalBytes.clear()
+                tunnelsState.value = emptyList()
+                captured
+            }
         }
-        tunnelsState.value = emptyList()
+        tunnelsToClose.forEach { runCatching { it.close() } }
     }
 
     /**
@@ -193,17 +197,23 @@ public class AutoForwarder(
      * block on I/O.
      */
     public suspend fun togglePort(remotePort: Int) {
-        mutex.withLock {
+        val tunnelToClose = mutex.withLock {
             if (stopped) return
             if (remotePort in tunnels) {
-                stopTunnelLocked(remotePort)
                 manualPorts.remove(remotePort)
+                val tunnel = detachTunnelLocked(remotePort)
+                updateStateLocked()
+                tunnel
             } else {
                 manualPorts.add(remotePort)
-                forwardPortLocked(remotePort)
+                null
             }
-            updateStateLocked()
         }
+        tunnelToClose?.let {
+            runCatching { it.close() }
+            return
+        }
+        forwardPort(remotePort)
     }
 
     /**
@@ -215,17 +225,22 @@ public class AutoForwarder(
      * forwarder stay consistent across reconnects.
      */
     public suspend fun ensurePort(remotePort: Int, enabled: Boolean) {
-        mutex.withLock {
+        val tunnelToClose = mutex.withLock {
             if (stopped) return
             if (enabled) {
-                if (manualPorts.add(remotePort) || remotePort !in tunnels) {
-                    forwardPortLocked(remotePort)
-                }
+                manualPorts.add(remotePort)
+                null
             } else {
                 manualPorts.remove(remotePort)
-                stopTunnelLocked(remotePort)
+                val tunnel = detachTunnelLocked(remotePort)
+                localPortMap.remove(remotePort)
+                updateStateLocked()
+                tunnel
             }
-            updateStateLocked()
+        }
+        tunnelToClose?.let { runCatching { it.close() } }
+        if (enabled) {
+            forwardPort(remotePort)
         }
     }
 
@@ -250,7 +265,8 @@ public class AutoForwarder(
         val remotePorts = PortScanner.scan(session)
         val remotePortSet = remotePorts.map { it.port }.toSet()
 
-        mutex.withLock {
+        val tunnelsToClose = mutableListOf<SshPortForward>()
+        val portsToOpen = mutex.withLock {
             if (stopped) return
             // Evict TTL'd deny-list entries up front so the rest of the
             // scan sees an accurate "is this port denied?" view.
@@ -261,12 +277,17 @@ public class AutoForwarder(
                 processNames[rp.port] = rp.processName
             }
 
-            // Open new forwards for newly-discovered ports.
-            remotePorts.forEach { rp ->
-                if (rp.port !in tunnels && rp.port !in failedPorts) {
-                    if (shouldForwardPort(rp.port)) {
-                        forwardPortLocked(rp.port)
-                    }
+            val discoveredPortsToOpen = remotePorts.mapNotNull { rp ->
+                val remotePort = rp.port
+                if (
+                    remotePort !in tunnels &&
+                    remotePort !in localPortMap &&
+                    remotePort !in failedPorts &&
+                    shouldForwardPort(remotePort)
+                ) {
+                    remotePort
+                } else {
+                    null
                 }
             }
 
@@ -277,9 +298,15 @@ public class AutoForwarder(
             // `maxAutoPort`, or briefly not listening). Without this the
             // forward would only come back if the port happened to fall in
             // the auto window AND was listening — i.e. the reconnect bug.
-            manualPorts.forEach { remotePort ->
-                if (remotePort !in tunnels && remotePort !in failedPorts) {
-                    forwardPortLocked(remotePort)
+            val manualPortsToOpen = manualPorts.mapNotNull { remotePort ->
+                if (
+                    remotePort !in tunnels &&
+                    remotePort !in localPortMap &&
+                    remotePort !in failedPorts
+                ) {
+                    remotePort
+                } else {
+                    null
                 }
             }
 
@@ -288,7 +315,16 @@ public class AutoForwarder(
             // disappearances (the user may have just restarted the service).
             tunnels.keys.toList().forEach { remotePort ->
                 if (remotePort !in remotePortSet && remotePort !in manualPorts) {
-                    stopTunnelLocked(remotePort)
+                    detachTunnelLocked(remotePort)?.let(tunnelsToClose::add)
+                }
+            }
+            localPortMap.keys.toList().forEach { remotePort ->
+                if (
+                    remotePort !in tunnels &&
+                    remotePort !in remotePortSet &&
+                    remotePort !in manualPorts
+                ) {
+                    localPortMap.remove(remotePort)
                 }
             }
 
@@ -298,7 +334,72 @@ public class AutoForwarder(
             failedPorts.keys.removeAll { it !in remotePortSet }
 
             updateStateLocked()
+            (discoveredPortsToOpen + manualPortsToOpen).distinct()
         }
+
+        tunnelsToClose.forEach { runCatching { it.close() } }
+        portsToOpen.forEach { forwardPort(it) }
+    }
+
+    private suspend fun forwardPort(remotePort: Int) {
+        val localPort = mutex.withLock {
+            if (stopped || remotePort in tunnels || remotePort in localPortMap) return
+            try {
+                // resolveLocalPortLocked() throws when localPortRange is
+                // exhausted — that's a forward-creation failure too.
+                resolveLocalPortLocked(remotePort).also { resolvedPort ->
+                    // Reserve the local port while the SSH open happens
+                    // outside the mutex. This prevents a concurrent scan or
+                    // manual toggle from allocating the same local port.
+                    localPortMap[remotePort] = resolvedPort
+                }
+            } catch (_: Throwable) {
+                failedPorts[remotePort] = clock()
+                updateStateLocked()
+                return
+            }
+        }
+
+        val forward = try {
+            // Forward 127.0.0.1:<remotePort> on the remote's side — the
+            // standard "service bound to localhost on the dev box" case.
+            // Matches the legacy ssh-auto-forward-android behaviour.
+            session.openLocalPortForward(
+                remoteHost = "127.0.0.1",
+                remotePort = remotePort,
+                localPort = localPort,
+            )
+        } catch (_: Throwable) {
+            mutex.withLock {
+                if (localPortMap[remotePort] == localPort) {
+                    localPortMap.remove(remotePort)
+                    failedPorts[remotePort] = clock()
+                    updateStateLocked()
+                }
+            }
+            return
+        }
+
+        var closeForward = false
+        mutex.withLock {
+            if (stopped || localPortMap[remotePort] != localPort || remotePort in tunnels) {
+                localPortMap.remove(remotePort)
+                closeForward = true
+            } else {
+                tunnels[remotePort] = forward
+            }
+            updateStateLocked()
+        }
+        if (closeForward) {
+            runCatching { forward.close() }
+        }
+    }
+
+    private fun detachTunnelLocked(remotePort: Int): SshPortForward? {
+        val tunnel = tunnels.remove(remotePort) ?: return null
+        localPortMap.remove(remotePort)
+        priorTotalBytes.remove(remotePort)
+        return tunnel
     }
 
     /**
@@ -316,51 +417,6 @@ public class AutoForwarder(
     private fun shouldForwardPort(remotePort: Int): Boolean {
         if (remotePort in manualPorts) return true
         return remotePort in config.skipPortsBelow..config.maxAutoPort
-    }
-
-    private fun forwardPortLocked(remotePort: Int) {
-        if (stopped) return
-        if (remotePort in tunnels) return
-        try {
-            // resolveLocalPortLocked() throws when localPortRange is
-            // exhausted — that's a forward-creation failure too, so it
-            // belongs inside the same catch as the openLocalPortForward
-            // call. Without this widening, an exhausted range would
-            // crash the scan loop instead of being memoed in failedPorts.
-            val localPort = resolveLocalPortLocked(remotePort)
-            if (stopped) return
-            // Forward 127.0.0.1:<remotePort> on the remote's side — the
-            // standard "service bound to localhost on the dev box" case.
-            // Matches the legacy ssh-auto-forward-android behaviour.
-            val forward = session.openLocalPortForward(
-                remoteHost = "127.0.0.1",
-                remotePort = remotePort,
-                localPort = localPort,
-            )
-            if (stopped) {
-                runCatching { forward.close() }
-                return
-            }
-            tunnels[remotePort] = forward
-            localPortMap[remotePort] = localPort
-        } catch (_: Throwable) {
-            // Forward couldn't be created (local port already in use,
-            // remote refused the channel, allocator exhausted, ...).
-            // Remember so we don't pummel the remote on every scan; the
-            // next disappearance of this remote port will clear the
-            // memo. We also TTL the entry
-            // ([AutoForwardConfig.failedPortTtlMs]) so a transient
-            // failure isn't sticky across re-scans on a still-listening
-            // remote port.
-            failedPorts[remotePort] = clock()
-        }
-    }
-
-    private fun stopTunnelLocked(remotePort: Int) {
-        val tunnel = tunnels.remove(remotePort) ?: return
-        runCatching { tunnel.close() }
-        localPortMap.remove(remotePort)
-        priorTotalBytes.remove(remotePort)
     }
 
     private fun resolveLocalPortLocked(remotePort: Int): Int {
@@ -412,8 +468,8 @@ public class AutoForwarder(
                 // Range fully exhausted — every slot is allocated. Fail
                 // fast with a clear message rather than silently handing
                 // out an already-used port (or, worse, looping forever).
-                // The caller (forwardPortLocked) catches Throwable and
-                // memos the remote port; this is the right shape.
+                // The caller (forwardPort) catches Throwable and memos
+                // the remote port; this is the right shape.
                 val low = config.localPortRange.first
                 val high = config.localPortRange.last
                 throw RuntimeException("no free local ports in range $low..$high")

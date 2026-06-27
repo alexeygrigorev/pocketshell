@@ -4,6 +4,7 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.RemoteEntry
 import com.pocketshell.core.ssh.RemoteListing
+import com.pocketshell.core.ssh.SshExecTimeoutException
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
@@ -22,6 +23,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.io.InputStream
 
 /**
@@ -97,6 +99,83 @@ class FileExplorerLeaseTest {
         leaseManager.close()
     }
 
+    @Test
+    fun browseRetriesOnceWhenLeaseExecTimesOutAsStale() = runBlocking {
+        val wedged = FakeSshSession(
+            listDirectoryFailure = SshExecTimeoutException("ls", 30_000L),
+        )
+        val healthy = FakeSshSession()
+        val connector = SequenceConnector(listOf(wedged, healthy))
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+
+        assertEquals("/srv", ready.currentPath)
+        assertEquals("stale timeout must evict and retry on a fresh lease", 2, connector.connectCount)
+        assertTrue("timed-out transport must be evicted", wedged.closed)
+        assertFalse("healthy retry transport must remain warm", healthy.closed)
+        leaseManager.close()
+    }
+
+    @Test
+    fun transfersUsePurposeLeaseSeparateFromBrowseLease() = runBlocking {
+        val session = FakeSshSession()
+        val connector = RecordingConnector(session)
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+
+        vm.uploadFile("note.txt", 4L) { ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)) }
+        vm.transfer.awaitSuccess()
+        vm.downloadFile(ready.entries.first { it.type == RemoteEntry.Type.FILE }) { }
+        vm.transfer.awaitSuccess()
+
+        assertEquals(
+            listOf(
+                "1:/tmp/key",
+                "1:/tmp/key|purpose=${FileExplorerViewModel.LEASE_PURPOSE_TRANSFER}",
+            ),
+            connector.credentialIds,
+        )
+        leaseManager.close()
+    }
+
+    @Test
+    fun downloadWritesDestinationAfterTransferLeaseIsReleased() = runBlocking {
+        val browseSession = FakeSshSession()
+        val transferSession = FakeSshSession()
+        val leaseManager = SshLeaseManager(
+            connector = SequenceConnector(listOf(browseSession, transferSession)),
+            idleTtlMillis = 0L,
+        )
+        val vm = FileExplorerViewModel(leaseManager)
+
+        vm.start(request("/srv"))
+        val ready = vm.state.awaitReady()
+        var writeSawReleasedTransfer = false
+
+        vm.downloadFile(ready.entries.first { it.type == RemoteEntry.Type.FILE }) {
+            writeSawReleasedTransfer = transferSession.closed
+        }
+        vm.transfer.awaitSuccess()
+
+        assertTrue(
+            "SAF destination write must run after the transfer lease is released",
+            writeSawReleasedTransfer,
+        )
+        leaseManager.close()
+    }
+
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
         predicate: (FileExplorerUiState.Ready) -> Boolean = { true },
     ): FileExplorerUiState.Ready {
@@ -107,6 +186,16 @@ class FileExplorerLeaseTest {
             kotlinx.coroutines.delay(20)
         }
         error("explorer never reached the expected Ready state; was ${value}")
+    }
+
+    private suspend fun StateFlow<FileTransferState>.awaitSuccess(): FileTransferState.Success {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = value
+            if (s is FileTransferState.Success) return s
+            kotlinx.coroutines.delay(20)
+        }
+        error("transfer never reached Success; was ${value}")
     }
 
     private fun request(startDir: String) = FileExplorerViewModel.Request(
@@ -136,12 +225,37 @@ class FileExplorerLeaseTest {
         }
     }
 
+    private class SequenceConnector(
+        private val sessions: List<FakeSshSession>,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val session = sessions.getOrNull(connectCount) ?: sessions.last()
+            connectCount += 1
+            return Result.success(session)
+        }
+    }
+
+    private class RecordingConnector(
+        private val session: FakeSshSession,
+    ) : SshLeaseConnector {
+        val credentialIds: MutableList<String> = mutableListOf()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            credentialIds += target.leaseKey.credentialId
+            return Result.success(session)
+        }
+    }
+
     /**
      * Minimal in-memory remote filesystem: any directory lists one subfolder +
      * one file; `cd … && pwd -P` echoes the requested absolute path so
      * canonicalize succeeds.
      */
-    private class FakeSshSession : SshSession {
+    private class FakeSshSession(
+        private val listDirectoryFailure: Throwable? = null,
+    ) : SshSession {
         var closed: Boolean = false
 
         override val isConnected: Boolean
@@ -157,8 +271,9 @@ class FileExplorerLeaseTest {
             }
         }
 
-        override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing =
-            RemoteListing(
+        override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing {
+            listDirectoryFailure?.let { throw it }
+            return RemoteListing(
                 entries = listOf(
                     RemoteEntry(
                         name = "sub",
@@ -175,6 +290,7 @@ class FileExplorerLeaseTest {
                 ),
                 truncated = false,
             )
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
 
@@ -186,14 +302,17 @@ class FileExplorerLeaseTest {
 
         override fun startShell(): SshShell = error("not used")
 
-        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = remotePath
 
         override suspend fun uploadStream(
             input: InputStream,
             length: Long,
             name: String,
             remotePath: String,
-        ): String = error("not used")
+        ): String = remotePath
+
+        override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
+            byteArrayOf(1, 2, 3)
 
         override fun close() {
             closed = true

@@ -532,6 +532,41 @@ class HostListViewModelTest {
         assertEquals(info, warning.releaseInfo)
     }
 
+    @Test
+    fun bootstrapReadyClosesProbeSessionAsynchronouslyOffMain() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "ready", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val session = FakeBootstrapSession()
+        val closeThread = CompletableDeferred<String>()
+        val viewModel = newViewModel(
+            sessionOpener = object : HostSessionOpener {
+                override suspend fun open(
+                    host: HostEntity,
+                    keyPath: String,
+                    passphrase: CharArray?,
+                ): SshSession = session
+
+                override suspend fun close(session: SshSession) {
+                    closeThread.complete(Thread.currentThread().name)
+                    session.close()
+                }
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+        val threadName = kotlinx.coroutines.withTimeout(5_000L) { closeThread.await() }
+
+        assertEquals(true, viewModel.pendingNavigation.value!!.ready)
+        assertEquals(1, session.closeCount)
+        assertFalse(
+            "bootstrap probe close must not run on the test main thread, ran on $threadName",
+            threadName.contains("main", ignoreCase = true),
+        )
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun appUpdateWarning_offersResolvedRelease_whenCachedHostProbeSaysRemoteCliNewerThanApp() = runTest {
@@ -1206,10 +1241,13 @@ class HostListViewModelTest {
                 connectCount += 1
                 Result.success(session)
             },
-            scope = this,
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+            ),
             idleTtlMillis = 60_000L,
         )
         val opener = LeaseBackedHostSessionOpener(manager)
+        manager.onProcessStarted()
 
         val opened = opener.open(host, keyFile.absolutePath, passphrase = null)
         assertSame(session, opened)
@@ -1229,6 +1267,7 @@ class HostListViewModelTest {
         )
         assertEquals("reacquire should not perform a second SSH connect", 1, connectCount)
         reacquired.release()
+        manager.close()
     }
 
     /**

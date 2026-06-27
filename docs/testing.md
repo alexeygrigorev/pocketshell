@@ -24,7 +24,7 @@ Command-line launch (no Android Studio):
 
 ```bash
 scripts/start-local-avd.sh
-./gradlew installDebug
+scripts/cgroup-run.sh -- ./gradlew installDebug
 adb shell am start -n com.pocketshell.app/.MainActivity
 ```
 
@@ -43,7 +43,7 @@ failure if the emulator exits after initially reporting boot complete.
 
 ### Automated UI tests
 
-Compose UI tests on the emulator via `./gradlew connectedDebugAndroidTest`. Use:
+Compose UI tests on the emulator via `scripts/connected-test.sh`. Use:
 
 - `createComposeRule()` for component-level tests
 - `createAndroidComposeRule<MainActivity>()` for screen-level tests
@@ -55,7 +55,7 @@ debug tests on an already-running emulator:
 
 ```bash
 docker compose -f tests/docker/docker-compose.yml up -d --build agents
-./gradlew connectedDebugAndroidTest
+scripts/connected-test.sh
 docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
 ```
 
@@ -68,7 +68,7 @@ flow, inspects the visible result, and records the command, artifact path, Docke
 involvement when relevant, and observed result in the issue.
 
 1. Start from the latest implementer status for the scoped issue
-2. `./gradlew installDebug`, or use the issue's documented walkthrough command
+2. `scripts/cgroup-run.sh -- ./gradlew installDebug`, or use the issue's documented walkthrough command
 3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at
    412 × 915
 4. Capture reviewer evidence:
@@ -226,10 +226,15 @@ scheme `5554 + 2K` -> `emulator-5556 / 5558 / 5560`), leaving the maintainer's
 manual `emulator-5554` untouched:
 
 ```bash
-scripts/avd-pool.sh start     # POOL_SIZE=3: boot test-1/2/3 (emulator-5556/5558/5560)
+scripts/avd-pool.sh start     # scoped: boot test-1/2/3 (emulator-5556/5558/5560)
 scripts/avd-pool.sh status    # CLONE / SERIAL / PORT / STATE + host load/RAM
 scripts/avd-pool.sh stop      # tear down the pool (leaves emulator-5554 alone)
 ```
+
+`avd-pool.sh` starts each pool emulator through `scripts/lib/scope-run.sh`, so
+the emulator process tree is memory-capped in its own sibling cgroup. If local
+user systemd is unavailable, pool startup fails closed instead of launching raw;
+set `POCKETSHELL_SCOPE_ALLOW_BARE=1` only when debugging cgroup setup.
 
 **KVM gotcha (this is the whole point of #776):** x86_64 emulation requires
 `/dev/kvm`, and on the Hetzner dev box a plain shell often lacks an *active*
@@ -243,10 +248,11 @@ foreground-steal + sibling-SIGKILL contention this issue set out to kill (a
 sibling lane launches its own `MainActivity` on the shared device, clearing
 another lane's activity -> `processForeground=false` -> null node lookups).
 
-So `avd-pool.sh` launches each pool emulator via `sg kvm -c "emulator -avd …"`
-to gain active `/dev/kvm` access. It auto-detects this: when the current shell
-can already read+write `/dev/kvm` (a CI runner with active membership) OR there
-is no `/dev/kvm` at all, it launches directly — byte-for-byte the legacy path.
+So `avd-pool.sh` launches each scoped pool emulator via
+`sg kvm -c "emulator -avd ..."` when that wrapper is needed to gain active
+`/dev/kvm` access. It auto-detects this: when the current shell can already
+read+write `/dev/kvm` (a CI runner with active membership) OR there is no
+`/dev/kvm` at all, it launches the emulator directly inside the cgroup scope.
 Override with `POOL_KVM_WRAP=sg` (always wrap) / `none` (never wrap) / `auto`
 (default).
 
@@ -276,7 +282,7 @@ single-lock, no-pin, no-pool behaviour unchanged.
 Two concurrent lanes, end to end:
 
 ```bash
-scripts/avd-pool.sh start                       # boot the pool via sg kvm
+scripts/avd-pool.sh start                       # boot the pool in cgroup scopes
 scripts/agents-pool.sh up 2222 2243             # warm two isolated agents fixtures
 CLASS=-Pandroid.testInstrumentationRunnerArguments.class=com.example.SomeE2eTest
 scripts/connected-test.sh --pool --suffix iA $CLASS &   # -> emulator-5556
@@ -375,7 +381,7 @@ ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.
 4. Run the connected Android smoke:
 
 ```bash
-./gradlew connectedDebugAndroidTest
+scripts/connected-test.sh
 ```
 
 The smoke test authenticates with `tests/docker/test_key`, connects to
@@ -413,10 +419,10 @@ visible-terminal sidecars, timings, Docker logs, instrumentation output, and
 logcat.
 
 If an emulator and the Docker `agents` service are already running, the focused
-Gradle equivalent is:
+wrapper equivalent is:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix i548 \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest#sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect
 ```
 
@@ -632,12 +638,13 @@ emulator-touching gate, the second invocation prints
 blocks until the first one exits. The lock is released automatically when
 the holding script exits (the open file descriptor closes).
 
-Individual `./gradlew :app:connectedDebugAndroidTest` invocations from
-implementer or reviewer worktrees do NOT take this lock: they are cheap
-to retry on collision and locking them would serialise all parallel
-worktree work. The lock is scoped to the release-gate scripts because
-their long sequential workflows cannot tolerate a sibling `adb install`
-mid-test (see issue #182).
+Direct `./gradlew :app:connectedDebugAndroidTest` invocations from implementer
+or reviewer worktrees do not take the AVD lock or cgroup scope and should not be
+used for local evidence. Use `scripts/connected-test.sh` for ad-hoc connected
+tests; it owns the lock/suffix/serial-pin/cgroup path. Some legacy broad
+harnesses still invoke Gradle internally, but new reusable local paths should
+call the wrapper or `scripts/cgroup-run.sh` rather than teaching raw connected
+Gradle.
 
 To override the lock-file path (rare; only useful when chaining gates by
 hand under a custom build directory):
@@ -739,7 +746,7 @@ running emulator + real-agent fixture without the rest of the release gate:
 
 ```bash
 docker compose -f tests/docker/real-agent/compose.yml up -d --build real-agents
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix realagent \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.RealAgentReleaseGateTest \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellRealAgentReleaseGate=1
 ```
@@ -893,7 +900,7 @@ docker compose -f tests/docker/docker-compose.yml up -d --build \
 Run the issue #552 ride-through proof:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix netfault \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.RideThroughInterruptionE2eTest
 ```
@@ -938,7 +945,7 @@ docker compose -f tests/docker/docker-compose.yml up -d --build \
 Run the whole opt-in suite on an already-running emulator:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix bootstrap \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest
 ```
@@ -946,7 +953,7 @@ Run the whole opt-in suite on an already-running emulator:
 Run one scenario by name:
 
 ```bash
-./gradlew :app:connectedDebugAndroidTest \
+scripts/connected-test.sh --suffix bootstrap \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest#uvInstall
 ```
@@ -1056,7 +1063,7 @@ GitHub Actions runs:
 2. `./gradlew :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest` — Docker-backed JVM integration tests via Testcontainers
 3. Local emulator + Docker agent smoke after the fast gates pass:
    - starts `tests/docker`'s `agents` target on host port 2222
-   - runs `./gradlew connectedDebugAndroidTest` on an Android emulator
+   - runs the connected Android suite on an emulator
    - uploads Android test reports and Docker logs as workflow artifacts
 
 ---
@@ -1069,8 +1076,8 @@ pushing an approved issue, the orchestrator follows the
 [process verification checklist](../process.md#verification-checklist).
 For testing-specific work, the minimum local checks are:
 
-1. `./gradlew assembleDebug` — does it build?
-2. `./gradlew check` — do unit tests pass?
+1. `scripts/cgroup-run.sh -- ./gradlew assembleDebug` — does it build?
+2. `scripts/cgroup-run.sh -- ./gradlew check` — do unit tests pass?
 3. For UI changes: install on emulator, eyeball against the matching mockup
 4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers
    integration test

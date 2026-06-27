@@ -13,6 +13,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -840,6 +841,73 @@ class TmuxClientTest {
         }
 
     @Test
+    fun `captureWithCursor timeout before begin quarantines all late batch blocks`() = runBlocking {
+        // A combined capture writes TWO tmux commands in one line. If the line
+        // has reached tmux but neither reply block has begun before the timeout,
+        // both late blocks must be reserved as stale; otherwise the first late
+        // capture block can bind to the next unrelated command.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val timedOut = scope.async {
+                runCatching { client.captureWithCursor("%3", scrollbackLines = 200) }
+            }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().contains("capture-pane")) { yield(); delay(10) }
+            }
+            timeoutGate.fireNextTimeout()
+            assertTrue(
+                "combined capture must time out before any reply block begins",
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { timedOut.await() }.isFailure,
+            )
+            shell.resetStdin()
+
+            val next = scope.async { client.sendCommand("list-sessions") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-sessions\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "%begin 1700000000 10 0\n" +
+                    "late-capture\n" +
+                    "%end 1700000000 10 0\n" +
+                    "%begin 1700000000 11 0\n" +
+                    "9,4\n" +
+                    "%end 1700000000 11 0\n",
+            )
+            repeat(10) { yield(); delay(10) }
+            shell.feed(
+                "%begin 1700000000 12 0\n" +
+                    "next-session\n" +
+                    "%end 1700000000 12 0\n",
+            )
+
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "late combined-capture blocks must not bind to the next command",
+                12L,
+                response.number,
+            )
+            assertEquals(listOf("next-session"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendChainedCommands writes one chained line and drains both blocks in order`() = runBlocking {
         // Issue #692: the folder-list discovery probe fetches list-sessions +
         // list-panes in ONE control-mode round-trip. tmux -CC answers a
@@ -929,6 +997,77 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `sendChainedCommands timeout before begin quarantines all late batch blocks`() = runBlocking {
+        // The first-block timeout fires after the chained line is written but
+        // before tmux emits any %begin. Every command in that written batch is
+        // still owed a response block, so every pending entry must reserve a
+        // stale block before the next command is allowed onto the FIFO.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val timedOut = scope.async {
+                runCatching { client.sendChainedCommands(listOf("list-sessions", "list-panes -a")) }
+            }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-sessions ; list-panes -a\n") {
+                    yield(); delay(10)
+                }
+            }
+            timeoutGate.fireNextTimeout()
+            assertTrue(
+                "chained command must time out before any reply block begins",
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { timedOut.await() }.isFailure,
+            )
+            shell.resetStdin()
+
+            val next = scope.async { client.sendCommand("display-message -p ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "display-message -p ok\n") {
+                    yield(); delay(10)
+                }
+            }
+
+            shell.feed(
+                "%begin 1700000000 20 0\n" +
+                    "late-sessions\n" +
+                    "%end 1700000000 20 0\n" +
+                    "%begin 1700000000 21 0\n" +
+                    "late-panes\n" +
+                    "%end 1700000000 21 0\n",
+            )
+            repeat(10) { yield(); delay(10) }
+            shell.feed(
+                "%begin 1700000000 22 0\n" +
+                    "ok\n" +
+                    "%end 1700000000 22 0\n",
+            )
+
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "late chained-command blocks must not bind to the next command",
+                22L,
+                response.number,
+            )
+            assertEquals(listOf("ok"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendChainedCommands bounds the acquire and degrades to errors when the mutex is wedged`() = runBlocking {
         // Issue #702: the picker enumeration reaches sendChainedCommands on the
         // ONE shared per-host -CC client and serializes on the single-flight
@@ -979,6 +1118,64 @@ class TmuxClientTest {
 
             // The holder is still parked (it never got its response). Releasing
             // its timeout lets it finish so the test tears down cleanly.
+            timeoutGate.fireNextTimeout()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { holder.await() }
+            Unit
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendCommand bounds the acquire and does not close when the mutex is wedged`() = runBlocking {
+        // Issue #470: bare sendCommand had an unbounded sendMutex acquire while
+        // sendChainedCommands/captureWithCursor were already bounded. A stuck
+        // owner must not park the caller forever, and because this caller has
+        // not written anything yet, the acquire timeout must not close a healthy
+        // shell.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 200L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val holder = scope.async { runCatching { client.sendCommand("send-keys -t %0 Enter") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                runCatching { client.sendCommand("list-sessions") }
+            }
+
+            assertTrue("expected acquire timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind and acquire failure",
+                ex.message?.contains("tmux command `list-sessions` acquire wedged") == true,
+            )
+            assertEquals(
+                "acquire timeout must not write the blocked command",
+                "send-keys -t %0 Enter\n",
+                shell.stdinAsString(),
+            )
+            assertFalse("acquire timeout must not close the shell", shell.closed)
+            assertFalse("acquire timeout must not trip disconnected latch", client.disconnected.value)
+
+            // Release the original holder so the test tears down without a
+            // parked coroutine. send-keys is fail-open; the late drain is now
+            // a strict wall-clock quarantine bounded by commandTimeoutMs here.
             timeoutGate.fireNextTimeout()
             withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { holder.await() }
             Unit
@@ -1045,7 +1242,6 @@ class TmuxClientTest {
                     yield(); delay(10)
                 }
             }
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1163,7 +1359,6 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "refresh-client -C 62x52\n") { yield(); delay(10) }
             }
-            timeoutGate.fireNextTimeout()
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1570,9 +1765,8 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
             }
-            // Primary response timeout, then the fail-open late-drain timeout
-            // (no late response is fed, so the quarantine expires).
-            timeoutGate.fireNextTimeout()
+            // Primary response timeout. No late response is fed, so the strict
+            // wall-clock quarantine expires.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1627,6 +1821,104 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `send-keys timeout after begin drains open block before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val sent = scope.async { runCatching { client.sendCommand("send-keys -t %0 Enter") } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+            shell.feed("%begin 1 10 0\n")
+            repeat(10) { yield(); delay(10) }
+
+            timeoutGate.fireNextTimeout()
+            val timedOut = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+            assertTrue("open response block should time out", timedOut.isFailure)
+            assertFalse("fail-open timeout must not close the shell", shell.closed)
+            assertFalse("fail-open timeout must not disconnect the client", client.disconnected.value)
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "late-send-keys-output\n" +
+                    "%end 1 10 0\n" +
+                    "%begin 1 11 0\n" +
+                    "next-ok\n" +
+                    "%end 1 11 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(
+                "the late close of the abandoned block must not complete the follow-up command",
+                11L,
+                nextResponse.number,
+            )
+            assertEquals(listOf("next-ok"), nextResponse.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `cancelled command after begin drains open block before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val cancelled = scope.async { client.sendCommand("send-keys -t %0 Enter") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "send-keys -t %0 Enter\n") { yield(); delay(10) }
+            }
+            shell.feed("%begin 1 20 0\n")
+            repeat(10) { yield(); delay(10) }
+            cancelled.cancelAndJoin()
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+
+            shell.feed(
+                "%end 1 20 0\n" +
+                    "%begin 1 21 0\n" +
+                    "next-ok\n" +
+                    "%end 1 21 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(21L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `capture-pane sendCommand timeout fails open and does not close client (issue 576 P4)`() = runBlocking {
         // Issue #576 (P4): read-only capture-pane is now classified FailOpenDrain,
         // so a late reply (e.g. behind a heavy redraw backlog) must NOT tear down
@@ -1660,8 +1952,8 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "capture-pane -p\n") { yield(); delay(10) }
             }
-            // Primary response timeout, then the fail-open late-drain timeout.
-            timeoutGate.fireNextTimeout()
+            // Primary response timeout; the late drain is a strict wall-clock
+            // quarantine now.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -1979,7 +2271,7 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `best-effort command timeout without late response does not disconnect or mis-correlate next command`() = runBlocking {
+    fun `best-effort command timeout quarantines late stale response before next command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         // Issue #676: deterministic timeout gate (best-effort: primary + late-drain).
@@ -2002,9 +2294,9 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
             }
-            // No late response is fed, so both the primary timeout and the
-            // best-effort late-drain quarantine expire deterministically.
-            timeoutGate.fireNextTimeout()
+            // No response lands inside the strict late-drain window, so the
+            // command times out and reserves the still-owed response block as
+            // stale before the next command can use the FIFO.
             timeoutGate.fireNextTimeout()
             val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
 
@@ -2030,12 +2322,71 @@ class TmuxClientTest {
                 while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
             }
             shell.feed(
+                "%begin 1 9 0\n" +
+                    "late-capture\n" +
+                    "%end 1 9 0\n" +
                 "%begin 1 10 0\n" +
                     "next-ok\n" +
                     "%end 1 10 0\n",
             )
             val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
             assertEquals(10L, nextResponse.number)
+            assertEquals(listOf("next-ok"), nextResponse.output)
+            assertFalse("follow-up command must not disconnect client", client.disconnected.value)
+            assertFalse("follow-up command must not close shell", shell.closed)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `best-effort timeout after begin abandons open response before next command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val timeoutGate = DeterministicCommandTimeoutGate()
+        val client = RealTmuxClient(
+            session,
+            scope,
+            commandTimeoutMs = 100L,
+            commandTimeoutGate = timeoutGate,
+        )
+        val command = "capture-pane -p -e -S -200 -t %0"
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val sent = scope.async { runCatching { client.sendBestEffortCommand(command) } }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "$command\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1 20 0\n" +
+                    "stale-open-response\n",
+            )
+
+            timeoutGate.fireNextTimeout()
+            val outcome = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sent.await() }
+            assertTrue("expected best-effort timeout, got ${outcome.getOrNull()}", outcome.isFailure)
+            assertFalse("open-block best-effort timeout must not close shell", shell.closed)
+            assertFalse("open-block best-effort timeout must not disconnect client", client.disconnected.value)
+
+            shell.resetStdin()
+            val next = scope.async { client.sendCommand("list-panes -F ok") }
+            withTimeout(2_000) {
+                while (shell.stdinAsString() != "list-panes -F ok\n") { yield(); delay(10) }
+            }
+            shell.feed(
+                "%end 1 20 0\n" +
+                    "%begin 1 21 0\n" +
+                    "next-ok\n" +
+                    "%end 1 21 0\n",
+            )
+
+            val nextResponse = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            assertEquals(21L, nextResponse.number)
             assertEquals(listOf("next-ok"), nextResponse.output)
             assertFalse("follow-up command must not disconnect client", client.disconnected.value)
             assertFalse("follow-up command must not close shell", shell.closed)
@@ -2447,8 +2798,9 @@ class TmuxClientTest {
             }
 
             val collected = scope.async {
-                // 2 outputs + Begin + End
-                client.events.take(4).toList()
+                // Response framing markers stay internal; output notifications
+                // still flow around the response block.
+                client.events.take(2).toList()
             }
             delay(100)
 
@@ -2468,11 +2820,9 @@ class TmuxClientTest {
             val r = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
             assertEquals(listOf("row"), r.output)
             val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { collected.await() }
-            assertEquals(4, events.size)
+            assertEquals(2, events.size)
             assertTrue(events[0] is ControlEvent.Output)
-            assertTrue(events[1] is ControlEvent.Begin)
-            assertTrue(events[2] is ControlEvent.End)
-            assertTrue(events[3] is ControlEvent.Output)
+            assertTrue(events[1] is ControlEvent.Output)
         } finally {
             client.close()
         }

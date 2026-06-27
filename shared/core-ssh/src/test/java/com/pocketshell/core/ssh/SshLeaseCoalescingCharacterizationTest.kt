@@ -86,12 +86,11 @@ class SshLeaseCoalescingCharacterizationTest {
     }
 
     @Test
-    fun `owner connect failure completes the slot and wakes the joined awaiter to dial its own`() = runTest {
-        // #620: when the OWNING connect fails, the awaiter that joined it must
-        // NOT silently fail — the failed slot is completed (cleared) and the
-        // awaiter falls back to its own dial so the caller still gets a lease.
-        val good = FakeSshSession()
-        val connector = GatedLeaseConnector(null, good) // owner fails, fallback succeeds
+    fun `owner connect failure completes the slot and wakes the joined awaiter with the same failure`() = runTest {
+        // When the OWNING connect fails, waiters that joined it must not serially
+        // retry. They receive the same failure, and a future fresh acquire can
+        // decide when to dial again.
+        val connector = GatedLeaseConnector(null, FakeSshSession())
         val manager = leaseManager(connector)
 
         val owner = async { manager.acquire(TARGET) }
@@ -105,14 +104,10 @@ class SshLeaseCoalescingCharacterizationTest {
         val ownerResult = owner.await()
         assertTrue("the owning acquire surfaces the connect failure", ownerResult.isFailure)
 
-        connector.releaseConnect() // resolve the awaiter's own fallback dial
         runCurrent()
         val joinerResult = joiner.await()
-        assertTrue("the woken awaiter recovers via its own connect", joinerResult.isSuccess)
-        assertSame(good, joinerResult.getOrThrow().session)
-        assertEquals("exactly two connects: failed owner + awaiter fallback", 2, connector.startedConnects)
-
-        joinerResult.getOrThrow().release()
+        assertTrue("the woken awaiter receives the shared failure", joinerResult.isFailure)
+        assertEquals("the awaiter must not serially retry after shared failure", 1, connector.startedConnects)
     }
 
     @Test
@@ -120,12 +115,9 @@ class SshLeaseCoalescingCharacterizationTest {
         // #620: the owner's connect is CANCELLED mid-flight (its acquire scope
         // dies). The NonCancellable finally in runOwnedConnect must clear the
         // in-flight slot and complete the Deferred so the awaiter that parked on
-        // it is woken and falls back to its own dial — never blocked forever on a
-        // Deferred that would otherwise never complete.
-        val fallback = FakeSshSession()
-        // Slot 0 = owner (will be cancelled, never released). Slot 1 = awaiter's
-        // own fallback dial.
-        val connector = GatedLeaseConnector(FakeSshSession(), fallback)
+        // it is woken with cancellation — never blocked forever on a Deferred
+        // that would otherwise never complete, and never serially retrying.
+        val connector = GatedLeaseConnector(FakeSshSession(), FakeSshSession())
         val manager = leaseManager(connector)
 
         val owner = async { manager.acquire(TARGET) }
@@ -143,21 +135,17 @@ class SshLeaseCoalescingCharacterizationTest {
         owner.join()
         runCurrent()
 
-        // The awaiter must now be unblocked and dialing its OWN connect — proof
+        // The awaiter must now be unblocked with the same cancellation — proof
         // the slot was completed rather than stranded.
         assertEquals(
-            "owner cancellation wakes the awaiter, which dials its own connect",
-            2,
+            "owner cancellation wakes the awaiter without a serial retry",
+            1,
             connector.startedConnects,
         )
 
-        connector.releaseConnect() // release the awaiter's own dial (slot 1)
         runCurrent()
         val awaiterResult = awaiter.await()
-        assertTrue("the woken awaiter completes successfully on its own transport", awaiterResult.isSuccess)
-        assertSame(fallback, awaiterResult.getOrThrow().session)
-
-        awaiterResult.getOrThrow().release()
+        assertTrue("the woken awaiter completes with cancellation", awaiterResult.isFailure)
     }
 
     @Test
@@ -197,6 +185,13 @@ class SshLeaseCoalescingCharacterizationTest {
             idleTtlMillis = idleTtlMillis,
             maxIdleLeases = maxIdleLeases,
             connectTimeoutContext = StandardTestDispatcher(testScheduler),
+            // Pin the owned-dial ABORT to the same virtual scheduler as the
+            // dial: cancelling a test-scheduler coroutine from a real
+            // Dispatchers.IO thread is a cross-thread mutation of a
+            // single-thread-only scheduler (the CI-load heisenbug). No
+            // connector here blocks in cancellation, so the test scheduler is
+            // safe and deterministic.
+            abortTimeoutContext = StandardTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 

@@ -43,6 +43,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -545,6 +546,7 @@ fi
 # normal build/unit checks first unless explicitly skipped.
 if [[ "$SKIP_GRADLE_CHECKS" != "1" ]]; then
   run_logged "00-gradle-build-and-unit-checks" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-release-terminal-$(pocketshell_unit_token "$RUN_ID")-build-unit" -- \
     ./gradlew --no-daemon \
     :app:assembleDebug \
     :app:test \

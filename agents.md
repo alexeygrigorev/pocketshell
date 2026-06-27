@@ -359,7 +359,8 @@ are looking at before proposing a fix:
   filtered subset.** A filter passes while the full suite fails or HANGS. The
   **#882 miss (2026-06-21):** a recording-timer `while(recording){delay(50)}`
   coroutine left active spun `advanceUntilIdle` forever under `runTest` virtual
-  time → the CI Unit job (`./gradlew test --no-daemon`, whole suite, 35-min cap)
+  time → the CI Unit job (`./gradlew test --no-daemon`, whole suite, 35-min cap;
+  local repros use `scripts/cgroup-run.sh -- ./gradlew test --no-daemon`)
   hit its timeout and `main` went red, but every gate ran the filtered subset and
   never saw it. Mandatory especially when a change adds a coroutine loop / ticker /
   new `runTest` test. A CI job that ends with "timed out after N minutes" + all
@@ -443,11 +444,12 @@ those sections, not repeated here.)
   even though `alexey` is in `/etc/group` (the login predates the group add), so
   any emulator the orchestrator boots directly fails with "user doesn't have
   permissions to use /dev/kvm" and release/emulator gates die at
-  emulator-readiness. Start ONE emulator under `sg kvm -c "... emulator -avd test
-  ..."`, let it boot, then run the gate (adb/gradle don't need kvm, only the
-  emulator process does). **Do NOT kill pre-existing running emulators** to "clean
-  up" — they were booted by a kvm-capable context and work; the orchestrator can't
-  re-boot them. Leave exactly ONE (or export `ANDROID_SERIAL`).
+  emulator-readiness. Start ONE emulator with `AVD_HOLD=1
+  scripts/start-local-avd.sh`, which uses the shared AVD lock, cgroup scoping,
+  and KVM wrapper, then run the gate. **Do NOT kill pre-existing running
+  emulators** to "clean up" — they were booted by a kvm-capable context and
+  work; the orchestrator may not be able to re-boot them. Leave exactly ONE (or
+  export `ANDROID_SERIAL`).
 - **Port 2222 squatter:** the #638 journey gate / terminal-workbench need the
   Docker `agents` fixture on host port **2222** specifically (the emulator's
   `10.0.2.2:2222` alias is fixed). The sibling project pocketshell-desktop's

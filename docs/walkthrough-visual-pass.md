@@ -148,7 +148,7 @@ Compose semantics nodes, not a full pixel-level proof for every painted element.
 Fresh compile validation after the assertion changes:
 
 ```text
-./gradlew --no-daemon --no-build-cache :app:compileDebugAndroidTestKotlin
+scripts/cgroup-run.sh -- ./gradlew --no-daemon --no-build-cache :app:compileDebugAndroidTestKotlin
 ```
 
 Result: `BUILD SUCCESSFUL in 21s`. This specifically verifies the screenshot

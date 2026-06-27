@@ -64,6 +64,12 @@ class SessionServiceControllerTest {
         assertEquals(SessionConnectionService.ACTION_START, started?.action)
         assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
         assertEquals("alpha", controller.flowOfSnapshot().value.primaryHostName)
+        assertFalse(
+            "the App grace gate must wait for actual foreground promotion, not just start intent",
+            controller.isHoldingSessionConnection(),
+        )
+        controller.onForegroundServicePromoted()
+        assertTrue(controller.isHoldingSessionConnection())
     }
 
     @Test
@@ -71,6 +77,12 @@ class SessionServiceControllerTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
         val controller = controller(activeClients, testScheduler)
+        val holdEnded = mutableListOf<Unit>()
+        val holdEndedCollector = launch {
+            controller.sessionHoldEndedRequests().collect {
+                holdEnded += Unit
+            }
+        }
 
         controller.observeActiveSessions()
         runCurrent()
@@ -94,6 +106,12 @@ class SessionServiceControllerTest {
         assertEquals(SessionConnectionService::class.java.name, stopped?.component?.className)
         assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
         assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+        assertEquals(
+            "natural hold end must notify App so a post-grace preserved hold can tear down",
+            1,
+            holdEnded.size,
+        )
+        holdEndedCollector.cancel()
     }
 
     @Test
@@ -125,9 +143,41 @@ class SessionServiceControllerTest {
 
         val snapshot = controller.currentSnapshot()
 
+        assertFalse(
+            "without actual foreground-service promotion, the App grace gate must not preserve",
+            controller.isHoldingSessionConnection(),
+        )
+        controller.onForegroundServicePromoted()
         assertTrue(controller.isHoldingSessionConnection())
         assertEquals(1, snapshot.liveSessionCount)
         assertEquals("alpha", snapshot.primaryHostName)
+    }
+
+    @Test
+    fun `foreground service start failure disables App grace preservation`() = runTest {
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        activeClients.register(
+            hostId = 1L,
+            hostName = "alpha",
+            hostname = "alpha.example",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        controller.onForegroundServiceStartFailed()
+
+        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
+        assertFalse(
+            "a rejected or failed foreground promotion must not preserve the terminal at grace expiry",
+            controller.isHoldingSessionConnection(),
+        )
     }
 
     @Test
@@ -155,6 +205,7 @@ class SessionServiceControllerTest {
         )
         runCurrent()
         drainStartedServices()
+        controller.onForegroundServicePromoted()
 
         controller.stopHoldingFromNotification()
         runCurrent()
@@ -188,6 +239,7 @@ class SessionServiceControllerTest {
         val restarted = shadow.nextStartedService
         assertNotNull("a fresh live-client transition after all-clear may start the hold again", restarted)
         assertEquals(SessionConnectionService.ACTION_START, restarted?.action)
+        controller.onForegroundServicePromoted()
         assertTrue(controller.isHoldingSessionConnection())
         stopCollector.cancel()
     }

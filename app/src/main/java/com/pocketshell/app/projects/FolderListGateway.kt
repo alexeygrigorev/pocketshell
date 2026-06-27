@@ -7,7 +7,7 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
-import com.pocketshell.app.sessions.remoteStartDirectoryExists
+import com.pocketshell.app.sessions.remoteStartDirectoryExistsCommand
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
@@ -381,6 +381,7 @@ data class FolderImportPayload(
     val remoteName: String,
     val length: Long?,
     val openStream: () -> InputStream?,
+    val cleanup: () -> Unit = {},
 )
 
 /**
@@ -665,9 +666,10 @@ class SshFolderListGateway internal constructor(
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
+        leasePurpose: String? = null,
         block: suspend (SshSession) -> T,
     ): Result<T> {
-        val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase)
+        val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase, leasePurpose)
         // Issue #680: a refresh probe over a pooled lease whose transport went
         // STALE between acquire and the exec (sshj's `isConnected` lies until
         // its keepalive trips, so `ensureConnected()` can throw "SSH session is
@@ -912,13 +914,14 @@ class SshFolderListGateway internal constructor(
     private fun HostEntity.toSshLeaseTarget(
         keyPath: String,
         passphrase: CharArray?,
+        leasePurpose: String? = null,
     ): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$id:$keyPath",
+                credentialId = buildCredentialId(id, keyPath, leasePurpose),
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
@@ -1197,7 +1200,7 @@ class SshFolderListGateway internal constructor(
         cwd: String,
         startCommand: String?,
     ): String {
-        if (!remoteStartDirectoryExists(session, cwd)) {
+        if (session.execBounded(remoteStartDirectoryExistsCommand(cwd)).exitCode != 0) {
             throw RuntimeException(
                 startDirectoryMissingMessage(
                     sessionName = sessionName,
@@ -1228,21 +1231,21 @@ class SshFolderListGateway internal constructor(
         // fresh list / suffix instead of silently leaking keystrokes. A plain
         // shell/no-launch create keeps its idempotent attach-or-create semantics.
         if (startCommand != null) {
-            val hasSession = session.exec(
+            val hasSession = session.execBounded(
                 pathAware("tmux has-session -t $quotedName"),
             )
             if (hasSession.exitCode == 0) {
                 throw RuntimeException(launchTargetCollisionMessage(sessionName))
             }
         }
-        val createResult = session.exec(
+        val createResult = session.execBounded(
             pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
         )
         if (createResult.exitCode == TMUXCTL_UNSUPPORTED_EXIT_CODE) {
             // Layer 1: tmuxctl is absent OR too old to know `create-detached`.
             // Fall back to the pre-#726 raw capped-less create so the user still
             // gets a session (just without the memory cap).
-            val fallback = session.exec(
+            val fallback = session.execBounded(
                 pathAware(fallbackCreateSessionCommand(quotedName, quotedCwd)),
             )
             if (fallback.exitCode != 0 && fallback.stderr.isNotBlank()) {
@@ -1284,7 +1287,7 @@ class SshFolderListGateway internal constructor(
                 ensureAgentSubcommandAvailable(session)
             }
             val quotedCommand = shellQuote(startCommand)
-            session.exec(
+            session.execBounded(
                 pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
             )
         }
@@ -1305,7 +1308,7 @@ class SshFolderListGateway internal constructor(
      * never blocks a healthy launch.
      */
     private suspend fun ensureAgentSubcommandAvailable(session: SshSession) {
-        val probe = session.exec(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
+        val probe = session.execBounded(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
         if (!AgentLaunchVersionCheck.isAgentSubcommandMissing(
                 stdout = probe.stdout,
                 stderr = probe.stderr,
@@ -1317,7 +1320,7 @@ class SshFolderListGateway internal constructor(
         // Outdated host: best-effort fetch of the installed version so the hint
         // can be concrete ("this host's pocketshell is 0.3.33").
         val installedVersion = runCatching {
-            val version = session.exec(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
+            val version = session.execBounded(pathAware(AgentLaunchVersionCheck.VERSION_PROBE_COMMAND))
             AgentLaunchVersionCheck.parseReportedVersion(
                 version.stdout.ifBlank { version.stderr },
             )
@@ -1492,25 +1495,34 @@ class SshFolderListGateway internal constructor(
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String> {
-        return withLeaseSession(host, keyPath, passphrase) { session ->
-            val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
-            if (mkdir.exitCode != 0) {
-                throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())
+        return try {
+            withLeaseSession(
+                host = host,
+                keyPath = keyPath,
+                passphrase = passphrase,
+                leasePurpose = LEASE_PURPOSE_IMPORT,
+            ) { session ->
+                val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
+                if (mkdir.exitCode != 0) {
+                    throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())
+                }
+                val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
+                    .getOrThrow()
+                val remotePath = childPath(resolvedFolderPath, payload.remoteName)
+                val input = payload.openStream()
+                    ?: throw RuntimeException("Couldn't read selected file.")
+                input.use { stream ->
+                    session.uploadStream(
+                        input = stream,
+                        length = payload.length ?: -1L,
+                        name = payload.remoteName,
+                        remotePath = remotePath,
+                    )
+                }
+                remotePath
             }
-            val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
-                .getOrThrow()
-            val remotePath = childPath(resolvedFolderPath, payload.remoteName)
-            val input = payload.openStream()
-                ?: throw RuntimeException("Couldn't read selected file.")
-            input.use { stream ->
-                session.uploadStream(
-                    input = stream,
-                    length = payload.length ?: -1L,
-                    name = payload.remoteName,
-                    remotePath = remotePath,
-                )
-            }
-            remotePath
+        } finally {
+            payload.cleanup()
         }
     }
 
@@ -1777,6 +1789,18 @@ class SshFolderListGateway internal constructor(
          * `ConnectError` instead of hanging.
          */
         const val PROBE_LOG_TAG: String = "PsFolderProbe"
+
+        internal const val LEASE_PURPOSE_IMPORT: String = "folder-import"
+
+        internal fun buildCredentialId(
+            hostId: Long,
+            keyPath: String,
+            leasePurpose: String?,
+        ): String {
+            val base = "$hostId:$keyPath"
+            val purpose = leasePurpose?.trim()?.takeIf { it.isNotEmpty() } ?: return base
+            return "$base|purpose=$purpose"
+        }
 
         /**
          * Issue #758 — DETERMINISTIC test injection of a poll-time stale-channel

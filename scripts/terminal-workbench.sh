@@ -18,6 +18,7 @@ if [[ -n "${RUN_ID:-}" ]]; then
 fi
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -360,7 +361,14 @@ require_positive_integer "$WORKBENCH_INSTRUMENTATION_ATTEMPTS" "WORKBENCH_INSTRU
 chmod 600 "$SSH_KEY" || fail "could not restrict SSH key permissions at $SSH_KEY"
 
 if ! "$ADB" get-state >/dev/null 2>&1; then
-  run_logged "00-start-emulator" "$EMULATOR" -avd "$AVD_NAME" -no-snapshot -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim &
+  declare -a emulator_cmd=()
+  pocketshell_build_sg_kvm_command emulator_cmd \
+    "$EMULATOR" -avd "$AVD_NAME" -no-snapshot -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim
+  pocketshell_scope_start_background \
+    "pocketshell-terminal-workbench-avd-$(pocketshell_unit_token "$RUN_ID")" \
+    "$RUN_DIR/00-start-emulator.log" \
+    "$RUN_DIR/00-start-emulator.pid" \
+    "${emulator_cmd[@]}"
 fi
 run_logged "01-wait-emulator" wait_for_emulator
 run_logged "02-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build "$AGENT_SERVICE"
@@ -371,7 +379,9 @@ if [[ "$BUILD_APKS" == "1" ]]; then
   if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
     GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
   fi
-  run_logged "04-build-apks" ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
+  run_logged "04-build-apks" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-terminal-workbench-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+    ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
 else
   [[ -f "$APP_APK" ]] || fail "app APK missing at $APP_APK"
   [[ -f "$TEST_APK" ]] || fail "test APK missing at $TEST_APK"

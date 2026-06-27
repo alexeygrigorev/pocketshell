@@ -511,7 +511,9 @@ private fun TransferBanner(
     val dismissible: Boolean
     when (transfer) {
         is FileTransferState.InProgress -> {
-            text = (if (transfer.isUpload) "Uploading " else "Downloading ") + transfer.name + "…"
+            val size = transfer.bytesTotal?.let { " (${formatSize(it)})" } ?: " (size unknown)"
+            text = (if (transfer.isUpload) "Uploading " else "Downloading ") +
+                transfer.name + size + "…"
             role = BannerRole.Info
             showSpinner = true
             dismissible = false

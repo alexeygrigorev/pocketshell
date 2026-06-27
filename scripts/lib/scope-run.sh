@@ -35,25 +35,80 @@
 # of dying outright; we additionally pin `OOMPolicy=stop` so that when the hard
 # wall IS hit, only this scope's process tree is stopped.
 #
-# GRACEFUL DEGRADE
-# ----------------
-# When `systemd-run` / a working user systemd is unavailable (e.g. CI), the
-# command is run BARE — byte-for-byte the legacy behaviour — and a one-line
-# warning is emitted. Mirrors robust.systemd_available().
+# FAIL-CLOSED LOCAL DEFAULT
+# -------------------------
+# When `systemd-run` / a working user systemd is unavailable, local runs fail
+# instead of silently running heavy work in the caller's cgroup. CI still falls
+# back to bare execution because many hosted runners do not expose user systemd.
+# A local caller may opt into the old uncapped fallback for cgroup debugging with
+# POCKETSHELL_SCOPE_ALLOW_BARE=1.
 #
 # USAGE
 # -----
 #   source scripts/lib/scope-run.sh
 #   pocketshell_scope_run <unit> <cmd...>
+#   pocketshell_scope_start_background <unit> <log-file> <pid-file> <cmd...>
 #
 # The memory caps are env-tunable (so CI/dev can size them):
 #   POCKETSHELL_TEST_MEM   hard MemoryMax for the scope         (default 8G)
 #   POCKETSHELL_TEST_HIGH  soft MemoryHigh throttle threshold   (default ~85% of MEM)
 #   POCKETSHELL_TEST_SWAP  MemorySwapMax cushion                (default 8G)
 #   POCKETSHELL_SCOPE_SLICE parent slice                        (default robust.slice)
+#   POCKETSHELL_SCOPE_ALLOW_BARE=1 allow uncapped fallback outside CI
 #
 # The <unit> should be UNIQUE per invocation (include suffix/serial/pid) so
 # parallel lanes get distinct sibling scopes that never collide.
+
+pocketshell_unit_token() {
+  local token="${1//[^A-Za-z0-9._-]/_}"
+  [[ -n "$token" ]] || token="default"
+  printf '%s' "$token"
+}
+
+pocketshell_shell_join() {
+  local arg quoted joined=""
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    joined+=" $quoted"
+  done
+  printf '%s' "${joined# }"
+}
+
+pocketshell_should_wrap_sg_kvm() {
+  case "${POCKETSHELL_EMULATOR_SG_KVM:-auto}" in
+    0 | false | FALSE | no | NO)
+      return 1
+      ;;
+    1 | true | TRUE | yes | YES)
+      command -v sg >/dev/null 2>&1 || return 1
+      getent group kvm >/dev/null 2>&1 || return 1
+      return 0
+      ;;
+  esac
+
+  [[ -e /dev/kvm ]] || return 1
+  [[ -r /dev/kvm && -w /dev/kvm ]] && return 1
+  command -v sg >/dev/null 2>&1 || return 1
+  local group_entry user
+  group_entry="$(getent group kvm 2>/dev/null || true)"
+  [[ -n "$group_entry" ]] || return 1
+  user="$(id -un 2>/dev/null || true)"
+  [[ -n "$user" ]] || return 1
+  if id -nG 2>/dev/null | tr ' ' '\n' | grep -Fxq kvm; then
+    return 0
+  fi
+  [[ ",${group_entry##*:}," == *",$user,"* ]] || return 1
+  return 0
+}
+
+pocketshell_build_sg_kvm_command() {
+  local -n _pocketshell_out="$1"
+  shift
+  _pocketshell_out=("$@")
+  if pocketshell_should_wrap_sg_kvm; then
+    _pocketshell_out=(sg kvm -c "$(pocketshell_shell_join "$@")")
+  fi
+}
 
 # robust.systemd_available() equivalent: systemd-run on PATH AND a reachable
 # user systemd manager. `systemctl --user is-system-running` returns one of
@@ -76,6 +131,28 @@ pocketshell_scope_available() {
       return 1
       ;;
   esac
+}
+
+pocketshell_scope_allow_bare() {
+  case "${POCKETSHELL_SCOPE_ALLOW_BARE:-}" in
+    1 | true | TRUE | yes | YES)
+      return 0
+      ;;
+  esac
+  case "${CI:-}" in
+    "" | 0 | false | FALSE | no | NO)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+_pocketshell_scope_unavailable_message() {
+  local unit="$1"
+  printf 'scope-run: user systemd unavailable; refusing to run %s uncapped.\n' "$unit" >&2
+  printf 'scope-run: rerun inside a working systemd --user session, or set POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup. CI may fall back automatically.\n' >&2
 }
 
 # Compute ~85% of a systemd size string (e.g. 8G -> 6963543080 bytes) for the
@@ -110,7 +187,7 @@ _pocketshell_scope_high_default() {
 # pocketshell_scope_run <unit> <cmd...>
 #
 # Runs <cmd...> inside a transient memory-capped `systemd-run --user --scope`
-# sibling scope when user systemd is available; otherwise runs <cmd...> bare.
+# sibling scope when user systemd is available; otherwise fails closed locally.
 # Returns the command's own exit code. On an OOM-kill of the scope, systemd-run
 # surfaces a non-zero exit and this function returns it with a clear message.
 pocketshell_scope_run() {
@@ -130,7 +207,11 @@ pocketshell_scope_run() {
   fi
 
   if ! pocketshell_scope_available; then
-    printf 'scope-run: user systemd unavailable; running %s BARE (uncapped fallback)\n' \
+    if ! pocketshell_scope_allow_bare; then
+      _pocketshell_scope_unavailable_message "$unit"
+      return 125
+    fi
+    printf 'scope-run: user systemd unavailable; running %s BARE (explicit uncapped fallback)\n' \
       "$unit" >&2
     "$@"
     return $?
@@ -173,4 +254,44 @@ pocketshell_scope_run() {
     systemctl --user reset-failed "$unit.scope" >/dev/null 2>&1 || true
   fi
   return "$rc"
+}
+
+# pocketshell_scope_start_background <unit> <log-file> <pid-file> <cmd...>
+#
+# Starts <cmd...> under the same memory-capped transient scope as
+# pocketshell_scope_run, but returns immediately after writing the launcher PID
+# to <pid-file>. This is for long-lived local reproduction processes such as
+# the Android emulator. The scoped process tree still has its own sibling
+# cgroup, so an OOM stops that scope rather than the interactive session.
+pocketshell_scope_start_background() {
+  local unit="$1"
+  local log_file="$2"
+  local pid_file="$3"
+  shift 3
+  if [[ -z "$unit" || -z "$log_file" || -z "$pid_file" || $# -eq 0 ]]; then
+    printf 'pocketshell_scope_start_background: need <unit> <log-file> <pid-file> and a command\n' >&2
+    return 2
+  fi
+
+  mkdir -p "$(dirname "$log_file")" "$(dirname "$pid_file")"
+
+  if ! pocketshell_scope_available; then
+    if ! pocketshell_scope_allow_bare; then
+      _pocketshell_scope_unavailable_message "$unit"
+      return 125
+    fi
+    printf 'scope-run: user systemd unavailable; starting %s BARE (explicit uncapped fallback)\n' \
+      "$unit" >&2
+    nohup "$@" >> "$log_file" 2>&1 &
+    printf '%s\n' "$!" > "$pid_file"
+    return 0
+  fi
+
+  (
+    exec >> "$log_file" 2>&1
+    pocketshell_scope_run "$unit" "$@"
+  ) &
+  printf '%s\n' "$!" > "$pid_file"
+  printf 'scope-run: background launcher for %s.scope pid=%s log=%s\n' \
+    "$unit" "$!" "$log_file" >&2
 }

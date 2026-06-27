@@ -70,6 +70,10 @@ class FolderListViewModelPrewarmLeaseTest {
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
         )
+        // Drive the bounded warm-lease release on the same virtual clock as the
+        // lease manager so the release-into-idle-TTL is observable deterministically
+        // (the release runs on [ioDispatcher]; production wires `Dispatchers.IO`).
+        vm.ioDispatcher = StandardTestDispatcher(testScheduler)
 
         vm.bind(
             hostId = HOST.id,

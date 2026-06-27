@@ -32,6 +32,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -283,7 +284,8 @@ export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 if [[ "$PARALLEL_BUILD_APKS" = "1" ]]; then
   build_log="$RUN_DIR/00-build-apks.log"
   printf 'building app + androidTest APKs once (shared by all shards) -> %s\n' "$build_log"
-  if ! ./gradlew --no-daemon --no-build-cache --no-parallel \
+  if ! "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-parallel-setup-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
+      ./gradlew --no-daemon --no-build-cache --no-parallel \
       :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace \
       >"$build_log" 2>&1; then
     tail -n 40 "$build_log" >&2 || true

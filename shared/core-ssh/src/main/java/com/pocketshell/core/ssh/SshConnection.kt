@@ -1,12 +1,18 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
@@ -32,6 +38,10 @@ public object SshConnection {
 
     /** Default TCP + auth timeouts, in milliseconds. */
     internal const val DEFAULT_TIMEOUT_MS: Int = 30_000
+
+    private const val CANCEL_DISCONNECT_TIMEOUT_MS: Long = 2_000L
+
+    private val cancellationCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Connect to `[host]:[port]` as [user] and authenticate with [key]
@@ -97,14 +107,31 @@ public object SshConnection {
             val liveClient = AtomicReference<C?>(null)
             var worker: Job? = null
 
-            fun disconnectClient() {
-                liveClient.getAndSet(null)?.let { client ->
-                    runCatching { connector.disconnect(client) }
+            fun takeLiveClient(): C? = liveClient.getAndSet(null)
+
+            fun disconnectClientBlocking(client: C) {
+                runCatching { connector.disconnect(client) }
+            }
+
+            fun disconnectClientAsync() {
+                val client = takeLiveClient() ?: return
+                cancellationCleanupScope.launch {
+                    withContext(NonCancellable) {
+                        withTimeoutOrNull(CANCEL_DISCONNECT_TIMEOUT_MS) {
+                            runInterruptible(Dispatchers.IO) {
+                                disconnectClientBlocking(client)
+                            }
+                        }
+                    }
                 }
             }
 
+            fun disconnectClientBestEffort() {
+                takeLiveClient()?.let { disconnectClientBlocking(it) }
+            }
+
             continuation.invokeOnCancellation {
-                disconnectClient()
+                disconnectClientAsync()
                 worker?.cancel()
             }
 
@@ -132,10 +159,10 @@ public object SshConnection {
                         session.close()
                     }
                 } catch (e: CancellationException) {
-                    disconnectClient()
+                    disconnectClientAsync()
                     continuation.cancel(e)
                 } catch (e: Throwable) {
-                    disconnectClient()
+                    disconnectClientBestEffort()
                     if (continuation.isActive) {
                         continuation.resume(Result.failure(wrap(e, host, port, user)))
                     }

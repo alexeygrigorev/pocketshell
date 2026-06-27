@@ -21,7 +21,13 @@ set -euo pipefail
 # The base `test` AVD (emulator-5554) is deliberately NEVER in the pool, so a
 # sibling agent already using emulator-5554 is never disturbed.
 #
-# KVM / hardware acceleration (issue #776):
+# Cgroup scope + KVM / hardware acceleration (issues #730/#776):
+#   Pool emulator launches are heavy local processes. They run through
+#   scripts/lib/scope-run.sh by default, so emulator OOMs stop their own
+#   transient cgroup scope instead of the caller's tmux/session cgroup. If user
+#   systemd is unavailable locally, startup fails closed; set
+#   POCKETSHELL_SCOPE_ALLOW_BARE=1 only when debugging cgroup setup.
+#
 #   x86_64 emulation REQUIRES /dev/kvm. On the Hetzner dev box a plain shell
 #   often lacks ACTIVE kvm-group membership (the login session predates the
 #   group add), so a bare `emulator -avd ...` dies with "x86_64 emulation
@@ -46,11 +52,13 @@ set -euo pipefail
 #                            can reach it)
 #   ANDROID_SDK / ADB / EMULATOR   tool paths
 #   AVD_START_FLAGS          emulator launch flags
+#   POCKETSHELL_TEST_MEM=8G  MemoryMax for each emulator scope
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-clone.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -91,28 +99,34 @@ pool_needs_kvm_wrap() {
   return 1
 }
 
-# Launch the emulator, wrapping in `sg kvm -c` when pool_needs_kvm_wrap says so.
-# The launched process is detached (nohup ... &) and its PID written by the
-# caller. When wrapping, the `sg` process is the parent of the emulator; killing
-# the process bound to the console port (emulator_pid_for_port) still tears the
-# emulator down regardless, so teardown is unaffected.
+# Launch the emulator in its own memory-capped sibling scope, wrapping in
+# `sg kvm -c` when pool_needs_kvm_wrap says so. When wrapping, the `sg` process
+# is the parent of the emulator; killing the process bound to the console port
+# (emulator_pid_for_port) still tears the emulator down, so teardown is
+# unaffected.
 pool_launch_emulator() {
-  local clone_name="$1" port="$2" logf="$3"
+  local clone_name="$1" port="$2" logf="$3" pidf="$4"
+  local scope_unit="pocketshell-avd-pool-${clone_name//[^A-Za-z0-9._-]/_}-${port}"
+  local -a avd_start_args
+  read -r -a avd_start_args <<< "$AVD_START_FLAGS"
+
+  {
+    printf '[%s] scope=%s.scope command:' "$(date -Is)" "$scope_unit"
+    printf ' %q' "$EMULATOR" -avd "$clone_name" -port "$port" "${avd_start_args[@]}"
+    printf '\n'
+  } > "$logf"
+
   if pool_needs_kvm_wrap; then
     # shellcheck disable=SC2016  # backticks here are literal log text, not a subshell
     printf '  (launching via `sg kvm -c` for /dev/kvm access)\n' >&2
-    # Build a single shell command string for sg -c. AVD_START_FLAGS is a
-    # space-separated flag list (word-splitting is intentional, as in the
-    # direct-launch path below).
-    # shellcheck disable=SC2086
-    nohup sg kvm -c "exec '$EMULATOR' -avd '$clone_name' -port '$port' $AVD_START_FLAGS" \
-      > "$logf" 2>&1 &
+    local sg_command
+    printf -v sg_command '%q ' "$EMULATOR" -avd "$clone_name" -port "$port" "${avd_start_args[@]}"
+    pocketshell_scope_start_background "$scope_unit" "$logf" "$pidf" \
+      sg kvm -c "exec $sg_command"
   else
-    # shellcheck disable=SC2086
-    nohup "$EMULATOR" -avd "$clone_name" -port "$port" $AVD_START_FLAGS \
-      > "$logf" 2>&1 &
+    pocketshell_scope_start_background "$scope_unit" "$logf" "$pidf" \
+      "$EMULATOR" -avd "$clone_name" -port "$port" "${avd_start_args[@]}"
   fi
-  printf '%s\n' "$!"
 }
 
 usage() {
@@ -129,6 +143,7 @@ parallel agents run connected tests without queueing on one AVD.
   purge    stop + delete the clone AVDs from disk
 
 Env: POOL_SIZE=3 BASE_AVD=test POOL_PORT_BASE=5554 BOOT_TIMEOUT_SECONDS=300
+     POCKETSHELL_TEST_MEM=8G POCKETSHELL_SCOPE_ALLOW_BARE=1
 USAGE
 }
 
@@ -178,7 +193,11 @@ boot_one() {
     printf 'Pool emulator on port %s already starting; waiting for boot.\n' "$port" >&2
   else
     printf 'Booting %s on port %s (%s)...\n' "$clone_name" "$port" "$serial" >&2
-    pool_launch_emulator "$clone_name" "$port" "$logf" > "$LOG_ROOT/$clone_name.pid"
+    if ! pool_launch_emulator "$clone_name" "$port" "$logf" "$LOG_ROOT/$clone_name.pid"; then
+      printf 'FAIL: could not start scoped emulator launch for %s. Log tail:\n' "$clone_name" >&2
+      tail -n 25 "$logf" >&2 || true
+      return 1
+    fi
   fi
 
   local deadline=$((SECONDS + BOOT_TIMEOUT_SECONDS))

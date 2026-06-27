@@ -41,6 +41,7 @@ import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -61,7 +62,6 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -215,6 +215,7 @@ sealed interface FolderListUiState {
         val flatSessions: List<FolderSessionEntry>,
         val expandedProjectPaths: Set<String>,
         val isRefreshing: Boolean = false,
+        val isCreatingSession: Boolean = false,
         val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(),
     ) : FolderListUiState
 
@@ -880,6 +881,7 @@ class FolderListViewModel internal constructor(
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
     private var sessionRefreshInFlight: Boolean = false
+    private var createSessionInFlight: Boolean = false
     private var refreshSessionsRequested: Boolean = false
 
     /**
@@ -1303,62 +1305,71 @@ class FolderListViewModel internal constructor(
         startCommand: String?,
         chosenKind: SessionAgentKind? = null,
         onResolved: (sessionName: String) -> Unit,
+        onFinished: () -> Unit = {},
     ) {
         val params = bound ?: return
+        if (createSessionInFlight) return
+        setCreateSessionInFlight(true)
         viewModelScope.launch {
-            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
-                _state.value = FolderListUiState.Failed("Host not found.")
-                return@launch
+            try {
+                val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) }
+                val result = if (host == null) {
+                    Result.failure<String>(IllegalStateException("Host not found."))
+                } else {
+                    gateway.createSession(
+                        host = host,
+                        keyPath = params.keyPath,
+                        passphrase = params.passphrase,
+                        sessionName = sessionName,
+                        cwd = cwd,
+                        startCommand = startCommand,
+                    )
+                }
+                result.fold(
+                    onSuccess = { resolvedName ->
+                        // EPIC #679 (#678 create side): the app KNOWS it just created
+                        // this session, so insert it into the maintained tree by id
+                        // immediately — optimistically — instead of waiting for the
+                        // next reconcile to discover it ("created session/window
+                        // slow-to-appear"). The node carries an optimistic grace so
+                        // the reconcile that follows does not prune it before the
+                        // probe has observed it; that same reconcile then confirms it
+                        // and clears the grace.
+                        //
+                        // EPIC #821 Workstream A: the app already KNOWS the kind it
+                        // just launched (the picker chose it, and the wrapper has
+                        // recorded it host-side as `@ps_agent_kind`). Stamp that
+                        // chosen kind onto the optimistic node instead of `Probing`
+                        // so the tree shows the real kind from the moment of
+                        // creation — no detection round-trip, no flicker through
+                        // Probing. The sticky `mergeAgentKind` guard keeps this
+                        // recorded kind across the reconcile that follows (which
+                        // also re-reads it from the host option). A shell session
+                        // (`chosenKind == null`) keeps the optimistic `Probing`
+                        // placeholder until the reconcile confirms it as `Shell`.
+                        tree.insertSession(
+                            entry = FolderSessionEntry(
+                                sessionName = resolvedName,
+                                lastActivity = System.currentTimeMillis(),
+                                attached = false,
+                                agentKind = chosenKind ?: SessionAgentKind.Probing,
+                            ),
+                            folderPath = cwd,
+                        )
+                        emitReady()
+                        onResolved(resolvedName)
+                        refresh()
+                    },
+                    onFailure = { error ->
+                        _state.value = FolderListUiState.Failed(
+                            "Couldn't create session: ${error.message ?: error.javaClass.simpleName}",
+                        )
+                    },
+                )
+            } finally {
+                setCreateSessionInFlight(false)
+                onFinished()
             }
-            val result = gateway.createSession(
-                host = host,
-                keyPath = params.keyPath,
-                passphrase = params.passphrase,
-                sessionName = sessionName,
-                cwd = cwd,
-                startCommand = startCommand,
-            )
-            result.fold(
-                onSuccess = { resolvedName ->
-                    // EPIC #679 (#678 create side): the app KNOWS it just created
-                    // this session, so insert it into the maintained tree by id
-                    // immediately — optimistically — instead of waiting for the
-                    // next reconcile to discover it ("created session/window
-                    // slow-to-appear"). The node carries an optimistic grace so
-                    // the reconcile that follows does not prune it before the
-                    // probe has observed it; that same reconcile then confirms it
-                    // and clears the grace.
-                    //
-                    // EPIC #821 Workstream A: the app already KNOWS the kind it
-                    // just launched (the picker chose it, and the wrapper has
-                    // recorded it host-side as `@ps_agent_kind`). Stamp that
-                    // chosen kind onto the optimistic node instead of `Probing`
-                    // so the tree shows the real kind from the moment of
-                    // creation — no detection round-trip, no flicker through
-                    // Probing. The sticky `mergeAgentKind` guard keeps this
-                    // recorded kind across the reconcile that follows (which
-                    // also re-reads it from the host option). A shell session
-                    // (`chosenKind == null`) keeps the optimistic `Probing`
-                    // placeholder until the reconcile confirms it as `Shell`.
-                    tree.insertSession(
-                        entry = FolderSessionEntry(
-                            sessionName = resolvedName,
-                            lastActivity = System.currentTimeMillis(),
-                            attached = false,
-                            agentKind = chosenKind ?: SessionAgentKind.Probing,
-                        ),
-                        folderPath = cwd,
-                    )
-                    emitReady()
-                    onResolved(resolvedName)
-                    refresh()
-                },
-                onFailure = { error ->
-                    _state.value = FolderListUiState.Failed(
-                        "Couldn't create session: ${error.message ?: error.javaClass.simpleName}",
-                    )
-                },
-            )
         }
     }
 
@@ -2681,9 +2692,16 @@ class FolderListViewModel internal constructor(
                 flatSessions = projection.flatSessions,
                 expandedProjectPaths = projection.expandedProjectPaths,
                 isRefreshing = refreshing,
+                isCreatingSession = createSessionInFlight,
                 portForwarding = forwardingSummary(),
             )
         }
+    }
+
+    private fun setCreateSessionInFlight(inFlight: Boolean) {
+        createSessionInFlight = inFlight
+        val ready = _state.value as? FolderListUiState.Ready ?: return
+        _state.value = ready.copy(isCreatingSession = inFlight)
     }
 
     private fun loadingState(): FolderListUiState.Loading {
@@ -2731,9 +2749,7 @@ class FolderListViewModel internal constructor(
         emitJob = null
         warmJob?.cancel()
         warmReleaseJob?.cancel()
-        runBlocking {
-            releaseWarmLease()
-        }
+        releaseWarmLeaseAsync()
         watchedFoldersJob?.cancel()
         lifecycleObserver?.let { observer ->
             // `removeObserver` is main-thread-affine; `onCleared` runs on
@@ -2797,11 +2813,37 @@ class FolderListViewModel internal constructor(
     }
 
     private suspend fun releaseWarmLease() {
-        withContext(NonCancellable) {
-            val lease = warmLease ?: return@withContext
-            warmLease = null
-            warmSessionReady.value = false
-            lease.release()
+        val lease = takeWarmLeaseForRelease() ?: return
+        releaseWarmLeaseBounded(lease)
+    }
+
+    private fun releaseWarmLeaseAsync() {
+        val lease = takeWarmLeaseForRelease() ?: return
+        CoroutineScope(ioDispatcher).launch {
+            releaseWarmLeaseBounded(lease)
+        }
+    }
+
+    private fun takeWarmLeaseForRelease(): SshLease? {
+        val lease = warmLease ?: return null
+        warmLease = null
+        warmSessionReady.value = false
+        return lease
+    }
+
+    private suspend fun releaseWarmLeaseBounded(lease: SshLease) {
+        // Run the bounded release off the Main thread (in production [ioDispatcher]
+        // is `Dispatchers.IO`) so a wedged half-open transport `close()` socket
+        // write can never block the caller; the lease manager's own release does
+        // the wedge-free refcount bookkeeping NonCancellably and only the bounded
+        // transport close runs here. Use the injectable [ioDispatcher] — NOT a
+        // hardcoded `Dispatchers.IO` — so a `runTest` virtual clock drives the
+        // release-into-idle-TTL deterministically, matching every other IO hop in
+        // this view model.
+        withContext(NonCancellable + ioDispatcher) {
+            withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) {
+                lease.release()
+            }
         }
     }
 
@@ -2859,6 +2901,7 @@ class FolderListViewModel internal constructor(
         // on a stale foreground/resume ([HostTreeModel.RECONCILE_STALENESS_MS])
         // and on the explicit pull-to-refresh swipe — never on a tight loop.
         const val WARM_RELEASE_DELAY_MS: Long = 10_000L
+        const val WARM_LEASE_RELEASE_TIMEOUT_MS: Long = 3_000L
 
         /**
          * Epic #821 slice C (issue #837): bound on how long the cold-start

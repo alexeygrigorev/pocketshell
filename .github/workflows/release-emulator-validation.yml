@@ -13,6 +13,12 @@ on:
         default: false
         type: boolean
 
+# Manual release validation owns a long emulator runner; queue one per ref
+# instead of letting duplicate dispatches pile up.
+concurrency:
+  group: release-emulator-validation-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   emulator-release-validation:
     name: Emulator-only release validation

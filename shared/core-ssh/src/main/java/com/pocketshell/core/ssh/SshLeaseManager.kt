@@ -2,12 +2,13 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * App-scoped, DI-ready SSH connection lease pool keyed by host and credential
@@ -38,8 +40,8 @@ public class SshLeaseManager(
     // is NOT a kotlinx suspension point, so a wedged/slow peer can pin the
     // acquire even when the caller wraps it in `withTimeout` — `withTimeout`
     // cancels the coroutine but the cancellation cannot interrupt the in-flight
-    // blocking read. This bound runs the connect as a child the lease can
-    // CANCEL on expiry; cancelling that child propagates into
+    // blocking read. This bound runs the connect as a manager-owned dial job the
+    // lease can CANCEL on expiry; cancelling that job propagates into
     // `SshConnection.connect`'s `invokeOnCancellation`, which DISCONNECTS the
     // half-open transport and unparks the blocking read (the same close-to-heal
     // trick `SshFolderListGateway.execBounded` uses for reads). Without this the
@@ -59,6 +61,22 @@ public class SshLeaseManager(
     // Virtual-time unit tests inject a `StandardTestDispatcher(testScheduler)`
     // to step the bound deterministically.
     private val connectTimeoutContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
+    // Issue #687: context the bounded connect's ABORT (the off-path
+    // `connectAbortScope.launch { dial.cancel() }` that fires on timeout/expiry)
+    // runs on. Defaults to [Dispatchers.IO] so the abort runs on a REAL
+    // background thread: cancelling a wedged dial can drive a blocking
+    // `invokeOnCancellation` cleanup (disconnecting the half-open transport to
+    // unpark the socket read), and that blocking cleanup MUST NOT run on the
+    // caller's resume thread — firing it off-path on the IO pool is what lets
+    // the acquire return its bounded failure even while cleanup is still
+    // tearing the socket down. Kept SEPARATE from [connectTimeoutContext] only
+    // so virtual-time unit tests can pin the abort to the SAME test scheduler
+    // as the dial: cancelling a coroutine that lives on a `TestCoroutineScheduler`
+    // from a real `Dispatchers.IO` thread is a cross-thread mutation of a
+    // scheduler kotlinx documents as single-thread-only — a heisenbug under CI
+    // load. Production stays on real [Dispatchers.IO]; only the test injects a
+    // `StandardTestDispatcher(testScheduler)`.
+    private val abortTimeoutContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) : AutoCloseable {
     private val mutex = Mutex()
@@ -70,7 +88,7 @@ public class SshLeaseManager(
     // from host detail instant: host detail's warm-lease acquire and the
     // user's session-open tap share ONE handshake, so the tap reuses the warm
     // transport the moment it is up rather than racing a second 3-4s connect.
-    private val inFlightConnects: MutableMap<SshLeaseKey, CompletableDeferred<Entry?>> =
+    private val inFlightConnects: MutableMap<SshLeaseKey, CompletableDeferred<Result<Entry>>> =
         linkedMapOf()
     private var closed: Boolean = false
     private var nextEntryId: Long = 1L
@@ -87,6 +105,8 @@ public class SshLeaseManager(
     // edge (transport gone), so a fresh dial after a close re-emits `Connected`.
     private val lastPublishedState: MutableMap<SshLeaseKey, SshLeaseConnectionState> =
         hashMapOf()
+    private val connectScope = CoroutineScope(SupervisorJob() + connectTimeoutContext)
+    private val connectAbortScope = CoroutineScope(SupervisorJob() + abortTimeoutContext)
 
     public val stateEvents: SharedFlow<SshLeaseStateEvent> = _stateEvents.asSharedFlow()
 
@@ -122,7 +142,7 @@ public class SshLeaseManager(
                     // it instead of opening a second redundant handshake.
                     AcquireDecision.Await(pending)
                 } else {
-                    val deferred = CompletableDeferred<Entry?>()
+                    val deferred = CompletableDeferred<Result<Entry>>()
                     inFlightConnects[key] = deferred
                     // Announce the in-flight handshake so a synchronous consumer
                     // (the tmux warm-open hint) can treat a session open landing
@@ -152,21 +172,22 @@ public class SshLeaseManager(
 
     /**
      * Issue #620: take a ref on the entry produced by another acquire's
-     * in-flight connect for this key. If that connect failed, or the shared
-     * entry was closed/disconnected by the time we awoke, fall back to a fresh
-     * owned connect so the caller still gets a lease (never silently fails just
-     * because the connect it joined lost its transport).
+     * in-flight connect for this key. If that connect failed, propagate the
+     * owner failure to every waiter instead of letting waiters serially retry
+     * one-by-one after a shared outage.
      */
     private suspend fun awaitSharedConnect(
         target: SshLeaseTarget,
-        deferred: CompletableDeferred<Entry?>,
+        deferred: CompletableDeferred<Result<Entry>>,
     ): Result<SshLease> {
         val key = target.leaseKey
-        val shared = deferred.await()
+        val shared = deferred.await().getOrElse { error ->
+            return Result.failure(error)
+        }
         val reused = mutex.withLock {
             if (closed) return Result.failure(SshLeaseManagerClosedException())
             val entry = shared
-                ?.takeIf { entries[key] === it && it.session.isConnected }
+                .takeIf { entries[key] === it && it.session.isConnected }
                 ?: return@withLock null
             entry.closeJob?.cancel()
             entry.closeJob = null
@@ -186,8 +207,9 @@ public class SshLeaseManager(
                 ),
             )
         }
-        // The shared connect did not yield a usable entry for us; dial our own.
-        return acquire(target)
+        return Result.failure(
+            SshException("Coalesced SSH connect for $key did not produce a live session"),
+        )
     }
 
     /**
@@ -198,75 +220,81 @@ public class SshLeaseManager(
      */
     private suspend fun runOwnedConnect(
         target: SshLeaseTarget,
-        deferred: CompletableDeferred<Entry?>,
+        deferred: CompletableDeferred<Result<Entry>>,
     ): Result<SshLease> {
         val key = target.leaseKey
         try {
             val session = boundedConnect(target).getOrElse { error ->
                 // Connect failed (including a bounded handshake timeout): clear
                 // the in-flight slot, retract the optimistic Connecting hint, and
-                // wake any awaiters so they fall back to their own dial rather
-                // than blocking forever.
+                // wake any awaiters with the same failure rather than letting
+                // them serially retry the same outage one-by-one.
                 mutex.withLock {
                     if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
                     retractConnectingHintLocked(key)
                 }
-                deferred.complete(null)
+                deferred.complete(Result.failure(error))
                 return Result.failure(error)
             }
-            return mutex.withLock {
-                if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
-                if (closed) {
-                    runCatching { session.close() }
-                    retractConnectingHintLocked(key)
-                    deferred.complete(null)
-                    return@withLock Result.failure(SshLeaseManagerClosedException())
-                }
-                val raced = entries[key]
-                if (raced != null && raced.session.isConnected) {
-                    // A live entry appeared for this key while we were dialing
-                    // (e.g. a different code path acquired directly). Drop our
-                    // redundant transport and reuse the live one; awaiters reuse
-                    // it too via the deferred.
-                    runCatching { session.close() }
-                    raced.closeJob?.cancel()
-                    raced.closeJob = null
-                    raced.idleSinceMillis = null
-                    raced.refCount += 1
-                    emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(raced)
-                    Result.success(
-                        SshLease(
-                            key = key,
-                            session = raced.session,
-                            isNewConnection = false,
-                            entryId = raced.id,
-                            releaseAction = ::release,
-                        ),
-                    )
-                } else {
-                    raced?.close()
-                    val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
-                    entries[key] = entry
-                    emitStateLocked(key, SshLeaseConnectionState.Connected)
-                    deferred.complete(entry)
-                    Result.success(
-                        SshLease(
-                            key = key,
-                            session = session,
-                            isNewConnection = true,
-                            entryId = entry.id,
-                            releaseAction = ::release,
-                        ),
-                    )
+            return withContext(NonCancellable) {
+                mutex.withLock {
+                    if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
+                    if (closed) {
+                        runCatching { session.close() }
+                        retractConnectingHintLocked(key)
+                        deferred.complete(Result.failure(SshLeaseManagerClosedException()))
+                        return@withLock Result.failure(SshLeaseManagerClosedException())
+                    }
+                    val raced = entries[key]
+                    if (raced != null && raced.session.isConnected) {
+                        // A live entry appeared for this key while we were dialing
+                        // (e.g. a different code path acquired directly). Drop our
+                        // redundant transport and reuse the live one; awaiters reuse
+                        // it too via the deferred. Run this registration/close block
+                        // noncancellably so a successful-but-not-yet-registered
+                        // transport cannot leak if the acquiring coroutine is
+                        // cancelled just after boundedConnect returns.
+                        runCatching { session.close() }
+                        raced.closeJob?.cancel()
+                        raced.closeJob = null
+                        raced.idleSinceMillis = null
+                        raced.refCount += 1
+                        emitStateLocked(key, SshLeaseConnectionState.Connected)
+                        deferred.complete(Result.success(raced))
+                        Result.success(
+                            SshLease(
+                                key = key,
+                                session = raced.session,
+                                isNewConnection = false,
+                                entryId = raced.id,
+                                releaseAction = ::release,
+                            ),
+                        )
+                    } else {
+                        raced?.close()
+                        val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
+                        entries[key] = entry
+                        emitStateLocked(key, SshLeaseConnectionState.Connected)
+                        deferred.complete(Result.success(entry))
+                        Result.success(
+                            SshLease(
+                                key = key,
+                                session = session,
+                                isNewConnection = true,
+                                entryId = entry.id,
+                                releaseAction = ::release,
+                            ),
+                        )
+                    }
                 }
             }
         } finally {
             // Cancellation (or any non-local exit) must never strand the
             // in-flight slot or leave awaiters blocked on a deferred that
-            // would never complete. Clear our slot and wake awaiters; they
-            // fall back to their own dial. No-op when the success/failure
-            // paths above already completed the deferred.
+            // would never complete. Clear our slot and wake awaiters with the
+            // cancellation rather than making them start serial fallback dials.
+            // No-op when the success/failure paths above already completed the
+            // deferred.
             if (!deferred.isCompleted) {
                 withContext(NonCancellable) {
                     mutex.withLock {
@@ -274,7 +302,9 @@ public class SshLeaseManager(
                         retractConnectingHintLocked(key)
                     }
                 }
-                deferred.complete(null)
+                deferred.complete(
+                    Result.failure(CancellationException("SSH connect cancelled for $key")),
+                )
             }
         }
     }
@@ -288,8 +318,8 @@ public class SshLeaseManager(
      * NOT a kotlinx suspension point. A wedged/slow peer can therefore pin the
      * acquire indefinitely: ordinary coroutine cancellation (what `withTimeout`
      * does) unparks at the next suspension point, but the in-flight blocking
-     * read has none. We run the dial as a CHILD coroutine and, on bound expiry,
-     * CANCEL that child. Cancelling it propagates into
+     * read has none. We run the dial as a manager-owned job and, on bound expiry,
+     * CANCEL that job. Cancelling it propagates into
      * [SshConnection.connect]'s `suspendCancellableCoroutine`, whose
      * `invokeOnCancellation` disconnects the half-open client — closing the
      * socket is what tears down the transport and unparks the blocking read
@@ -300,18 +330,18 @@ public class SshLeaseManager(
      *
      * On the healthy path the child completes well within the bound and the
      * timeout coroutine is cancelled, so this adds no latency. Cancellation of
-     * the acquire itself still flows straight through (the child is cancelled
-     * with the parent), preserving the #620 coalescing cleanup contract.
+     * the acquire itself still schedules cancellation of the owned dial job,
+     * preserving the #620 coalescing cleanup contract.
      */
     private suspend fun boundedConnect(target: SshLeaseTarget): Result<SshSession> =
         withContext(connectTimeoutContext) {
-            // Dial as a child of this withContext scope. The connector already
-            // returns Result, so a normal connect failure is a value, not a
-            // thrown child failure; a defensively caught throw is folded into a
-            // failure Result too so a misbehaving connector can never crash the
-            // lease scope.
-            val dial = async {
-                try {
+            // Dial outside this withContext's structured child tree. Timeout
+            // expiry must be able to return even when the connector's cancellation
+            // cleanup blocks inside disconnect(); a regular child would keep the
+            // parent scope from completing until that cleanup returned.
+            val abandoned = AtomicBoolean(false)
+            val dial = connectScope.async {
+                val result = try {
                     connector.connect(target)
                 } catch (ce: kotlinx.coroutines.CancellationException) {
                     throw ce // never swallow cancellation
@@ -320,20 +350,31 @@ public class SshLeaseManager(
                     // failure Result must not crash the lease scope.
                     Result.failure(t)
                 }
-            }
-            withTimeoutOrNull(connectTimeoutMillis) { dial.await() }
-                ?: run {
-                    // Stop awaiting the wedged handshake so this coroutine can
-                    // resume; cancelling the child fires
-                    // SshConnection.connect's invokeOnCancellation, which
-                    // disconnects the half-open transport and unparks the
-                    // blocking read. NonCancellable + cancelAndJoin guards the
-                    // cleanup so the disconnect actually runs and the child is
-                    // fully settled (never left dangling) before we return,
-                    // even if the acquire itself is racing cancellation.
-                    withContext(NonCancellable) { dial.cancelAndJoin() }
-                    Result.failure(SshLeaseConnectTimeoutException(target.leaseKey, connectTimeoutMillis))
+                if (abandoned.get()) {
+                    result.getOrNull()?.close()
                 }
+                result
+            }
+            try {
+                withTimeoutOrNull(connectTimeoutMillis) { dial.await() }
+                    ?: run {
+                        // Stop awaiting the wedged handshake so this coroutine can
+                        // resume; cancelling the detached dial fires
+                        // SshConnection.connect's invokeOnCancellation, which
+                        // disconnects the half-open transport and unparks the
+                        // blocking read. Do NOT cancel on this coroutine: a
+                        // blocking cancellation handler would make the timeout
+                        // path hang. Fire it from the abort scope and return.
+                        abandoned.set(true)
+                        connectAbortScope.launch { dial.cancel() }
+                        Result.failure(SshLeaseConnectTimeoutException(target.leaseKey, connectTimeoutMillis))
+                    }
+            } finally {
+                if (!dial.isCompleted) {
+                    abandoned.set(true)
+                    connectAbortScope.launch { dial.cancel() }
+                }
+            }
         }
 
     /**
@@ -345,20 +386,24 @@ public class SshLeaseManager(
      * as warm. No-op when a live entry exists for the key (it already announced
      * Connected). Must be called while holding [mutex].
      */
-    private fun retractConnectingHintLocked(key: SshLeaseKey) {
+    private fun retractConnectingHintLocked(
+        key: SshLeaseKey,
+        closeReason: SshLeaseCloseReason = SshLeaseCloseReason.Disconnected,
+    ) {
         if (entries[key]?.session?.isConnected == true) return
         if (inFlightConnects.containsKey(key)) return
+        if (lastPublishedState[key] != SshLeaseConnectionState.Connecting) return
         emitStateLocked(
             key = key,
             state = SshLeaseConnectionState.Closed,
-            closeReason = SshLeaseCloseReason.Disconnected,
+            closeReason = closeReason,
         )
     }
 
     private sealed interface AcquireDecision {
         data class Reuse(val entry: Entry) : AcquireDecision
-        data class Await(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
-        data class Own(val deferred: CompletableDeferred<Entry?>) : AcquireDecision
+        data class Await(val deferred: CompletableDeferred<Result<Entry>>) : AcquireDecision
+        data class Own(val deferred: CompletableDeferred<Result<Entry>>) : AcquireDecision
     }
 
     /**
@@ -474,18 +519,28 @@ public class SshLeaseManager(
 
     override fun close() {
         val toClose = mutableListOf<Entry>()
-        val pendingToWake = mutableListOf<CompletableDeferred<Entry?>>()
+        val pendingToWake = mutableListOf<CompletableDeferred<Result<Entry>>>()
         runCatching {
             kotlinx.coroutines.runBlocking {
                 mutex.withLock {
                     closed = true
                     toClose += entries.values
+                    val keysWithEntries = entries.keys.toSet()
+                    val pendingKeys = inFlightConnects.keys.toList()
                     entries.clear()
                     // Issue #620: wake any acquires parked on an in-flight
                     // connect so they observe `closed` and fail fast instead of
                     // blocking forever on a deferred that would never complete.
                     pendingToWake += inFlightConnects.values
                     inFlightConnects.clear()
+                    pendingKeys
+                        .filterNot { it in keysWithEntries }
+                        .forEach {
+                            retractConnectingHintLocked(
+                                key = it,
+                                closeReason = SshLeaseCloseReason.ManagerClosed,
+                            )
+                        }
                     toClose.forEach {
                         emitStateLocked(
                             key = it.key,
@@ -496,8 +551,10 @@ public class SshLeaseManager(
                 }
             }
         }
-        pendingToWake.forEach { it.complete(null) }
+        pendingToWake.forEach { it.complete(Result.failure(SshLeaseManagerClosedException())) }
         toClose.forEach { it.close() }
+        connectScope.cancel()
+        connectAbortScope.cancel()
     }
 
     private suspend fun release(key: SshLeaseKey, entryId: Long) {

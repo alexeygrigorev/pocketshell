@@ -54,6 +54,10 @@ class RealSshSessionTeardownOrderingTest {
             elapsedMs < 3_500L,
         )
         assertFalse("close must mark the session disconnected", session.isConnected)
+        assertTrue(
+            "forced close must hard-disconnect the raw SSH client",
+            client.rawDisconnected.await(1, TimeUnit.SECONDS),
+        )
 
         withTimeout(5_000L) {
             exec.await()
@@ -62,6 +66,44 @@ class RealSshSessionTeardownOrderingTest {
             "force-closing the dispatcher must interrupt the wedged startSession",
             client.startSessionInterrupted.get(),
         )
+    }
+
+    @Test
+    fun `raw disconnect fallback is bounded after dispatcher close timeout`() = runBlocking {
+        val client = WedgedStartSessionAndRawDisconnectClient()
+        val session = RealSshSession(client)
+        val exec = async(Dispatchers.IO) {
+            runCatching { session.exec("true") }
+        }
+
+        assertTrue(
+            "the synthetic startSession must enter before close queues behind it",
+            client.startSessionEntered.await(5, TimeUnit.SECONDS),
+        )
+
+        val closeThread = Thread({ session.close() }, "ps-test-session-close").apply {
+            isDaemon = true
+            start()
+        }
+        closeThread.join(5_500L)
+
+        assertFalse(
+            "close() must return even when the raw disconnect fallback wedges",
+            closeThread.isAlive,
+        )
+        assertTrue(
+            "the raw fallback disconnect must have been attempted",
+            client.rawDisconnectEntered.await(1, TimeUnit.SECONDS),
+        )
+        assertTrue(
+            "the raw fallback disconnect must be interrupted by a wall-clock ceiling",
+            client.rawDisconnectInterrupted.get(),
+        )
+
+        withTimeout(5_000L) {
+            exec.await()
+        }
+        Unit
     }
 
     @Test
@@ -119,6 +161,37 @@ class RealSshSessionTeardownOrderingTest {
     private class WedgedStartSessionClient : SSHClient() {
         val startSessionEntered = CountDownLatch(1)
         val startSessionInterrupted = AtomicBoolean(false)
+        val rawDisconnected = CountDownLatch(1)
+
+        override fun isConnected(): Boolean = rawDisconnected.count != 0L
+        override fun isAuthenticated(): Boolean = rawDisconnected.count != 0L
+
+        override fun startSession(): Session {
+            startSessionEntered.countDown()
+            try {
+                while (true) {
+                    if (Thread.interrupted()) {
+                        startSessionInterrupted.set(true)
+                        throw InterruptedException("wedged startSession interrupted")
+                    }
+                    Thread.sleep(10L)
+                }
+            } catch (e: InterruptedException) {
+                startSessionInterrupted.set(true)
+                throw e
+            }
+        }
+
+        override fun disconnect() {
+            rawDisconnected.countDown()
+        }
+    }
+
+    private class WedgedStartSessionAndRawDisconnectClient : SSHClient() {
+        val startSessionEntered = CountDownLatch(1)
+        val startSessionInterrupted = AtomicBoolean(false)
+        val rawDisconnectEntered = CountDownLatch(1)
+        val rawDisconnectInterrupted = AtomicBoolean(false)
 
         @Volatile
         private var disconnected = false
@@ -144,6 +217,19 @@ class RealSshSessionTeardownOrderingTest {
 
         override fun disconnect() {
             disconnected = true
+            rawDisconnectEntered.countDown()
+            try {
+                while (true) {
+                    if (Thread.interrupted()) {
+                        rawDisconnectInterrupted.set(true)
+                        throw InterruptedException("wedged raw disconnect interrupted")
+                    }
+                    Thread.sleep(10L)
+                }
+            } catch (e: InterruptedException) {
+                rawDisconnectInterrupted.set(true)
+                throw e
+            }
         }
     }
 

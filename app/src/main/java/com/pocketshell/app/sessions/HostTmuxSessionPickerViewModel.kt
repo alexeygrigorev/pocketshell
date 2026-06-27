@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 @HiltViewModel
@@ -36,7 +37,15 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
         loadJob?.cancel()
         _state.value = HostTmuxSessionPickerState.Loading(request)
         loadJob = viewModelScope.launch {
-            _state.value = when (val result = gateway.listSessions(request.host, request.keyPath, request.passphrase)) {
+            val result = withTimeoutOrNull(LOAD_TIMEOUT_MS) {
+                gateway.listSessions(request.host, request.keyPath, request.passphrase)
+            }
+            _state.value = if (result == null) {
+                HostTmuxSessionPickerState.Fallback(
+                    request = request,
+                    message = "Timed out while loading tmux sessions. Please retry.",
+                )
+            } else when (result) {
                 is HostTmuxSessionListResult.Sessions -> HostTmuxSessionPickerState.Ready(
                     request = request,
                     rows = result.rows.sortedWith(
@@ -184,5 +193,14 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
     ) {
         val hasSiblingsToSwitch: Boolean
             get() = siblings.any { it.name != currentSessionName }
+    }
+
+    internal companion object {
+        /**
+         * Last-resort UI ceiling: gateway paths have their own tighter bounds,
+         * but the picker must still leave Loading if a future implementation
+         * accidentally parks forever.
+         */
+        const val LOAD_TIMEOUT_MS: Long = 12_000L
     }
 }

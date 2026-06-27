@@ -151,6 +151,25 @@ class PromptAttachmentStagerTest {
         assertTrue(result.exceptionOrNull() is SshException)
     }
 
+    @Test
+    fun uriBytesAreMaterializedBeforeRemoteDirectoryCommand() = runTest {
+        val source = File(cacheDir, "before-ssh.png").apply {
+            writeBytes(ByteArray(64) { it.toByte() })
+        }
+        val session = FakeStagingSshSession(
+            onExec = { source.delete() },
+        )
+
+        val result = newStager().stage(session, "host-7", listOf(Uri.fromFile(source)))
+
+        assertTrue(result.isSuccess)
+        assertEquals(1, session.uploadedRemotePaths.size)
+        assertTrue(
+            "source URI file is gone before upload; success proves the temp copy was made first",
+            !source.exists(),
+        )
+    }
+
     /**
      * Minimal [SshSession] fake: records uploads, fails the upload at a
      * configured index (or all when negative), and reports the attachment
@@ -158,6 +177,7 @@ class PromptAttachmentStagerTest {
      */
     private class FakeStagingSshSession(
         private val failOnUploadIndex: Int = Int.MIN_VALUE,
+        private val onExec: () -> Unit = {},
     ) : SshSession {
         val uploadedRemotePaths = mutableListOf<String>()
         private var uploadCalls = 0
@@ -165,8 +185,10 @@ class PromptAttachmentStagerTest {
 
         override val isConnected: Boolean get() = !closed
 
-        override suspend fun exec(command: String): ExecResult =
-            ExecResult(stdout = "", stderr = "", exitCode = 0)
+        override suspend fun exec(command: String): ExecResult {
+            onExec()
+            return ExecResult(stdout = "", stderr = "", exitCode = 0)
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job =
             Job().apply { complete() }

@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 PACKAGE="${PACKAGE:-com.pocketshell.app}"
@@ -72,7 +76,7 @@ Environment:
   LOG_ROOT=<dir>            default build/issue271-startup-connect
   LAUNCHES=3                number of measured launches
   WAIT_AFTER_START_SEC=35   logcat capture window after each launch
-  BUILD_APK=1               run ./gradlew :app:assembleDebug first
+  BUILD_APK=1               build :app:assembleDebug first via scripts/cgroup-run.sh
   INSTALL_APK=1             adb install -r the debug APK before launch 1
   APP_APK=<path>            APK path when BUILD_APK=0 or custom install
   SCENARIO=...              tmux-process-death-resume or hostlist-force-stop
@@ -333,7 +337,9 @@ run_logged "01-adb-devices" "$ADB" devices -l
 "$ADB" shell getprop >"$RUN_DIR/getprop.txt" 2>&1 || true
 
 if [[ "$BUILD_APK" == "1" ]]; then
-  run_logged "02-assemble-debug" ./gradlew :app:assembleDebug
+  run_logged "02-assemble-debug" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-issue271-$(pocketshell_unit_token "$RUN_ID")-assemble-debug" -- \
+    ./gradlew :app:assembleDebug
 fi
 
 if command -v unzip >/dev/null 2>&1 && [[ -f "$APP_APK" ]]; then

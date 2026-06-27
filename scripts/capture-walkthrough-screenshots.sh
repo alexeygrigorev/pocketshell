@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/scope-run.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
@@ -138,7 +142,7 @@ collect_diagnostics() {
     printf '\nDiagnostics collected in %s\n' "$RUN_DIR" >&2
   fi
 }
-trap collect_diagnostics EXIT
+trap 'collect_diagnostics; pocketshell_release_all' EXIT
 
 # Issue #150: wait on the compose `healthcheck:` block via
 # `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
@@ -334,8 +338,11 @@ run_logged "06-cold-reset-emulator-app-state" bash -lc \
   _ "$ADB"
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR"
-run_logged "09-stop-gradle-daemons" ./gradlew --stop
+run_logged "09-stop-gradle-daemons" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-stop-gradle" -- \
+  ./gradlew --stop
 run_logged "10-build-walkthrough-visual-apks" \
+  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
   ./gradlew --no-daemon --no-build-cache :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 install_apks "11-install-walkthrough-visual-apks"
 run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAIN_TEST_CLASS"

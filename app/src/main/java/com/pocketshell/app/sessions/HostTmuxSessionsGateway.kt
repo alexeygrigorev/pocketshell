@@ -1,18 +1,13 @@
 package com.pocketshell.app.sessions
 
+import android.util.Log
 import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
-import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
-import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
-import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.storage.entity.HostEntity
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.withContext
-import java.io.File
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 interface HostTmuxSessionsGateway {
@@ -36,15 +31,37 @@ interface HostTmuxSessionsGateway {
     ): HostTmuxSessionListResult?
 }
 
-class SshHostTmuxSessionsGateway @Inject constructor(
+class SshHostTmuxSessionsGateway internal constructor(
     private val parser: HostTmuxSessionListParser,
     private val activeTmuxClients: ActiveTmuxClients,
-    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
-        connector = SshLeaseConnector { target ->
-            DefaultSshLeaseConnector().connect(target)
-        },
-    ),
+    private val sshLeaseManager: SshLeaseManager,
+    private val leaseBlockTimeoutMs: Long,
+    private val liveEnumTimeoutMs: Long,
 ) : HostTmuxSessionsGateway {
+    constructor(
+        parser: HostTmuxSessionListParser,
+        activeTmuxClients: ActiveTmuxClients,
+    ) : this(
+        parser = parser,
+        activeTmuxClients = activeTmuxClients,
+        sshLeaseManager = defaultLeaseManager(),
+        leaseBlockTimeoutMs = LEASE_BLOCK_TIMEOUT_MS,
+        liveEnumTimeoutMs = LIVE_ENUM_TIMEOUT_MS,
+    )
+
+    @Inject
+    constructor(
+        parser: HostTmuxSessionListParser,
+        activeTmuxClients: ActiveTmuxClients,
+        sshLeaseManager: SshLeaseManager,
+    ) : this(
+        parser = parser,
+        activeTmuxClients = activeTmuxClients,
+        sshLeaseManager = sshLeaseManager,
+        leaseBlockTimeoutMs = LEASE_BLOCK_TIMEOUT_MS,
+        liveEnumTimeoutMs = LIVE_ENUM_TIMEOUT_MS,
+    )
+
     override suspend fun listSessions(
         host: HostEntity,
         keyPath: String,
@@ -58,29 +75,16 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             port = host.port,
             user = host.username,
         )
-        val lease = try {
-            sshLeaseManager.acquire(host.toSshLeaseTarget(keyPath, passphrase)).getOrElse { error ->
-                // Issue #109: surface the throwable up to the view-model so
-                // the user-facing summary path (HostConnectError) can run.
-                // Concatenating `error.message` into the sheet body was what
-                // produced the raw "ECONNREFUSED" stack trace.
-                return HostTmuxSessionListResult.ConnectFailed(error)
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            // Issue #109: surface the throwable up to the view-model so
-            // the user-facing summary path (HostConnectError) can run.
-            // Concatenating `error.message` into the sheet body was what
-            // produced the raw "ECONNREFUSED" stack trace.
-            return HostTmuxSessionListResult.ConnectFailed(t)
-        }
-
-        return try {
-            val session = lease.session
+        return LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = host.toLeaseSessionTarget(keyPath, passphrase),
+            blockTimeoutMs = leaseBlockTimeoutMs,
+        ) { session ->
             val pocketshell = session.exec(pathAware("pocketshell sessions list --by activity"))
             if (pocketshell.exitCode == 0) {
-                return HostTmuxSessionListResult.Sessions(parser.parsePocketshellSessionsList(pocketshell.stdout))
+                return@withSession HostTmuxSessionListResult.Sessions(
+                    parser.parsePocketshellSessionsList(pocketshell.stdout),
+                )
             }
 
             val tmux = session.exec(
@@ -103,32 +107,23 @@ class SshHostTmuxSessionsGateway @Inject constructor(
                     tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
                 )
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            HostTmuxSessionListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
-        } finally {
-            withContext(NonCancellable) {
-                lease.release()
-            }
-        }
+        }.fold(
+            onSuccess = { it },
+            onFailure = { error -> HostTmuxSessionListResult.ConnectFailed(error) },
+        )
     }
 
-    private fun HostEntity.toSshLeaseTarget(
+    private fun HostEntity.toLeaseSessionTarget(
         keyPath: String,
         passphrase: CharArray?,
-    ): SshLeaseTarget =
-        SshLeaseTarget(
-            leaseKey = SshLeaseKey(
-                host = hostname,
-                port = port,
-                user = username,
-                credentialId = "$id:$keyPath",
-                knownHostsId = "accept-all",
-            ),
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
+    ): LeaseSessionTarget =
+        LeaseSessionTarget(
+            hostId = id,
+            hostname = hostname,
+            port = port,
+            username = username,
+            keyPath = keyPath,
+            passphrase = passphrase,
         )
 
     private fun pathAware(command: String): String =
@@ -143,7 +138,16 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             ?.takeUnless { it.client.disconnected.value }
             ?: return null
         return try {
-            val response = entry.client.sendCommand(LIVE_LIST_SESSIONS_COMMAND)
+            val response = withTimeoutOrNull(liveEnumTimeoutMs) {
+                entry.client.sendCommand(LIVE_LIST_SESSIONS_COMMAND)
+            } ?: run {
+                Log.w(
+                    LOG_TAG,
+                    "live -CC session picker enumeration wedged >${liveEnumTimeoutMs}ms; " +
+                        "falling through to bounded SSH-lease enumeration.",
+                )
+                return null
+            }
             if (response.isError) {
                 val message = response.output.joinToString("\n")
                 if (message.contains("no server running", ignoreCase = true)) {
@@ -170,6 +174,19 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             this.keyPath == keyPath
 
     private companion object {
+        const val LOG_TAG: String = "HostTmuxSessions"
+
+        const val LEASE_BLOCK_TIMEOUT_MS: Long = 3_500L
+
+        const val LIVE_ENUM_TIMEOUT_MS: Long = 3_500L
+
+        fun defaultLeaseManager(): SshLeaseManager =
+            SshLeaseManager(
+                connector = SshLeaseConnector { target ->
+                    DefaultSshLeaseConnector().connect(target)
+                },
+            )
+
         // Issue #463: append `#{session_path}` so the warm live-client list
         // carries each session's working directory and the in-session
         // project switcher can group sessions by project/folder without a

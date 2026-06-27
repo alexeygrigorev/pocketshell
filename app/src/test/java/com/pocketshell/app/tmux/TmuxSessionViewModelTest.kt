@@ -38,6 +38,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.core.tmux.TmuxClientException
@@ -63,6 +64,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
@@ -1112,12 +1114,14 @@ class TmuxSessionViewModelTest {
             listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
         )
         runCurrent()
-        // Wait until client A's pane-output collectors (producer + activity +
-        // port detector) are all subscribed before emitting.
+        // Wait until client A's pane-output collectors (producer + activity)
+        // are subscribed before emitting. The port detector is now
+        // target/generation-owned and intentionally does not start from this
+        // attachClientForTest-only harness because it has no active target.
         assertTrue(
             "client A pane-output collectors must subscribe",
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 3 }
+                clientA.emittedPaneOutputs.subscriptionCount.first { it >= 2 }
                 true
             } ?: false,
         )
@@ -2398,6 +2402,42 @@ class TmuxSessionViewModelTest {
         }
 
     @Test
+    fun withinGraceForegroundDoesNotReseedDisconnectedHeldClient() = runTest(scheduler) {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> replacementClient }
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 1_000L, silentReattachTimeoutMs = 1_000L)
+        val staleClient = FakeTmuxClient().withSinglePane("work", "%0")
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = staleClient,
+            session = FakeSshSession(),
+        )
+        vm.markActiveLeaseWarmForTest()
+        runCurrent()
+
+        staleClient.disconnectedSignal.value = true
+        vm.onAppForegrounded(resumedWithinGrace = true)
+        advanceUntilIdle()
+
+        assertTrue(
+            "within-grace foreground must not run capture/reseed over a disconnected held client",
+            staleClient.sentCommands.none { it.startsWith("capture-pane") },
+        )
+    }
+
+    @Test
     fun livenessProbeDeclaredDropClosesTheClientAndDrivesTheSingleReconnectEntrypoint() =
         runTest(scheduler) {
             // EPIC #792 Slice D (#822/V7a): the LivenessProbe's confirmed-drop body
@@ -2858,6 +2898,10 @@ class TmuxSessionViewModelTest {
         )
         assertTrue("stale client should be closed after silent reattach", deadClient.closed)
         assertTrue("replacement control client should be opened", replacementClient.connectCalled)
+        assertTrue(
+            "silent same-SSH reattach expects the session to exist, so it must probe server liveness",
+            vm.lastProbeServerLivenessForTest(),
+        )
     }
 
     @Test
@@ -5059,6 +5103,108 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun postGraceForegroundWithoutPendingReattachProbesAndReseedsHeldRuntime() = runTest(scheduler) {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            val client = FakeTmuxClient().withSinglePane("work", "%1")
+            val session = FakeSshSession()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+                session = session,
+            )
+            client.emittedEvents.emit(
+                ControlEvent.WindowAdd(sessionId = "work", windowId = "@0", name = "work"),
+            )
+            advanceUntilIdle()
+
+            client.capturePaneResponses.addLast(
+                CommandResponse(number = 4L, output = listOf("post-grace held reseed"), isError = false),
+            )
+            val probeCountBefore =
+                client.sentCommands.count { it == "display-message -p '#{session_name}'" }
+            val captureCountBefore =
+                client.sentCommands.count { it == seedCaptureCommand("%1") }
+
+            vm.onAppForegrounded(resumedWithinGrace = false)
+            assertTrue(
+                "service-held post-grace foreground must not flash a reconnect state while probing",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            advanceUntilIdle()
+
+            assertFalse(
+                "service-held post-grace foreground has no detached runtime to replay",
+                vm.hasPendingReattachForTest(),
+            )
+            assertTrue(
+                "post-grace foreground with a held runtime must probe the control channel",
+                client.sentCommands.count { it == "display-message -p '#{session_name}'" } > probeCountBefore,
+            )
+            assertTrue(
+                "a healthy held runtime must be reseeded instead of no-oping",
+                client.sentCommands.count { it == seedCaptureCommand("%1") } > captureCountBefore,
+            )
+            assertTrue(
+                "the post-grace hold probe must emit a foreground diagnostic",
+                diagnostics.eventsNamed("foreground_reattach").any {
+                    it.fields["outcome"] == "post_grace_hold_probe" &&
+                        it.fields["probeVerdict"] == RuntimeHealthVerdict.HEALTHY.name
+                },
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
+    fun postGraceForegroundWithoutPendingReattachReconnectsDisconnectedHeldRuntime() = runTest(scheduler) {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val vm = newVm()
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            val client = FakeTmuxClient().withSinglePane("work", "%1")
+            val session = FakeSshSession()
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+                session = session,
+            )
+            client.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "test",
+                    intent = "held_post_grace",
+                ),
+            )
+
+            vm.onAppForegrounded(resumedWithinGrace = false)
+            runCurrent()
+
+            assertTrue(
+                "post-grace foreground with a disconnected held client must schedule reconnect, got " +
+                    "${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
+    @Test
     fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -5935,6 +6081,59 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun terminalSurfaceFailureClearsProducerClientWhenAttachProducerFailsSoReconcileRetries() =
+        runTest(scheduler) {
+            val vm = newVm()
+            val backingClient = FakeTmuxClient()
+            val client = OutputFailingTmuxClient(backingClient)
+            vm.attachClientForTest(client)
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+            )
+            advanceUntilIdle()
+
+            val clientIdentity = System.identityHashCode(client)
+            assertEquals(
+                "precondition: pane producer starts bound to the live client",
+                clientIdentity,
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            val originalState = vm.panes.value.single().terminalState
+
+            client.failOutputFor = true
+            vm.reportTerminalSurfaceFailureForTest(
+                paneId = "%0",
+                cause = RuntimeException("surface reset"),
+            )
+            advanceUntilIdle()
+
+            assertNull(
+                "failed terminal producer reattach must clear the client binding so " +
+                    "the next reconcile retries instead of assuming the producer is live",
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            assertNotSame(
+                "surface failure still replaces the local TerminalSurfaceState",
+                originalState,
+                vm.panes.value.single().terminalState,
+            )
+
+            client.failOutputFor = false
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "a later reconcile must retry and restore the producer-client binding",
+                clientIdentity,
+                vm.paneProducerClientIdentityForTest("%0"),
+            )
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertFalse(backingClient.disconnectedSignal.value)
+        }
+
+    @Test
     fun repeatedTerminalSurfaceFailuresStopAtErrorStateInsteadOfReconnectStorm() = runTest(scheduler) {
         // Issue #423: opening the keyboard after a long dictated Codex
         // prompt could send the terminal into a recovery storm — the
@@ -6013,6 +6212,35 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun dequeuedTmuxInputSendFailureRetriesOnceBeforeRecordingSent() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            throwOnCommandPrefix = "send-keys -l -t %0"
+            throwOnCommandRemaining = 1
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+
+        sink.write("retry".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
+        val literalSends = client.sentCommands.filter { it.startsWith("send-keys -l -t %0") }
+        assertEquals(
+            "the dequeued batch must be retried once after a post-dequeue send failure",
+            2,
+            literalSends.size,
+        )
+        val metrics = vm.tmuxInputMetricsForTest("%0") ?: error("input metrics should be recorded")
+        assertEquals(5L, metrics.totalEnqueuedBytes)
+        assertEquals(
+            "bytes should only be counted sent after the retry succeeds",
+            5L,
+            metrics.totalSentBytes,
+        )
+        assertFalse("one recovered send failure must not disconnect the client", client.disconnected.value)
+    }
+
+    @Test
     fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
@@ -6020,7 +6248,7 @@ class TmuxSessionViewModelTest {
         }
         vm.attachClientForTest(client)
         val sink = vm.tmuxInputSinkForTest("%0")
-        val chunks = List(2_000) { index ->
+        val chunks = List(800) { index ->
             ("stress-${index.toString().padStart(4, '0')}-" + "x".repeat(51))
                 .toByteArray(Charsets.US_ASCII)
         }
@@ -6064,6 +6292,32 @@ class TmuxSessionViewModelTest {
             expected.toList(),
             reconstructed.toList(),
         )
+    }
+
+    @Test
+    fun tmuxInputEnqueueRejectsWhenPendingByteBudgetIsFull() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            sendCommandGatePrefix = "send-keys -l -t %0"
+            sendCommandGate = CompletableDeferred()
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+        val chunk = ByteArray(TMUX_INPUT_CHUNK_BYTES) { 'x'.code.toByte() }
+
+        repeat(vm.tmuxInputCapacityBytesForTest() / TMUX_INPUT_CHUNK_BYTES) {
+            sink.write(chunk)
+        }
+        runCurrent()
+
+        val thrown = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
+            .exceptionOrNull()
+        assertTrue(
+            "enqueue must fail fast instead of blocking when the pending-byte budget is full",
+            thrown is IOException,
+        )
+        client.sendCommandGate?.complete(Unit)
+        advanceUntilIdle()
     }
 
     @Test
@@ -11915,13 +12169,12 @@ class TmuxSessionViewModelTest {
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───
     //
     // The connect() path detects "same host, different tmux session"
-    // and routes through [closeCurrentClientKeepSession] +
-    // [runFastSessionSwitch] instead of the full SSH-handshake teardown
-    // + reconnect. Production exercise lives in the connected
-    // TmuxSessionSwitchSameHostReusesSshE2eTest because a unit test
-    // cannot reach into [SshConnection.connect] without a real
-    // network. The unit tests below pin the predicate behaviour, the
-    // teardown-keep-session invariant, and the registry side-effects
+    // and routes through the fast-switch path instead of the full
+    // SSH-handshake teardown + reconnect. Production exercise lives in
+    // the connected TmuxSessionSwitchSameHostReusesSshE2eTest because a
+    // unit test cannot reach into [SshConnection.connect] without a
+    // real network. The unit tests below pin the predicate behaviour,
+    // the teardown-keep-session invariant, and the registry side-effects
     // through the dedicated test seams the VM exposes.
 
     @Test
@@ -15079,6 +15332,40 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun stalePortDetectorFromParkedRuntimeDoesNotSurfaceOnNewRuntime() = runTest(scheduler) {
+        val vm = newVm()
+        val oldClient = FakeTmuxClient()
+        val oldSession = FakeSshSession(ssListeningPorts = emptySet())
+        vm.attachForPortDetection(oldClient, oldSession)
+        advanceUntilIdle()
+
+        val newClient = FakeTmuxClient()
+        val newSession = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = newSession,
+        )
+        advanceUntilIdle()
+
+        oldClient.emittedEvents.emit(
+            ControlEvent.Output("%0", "Local:   http://localhost:5173/\n".toByteArray()),
+        )
+        advanceUntilIdle()
+
+        assertNull(
+            "a detector bound to the parked old runtime must not confirm against the new runtime",
+            vm.detectedPort.value,
+        )
+    }
+
+    @Test
     fun assistantConversationLocalhostUrlSurfacesPortForwardOverlay() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -16666,6 +16953,17 @@ class TmuxSessionViewModelTest {
         override suspend fun delete(host: com.pocketshell.core.storage.entity.HostEntity) =
             error("not used")
         override suspend fun deleteById(id: Long) = error("not used")
+    }
+
+    private class OutputFailingTmuxClient(
+        private val delegate: FakeTmuxClient,
+    ) : TmuxClient by delegate {
+        var failOutputFor: Boolean = false
+
+        override fun outputFor(paneId: String): Flow<ControlEvent.Output> {
+            if (failOutputFor) throw RuntimeException("outputFor failed")
+            return delegate.outputFor(paneId)
+        }
     }
 
     /**

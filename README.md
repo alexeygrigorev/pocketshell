@@ -202,10 +202,10 @@ sdk.dir=/home/alexey/Android/Sdk
 Common commands:
 
 ```bash
-./gradlew assembleDebug
-./gradlew test --stacktrace
-./gradlew check --stacktrace
-./gradlew connectedDebugAndroidTest
+scripts/cgroup-run.sh -- ./gradlew assembleDebug
+scripts/cgroup-run.sh -- ./gradlew test --stacktrace
+scripts/cgroup-run.sh -- ./gradlew check --stacktrace
+scripts/connected-test.sh
 ```
 
 The test matrix and Docker/emulator setup are in

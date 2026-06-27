@@ -10,6 +10,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -53,6 +54,7 @@ internal class RealSshPortForward(
     private val running = AtomicBoolean(true)
     private val forwardedBytes = AtomicLong(0)
     private val receivedBytes = AtomicLong(0)
+    private val activeConnectionSlots = AtomicInteger(0)
 
     /**
      * Live copy threads (one per direction, per accepted connection). We
@@ -106,6 +108,11 @@ internal class RealSshPortForward(
     }
 
     private fun startChannel(local: Socket) {
+        if (!tryAcquireConnectionSlot()) {
+            runCatching { local.close() }
+            return
+        }
+
         // Open the direct-tcpip channel synchronously so an open failure is
         // visible *here* (we can log + close the local socket). Once open, we
         // hand off to two daemon copy threads — one per direction.
@@ -117,6 +124,7 @@ internal class RealSshPortForward(
         } catch (t: Throwable) {
             // Couldn't open the channel — drop the local connection. Don't
             // crash the accept loop; another connection might succeed.
+            releaseConnectionSlot()
             runCatching { local.close() }
             return
         }
@@ -125,7 +133,11 @@ internal class RealSshPortForward(
         // accept() returning and us getting here, don't bother spinning
         // up the copy threads — tear the pair down and bail.
         if (!running.get()) {
-            closePair(local, channel)
+            try {
+                closePair(local, channel)
+            } finally {
+                releaseConnectionSlot()
+            }
             return
         }
 
@@ -136,7 +148,11 @@ internal class RealSshPortForward(
         // ours). In that case we close eagerly and skip the copy threads.
         if (!running.get()) {
             activePairs.remove(pair)
-            closePair(local, channel)
+            try {
+                closePair(local, channel)
+            } finally {
+                releaseConnectionSlot()
+            }
             return
         }
 
@@ -162,8 +178,24 @@ internal class RealSshPortForward(
 
     private fun closePairAndUntrack(pair: Pair<Socket, DirectConnection>) {
         if (activePairs.remove(pair)) {
-            closePair(pair.first, pair.second)
+            try {
+                closePair(pair.first, pair.second)
+            } finally {
+                releaseConnectionSlot()
+            }
         }
+    }
+
+    private fun tryAcquireConnectionSlot(): Boolean {
+        while (true) {
+            val current = activeConnectionSlots.get()
+            if (current >= MAX_ACTIVE_CONNECTIONS) return false
+            if (activeConnectionSlots.compareAndSet(current, current + 1)) return true
+        }
+    }
+
+    private fun releaseConnectionSlot() {
+        activeConnectionSlots.updateAndGet { current -> (current - 1).coerceAtLeast(0) }
     }
 
     /**
@@ -225,17 +257,24 @@ internal class RealSshPortForward(
         val pairs = activePairs.toList()
         activePairs.clear()
         for ((local, channel) in pairs) {
-            closePair(local, channel)
+            try {
+                closePair(local, channel)
+            } finally {
+                releaseConnectionSlot()
+            }
         }
         // Join the in-flight copy threads so callers see deterministic
         // teardown (no file descriptors leak past close() returning). We
         // skip joining if we'd be deadlocking on ourselves (a copy thread
         // calling close() — unusual but cheap to guard).
         val self = Thread.currentThread()
+        val deadlineNanos = System.nanoTime() + CLOSE_JOIN_TIMEOUT_MS * NANOS_PER_MILLI
         for (t in copyThreads) {
             if (t === self) continue
+            val remainingMillis = (deadlineNanos - System.nanoTime()) / NANOS_PER_MILLI
+            if (remainingMillis <= 0L) break
             try {
-                t.join(JOIN_TIMEOUT_MS)
+                t.join(remainingMillis)
             } catch (_: InterruptedException) {
                 // Preserve interrupt status; stop joining the rest — they
                 // are daemon threads and will eventually exit on their
@@ -255,9 +294,16 @@ internal class RealSshPortForward(
         // the copy loop tight without over-allocating.
         const val BUFFER_SIZE = 32 * 1024
 
-        // Per-thread join budget in close(). Two copy threads * 500 ms ==
-        // 1 s worst-case stall, which is generous given the underlying
-        // sockets are already closed by the time we get here.
-        const val JOIN_TIMEOUT_MS = 500L
+        // Each accepted connection creates two copy threads. Keep a runaway
+        // local client burst from creating unbounded daemon threads and SSH
+        // direct-tcpip channels while still allowing normal browser/dev-tool
+        // concurrency.
+        const val MAX_ACTIVE_CONNECTIONS = 32
+
+        // Aggregate join budget in close(). The underlying sockets/channels
+        // have already been closed, so this is only a deterministic cleanup
+        // window, not a per-thread multiplier.
+        const val CLOSE_JOIN_TIMEOUT_MS = 1_000L
+        const val NANOS_PER_MILLI = 1_000_000L
     }
 }

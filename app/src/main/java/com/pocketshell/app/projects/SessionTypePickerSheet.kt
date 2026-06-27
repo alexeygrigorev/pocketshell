@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
@@ -36,10 +37,12 @@ import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.components.SheetHeader
+import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
@@ -72,6 +75,7 @@ fun SessionTypePickerSheet(
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
+    creating: Boolean = false,
     // Issue #678: the same picker also drives the in-session `+ window` flow,
     // which creates a new WINDOW rather than a new session. The only visible
     // difference is the heading, so the title is parameterised; everything else
@@ -95,6 +99,7 @@ fun SessionTypePickerSheet(
             autocompleteController = autocompleteController,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
+            creating = creating,
             title = title,
         )
     }
@@ -114,6 +119,7 @@ internal fun SessionTypePickerContent(
     autocompleteController: StartDirectoryAutocompleteController? = null,
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
+    creating: Boolean = false,
     title: String = "New session",
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
@@ -290,31 +296,46 @@ internal fun SessionTypePickerContent(
             )
             Spacer(modifier = Modifier.padding(end = 8.dp))
             PocketShellButton(
-                text = "Create",
                 onClick = {
-                    onCreate(
-                        SessionTypeChoice(
-                            type = sessionType,
-                            agent = if (sessionType == SessionType.Agent) agentKind else null,
-                            startDirectory = startDirectory.trim().ifBlank { folderPath },
-                            skipPermissions = skipPermissions,
-                            claudeProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Claude) {
-                                claudeProfile
-                            } else {
-                                null
-                            },
-                            codexProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Codex) {
-                                codexProfile
-                            } else {
-                                null
-                            },
-                        ),
-                    )
+                    if (!creating) {
+                        onCreate(
+                            SessionTypeChoice(
+                                type = sessionType,
+                                agent = if (sessionType == SessionType.Agent) agentKind else null,
+                                startDirectory = startDirectory.trim().ifBlank { folderPath },
+                                skipPermissions = skipPermissions,
+                                claudeProfileName = if (
+                                    sessionType == SessionType.Agent &&
+                                    agentKind == AgentCli.Claude
+                                ) {
+                                    claudeProfile
+                                } else {
+                                    null
+                                },
+                                codexProfileName = if (
+                                    sessionType == SessionType.Agent &&
+                                    agentKind == AgentCli.Codex
+                                ) {
+                                    codexProfile
+                                } else {
+                                    null
+                                },
+                            ),
+                        )
+                    }
                 },
                 variant = ButtonVariant.Primary,
-                enabled = startDirectory.isNotBlank(),
+                enabled = startDirectory.isNotBlank() && !creating,
                 modifier = Modifier.testTag(SESSION_TYPE_PICKER_CREATE_TAG),
-            )
+            ) {
+                if (creating) {
+                    LoadingIndicator.Spinner(size = SpinnerSize.Small, onAccent = true)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Creating", fontWeight = FontWeight.SemiBold)
+                } else {
+                    Text("Create", fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
 }

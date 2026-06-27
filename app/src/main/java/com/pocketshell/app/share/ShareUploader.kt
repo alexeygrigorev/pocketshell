@@ -14,6 +14,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -96,7 +97,7 @@ internal class ShareUploader(
      * default points at the same [SshConnection.connect] the rest of
      * the app uses.
      */
-    private val connect: suspend (HostEntity, SshKey, String) -> Result<SshSession> = { host, key, _ ->
+    private val connect: suspend (HostEntity, SshKey, String, String?) -> Result<SshSession> = { host, key, _, _ ->
         SshConnection.connect(
             host = host.hostname,
             port = host.port,
@@ -124,10 +125,21 @@ internal class ShareUploader(
         item: ShareableItem,
         target: ShareTarget,
     ): Result<String> = withContext(Dispatchers.IO) {
+        val preparedUriFile = if (item is ShareableItem.UriItem) {
+            val resolver = context.contentResolver
+            withTimeoutOrNull(SHARE_SAF_TIMEOUT_MS) {
+                drainToTempFile(resolver, item.uri)
+            } ?: return@withContext Result.failure(
+                SshException("Could not read shared file before upload"),
+            )
+        } else {
+            null
+        }
         val keyFile = File(keyEntity.privateKeyPath)
         val key: SshKey = SshKey.Path(keyFile)
-        val sessionResult = connect(host, key, keyEntity.privateKeyPath)
+        val sessionResult = connect(host, key, keyEntity.privateKeyPath, SHARE_LEASE_PURPOSE_UPLOAD)
         val session = sessionResult.getOrElse { e ->
+            preparedUriFile?.delete()
             return@withContext Result.failure(
                 SshException(errorMessage("connect", e), e),
             )
@@ -151,7 +163,11 @@ internal class ShareUploader(
                 val remotePath = "${destination.uploadDirectory}/$remoteName"
 
                 when (item) {
-                    is ShareableItem.UriItem -> uploadUri(live, item, remotePath)
+                    is ShareableItem.UriItem -> live.uploadFile(
+                        preparedUriFile
+                            ?: throw SshException("Could not read shared file before upload"),
+                        remotePath,
+                    )
                     is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName)
                     is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath)
                 }
@@ -161,6 +177,8 @@ internal class ShareUploader(
             Result.failure(e)
         } catch (e: Throwable) {
             Result.failure(SshException(errorMessage("upload", e), e))
+        } finally {
+            preparedUriFile?.delete()
         }
     }
 
@@ -253,36 +271,6 @@ internal class ShareUploader(
         )
     }
 
-    private suspend fun uploadUri(
-        session: SshSession,
-        item: ShareableItem.UriItem,
-        remotePath: String,
-    ) {
-        val resolver = context.contentResolver
-        val length = item.size ?: resolveSize(resolver, item.uri)
-        if (length == null) {
-            // SCP needs a content length up-front. When the content
-            // provider doesn't tell us, drain the stream into a temp
-            // file under the cache directory so we can use uploadFile.
-            val temp = drainToTempFile(resolver, item.uri)
-            try {
-                session.uploadFile(temp, remotePath)
-            } finally {
-                temp.delete()
-            }
-            return
-        }
-
-        resolver.openInputStream(item.uri)?.use { input ->
-            session.uploadStream(
-                input = input,
-                length = length,
-                name = remotePath.substringAfterLast('/'),
-                remotePath = remotePath,
-            )
-        } ?: throw SshException("Could not read shared file (content provider returned null)")
-    }
-
     private suspend fun uploadText(
         session: SshSession,
         item: ShareableItem.TextItem,
@@ -297,20 +285,6 @@ internal class ShareUploader(
                 name = remoteName,
                 remotePath = remotePath,
             )
-        }
-    }
-
-    private fun resolveSize(resolver: ContentResolver, uri: Uri): Long? {
-        return try {
-            resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                if (!cursor.moveToFirst()) return@use null
-                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (index < 0) return@use null
-                val size = cursor.getLong(index)
-                if (size <= 0) null else size
-            }
-        } catch (_: Throwable) {
-            null
         }
     }
 
@@ -442,6 +416,9 @@ internal class ShareUploader(
             if (mime.isNullOrBlank()) return null
             return MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
         }
+
+        const val SHARE_LEASE_PURPOSE_UPLOAD = "share-upload"
+        const val SHARE_SAF_TIMEOUT_MS: Long = 10_000L
     }
 }
 

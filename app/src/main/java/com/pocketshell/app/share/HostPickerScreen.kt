@@ -170,7 +170,7 @@ internal fun HostPickerScreen(
                         )
                 }
             }
-            is UploadState.Running -> UploadingSurface(hostName = state.hostName)
+            is UploadState.Running -> UploadingSurface(hostName = state.hostName, detail = state.detail)
             is UploadState.NeedsPassphrase ->
                 PassphraseDialog(
                     hostName = state.hostName,
@@ -468,7 +468,7 @@ private fun ShareEmptyState(message: String) {
 }
 
 @Composable
-private fun UploadingSurface(hostName: String) {
+private fun UploadingSurface(hostName: String, detail: String?) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -482,6 +482,14 @@ private fun UploadingSurface(hostName: String) {
             text = "Uploading to $hostName...",
             style = MaterialTheme.typography.titleMedium,
         )
+        if (!detail.isNullOrBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

@@ -177,7 +177,7 @@ internal class ShareViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal var uploader: ShareItemUploader = ShareUploader(
         context = applicationContext,
-        connect = { host, key, keyPath -> connectForUpload(host, key, keyPath) },
+        connect = { host, key, keyPath, purpose -> connectForUpload(host, key, keyPath, purpose) },
     )
 
     private var lastShareAction: ShareRetryAction? = null
@@ -222,27 +222,33 @@ internal class ShareViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal var connectForStaging: suspend (HostEntity, SshKeyEntity) -> Result<SshSession> =
         { host, keyEntity ->
-            acquireLeaseBackedSession(host = host, keyPath = keyEntity.privateKeyPath)
+            acquireLeaseBackedSession(
+                host = host,
+                keyPath = keyEntity.privateKeyPath,
+                leasePurpose = SHARE_LEASE_PURPOSE_STAGING,
+            )
         }
 
     private suspend fun connectForUpload(
         host: HostEntity,
         key: SshKey,
         keyPath: String,
+        leasePurpose: String?,
     ): Result<SshSession> {
         if (key !is SshKey.Path) {
             return Result.failure(
                 com.pocketshell.core.ssh.SshException("Share upload requires a persisted SSH key"),
             )
         }
-        return acquireLeaseBackedSession(host = host, keyPath = keyPath)
+        return acquireLeaseBackedSession(host = host, keyPath = keyPath, leasePurpose = leasePurpose)
     }
 
     private suspend fun acquireLeaseBackedSession(
         host: HostEntity,
         keyPath: String,
+        leasePurpose: String?,
     ): Result<SshSession> {
-        val target = host.toShareLeaseTarget(keyPath, pendingPassphrase.get())
+        val target = host.toShareLeaseTarget(keyPath, pendingPassphrase.get(), leasePurpose)
         return sshLeaseManager.acquire(target).map { lease ->
             LeaseBackedShareSession(lease)
         }
@@ -264,19 +270,26 @@ internal class ShareViewModel internal constructor(
     private fun HostEntity.toShareLeaseTarget(
         keyPath: String,
         passphrase: CharArray?,
+        leasePurpose: String?,
     ): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$id:$keyPath",
+                credentialId = shareCredentialId(keyPath, leasePurpose),
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
             knownHosts = KnownHostsPolicy.AcceptAll,
         )
+
+    private fun HostEntity.shareCredentialId(keyPath: String, leasePurpose: String?): String {
+        val base = "$id:$keyPath"
+        val purpose = leasePurpose?.trim()?.takeIf { it.isNotEmpty() } ?: return base
+        return "$base|purpose=$purpose"
+    }
 
     /**
      * Stage the [items] the activity extracted from the share intent.
@@ -459,8 +472,23 @@ internal class ShareViewModel internal constructor(
             return
         }
         _targetSelection.value = null
-        _uploadState.value = UploadState.Running(host.name)
+        _uploadState.value = UploadState.Running(host.name, runningDetail(payload, "Staging"))
         viewModelScope.launch {
+            val liveEntry = activeTmuxClients.clients.value[host.id]
+            if (liveEntry == null || !isSessionTargetCurrent(liveEntry.client, session)) {
+                DiagnosticEvents.record(
+                    "action",
+                    "share_stage_into_session_result",
+                    "status" to "failure",
+                    "hostId" to host.id,
+                    "cause" to "StaleSessionTarget",
+                )
+                val message = staleSessionTargetMessage(host, session)
+                android.util.Log.w(LOG_TAG, "share into session aborted: $message")
+                _uploadState.value = UploadState.Failed(host.name, message)
+                notifyShareFailure(host.name, message)
+                return@launch
+            }
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
                 DiagnosticEvents.record(
@@ -646,21 +674,76 @@ internal class ShareViewModel internal constructor(
                 if (name != focusedSession) add(name)
             }
         }
+        val identitiesBySession = resolveSessionIdentities(host, ordered)
 
         val sessions = mutableListOf<ActiveSessionTarget>()
         for (sessionName in ordered) {
             if (sessionName.isBlank()) continue
             val cwd = activePanes[sessionName]?.cwd?.trim().orEmpty()
             val normalised = cwd.takeIf { it.startsWith("/") }?.trimEnd('/')?.ifBlank { "/" }.orEmpty()
+            val identity = identitiesBySession[sessionName]
             sessions += ActiveSessionTarget(
                 sessionName = sessionName,
                 cwd = normalised,
                 label = sessionName,
                 focused = sessionName == focusedSession,
+                tmuxSessionId = identity?.tmuxSessionId,
+                sessionCreated = identity?.sessionCreated,
             )
         }
         return sessions
     }
+
+    private suspend fun resolveSessionIdentities(
+        host: HostEntity,
+        sessionNames: List<String>,
+    ): Map<String, ActiveSessionIdentity> {
+        if (sessionNames.isEmpty()) return emptyMap()
+        val entry = activeTmuxClients.clients.value[host.id] ?: return emptyMap()
+        val wanted = sessionNames.toSet()
+        return runCatching {
+            val response = entry.client.sendCommand(SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND)
+            if (response.isError) return@runCatching emptyMap()
+            SshFolderListGateway.parseListSessionsRows(response.output.joinToString("\n"))
+                .asSequence()
+                .filter { it.sessionName in wanted }
+                .mapNotNull { row ->
+                    val id = row.tmuxSessionId ?: return@mapNotNull null
+                    val created = row.sessionCreated ?: return@mapNotNull null
+                    row.sessionName to ActiveSessionIdentity(id, created)
+                }
+                .toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    private suspend fun isSessionTargetCurrent(
+        client: TmuxClient,
+        session: ActiveSessionTarget,
+    ): Boolean {
+        val escaped = escapeSingleQuoted(session.sessionName)
+        val expectedId = session.tmuxSessionId
+        val expectedCreated = session.sessionCreated
+        if (expectedId != null && expectedCreated != null) {
+            val response = runCatching {
+                client.sendCommand(
+                    "display-message -p -t '$escaped' '#{session_id}::#{session_created}'",
+                )
+            }.getOrNull() ?: return false
+            if (response.isError) return false
+            val actual = response.output.firstOrNull()?.trim().orEmpty()
+            return actual == "$expectedId::$expectedCreated"
+        }
+        val response = runCatching {
+            client.sendCommand("has-session -t '$escaped'")
+        }.getOrNull() ?: return false
+        return !response.isError
+    }
+
+    private fun staleSessionTargetMessage(
+        host: HostEntity,
+        session: ActiveSessionTarget,
+    ): String =
+        "Session ${session.sessionName} is no longer active on ${host.name} — save to inbox instead"
 
     /**
      * Issue #473: upload every staged item to [host], routing to either
@@ -686,7 +769,7 @@ internal class ShareViewModel internal constructor(
             "target" to targetName,
         )
         _targetSelection.value = null
-        _uploadState.value = UploadState.Running(host.name)
+        _uploadState.value = UploadState.Running(host.name, runningDetail(payload, "Uploading"))
         viewModelScope.launch {
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
@@ -969,7 +1052,7 @@ internal class ShareViewModel internal constructor(
             notifyShareFailure(host.name, message)
             return
         }
-        _uploadState.value = UploadState.Running(host.name)
+        _uploadState.value = UploadState.Running(host.name, "Pasting text into active session")
         viewModelScope.launch {
             val sendResult = runCatching {
                 sendTextToAttachedPane(entry.client, staged.text)
@@ -1164,7 +1247,7 @@ internal class ShareViewModel internal constructor(
      */
     fun submitPassphrase(passphrase: CharArray) {
         if (passphrase.isEmpty()) return
-        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill(' ')
+        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill('\u0000')
         retryLastShareAction()
     }
 
@@ -1174,7 +1257,7 @@ internal class ShareViewModel internal constructor(
     }
 
     private fun clearPendingPassphrase() {
-        pendingPassphrase.getAndSet(null)?.fill(' ')
+        pendingPassphrase.getAndSet(null)?.fill('\u0000')
     }
 
     /**
@@ -1206,6 +1289,8 @@ internal class ShareViewModel internal constructor(
         const val TEXT_PASTE_BUDGET_BYTES: Int = 8 * 1024
         const val LOG_TAG: String = "PocketShellShare"
         const val STAGE_INTO_SESSION_TIMEOUT_MS: Long = 90_000L
+        const val SHARE_LEASE_PURPOSE_UPLOAD: String = "share-upload"
+        const val SHARE_LEASE_PURPOSE_STAGING: String = "share-staging"
 
         /** Truncation cap for the paste preview surfaced in UploadState.Success. */
         const val PASTE_PREVIEW_LENGTH: Int = 80
@@ -1229,6 +1314,33 @@ internal class ShareViewModel internal constructor(
             } else {
                 firstLine
             }
+        }
+
+        fun runningDetail(items: List<ShareableItem>, verb: String): String {
+            val totalBytes = items.mapNotNull { item ->
+                when (item) {
+                    is ShareableItem.FileItem -> item.file.length().takeIf { it > 0L }
+                    is ShareableItem.TextItem -> item.text.toByteArray(Charsets.UTF_8).size.toLong()
+                    is ShareableItem.UriItem -> item.size?.takeIf { it > 0L }
+                }
+            }.takeIf { it.size == items.size }?.sum()
+            val count = when (items.size) {
+                1 -> "1 item"
+                else -> "${items.size} items"
+            }
+            return if (totalBytes != null) {
+                "$verb $count (${formatRunningBytes(totalBytes)})"
+            } else {
+                "$verb $count (size unknown)"
+            }
+        }
+
+        private fun formatRunningBytes(bytes: Long): String = when {
+            bytes < 1024L -> "$bytes B"
+            bytes < 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+            bytes < 1024L * 1024L * 1024L ->
+                String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+            else -> String.format(java.util.Locale.US, "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
         }
 
         /**
@@ -1257,7 +1369,7 @@ internal sealed interface UploadState {
     data object Idle : UploadState
 
     /** SCP upload (or send-keys paste) is running. Surface a spinner + the host name. */
-    data class Running(val hostName: String) : UploadState
+    data class Running(val hostName: String, val detail: String? = null) : UploadState
 
     /**
      * Issue #654: the fresh share connect could not authenticate because
@@ -1469,12 +1581,24 @@ internal data class TargetSelection(
  * @property label the user-visible session label (the session name).
  * @property focused true for the host's currently-focused session, which
  *   the picker lists first.
+ * @property tmuxSessionId stable tmux `#{session_id}` captured when the picker
+ *   was rendered. Rechecked before staging so a stale same-name target is not
+ *   treated as the original session.
+ * @property sessionCreated tmux `#{session_created}` paired with
+ *   [tmuxSessionId] to distinguish recreated same-name sessions.
  */
 internal data class ActiveSessionTarget(
     val sessionName: String,
     val cwd: String,
     val label: String,
     val focused: Boolean = false,
+    val tmuxSessionId: String? = null,
+    val sessionCreated: Long? = null,
+)
+
+private data class ActiveSessionIdentity(
+    val tmuxSessionId: String,
+    val sessionCreated: Long,
 )
 
 private class ShareStageIntoSessionTimeoutException(

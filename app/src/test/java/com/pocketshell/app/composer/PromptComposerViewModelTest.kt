@@ -21,7 +21,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -3103,6 +3102,32 @@ class PromptComposerViewModelTest {
         }
     }
 
+    /**
+     * The sidecar store does real `Dispatchers.IO` file work (see
+     * [OutboundAttachmentSidecarStore]) and the dispatch resumes back on the
+     * test Main dispatcher only AFTER that IO completes — so driving the virtual
+     * clock alone never observes the settled outcome. Each tick must also yield
+     * to the real IO threads so the store work can make progress before the next
+     * scheduler advance.
+     */
+    private suspend fun kotlinx.coroutines.test.TestScope.advanceSchedulerUntil(
+        predicate: suspend () -> Boolean,
+        maxTicks: Int = 1_000,
+    ): Boolean {
+        repeat(maxTicks) {
+            advanceUntilIdle()
+            if (predicate()) return true
+            runCurrent()
+            if (predicate()) return true
+            advanceTimeBy(1L)
+            runCurrent()
+            if (predicate()) return true
+            yieldToRealDispatchers()
+        }
+        advanceUntilIdle()
+        return predicate()
+    }
+
     private suspend fun yieldToRealDispatchers() {
         withContext(Dispatchers.IO) {
             yield()
@@ -3113,30 +3138,18 @@ class PromptComposerViewModelTest {
         store: OutboundAttachmentSidecarStore,
         outboundItemId: String,
     ) {
-        repeat(100) {
-            advanceUntilIdle()
-            if (store.refsFor(outboundItemId).isEmpty()) return
-            runCurrent()
-            if (store.refsFor(outboundItemId).isEmpty()) return
-            yieldToRealDispatchers()
-        }
-        advanceUntilIdle()
-        assertTrue(store.refsFor(outboundItemId).isEmpty())
+        assertTrue(
+            advanceSchedulerUntil(predicate = { store.refsFor(outboundItemId).isEmpty() }),
+        )
     }
 
     private suspend fun kotlinx.coroutines.test.TestScope.waitForSendCount(
         sent: List<PromptComposerViewModel.SendRequest>,
         count: Int,
     ) {
-        repeat(100) {
-            advanceUntilIdle()
-            if (sent.size >= count) return
-            runCurrent()
-            if (sent.size >= count) return
-            yieldToRealDispatchers()
-        }
-        advanceUntilIdle()
-        assertEquals(count, sent.size)
+        assertTrue(
+            advanceSchedulerUntil(predicate = { sent.size >= count }),
+        )
     }
 
     @Test
@@ -6286,22 +6299,14 @@ class PromptComposerViewModelTest {
     // the safety net.
 
     /**
-     * The sidecar store does real `Dispatchers.IO` file work + the dispatch is
-     * launched on viewModelScope, so `advanceUntilIdle` alone cannot observe the
-     * settled outcome. Drive the virtual clock AND yield to the real IO threads
-     * until [predicate] holds (or the bound elapses).
+     * The sidecar dispatch resumes on the test Main dispatcher after any store
+     * work completes. Drive the `runTest` scheduler in bounded virtual-time ticks
+     * until [predicate] holds.
      */
     private suspend fun kotlinx.coroutines.test.TestScope.settleUntil(
         predicate: () -> Boolean,
     ) {
-        repeat(1_000) {
-            advanceUntilIdle()
-            if (predicate()) return
-            runCurrent()
-            if (predicate()) return
-            yieldToRealDispatchers()
-        }
-        advanceUntilIdle()
+        advanceSchedulerUntil(predicate = { predicate() })
     }
 
     /**

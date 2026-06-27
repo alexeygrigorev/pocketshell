@@ -1,6 +1,7 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.tmuxOptionValue
 
@@ -50,7 +51,7 @@ internal object ManualKindWriter {
      */
     fun buildSetOptionCommand(sessionName: String, kind: SessionAgentKind): String? {
         val value = kind.tmuxOptionValue() ?: return null
-        return "tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind $value"
+        return "tmux set-option -t ${shellSingleQuote(sessionName)} @ps_agent_kind $value"
     }
 
     /**
@@ -79,7 +80,4 @@ internal object ManualKindWriter {
         }
     }
 
-    /** Single-quote a value for safe inclusion in a shell command. */
-    private fun shellQuote(value: String): String =
-        "'" + value.replace("'", "'\\''") + "'"
 }

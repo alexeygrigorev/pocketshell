@@ -14,6 +14,7 @@ import com.pocketshell.core.ssh.SshNotADirectoryException
 import com.pocketshell.core.ssh.SshPermissionDeniedException
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SortField
+import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.app.share.FilenameSanitiser
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -430,8 +431,8 @@ class FileExplorerViewModel @Inject constructor(
      * then surfaces the listing error, which has the precise reason).
      */
     private suspend fun canonicalize(live: SshSession, path: String): String? {
-        val quoted = path.replace("'", "'\\''")
-        val result = runCatching { live.exec("cd '$quoted' 2>/dev/null && pwd -P") }.getOrNull()
+        val quoted = shellSingleQuote(path)
+        val result = runCatching { live.exec("cd $quoted 2>/dev/null && pwd -P") }.getOrNull()
         val out = result?.stdout?.trim()
         return out?.takeIf { result.exitCode == 0 && it.startsWith("/") }
     }

@@ -2,6 +2,7 @@ package com.pocketshell.app.git
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.shellSingleQuote
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -427,7 +428,7 @@ class GitHistoryGateway(private val session: SshSession) {
 
         /** Single-quote a path for safe interpolation into a remote shell command. */
         internal fun quoteSingle(value: String): String =
-            "'" + value.replace("'", "'\\''") + "'"
+            shellSingleQuote(value)
 
         /**
          * Build the `gh issue create` command line for [dir] — issue #650. Pure

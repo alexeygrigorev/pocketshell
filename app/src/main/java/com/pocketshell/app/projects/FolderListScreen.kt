@@ -487,32 +487,53 @@ fun FolderListScreen(
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             creating = (state as? FolderListUiState.Ready)?.isCreatingSession == true,
+            allowMissingStartDirectoryCreation = true,
             // Issue #1184: prefill the editable "Session name" field with the
             // directory-derived default for the chosen start folder.
             deriveDefaultName = { dir ->
                 defaultSessionBaseName(dir, conventionalRemoteHome(username))
             },
             onCreate = { choice ->
-                val newName = derivedSessionName(
-                    choice = choice,
-                    homeDirectory = conventionalRemoteHome(username),
-                    existingNames = knownSessionNames(state),
-                )
-                viewModel.createSession(
-                    sessionName = newName,
-                    cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(claudeProfiles, codexProfiles),
-                    // Epic #821 Workstream A: record the picked kind onto the
-                    // new tree node immediately (no detection round-trip).
-                    chosenKind = choice.sessionAgentKind,
-                    onResolved = { resolved ->
-                        pickerFolder = null
-                        onSessionCreated(resolved, choice.startDirectory)
-                    },
-                    onFinished = {
-                        pickerFolder = null
-                    },
-                )
+                fun createPickedSession(cwd: String) {
+                    val resolvedChoice = choice.copy(
+                        startDirectory = cwd,
+                        createStartDirectory = null,
+                    )
+                    val newName = derivedSessionName(
+                        choice = resolvedChoice,
+                        homeDirectory = conventionalRemoteHome(username),
+                        existingNames = knownSessionNames(state),
+                    )
+                    viewModel.createSession(
+                        sessionName = newName,
+                        cwd = cwd,
+                        startCommand = resolvedChoice.startCommand(claudeProfiles, codexProfiles),
+                        // Epic #821 Workstream A: record the picked kind onto the
+                        // new tree node immediately (no detection round-trip).
+                        chosenKind = resolvedChoice.sessionAgentKind,
+                        onResolved = { resolved ->
+                            pickerFolder = null
+                            onSessionCreated(resolved, cwd)
+                        },
+                        onFinished = {
+                            pickerFolder = null
+                        },
+                    )
+                }
+
+                val missingFolder = choice.createStartDirectory
+                if (missingFolder != null) {
+                    pickerFolder = null
+                    viewModel.createEmptyProject(
+                        parentPath = missingFolder.parentPath,
+                        folderName = missingFolder.folderName,
+                        onCreated = { createdPath ->
+                            createPickedSession(createdPath)
+                        },
+                    )
+                } else {
+                    createPickedSession(choice.startDirectory)
+                }
             },
         )
     }
@@ -599,6 +620,19 @@ fun FolderListScreen(
             onCreateEmptyProject = {
                 rootAddSheet = null
                 emptyProjectFolder = PickerTarget(path = root.path, label = root.label)
+            },
+            onCreateNamedProject = { folderName ->
+                rootAddSheet = null
+                viewModel.createEmptyProject(
+                    parentPath = root.path,
+                    folderName = folderName,
+                    onCreated = { path ->
+                        pickerFolder = PickerTarget(
+                            path = path,
+                            label = FolderListViewModel.defaultLabelForPath(path),
+                        )
+                    },
+                )
             },
             onCloneGitProject = {
                 rootAddSheet = null

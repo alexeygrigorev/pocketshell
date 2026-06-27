@@ -51,6 +51,7 @@ fun RootProjectAddSheet(
     onStartSession: (RootProjectCandidate) -> Unit,
     onCreateEmptyProject: () -> Unit,
     onCloneGitProject: () -> Unit,
+    onCreateNamedProject: (String) -> Unit = {},
 ) {
     // Issue #613: the search field auto-focuses, so the soft keyboard opens
     // immediately. Use a fully-expanded sheet (not a partial one) so the
@@ -70,6 +71,7 @@ fun RootProjectAddSheet(
             onStartSession = onStartSession,
             onCreateEmptyProject = onCreateEmptyProject,
             onCloneGitProject = onCloneGitProject,
+            onCreateNamedProject = onCreateNamedProject,
         )
     }
 }
@@ -81,10 +83,14 @@ internal fun RootProjectAddSheetContent(
     onStartSession: (RootProjectCandidate) -> Unit,
     onCreateEmptyProject: () -> Unit,
     onCloneGitProject: () -> Unit,
+    onCreateNamedProject: (String) -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(candidates, query) {
         RootProjectFilter.filter(candidates, query)
+    }
+    val createOffer = remember(root.path, candidates, query) {
+        rootProjectCreateOffer(root = root, candidates = candidates, query = query)
     }
     val rootSessionTarget = remember(root.path, root.label) {
         RootProjectCandidate(
@@ -167,7 +173,15 @@ internal fun RootProjectAddSheetContent(
             contentPadding = PaddingValues(bottom = PocketShellSpacing.md),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
         ) {
-            if (filtered.isEmpty()) {
+            if (createOffer != null) {
+                item {
+                    RootProjectCreateRow(
+                        offer = createOffer,
+                        onClick = { onCreateNamedProject(createOffer.folderName) },
+                    )
+                }
+            }
+            if (filtered.isEmpty() && createOffer == null) {
                 item { RootProjectAddEmptyState(query = query) }
             } else {
                 items(filtered, key = { it.path }) { candidate ->
@@ -179,6 +193,30 @@ internal fun RootProjectAddSheetContent(
             }
         }
     }
+}
+
+internal data class RootProjectCreateOffer(
+    val folderName: String,
+    val path: String,
+)
+
+internal fun rootProjectCreateOffer(
+    root: FolderTreeRoot,
+    candidates: List<RootProjectCandidate>,
+    query: String,
+): RootProjectCreateOffer? {
+    val raw = query.trim()
+    if (raw.isBlank()) return null
+    if (RootProjectFilter.filter(candidates, raw).isNotEmpty()) return null
+    val safeName = SshFolderListGateway.normaliseProjectFolderName(raw) ?: return null
+    if (safeName != raw.trim('/')) return null
+    val childPath = SshFolderListGateway.childPath(root.path, safeName)
+    val exists = candidates.any { candidate ->
+        candidate.label == safeName ||
+            candidate.path.trimEnd('/') == childPath.trimEnd('/')
+    }
+    if (exists) return null
+    return RootProjectCreateOffer(folderName = safeName, path = childPath)
 }
 
 @Composable
@@ -258,6 +296,34 @@ private fun RootProjectCandidateRow(
     }
 }
 
+@Composable
+private fun RootProjectCreateRow(
+    offer: RootProjectCreateOffer,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.small)
+            .testTag(ROOT_PROJECT_ADD_CREATE_MATCH_TAG),
+    ) {
+        ListRow(
+            title = "Create folder ${offer.folderName}",
+            subtitle = "Start a new session there.",
+            onClick = onClick,
+            trailing = {
+                Text(
+                    text = "+",
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+        )
+    }
+}
+
 /**
  * The path segment leading up to (but excluding) the project [label], shown
  * dimmed so the user keeps just enough context to disambiguate same-named
@@ -333,6 +399,7 @@ const val ROOT_PROJECT_ADD_ROOT_SESSION_TAG: String = "root-project-add:root-ses
 const val ROOT_PROJECT_ADD_SEARCH_TAG: String = "root-project-add:search"
 const val ROOT_PROJECT_ADD_LIST_TAG: String = "root-project-add:list"
 const val ROOT_PROJECT_ADD_EMPTY_TAG: String = "root-project-add:empty"
+const val ROOT_PROJECT_ADD_CREATE_MATCH_TAG: String = "root-project-add:create-match"
 
 fun rootProjectCandidateTestTag(path: String): String = "root-project-add:project:$path"
 fun rootProjectCandidateSourceTestTag(path: String): String = "root-project-add:project:$path:source"

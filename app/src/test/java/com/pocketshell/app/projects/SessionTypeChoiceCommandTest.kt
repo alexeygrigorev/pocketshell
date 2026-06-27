@@ -30,6 +30,78 @@ class SessionTypeChoiceCommandTest {
             skipPermissions = skip,
         )
 
+    @Test
+    fun missingStartDirectoryCreationBuildsChildUnderCurrentFolder() {
+        val offer = missingStartDirectoryCreation(
+            baseFolderPath = "~/git",
+            typedStartDirectory = "new.project",
+            suggestions = emptyList(),
+            loading = false,
+        )
+
+        assertEquals("~/git", offer?.parentPath)
+        assertEquals("new.project", offer?.folderName)
+        assertEquals("~/git/new.project", offer?.path)
+    }
+
+    @Test
+    fun missingStartDirectoryCreationUsesTypedParentForExplicitPath() {
+        val offer = missingStartDirectoryCreation(
+            baseFolderPath = "~",
+            typedStartDirectory = "~/git/new.project",
+            suggestions = emptyList(),
+            loading = false,
+        )
+
+        assertEquals("~/git", offer?.parentPath)
+        assertEquals("new.project", offer?.folderName)
+        assertEquals("~/git/new.project", offer?.path)
+    }
+
+    @Test
+    fun missingStartDirectoryCreationSuppressesExistingAndUnsafeNames() {
+        assertNull(
+            missingStartDirectoryCreation(
+                baseFolderPath = "~/git",
+                typedStartDirectory = "~/git/pocketshell",
+                suggestions = listOf("~/git/pocketshell/"),
+                loading = false,
+            ),
+        )
+        assertNull(
+            missingStartDirectoryCreation(
+                baseFolderPath = "~/git",
+                typedStartDirectory = "../bad",
+                suggestions = emptyList(),
+                loading = false,
+            ),
+        )
+        assertNull(
+            missingStartDirectoryCreation(
+                baseFolderPath = "~/git",
+                typedStartDirectory = "new.project",
+                suggestions = emptyList(),
+                loading = true,
+            ),
+        )
+        assertNull(
+            missingStartDirectoryCreation(
+                baseFolderPath = "~/git",
+                typedStartDirectory = "~",
+                suggestions = emptyList(),
+                loading = false,
+            ),
+        )
+        assertNull(
+            missingStartDirectoryCreation(
+                baseFolderPath = "~/git/pocketshell",
+                typedStartDirectory = "~/git/pocketshell",
+                suggestions = emptyList(),
+                loading = false,
+            ),
+        )
+    }
+
     // --- The short wrapper form, per agent ---
 
     @Test

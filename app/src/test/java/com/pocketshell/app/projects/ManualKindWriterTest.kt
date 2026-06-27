@@ -26,21 +26,21 @@ class ManualKindWriterTest {
     @Test
     fun `builds session-scoped set-option command for each pickable kind`() {
         assertEquals(
-            "tmux set-option -t 'work' @ps_agent_kind claude",
+            manualKindCommand("work", "claude"),
             ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Claude),
         )
         assertEquals(
-            "tmux set-option -t 'work' @ps_agent_kind codex",
+            manualKindCommand("work", "codex"),
             ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Codex),
         )
         assertEquals(
-            "tmux set-option -t 'work' @ps_agent_kind opencode",
+            manualKindCommand("work", "opencode"),
             ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.OpenCode),
         )
         // A manually-classified plain shell IS recordable (so it never
         // re-prompts as Unknown) — the one extra value over the wrapper.
         assertEquals(
-            "tmux set-option -t 'work' @ps_agent_kind shell",
+            manualKindCommand("work", "shell"),
             ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Shell),
         )
     }
@@ -48,9 +48,18 @@ class ManualKindWriterTest {
     @Test
     fun `single-quotes a session name with shell metacharacters`() {
         assertEquals(
-            "tmux set-option -t 'a'\\''b c' @ps_agent_kind claude",
+            manualKindCommand("a'\\''b c", "claude"),
             ManualKindWriter.buildSetOptionCommand("a'b c", SessionAgentKind.Claude),
         )
+    }
+
+    @Test
+    fun `manual kind write clears stale recorded transcript source`() {
+        val command = ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Codex)!!
+
+        assertTrue(command.contains("@ps_agent_kind codex"))
+        assertTrue(command.contains("set-option -u -q -t 'work' @ps_agent_source_generation"))
+        assertTrue(command.contains("set-option -u -q -t 'work' @ps_agent_source"))
     }
 
     @Test
@@ -65,7 +74,7 @@ class ManualKindWriterTest {
         val session = RecordingSshSession()
         ManualKindWriter.write(session, "work", SessionAgentKind.Codex)
         assertEquals(
-            listOf("tmux set-option -t 'work' @ps_agent_kind codex"),
+            listOf(manualKindCommand("work", "codex")),
             session.commands,
         )
     }
@@ -125,5 +134,12 @@ class ManualKindWriterTest {
             remotePath: String,
         ): String = error("not used")
         override fun close() = Unit
+    }
+
+    private companion object {
+        fun manualKindCommand(target: String, kind: String): String =
+            "tmux set-option -t '$target' @ps_agent_kind $kind" +
+                " \\; set-option -u -q -t '$target' @ps_agent_source_generation" +
+                " \\; set-option -u -q -t '$target' @ps_agent_source"
     }
 }

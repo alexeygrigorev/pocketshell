@@ -21,7 +21,10 @@ import com.pocketshell.uikit.model.tmuxOptionValue
  * — choose") and, on pick, writes the same `@ps_agent_kind` option HERE, over
  * the warm SSH/tmux session, so the chosen kind becomes the durable recorded
  * kind. The SAME write also drives the "change kind" affordance for an
- * already-classified session — rewriting the option flips the recorded kind.
+ * already-classified session — rewriting the option flips the recorded kind
+ * and clears any launch-recorded transcript source so a stale
+ * `@ps_agent_source` cannot keep the Conversation bound to the previous
+ * identity.
  *
  * Writing the SAME tmux user option that `record_agent_kind` writes means the
  * value round-trips through the unchanged read-back path
@@ -33,7 +36,9 @@ import com.pocketshell.uikit.model.tmuxOptionValue
  *
  * Mirror of the server-side argv (`agents.py`):
  * ```
- * tmux set-option -t <session> @ps_agent_kind <value>
+ * tmux set-option -t <session> @ps_agent_kind <value> \; \
+ *   set-option -u -q -t <session> @ps_agent_source_generation \; \
+ *   set-option -u -q -t <session> @ps_agent_source
  * ```
  * The wrapper omits `-t` (it runs inside the target session); the client is
  * NOT inside the session, so it must target it explicitly with `-t`. The
@@ -42,16 +47,18 @@ import com.pocketshell.uikit.model.tmuxOptionValue
 internal object ManualKindWriter {
 
     /**
-     * Build the `tmux set-option -t <session> @ps_agent_kind <value>` command
-     * for [sessionName] and [kind]. Returns `null` when [kind] has no durable
-     * recorded value (Probing / Exited / Unknown — see
-     * [SessionAgentKind.tmuxOptionValue]); the caller must not write a
-     * non-classification kind. [sessionName] is single-quoted so a name with
-     * shell metacharacters cannot break out of the argument.
+     * Build the manual recorded-kind command for [sessionName] and [kind].
+     * Returns `null` when [kind] has no durable recorded value (Probing /
+     * Exited / Unknown — see [SessionAgentKind.tmuxOptionValue]); the caller
+     * must not write a non-classification kind. [sessionName] is single-quoted
+     * so a name with shell metacharacters cannot break out of the argument.
      */
     fun buildSetOptionCommand(sessionName: String, kind: SessionAgentKind): String? {
         val value = kind.tmuxOptionValue() ?: return null
-        return "tmux set-option -t ${shellSingleQuote(sessionName)} @ps_agent_kind $value"
+        val target = shellSingleQuote(sessionName)
+        return "tmux set-option -t $target @ps_agent_kind $value" +
+            " \\; set-option -u -q -t $target @ps_agent_source_generation" +
+            " \\; set-option -u -q -t $target @ps_agent_source"
     }
 
     /**

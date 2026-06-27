@@ -365,6 +365,7 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setSessionCardsDispatcherForTest(dispatcher: CoroutineDispatcher) {
         sessionCardsDispatcher = dispatcher
+        sessionCardsRemoteSource.setExecDispatcherForTest(dispatcher)
     }
 
     /**

@@ -4,9 +4,11 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -145,6 +147,65 @@ class SessionCardsRemoteSourceTest {
     }
 
     @Test
+    fun getCardsDropsDuplicateCardIds() = runTest {
+        val session = cardsSession(
+            getStdout = """
+                {
+                  "session": "demo",
+                  "cards": [
+                    {
+                      "id": "same", "type": "checklist", "title": "First",
+                      "body": {"items": [{"id": "build-0", "text": "build"}]},
+                      "state": {"checked": []}
+                    },
+                    {
+                      "id": "same", "type": "note", "title": "Duplicate",
+                      "body": {"text": "should not render with the same lazy key"},
+                      "state": {"read": false}
+                    },
+                    {
+                      "id": "other", "type": "note", "title": "Other",
+                      "body": {"text": "ok"},
+                      "state": {"read": true}
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        val feed = source.getCards(session, tmuxSessionName = "demo")
+
+        assertEquals(listOf("same", "other"), feed.cards.map { it.id })
+        assertTrue(feed.cards[0] is SessionCardsRemoteSource.ChecklistCard)
+        assertTrue(feed.cards[1] is SessionCardsRemoteSource.NoteCard)
+    }
+
+    @Test
+    fun malformedCardDoesNotReserveDuplicateId() = runTest {
+        val session = cardsSession(
+            getStdout = """
+                {
+                  "session": "demo",
+                  "cards": [
+                    {"id": "same", "title": "Missing type"},
+                    {
+                      "id": "same", "type": "note", "title": "Valid",
+                      "body": {"text": "ok"},
+                      "state": {"read": true}
+                    }
+                  ]
+                }
+            """.trimIndent(),
+        )
+
+        val feed = source.getCards(session, tmuxSessionName = "demo")
+
+        val note = feed.cards.single() as SessionCardsRemoteSource.NoteCard
+        assertEquals("same", note.id)
+        assertEquals("Valid", note.title)
+    }
+
+    @Test
     fun setNoteReadBuildsReadCommandAndReturnsAck() = runTest {
         val session = cardsSession(readResult = ExecResult("note: read", "", 0))
 
@@ -227,6 +288,38 @@ class SessionCardsRemoteSourceTest {
                 tmuxSessionName = "demo",
             ).cards.isEmpty(),
         )
+    }
+
+    @Test
+    fun getCardsTimeoutDegradesToEmptyFeedAndClosesSession() = runTest {
+        val timeoutSource = SessionCardsRemoteSource(execReadTimeoutMs = 10L).also {
+            it.setExecDispatcherForTest(StandardTestDispatcher(testScheduler))
+        }
+        val session = NeverReturningSshSession()
+
+        val feed = timeoutSource.getCards(session, tmuxSessionName = "demo")
+
+        assertTrue(feed.cards.isEmpty())
+        assertTrue(session.closed)
+    }
+
+    @Test
+    fun checklistWriteTimeoutReturnsFalseAndClosesSession() = runTest {
+        val timeoutSource = SessionCardsRemoteSource(execReadTimeoutMs = 10L).also {
+            it.setExecDispatcherForTest(StandardTestDispatcher(testScheduler))
+        }
+        val session = NeverReturningSshSession()
+
+        val ok = timeoutSource.setChecklistItemChecked(
+            session = session,
+            tmuxSessionName = "demo",
+            cardId = "checklist",
+            itemId = "build-0",
+            checked = true,
+        )
+
+        assertFalse(ok)
+        assertTrue(session.closed)
     }
 
     @Test
@@ -346,6 +439,28 @@ class SessionCardsRemoteSourceTest {
             remotePath: String,
         ): String = error("unused")
         override fun close() = Unit
+    }
+
+    private class NeverReturningSshSession : SshSession {
+        override val isConnected: Boolean = true
+        var closed = false
+            private set
+
+        override suspend fun exec(command: String): ExecResult = awaitCancellation()
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("unused")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("unused")
+        override fun startShell(): SshShell = error("unused")
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String = error("unused")
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("unused")
+        override fun close() {
+            closed = true
+        }
     }
 
     private class ThrowingSshSession(private val throwable: Throwable) : SshSession {

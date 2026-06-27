@@ -62,6 +62,20 @@ jobs:
           chmod +x scripts/check-test-validity.sh
           scripts/check-test-validity.sh
 
+      # Issue #848: per-push journey harness guard. Proof journeys listed by
+      # scripts/ci-journey-suite.sh that launch MainActivity should use the
+      # launch-owned createAndroidComposeRule<MainActivity>() +
+      # SeedBeforeLaunchRule harness, not the old createEmptyComposeRule() +
+      # manual ActivityScenario.launch shape, unless a local
+      # JOURNEY_HARNESS_JUSTIFIED reason is present. Current-main legacy classes
+      # are baselined so this pins new drift without duplicating the #911
+      # migration backlog.
+      - name: CI journey harness guard (issue #848)
+        run: |
+          chmod +x scripts/check-ci-journey-harness.sh scripts/check-ci-journey-harness-selftest.sh
+          scripts/check-ci-journey-harness.sh
+          scripts/check-ci-journey-harness-selftest.sh
+
       # Issue #865: raw-component drift guardrail. After the #756 design-
       # consistency migrations landed (#860/#861/#862/#863 — shared ConfirmDialog
       # / FormDialog / LoadingIndicator.Spinner / PocketShellButton own the

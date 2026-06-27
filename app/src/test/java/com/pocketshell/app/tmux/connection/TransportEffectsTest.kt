@@ -1,6 +1,16 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.core.connection.ConnectionEvent
+import com.pocketshell.core.connection.ConnectionState
+import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.LivenessProbe
+import com.pocketshell.core.connection.SessionId
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -16,6 +26,7 @@ import org.junit.Test
  * `startReconnectForSend` direct calls can all be deleted (no dual-write, D28(4) single
  * active path), and the future #823 affordance has ONE entrypoint to call.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class TransportEffectsTest {
 
     private class RecordingReconnectIo(
@@ -86,5 +97,51 @@ class TransportEffectsTest {
 
         assertEquals(2, io.auto)
         assertEquals(1, io.manual)
+    }
+
+    @Test
+    fun livenessProbeDeclaredDropWalksControllerAndDispatchesAutoReconnectOnly() {
+        runTest(StandardTestDispatcher()) {
+            val host = HostKey("alice@example.com:22/7")
+            val target = SessionId("7/main")
+            val manager = ConnectionManager(warmSnapshot = { true })
+            val io = RecordingReconnectIo()
+            val effects = TransportEffects(io)
+
+            manager.enter(host, target)
+            manager.observeSeedLanded(host, target, paneId = "%0")
+            assertEquals(ConnectionState.Live(host, target), manager.state)
+
+            val probe = LivenessProbe(
+                io = object : LivenessProbe.ProbeIo {
+                    override fun shouldProbe(): Boolean = manager.state is ConnectionState.Live
+                    override suspend fun probe(): Boolean = false
+                    override fun onProbeFailed(consecutiveFailures: Int) {
+                        manager.submit(
+                            ConnectionEvent.TransportDropped("liveness_probe_silent_drop"),
+                        )
+                        effects.onAutoReconnect { io.markAutoBodyRan() }
+                    }
+                },
+                intervalMs = 100,
+                perProbeTimeoutMs = 1_000,
+                failureThreshold = 2,
+            )
+
+            probe.start(this)
+            advanceTimeBy(250)
+            runCurrent()
+            probe.stop()
+
+            assertEquals(
+                "a probe-declared silent drop must move the controller onto the " +
+                    "silent recovery path immediately",
+                ConnectionState.Reattaching(host, target),
+                manager.state,
+            )
+            assertEquals("probe recovery must dispatch the auto ladder exactly once", 1, io.auto)
+            assertEquals("probe recovery must not use the manual reconnect entrypoint", 0, io.manual)
+            assertEquals("the auto ladder body must run", true, io.lastAutoBodyRan)
+        }
     }
 }

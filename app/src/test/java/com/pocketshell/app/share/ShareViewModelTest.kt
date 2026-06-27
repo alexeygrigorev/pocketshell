@@ -657,18 +657,19 @@ class ShareViewModelTest {
     }
 
     @Test
-    fun startUploadReusesActiveSshLeaseInsteadOfStartingFreshAuth() = runTest {
+    fun startUploadUsesTransferLeaseWithoutClosingActiveSshLease() = runTest {
         val host = seededHost(id = 138L, name = "hetzner")
         val keyPath = "/tmp/key-138"
-        val fakeSession = FakeStagingSshSession()
+        val terminalSession = FakeStagingSshSession()
+        val uploadSession = FakeStagingSshSession()
         var connectCalls = 0
         val leaseManager = SshLeaseManager(
             connector = { _: SshLeaseTarget ->
                 connectCalls += 1
-                if (connectCalls == 1) {
-                    Result.success(fakeSession)
-                } else {
-                    Result.failure(SshException("Authentication failed"))
+                when (connectCalls) {
+                    1 -> Result.success(terminalSession)
+                    2 -> Result.success(uploadSession)
+                    else -> Result.failure(SshException("unexpected extra connect"))
                 }
             },
         )
@@ -687,17 +688,21 @@ class ShareViewModelTest {
                     success.copyText.endsWith("report.txt"),
             )
             assertEquals(
-                "a live lease for the same host/key should be reused",
-                1,
+                "share upload should use a separate transfer lease",
+                2,
                 connectCalls,
             )
             assertTrue(
-                "the upload should have used the already-live session",
-                fakeSession.uploadedRemotePaths.isNotEmpty(),
+                "the upload should use the transfer session",
+                uploadSession.uploadedRemotePaths.isNotEmpty(),
+            )
+            assertTrue(
+                "the active app session should not receive upload bytes",
+                terminalSession.uploadedRemotePaths.isEmpty(),
             )
             assertFalse(
                 "releasing the share lease must not close the active app session",
-                fakeSession.closed,
+                terminalSession.closed,
             )
         } finally {
             activeLease.release()
@@ -706,24 +711,22 @@ class ShareViewModelTest {
     }
 
     @Test
-    fun startUploadDoesNotReAuthWhenWarmLeaseExistsForPassphraseKey() = runTest {
-        // Issue #654: a passphrase-protected key must STILL reuse the warm
-        // app lease without any passphrase prompt — the passphrase is not
-        // part of the lease key, so an already-unlocked lease is shared.
+    fun startUploadUsesIsolatedTransferLeaseEvenWhenWarmTerminalLeaseExists() = runTest {
+        // Issue #1037: a multi-megabyte share upload must not ride the same
+        // warm transport as the active terminal session. It dials a transfer
+        // lease with a purpose-suffixed key instead.
         val host = seededHost(id = 654L, name = "hetzner", hasPassphrase = true)
         val keyPath = "/tmp/key-654"
-        val fakeSession = FakeStagingSshSession()
+        val terminalSession = FakeStagingSshSession()
+        val uploadSession = FakeStagingSshSession()
         var connectCalls = 0
-        // The first connect (the live app session's) succeeds; any SECOND
-        // connect would mean the share re-authenticated instead of reusing
-        // the warm lease, which the assertion below forbids.
         val leaseManager = SshLeaseManager(
             connector = { _: SshLeaseTarget ->
                 connectCalls += 1
-                if (connectCalls == 1) {
-                    Result.success(fakeSession)
-                } else {
-                    Result.failure(SshException("Authentication failed"))
+                when (connectCalls) {
+                    1 -> Result.success(terminalSession)
+                    2 -> Result.success(uploadSession)
+                    else -> Result.failure(SshException("unexpected extra connect"))
                 }
             },
         )
@@ -736,11 +739,19 @@ class ShareViewModelTest {
             advanceUntilIdle()
 
             val success = vm.uploadState.first { it is UploadState.Success }
-            assertTrue("warm lease reuse must succeed", success is UploadState.Success)
+            assertTrue("isolated upload lease must succeed", success is UploadState.Success)
             assertEquals(
-                "the passphrase-protected key's warm lease was reused; no fresh auth",
-                1,
+                "the upload should dial a separate transfer lease instead of reusing the terminal lease",
+                2,
                 connectCalls,
+            )
+            assertTrue(
+                "the upload session should receive the file",
+                uploadSession.uploadedRemotePaths.isNotEmpty(),
+            )
+            assertTrue(
+                "the active terminal session should not receive upload bytes",
+                terminalSession.uploadedRemotePaths.isEmpty(),
             )
         } finally {
             activeLease.release()
@@ -1498,10 +1509,17 @@ class ShareViewModelTest {
             keyEntity: SshKeyEntity,
             item: ShareableItem,
             target: ShareTarget,
+            onProgress: ((com.pocketshell.core.ssh.SshUploadProgress) -> Unit)?,
         ): Result<String> {
             val name = item.displayName.orEmpty()
             uploadedNames += name
             uploadedTargets += target
+            onProgress?.invoke(
+                com.pocketshell.core.ssh.SshUploadProgress(
+                    bytesTransferred = 1L,
+                    totalBytes = 1L,
+                ),
+            )
             return if (name in failNames) {
                 Result.failure(IllegalStateException("Permission denied"))
             } else if (name in blankNames) {

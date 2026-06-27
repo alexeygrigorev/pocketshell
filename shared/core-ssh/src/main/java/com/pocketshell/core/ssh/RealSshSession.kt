@@ -88,15 +88,16 @@ internal class RealSshSession(
     private val dispatcher = TransportDispatcher()
 
     /**
-     * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
-     * transport activity — bumped on a successful keepalive reply (issue #945)
-     * AND on ANY decoded application bytes the server sends back over the
-     * transport: the live `-CC` control-mode reader's output, an exec/list/cat
-     * round-trip's stdout/stderr, and each `tail -F` line (issue #974). The
-     * keepalive loop reads this to SKIP a ping when the link produced server
-     * bytes within the last interval (OpenSSH reset-on-server-traffic
-     * semantics), so a busy link is self-evidently alive and we never ping —
-     * nor tear down — a channel that is actively streaming.
+     * Monotonic ([System.nanoTime]) timestamp of the most recent transport
+     * activity that should reset idle liveness accounting — bumped on a
+     * successful keepalive reply (issue #945), on ANY decoded application bytes
+     * the server sends back over the transport, and on active outbound upload
+     * byte progress. Inbound examples are the live `-CC` control-mode reader's
+     * output, an exec/list/cat round-trip's stdout/stderr, and each `tail -F`
+     * line (issue #974). The keepalive loop reads this to SKIP a ping when
+     * the link produced server bytes or foreground upload progress within the
+     * last interval, so a busy link is self-evidently alive and we never ping
+     * — nor tear down — a channel that is actively streaming.
      *
      * ## Issue #974 — honour the contract: live data proves the transport alive
      *
@@ -115,11 +116,12 @@ internal class RealSshSession(
      * counter and keep [isTransportProvenAliveWithinKeepAliveWindow] true, so a
      * link with live data is never spuriously declared dead.
      *
-     * Bound to DECODED application bytes from the server (the channel streams
-     * sshj already decrypted/decoded), NOT raw socket reads — a genuinely
-     * half-open peer that sends no bytes still produces no activity here, so the
-     * keepalive's own ride-through budget still catches a truly-dead link
-     * promptly (the fix must not make a dead link look alive forever).
+     * Normally bound to DECODED application bytes from the server (the channel
+     * streams sshj already decrypted/decoded), NOT raw socket reads. Uploads are
+     * the deliberate exception: a large foreground upload can be outbound-only
+     * until EOF/exit-status, so successful chunk writes count as active transport
+     * progress while the upload's own 60s transfer timeout still bounds a
+     * genuinely wedged/dead link.
      */
     @Volatile
     private var lastInboundActivityNanos: Long = System.nanoTime()
@@ -134,6 +136,10 @@ internal class RealSshSession(
      * promises. Cheap volatile store, safe to call from any reader thread.
      */
     private fun recordInboundActivity() {
+        lastInboundActivityNanos = System.nanoTime()
+    }
+
+    private fun recordUploadProgressActivity() {
         lastInboundActivityNanos = System.nanoTime()
     }
 
@@ -775,6 +781,13 @@ internal class RealSshSession(
     }
 
     override suspend fun uploadFile(file: File, remotePath: String): String =
+        uploadFile(file, remotePath, onProgress = null)
+
+    override suspend fun uploadFile(
+        file: File,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
         withContext(Dispatchers.IO) {
             ensureConnected()
             if (!file.exists()) {
@@ -786,6 +799,7 @@ internal class RealSshSession(
                     length = file.length(),
                     name = file.name,
                     remotePath = remotePath,
+                    onProgress = onProgress,
                 )
             }
             remotePath
@@ -796,9 +810,18 @@ internal class RealSshSession(
         length: Long,
         name: String,
         remotePath: String,
+    ): String =
+        uploadStream(input, length, name, remotePath, onProgress = null)
+
+    override suspend fun uploadStream(
+        input: InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): String = withContext(Dispatchers.IO) {
         ensureConnected()
-        uploadStreamInternal(input, length, name, remotePath)
+        uploadStreamInternal(input, length, name, remotePath, onProgress)
         remotePath
     }
 
@@ -952,6 +975,7 @@ internal class RealSshSession(
         length: Long,
         name: String,
         remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ) {
         // Atomic temp sibling of the final path: `<final>.part-<rand>`. A
         // dropped/timed-out transfer corrupts only THIS temp name, never the
@@ -959,7 +983,14 @@ internal class RealSshSession(
         // concurrent retries of the same attachment.
         val tempRemotePath = remotePath + ".part-" + java.util.UUID.randomUUID().toString().take(8)
         try {
-            val copied = streamToRemoteTemp(input, name, remotePath, tempRemotePath)
+            val copied = streamToRemoteTemp(
+                input = input,
+                name = name,
+                remotePath = remotePath,
+                tempRemotePath = tempRemotePath,
+                totalBytes = length,
+                onProgress = onProgress,
+            )
 
             // Integrity check BEFORE the rename: the bytes that actually landed
             // in the temp file must match what we copied, and — when the caller
@@ -1013,6 +1044,8 @@ internal class RealSshSession(
         name: String,
         remotePath: String,
         tempRemotePath: String,
+        totalBytes: Long,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): Long {
         val coroutineJob = currentCoroutineContext()[Job]
         // Channel open + `cat >` exec are transport-mutating packets — serialise
@@ -1063,7 +1096,7 @@ internal class RealSshSession(
             val copied = withTimeoutOrNull(UPLOAD_TRANSFER_TIMEOUT_MS) {
                 runInterruptible(Dispatchers.IO) {
                     val n = command!!.outputStream.use { output ->
-                        copyToRemoteBlocking(input, output)
+                        copyToRemoteBlocking(input, output, totalBytes, onProgress)
                     }
                     // `outputStream.close()` sends EOF on the channel. The remote
                     // `cat` exits on EOF; `join()` waits for it so we can read
@@ -1195,9 +1228,15 @@ internal class RealSshSession(
      * wedged transfer unblocks promptly instead of hanging. Returns the number
      * of bytes copied.
      */
-    private fun copyToRemoteBlocking(input: InputStream, output: OutputStream): Long {
+    private fun copyToRemoteBlocking(
+        input: InputStream,
+        output: OutputStream,
+        totalBytes: Long,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): Long {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0L
+        onProgress?.invoke(SshUploadProgress(bytesTransferred = 0L, totalBytes = totalBytes))
         while (true) {
             if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
             val read = input.read(buffer)
@@ -1205,6 +1244,8 @@ internal class RealSshSession(
             if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
             output.write(buffer, 0, read)
             total += read
+            recordUploadProgressActivity()
+            onProgress?.invoke(SshUploadProgress(bytesTransferred = total, totalBytes = totalBytes))
         }
         output.flush()
         return total

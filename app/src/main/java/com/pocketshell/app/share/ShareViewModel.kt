@@ -16,6 +16,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshUploadProgress
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -222,7 +223,11 @@ internal class ShareViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal var connectForStaging: suspend (HostEntity, SshKeyEntity) -> Result<SshSession> =
         { host, keyEntity ->
-            acquireLeaseBackedSession(host = host, keyPath = keyEntity.privateKeyPath)
+            acquireLeaseBackedSession(
+                host = host,
+                keyPath = keyEntity.privateKeyPath,
+                purpose = "staging",
+            )
         }
 
     private suspend fun connectForUpload(
@@ -235,14 +240,19 @@ internal class ShareViewModel internal constructor(
                 com.pocketshell.core.ssh.SshException("Share upload requires a persisted SSH key"),
             )
         }
-        return acquireLeaseBackedSession(host = host, keyPath = keyPath)
+        return acquireLeaseBackedSession(host = host, keyPath = keyPath, purpose = "upload")
     }
 
     private suspend fun acquireLeaseBackedSession(
         host: HostEntity,
         keyPath: String,
+        purpose: String,
     ): Result<SshSession> {
-        val target = host.toShareLeaseTarget(keyPath, pendingPassphrase.get())
+        val target = host.toShareLeaseTarget(
+            keyPath = keyPath,
+            passphrase = pendingPassphrase.get(),
+            purpose = purpose,
+        )
         return sshLeaseManager.acquire(target).map { lease ->
             LeaseBackedShareSession(lease)
         }
@@ -251,26 +261,21 @@ internal class ShareViewModel internal constructor(
     /**
      * Build the lease target for the share connect.
      *
-     * The [SshLeaseKey] is byte-for-byte identical to the one the live
-     * tmux session uses (`TmuxSessionViewModel.toSshLeaseTarget`) — same
-     * `credentialId` (`"$id:$keyPath"`) and `knownHostsId` — so when the
-     * app already holds a warm lease for this host/key the share REUSES it
-     * (the passphrase is intentionally NOT part of the lease key, so a
-     * warm, already-unlocked lease is shared regardless of whether we have
-     * a passphrase here). The [passphrase] only matters on the
-     * fresh-connect fallback, when no reusable lease exists and the key is
-     * passphrase-protected (issue #654).
+     * File-transfer work gets its own lease-key purpose suffix instead of
+     * borrowing the live tmux terminal transport. A multi-megabyte upload can
+     * otherwise disturb the active control session on the same SSH connection.
      */
     private fun HostEntity.toShareLeaseTarget(
         keyPath: String,
         passphrase: CharArray?,
+        purpose: String,
     ): SshLeaseTarget =
         SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = hostname,
                 port = port,
                 user = username,
-                credentialId = "$id:$keyPath",
+                credentialId = "$id:$keyPath:$purpose",
                 knownHostsId = "accept-all",
             ),
             key = SshKey.Path(File(keyPath)),
@@ -686,7 +691,7 @@ internal class ShareViewModel internal constructor(
             "target" to targetName,
         )
         _targetSelection.value = null
-        _uploadState.value = UploadState.Running(host.name)
+        _uploadState.value = UploadState.Running(hostName = host.name, totalCount = payload.size)
         viewModelScope.launch {
             val keyEntity = sshKeyDao.getById(host.keyId)
             if (keyEntity == null) {
@@ -714,7 +719,32 @@ internal class ShareViewModel internal constructor(
 
             for ((index, item) in payload.withIndex()) {
                 val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
-                val result = uploader.upload(host, keyEntity, item, target)
+                val itemNumber = index + 1
+                val estimatedBytes = estimatedUploadBytes(item)
+                _uploadState.value = UploadState.Running(
+                    hostName = host.name,
+                    currentItemIndex = itemNumber,
+                    totalCount = payload.size,
+                    currentItemName = itemLabel,
+                    bytesTransferred = 0L,
+                    totalBytes = estimatedBytes,
+                )
+                val result = uploader.upload(
+                    host = host,
+                    keyEntity = keyEntity,
+                    item = item,
+                    target = target,
+                    onProgress = { progress ->
+                        _uploadState.value = UploadState.Running(
+                            hostName = host.name,
+                            currentItemIndex = itemNumber,
+                            totalCount = payload.size,
+                            currentItemName = itemLabel,
+                            bytesTransferred = progress.bytesTransferred,
+                            totalBytes = progress.totalBytes.takeIf { it > 0L } ?: estimatedBytes,
+                        )
+                    },
+                )
                 val failure = result.exceptionOrNull()
                 // Issue #654: a fresh share connect (when no warm app lease
                 // is reusable — e.g. the live session's lease expired while
@@ -1012,6 +1042,12 @@ internal class ShareViewModel internal constructor(
         ShareUploadNotifications.showFailure(applicationContext, hostName, message)
     }
 
+    private fun estimatedUploadBytes(item: ShareableItem): Long? = when (item) {
+        is ShareableItem.FileItem -> item.file.length().takeIf { it > 0L }
+        is ShareableItem.TextItem -> item.text.toByteArray(Charsets.UTF_8).size.toLong()
+        is ShareableItem.UriItem -> item.size?.takeIf { it > 0L }
+    }
+
     private data class SessionStagingInput(
         val uris: List<Uri>,
         val tempFiles: List<File>,
@@ -1164,7 +1200,7 @@ internal class ShareViewModel internal constructor(
      */
     fun submitPassphrase(passphrase: CharArray) {
         if (passphrase.isEmpty()) return
-        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill(' ')
+        pendingPassphrase.getAndSet(passphrase.copyOf())?.fill('\u0000')
         retryLastShareAction()
     }
 
@@ -1174,7 +1210,7 @@ internal class ShareViewModel internal constructor(
     }
 
     private fun clearPendingPassphrase() {
-        pendingPassphrase.getAndSet(null)?.fill(' ')
+        pendingPassphrase.getAndSet(null)?.fill('\u0000')
     }
 
     /**
@@ -1257,7 +1293,14 @@ internal sealed interface UploadState {
     data object Idle : UploadState
 
     /** SCP upload (or send-keys paste) is running. Surface a spinner + the host name. */
-    data class Running(val hostName: String) : UploadState
+    data class Running(
+        val hostName: String,
+        val currentItemIndex: Int = 0,
+        val totalCount: Int = 1,
+        val currentItemName: String? = null,
+        val bytesTransferred: Long = 0L,
+        val totalBytes: Long? = null,
+    ) : UploadState
 
     /**
      * Issue #654: the fresh share connect could not authenticate because
@@ -1357,6 +1400,13 @@ private class LeaseBackedShareSession(
     override suspend fun uploadFile(file: File, remotePath: String): String =
         session.uploadFile(file, remotePath)
 
+    override suspend fun uploadFile(
+        file: File,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
+        session.uploadFile(file, remotePath, onProgress)
+
     override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
         session.downloadFile(remotePath, maxBytes)
 
@@ -1367,6 +1417,15 @@ private class LeaseBackedShareSession(
         remotePath: String,
     ): String =
         session.uploadStream(input, length, name, remotePath)
+
+    override suspend fun uploadStream(
+        input: java.io.InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
+        session.uploadStream(input, length, name, remotePath, onProgress)
 
     override suspend fun listDirectory(
         remotePath: String,

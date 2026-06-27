@@ -10,6 +10,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshUploadProgress
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,7 @@ internal interface ShareItemUploader {
         keyEntity: SshKeyEntity,
         item: ShareableItem,
         target: ShareTarget = ShareTarget.HostInbox,
+        onProgress: ((SshUploadProgress) -> Unit)? = null,
     ): Result<String>
 }
 
@@ -123,6 +125,7 @@ internal class ShareUploader(
         keyEntity: SshKeyEntity,
         item: ShareableItem,
         target: ShareTarget,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): Result<String> = withContext(Dispatchers.IO) {
         val keyFile = File(keyEntity.privateKeyPath)
         val key: SshKey = SshKey.Path(keyFile)
@@ -151,9 +154,9 @@ internal class ShareUploader(
                 val remotePath = "${destination.uploadDirectory}/$remoteName"
 
                 when (item) {
-                    is ShareableItem.UriItem -> uploadUri(live, item, remotePath)
-                    is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName)
-                    is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath)
+                    is ShareableItem.UriItem -> uploadUri(live, item, remotePath, onProgress)
+                    is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName, onProgress)
+                    is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath, onProgress)
                 }
                 Result.success("${destination.displayDirectory}/$remoteName")
             }
@@ -257,6 +260,7 @@ internal class ShareUploader(
         session: SshSession,
         item: ShareableItem.UriItem,
         remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ) {
         val resolver = context.contentResolver
         val length = item.size ?: resolveSize(resolver, item.uri)
@@ -266,7 +270,7 @@ internal class ShareUploader(
             // file under the cache directory so we can use uploadFile.
             val temp = drainToTempFile(resolver, item.uri)
             try {
-                session.uploadFile(temp, remotePath)
+                session.uploadFile(temp, remotePath, onProgress)
             } finally {
                 temp.delete()
             }
@@ -279,6 +283,7 @@ internal class ShareUploader(
                 length = length,
                 name = remotePath.substringAfterLast('/'),
                 remotePath = remotePath,
+                onProgress = onProgress,
             )
         } ?: throw SshException("Could not read shared file (content provider returned null)")
     }
@@ -288,6 +293,7 @@ internal class ShareUploader(
         item: ShareableItem.TextItem,
         remotePath: String,
         remoteName: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ) {
         val bytes = item.text.toByteArray(Charsets.UTF_8)
         bytes.inputStream().use { input ->
@@ -296,6 +302,7 @@ internal class ShareUploader(
                 length = bytes.size.toLong(),
                 name = remoteName,
                 remotePath = remotePath,
+                onProgress = onProgress,
             )
         }
     }

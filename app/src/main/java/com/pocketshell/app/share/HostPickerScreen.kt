@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -170,7 +171,7 @@ internal fun HostPickerScreen(
                         )
                 }
             }
-            is UploadState.Running -> UploadingSurface(hostName = state.hostName)
+            is UploadState.Running -> UploadingSurface(state = state)
             is UploadState.NeedsPassphrase ->
                 PassphraseDialog(
                     hostName = state.hostName,
@@ -468,7 +469,13 @@ private fun ShareEmptyState(message: String) {
 }
 
 @Composable
-private fun UploadingSurface(hostName: String) {
+private fun UploadingSurface(state: UploadState.Running) {
+    val totalBytes = state.totalBytes?.takeIf { it > 0L }
+    val progress = if (totalBytes != null) {
+        (state.bytesTransferred.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+    } else {
+        null
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -479,9 +486,54 @@ private fun UploadingSurface(hostName: String) {
         LoadingIndicator.Spinner(size = SpinnerSize.Medium)
         Spacer(Modifier.height(24.dp))
         Text(
-            text = "Uploading to $hostName...",
+            text = "Uploading to ${state.hostName}...",
             style = MaterialTheme.typography.titleMedium,
         )
+        state.currentItemName?.let { name ->
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = name,
+                style = PocketShellType.bodyDense,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (state.totalCount > 1 && state.currentItemIndex > 0) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "File ${state.currentItemIndex} of ${state.totalCount}",
+                style = PocketShellType.labelMono,
+                color = PocketShellColors.TextMuted,
+            )
+        }
+        if (progress != null && totalBytes != null) {
+            Spacer(Modifier.height(16.dp))
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "${formatUploadBytes(state.bytesTransferred)} / ${formatUploadBytes(totalBytes)}",
+                style = PocketShellType.labelMono,
+                color = PocketShellColors.TextMuted,
+            )
+        }
+    }
+}
+
+private fun formatUploadBytes(bytes: Long): String {
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var unit = 0
+    while (value >= 1024.0 && unit < units.lastIndex) {
+        value /= 1024.0
+        unit += 1
+    }
+    return if (unit == 0) {
+        "${bytes.coerceAtLeast(0L)} ${units[unit]}"
+    } else {
+        String.format(java.util.Locale.US, "%.1f %s", value, units[unit])
     }
 }
 

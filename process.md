@@ -37,6 +37,15 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
   to `origin/main` after every merge — never leave it stranded on a stale
   commit. Only sub-agents work in worktrees. If uncommitted WIP blocks the
   fast-forward, save it to a `wip/<date>` branch first, then fast-forward.
+
+- **The root checkout NEVER switches branches (locked, 2026-06-25).** The
+  orchestrator works in exactly ONE of two ways: a **direct push to `main`**
+  (fine for small tasks — doc/process tweaks, one-line fixes), or a **worktree**
+  (`.worktrees/<name>/` off `origin/main`) for anything branch-based. It does NOT
+  `git switch -c` / `checkout -b` on the root checkout — not for code, not for a
+  quick doc PR, not ever. Switching the root's branch takes it off `main` and
+  flickers the statusline to a PR branch. The root stays on a synced `main`,
+  period: push small things straight to `main`, do everything else in a worktree.
 - **`git worktree remove` right after merging** (and delete the branch). A
   lingering worktree looks like "uncommitted work" forever — implementers leave
   their diff uncommitted and the orchestrator applies it to `main` — even though

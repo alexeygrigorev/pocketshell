@@ -4874,7 +4874,7 @@ class TmuxSessionViewModelTest {
 
     // --- EPIC #766 slice 2a: the bg/fg arms are DRIVEN by the controller edge ----
     //
-    // These pin the re-home of the inline `reduceConnection(Background/Foreground)`
+    // These pin the re-home of the inline background/foreground
     // arm dispatch onto the ConnectionController state EDGE fired by the
     // ConnectionEffectDriver. Each asserts the post-migration decision matches the
     // inline reducer's prior behavior (D31 per-event red→green): if the bg/fg arms

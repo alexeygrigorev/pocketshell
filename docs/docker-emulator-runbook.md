@@ -32,20 +32,47 @@ scripts/start-local-avd.sh
 The helper uses the shared AVD lock, starts the local `test` AVD with the
 review-safe headless flags, waits for `sys.boot_completed=1`, and writes
 diagnostics under `build/local-avd-start/<run-id>/` if the emulator exits before
-adb device discovery. For connected-test review evidence, keep it open in a
-dedicated terminal:
+adb device discovery. A newly started emulator runs in a memory-capped cgroup by
+default via `scripts/lib/scope-run.sh`, so an emulator OOM stops that scope
+instead of the interactive session. The default cap is `POCKETSHELL_TEST_MEM=8G`;
+override it only for a specific reproduction:
+
+```bash
+POCKETSHELL_TEST_MEM=6G scripts/start-local-avd.sh
+```
+
+For connected-test review evidence, keep it open in a dedicated terminal:
 
 ```bash
 AVD_HOLD=1 scripts/start-local-avd.sh
 ```
 
-Then run `:app:connectedDebugAndroidTest` from another terminal. If the emulator
-exits after boot, the held helper records the failure in the same run directory.
+Then run `:app:connectedDebugAndroidTest` from another terminal through the
+scoped connected-test wrapper. It already runs Gradle in a sibling cgroup and
+serializes AVD access:
+
+```bash
+scripts/connected-test.sh --suffix i123 \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
+```
+
+If the emulator exits after boot, the held helper records the failure in the
+same run directory.
+
+For other heavy local reproduction commands, use the explicit cgroup wrapper:
+
+```bash
+scripts/cgroup-run.sh -- ./gradlew --no-daemon :app:compileDebugKotlin
+POCKETSHELL_TEST_MEM=6G scripts/cgroup-run.sh --unit local-repro -- bash -lc '...'
+```
+
+Only set `AVD_SCOPE=0` or bypass `scripts/cgroup-run.sh` when debugging cgroup
+setup itself.
 
 To run the same command manually:
 
 ```bash
-"$EMULATOR" -avd test \
+scripts/cgroup-run.sh -- "$EMULATOR" -avd test \
   -no-window \
   -no-audio \
   -no-boot-anim \

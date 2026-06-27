@@ -45,6 +45,7 @@
 # -----
 #   source scripts/lib/scope-run.sh
 #   pocketshell_scope_run <unit> <cmd...>
+#   pocketshell_scope_start_background <unit> <log-file> <pid-file> <cmd...>
 #
 # The memory caps are env-tunable (so CI/dev can size them):
 #   POCKETSHELL_TEST_MEM   hard MemoryMax for the scope         (default 8G)
@@ -173,4 +174,40 @@ pocketshell_scope_run() {
     systemctl --user reset-failed "$unit.scope" >/dev/null 2>&1 || true
   fi
   return "$rc"
+}
+
+# pocketshell_scope_start_background <unit> <log-file> <pid-file> <cmd...>
+#
+# Starts <cmd...> under the same memory-capped transient scope as
+# pocketshell_scope_run, but returns immediately after writing the launcher PID
+# to <pid-file>. This is for long-lived local reproduction processes such as
+# the Android emulator. The scoped process tree still has its own sibling
+# cgroup, so an OOM stops that scope rather than the interactive session.
+pocketshell_scope_start_background() {
+  local unit="$1"
+  local log_file="$2"
+  local pid_file="$3"
+  shift 3
+  if [[ -z "$unit" || -z "$log_file" || -z "$pid_file" || $# -eq 0 ]]; then
+    printf 'pocketshell_scope_start_background: need <unit> <log-file> <pid-file> and a command\n' >&2
+    return 2
+  fi
+
+  mkdir -p "$(dirname "$log_file")" "$(dirname "$pid_file")"
+
+  if ! pocketshell_scope_available; then
+    printf 'scope-run: user systemd unavailable; starting %s BARE (uncapped fallback)\n' \
+      "$unit" >&2
+    nohup "$@" >> "$log_file" 2>&1 &
+    printf '%s\n' "$!" > "$pid_file"
+    return 0
+  fi
+
+  (
+    exec >> "$log_file" 2>&1
+    pocketshell_scope_run "$unit" "$@"
+  ) &
+  printf '%s\n' "$!" > "$pid_file"
+  printf 'scope-run: background launcher for %s.scope pid=%s log=%s\n' \
+    "$unit" "$!" "$log_file" >&2
 }

@@ -12,7 +12,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$SANDBOX/scripts" "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof"
+mkdir -p \
+  "$SANDBOX/scripts" \
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/composer" \
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/costs" \
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof"
 
 cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash
@@ -24,9 +28,20 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.GoodLaunchOwnedE2eTest"
   "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
   "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
   "com.pocketshell.app.tmux.NotAProofEntryE2eTest"
 )
 SH
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerOutboundQueueTest.kt" <<'KT'
+package com.pocketshell.app.composer
+class PromptComposerOutboundQueueTest
+KT
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/costs/CostsScreenE2eTest.kt" <<'KT'
+package com.pocketshell.app.costs
+class CostsScreenE2eTest
+KT
 
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadManualHarnessE2eTest.kt" <<'KT'
 package com.pocketshell.app.proof
@@ -154,16 +169,23 @@ else
   note_fail "inline manual exemption was incorrectly reported as a new failure"
 fi
 
-if ! printf '%s' "$out" | grep -q 'NotListedBadManualE2eTest'; then
-  note_pass "unlisted proof fixture is ignored"
+if printf '%s' "$out" | awk '/NEW FAIL - androidTest E2e\/Docker class not wired/{capture=1; next} /^$/{if (capture) exit} capture {print}' | grep -q 'NotListedBadManualE2eTest'; then
+  note_pass "unlisted E2e/Docker fixture is reported by the per-push wiring guard"
 else
-  note_fail "unlisted proof fixture should not be scanned"
+  note_fail "unlisted E2e/Docker fixture should be reported as unwired"
+fi
+
+if printf '%s' "$out" | awk '/KNOWN - unwired androidTest E2e\/Docker baseline/{capture=1; next} /^$/{if (capture) exit} capture {print}' | grep -q 'CostsScreenE2eTest'; then
+  note_pass "known current unwired E2e/Docker baseline is spared"
+else
+  note_fail "known current unwired E2e/Docker baseline should be spared"
 fi
 
 rm -f \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadManualHarnessE2eTest.kt" \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadMissingSeedE2eTest.kt" \
-  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadCommentOnlySeedE2eTest.kt"
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadCommentOnlySeedE2eTest.kt" \
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/NotListedBadManualE2eTest.kt"
 cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash
 FQCN_PREFIX="com.pocketshell.app.proof"
@@ -171,6 +193,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.GoodLaunchOwnedE2eTest"
   "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
   "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
 )
 SH
 
@@ -187,6 +210,7 @@ cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 FQCN_PREFIX="com.pocketshell.app.proof"
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
 )
 SH
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/DeepLinkSessionSwitchE2eTest.kt" <<'KT'
@@ -212,6 +236,7 @@ cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 FQCN_PREFIX="com.pocketshell.app.proof"
 JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.NotAProofEntryE2eTest"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
 )
 SH
 

@@ -1,9 +1,11 @@
 name: Tests
 
 # Issue #41: run JVM unit tests and Testcontainers-driven integration tests.
-# Issue #816: protected PRs are the merge gate, so branch pushes no longer run a
-# duplicate full Tests workflow beside the pull_request run. Keep the post-merge
-# push-to-main backstop. APK builds stay on the tag-only trigger in build.yml.
+# Issue #816/#953: PRs run the cheap merge gate; Docker/emulator validation is
+# batched on main pushes or manual dispatch so every trivial/independent PR does
+# not sit in the heavy runner queue. The main-push concurrency group cancels
+# older in-flight runs when newer merges land, so the newest main commit becomes
+# the current batch head. APK builds stay on the tag-only trigger in build.yml.
 
 on:
   push:
@@ -18,6 +20,7 @@ on:
       - "**/*.md"
       - "docs/**"
       - "chat/**"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref) }}
@@ -209,6 +212,7 @@ jobs:
 
   integration:
     name: Integration tests (Docker)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -310,6 +314,7 @@ jobs:
   # connect-break class was structurally invisible to CI — the exact #848 gate gap.
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
+    if: github.event_name != 'pull_request'
     needs: [unit, python, integration]
     runs-on: ubuntu-latest
     # Issue #691 (STABILIZE): lowered 75 -> 45 as a backstop. A wedging test

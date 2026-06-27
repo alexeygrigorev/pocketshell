@@ -46,7 +46,7 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 - **One meaningful integration PR to `main` at a time.** For feature/code/risky
   issue slices, rebase the integration worktree on the latest `origin/main`, run
   the verification gate, push the issue branch, and merge only after the
-  required GitHub checks are green. Never blind-apply a stale-based patch.
+  required cheap GitHub checks are green. Never blind-apply a stale-based patch.
   Trivial/docs-only direct-to-main commits use the locked exception above
   instead of creating a PR.
 - **Integrate in a clean worktree**, not the polluted root, when assembling and
@@ -216,17 +216,20 @@ epic; follow-up issues are filed from its findings.
 - **G7 — pre-merge CI-green enforcement (#816).** `main` is protected by a
   PR-to-main flow for meaningful feature/code/risky slices. The required
   `Tests` checks are blocking before that kind of slice reaches `main`: `Unit
-  tests`, `Python utility tests (pocketshell)`, `Integration tests (Docker)`,
-  and `Emulator journey subset (load-bearing, Docker agents)`. A red required
-  check stops that merge; do not bypass it as a normal workflow. Required checks
-  must pass on the PR head, but GitHub's strict "branch must be up to date"
-  switch stays OFF because no-behavior direct-to-main commits would otherwise
-  invalidate every open PR and queue the expensive emulator job for no signal.
-  The orchestrator updates/rebases a PR before merge when `main` changed code,
-  workflow behavior, dependencies, or files that overlap the PR. The locked
-  trivial/docs-only direct-to-main lane is not a feature-slice bypass; it is the
-  normal path for no-behavior process/doc cleanups and one-line fixes. Do not
-  spend full CI or emulator queue capacity on that lane.
+  tests` and `Python utility tests (pocketshell)`. A red required check stops
+  that merge; do not bypass it as a normal workflow. Heavy
+  `Integration tests (Docker)` and
+  `Emulator journey subset (load-bearing, Docker agents)` runs are batched on
+  `main` pushes or run manually for changes that need them; they are not default
+  per-PR blockers because the emulator queue is expensive and slow. Required
+  checks must pass on the PR head, but GitHub's strict "branch must be up to
+  date" switch stays OFF because no-behavior direct-to-main commits would
+  otherwise invalidate every open PR and queue the expensive emulator job for no
+  signal. The orchestrator updates/rebases a PR before merge when `main` changed
+  code, workflow behavior, dependencies, or files that overlap the PR. The
+  locked trivial/docs-only direct-to-main lane is not a feature-slice bypass; it
+  is the normal path for no-behavior process/doc cleanups and one-line fixes. Do
+  not spend full CI or emulator queue capacity on that lane.
 
 **Pending maintainer sign-off (higher-cost, NOT yet adopted):**
 - **G8 — second adversarial reviewer** for the worst-reopen areas
@@ -343,10 +346,18 @@ Minimum pre-push gate:
 
 CI policy after issue-branch push:
 
-- After pushing, monitor CI for that slice, but do not treat waiting as the main
-  activity if other independent backlog work is available. Continue issue
-  triage, launch non-overlapping implementers/reviewers, review completed
-  worktrees, or prepare the next local verification gate.
+- After pushing, monitor the cheap required PR checks for that slice, but do not
+  treat waiting as the main activity if other independent backlog work is
+  available. Continue issue triage, launch non-overlapping
+  implementers/reviewers, review completed worktrees, or prepare the next local
+  verification gate.
+- Batch heavy Docker/emulator CI. `Integration tests (Docker)` and
+  `Emulator journey subset (load-bearing, Docker agents)` run on `main` pushes
+  and manual dispatch, not as default PR blockers. The `main` push concurrency
+  group cancels older in-flight runs when newer merges land, so a group of
+  merged PRs naturally validates at the newest batch head. Run heavy PR-scoped
+  evidence manually only when the changed area itself needs Docker/emulator
+  proof before merge.
 - If a pipeline is merely running, the orchestrator's default next action is to
   keep the backlog moving locally. Only release cuts, red CI investigation, or a
   direct dependency on that exact pipeline justify blocking on it.
@@ -359,13 +370,16 @@ CI policy after issue-branch push:
 ### Protected `main` checks
 
 `main` uses branch protection / a repository ruleset to require PR-based merges
-for meaningful feature/code/risky slices and these exact `Tests` workflow check
-names:
+for meaningful feature/code/risky slices and these exact cheap `Tests` workflow
+check names:
 
 - `Unit tests`
 - `Python utility tests (pocketshell)`
-- `Integration tests (Docker)`
-- `Emulator journey subset (load-bearing, Docker agents)`
+
+The heavy `Integration tests (Docker)` and
+`Emulator journey subset (load-bearing, Docker agents)` jobs remain part of the
+`Tests` workflow, but they run as batched `main`/manual validation instead of
+required per-PR checks.
 
 The required checks must pass on the PR head. Do not enable GitHub's strict
 "branch must be up to date" requirement as a blanket rule: it makes a
@@ -811,15 +825,15 @@ verification checklist passes, merge through a protected PR:
 
 4. Push the issue branch and open a PR against `main`. The PR title or body must
    include `Closes #N` only when the issue is fully complete.
-5. Wait for the four required `Tests` checks to complete on the PR head:
-   `Unit tests`, `Python utility tests (pocketshell)`,
-   `Integration tests (Docker)`, and
-   `Emulator journey subset (load-bearing, Docker agents)`. A red or cancelled
+5. Wait for the cheap required `Tests` checks to complete on the PR head:
+   `Unit tests` and `Python utility tests (pocketshell)`. A red or cancelled
    required check blocks merge until classified and fixed through the same
-   implementer/reviewer loop.
+   implementer/reviewer loop. Do not wait on Docker/emulator by default; those
+   heavy jobs are batched on `main` or run manually only when this PR's changed
+   area needs that proof before merge.
 6. Merge the PR only after the reviewer approval, final local verification, and
-   required checks are green. Then fast-forward local `main` and clean up the
-   worktree and branch:
+   cheap required checks are green. Then fast-forward local `main` and clean up
+   the worktree and branch:
 
    ```bash
    gh pr merge <PR> --squash --delete-branch
@@ -946,7 +960,7 @@ If any verification check fails, do not commit. Send the failure back to an impl
 
 After an issue is reviewer-approved and the orchestrator verification checklist
 passes, commit that finished task on its issue branch, open/update its PR, and
-carry it through required green checks before moving on to unrelated work.
+carry it through required cheap green checks before moving on to unrelated work.
 Prefer one small commit per approved issue or tightly coupled issue group so
 rollback remains practical.
 

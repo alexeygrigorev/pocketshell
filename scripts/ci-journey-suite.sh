@@ -1231,10 +1231,60 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.diagnostics.ConnectionLogHostMirrorReconnectDockerTest"
 )
 
+# ---------------------------------------------------------------------------
+# Issue #835 (REOPENED): CI-matrix sharding of the journey class list.
+#
+# Root cause of the persistent emulator-journey RED/cancel: ~83 journey classes
+# + 6 core-terminal proofs run STRICTLY SERIALLY on ONE swiftshader AVD take
+# ~69+ min of wall-clock AND degrade the single emulator (the #470 enumeration
+# stall worsens as the one AVD is churned by ~89 install/run/teardown cycles).
+# Even the right-sized 4200s budget / 95-min cap (#1055) could not finish: its
+# own validation run (commit 98384e91, GH Actions run 28307686762) ran the full
+# ~95 min and was CANCELLED — no green verdict. Daemon-reuse + a bigger budget cut
+# per-class overhead but the SERIAL wall-clock and single-emulator fragility
+# remained the structural blocker.
+#
+# Fix: shard the class list across a CI MATRIX of runners (.github/workflows/
+# tests.yml `strategy.matrix.shard`). Each matrix leg is its OWN runner with its
+# OWN cold-booted emulator + its OWN Docker `agents` fixtures, and runs only its
+# 1/N slice of the journey classes (round-robin by index so the heavy
+# reconnect/switch journeys at the FRONT of the list distribute evenly across
+# shards rather than all landing on one). This (a) cuts each leg's wall-clock to
+# ~1/N so it finishes comfortably inside the budget, and (b) keeps each emulator
+# far healthier (~1/N install/teardown cycles), which directly attacks the #470
+# enumeration-stall root (a churned, degraded AVD).
+#
+# POCKETSHELL_JOURNEY_CI_SHARD_TOTAL / _INDEX are set by the workflow matrix.
+# Default (unset / TOTAL<=1) = the unsharded serial path, UNCHANGED — so local
+# runs and the budget self-test still run the FULL set. This is ORTHOGONAL to the
+# #724 POCKETSHELL_JOURNEY_SHARD dev-box pool sharding (multiple emulators on ONE
+# host); the two never combine on CI (one AVD per matrix leg). The six
+# core-terminal proofs are NOT sharded — they are cheap in-process Compose UI
+# tests (no Docker churn) and run on EVERY shard so a regression in any of them is
+# caught on every leg.
+JOURNEY_CI_SHARD_TOTAL="${POCKETSHELL_JOURNEY_CI_SHARD_TOTAL:-1}"
+JOURNEY_CI_SHARD_INDEX="${POCKETSHELL_JOURNEY_CI_SHARD_INDEX:-0}"
+[[ "$JOURNEY_CI_SHARD_TOTAL" =~ ^[0-9]+$ ]] || JOURNEY_CI_SHARD_TOTAL=1
+[[ "$JOURNEY_CI_SHARD_INDEX" =~ ^[0-9]+$ ]] || JOURNEY_CI_SHARD_INDEX=0
+(( JOURNEY_CI_SHARD_TOTAL < 1 )) && JOURNEY_CI_SHARD_TOTAL=1
+(( JOURNEY_CI_SHARD_INDEX < 0 || JOURNEY_CI_SHARD_INDEX >= JOURNEY_CI_SHARD_TOTAL )) && JOURNEY_CI_SHARD_INDEX=0
+
+EFFECTIVE_JOURNEY_CLASSES=()
+if (( JOURNEY_CI_SHARD_TOTAL <= 1 )); then
+  EFFECTIVE_JOURNEY_CLASSES=("${JOURNEY_CLASSES[@]}")
+else
+  for _shard_i in "${!JOURNEY_CLASSES[@]}"; do
+    if (( _shard_i % JOURNEY_CI_SHARD_TOTAL == JOURNEY_CI_SHARD_INDEX )); then
+      EFFECTIVE_JOURNEY_CLASSES+=("${JOURNEY_CLASSES[$_shard_i]}")
+    fi
+  done
+  echo ">>> CI journey shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL} (issue #835): running ${#EFFECTIVE_JOURNEY_CLASSES[@]} of ${#JOURNEY_CLASSES[@]} journey classes (round-robin), plus all 6 core-terminal proofs"
+fi
+
 echo "=========================================================="
 echo "Per-push CI journey suite (issue #691) — load-bearing subset"
 echo "Included classes:"
-for c in "${JOURNEY_CLASSES[@]}"; do
+for c in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
   echo "  - $c"
 done
 echo "  (pocketshellCi=true; deterministic agents:2222 only, no toxiproxy)"
@@ -1440,6 +1490,54 @@ run_class() {
   return "$rc"
 }
 
+# run_ct_class <FQCN> — runs ONE core-terminal proof class as its own
+# :shared:core-terminal:connectedDebugAndroidTest invocation, wrapped in the
+# SAME budget-capped `timeout` discipline as run_class (issue #835 REOPENED).
+#
+# Before this, the six core-terminal proofs below invoked Gradle with NO
+# `timeout` wrapper and NO budget cap. That is the PROXIMATE cause of the
+# 95-min CANCEL in run 28307686762: the #796 output-burst-IME proof
+# (CodexOutputBurstImeMainThreadProofTest) HUNG on the degraded swiftshader AVD
+# at minute ~69 and, being unbounded, ran until the workflow JOB cap SIGKILLed
+# the whole step — producing a "cancelled" with NO trustworthy summary.md (the
+# exact reopen symptom, mis-routed to the #470/#771 branches). Bounding every
+# proof at min(per-class cap, budget remaining) — identical to run_class —
+# guarantees a hung proof is a CLEAN classifiable cap-hit (rc 124/137) that
+# writes a summary, NEVER a job-cap cancel. A killed invocation's Gradle
+# daemon/file-hash lock (#918) is cleared by cleanup_gradle_after_timeout, same
+# as the journey path.
+run_ct_class() {
+  local fqcn="$1"
+  local remaining cap rc attempt_start attempt_elapsed
+  LAST_RUN_CLASS_TIMEOUT_HIT=0
+  LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
+  remaining="$(budget_remaining)"
+  cap="$JOURNEY_CLASS_TIMEOUT_SECS"
+  (( remaining < cap )) && cap="$remaining"
+  if (( cap <= 0 )); then
+    LAST_RUN_CLASS_TIMEOUT_HIT=1
+    LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
+    return 124
+  fi
+  attempt_start=$SECONDS
+  timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${cap}s" \
+    "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
+    --stacktrace
+  rc=$?
+  attempt_elapsed=$((SECONDS - attempt_start))
+  if [[ $rc -eq 124 || ( $rc -eq 137 && $attempt_elapsed -ge $cap ) ]]; then
+    LAST_RUN_CLASS_TIMEOUT_HIT=1
+  fi
+  if budget_exhausted; then
+    LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
+  fi
+  if needs_gradle_cleanup_after_class_abort "$rc"; then
+    cleanup_gradle_after_timeout "$fqcn"
+  fi
+  return "$rc"
+}
+
 # ---------------------------------------------------------------------------
 # Issue #724: optional cross-lane sharding.
 #
@@ -1575,7 +1673,7 @@ SUITE_START=$SECONDS
 echo ">>> Suite-level time budget (issue #835): ${JOURNEY_STEP_BUDGET_SECS}s"
 echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow job cap: 95 min)"
 
-for fqcn in "${JOURNEY_CLASSES[@]}"; do
+for fqcn in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
   # Issue #835: stop launching new classes once the suite-level budget is spent.
   # A #470 enumeration stall earlier in the run can eat the budget; rather than
   # let the workflow job SIGKILL us mid-class (which writes NO summary and
@@ -1670,9 +1768,7 @@ CORE_TERMINAL_APPEND_BURST_CLASS="com.pocketshell.core.terminal.ui.CodexAppendBu
 APPEND_BURST_STATUS="PASS"
 
 run_core_terminal_append_burst() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_APPEND_BURST_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_APPEND_BURST_CLASS"
 }
 
 # Issue #835: if the suite budget was already spent by a #470 stall in the
@@ -1719,9 +1815,7 @@ CORE_TERMINAL_OUTPUT_BURST_IME_CLASS="com.pocketshell.core.terminal.ui.CodexOutp
 OUTPUT_BURST_IME_STATUS="PASS"
 
 run_core_terminal_output_burst_ime() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS"
 }
 
 # Issue #835: same budget guard as the #803 proof above.
@@ -1763,9 +1857,7 @@ CORE_TERMINAL_MULTICHUNK_SEED_CLASS="com.pocketshell.core.terminal.ui.CodexMulti
 MULTICHUNK_SEED_STATUS="PASS"
 
 run_core_terminal_multichunk_seed() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_MULTICHUNK_SEED_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_MULTICHUNK_SEED_CLASS"
 }
 
 if budget_exhausted; then
@@ -1807,9 +1899,7 @@ CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS="com.pocketshell.core.terminal.ui.Agen
 AGENT_LINK_AFFORDANCE_STATUS="PASS"
 
 run_core_terminal_agent_link_affordance() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS"
 }
 
 if budget_exhausted; then
@@ -1857,9 +1947,7 @@ CORE_TERMINAL_REATTACH_REPAINT_CLASS="com.termux.view.TerminalViewReattachLateSu
 REATTACH_REPAINT_STATUS="PASS"
 
 run_core_terminal_reattach_repaint() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_REATTACH_REPAINT_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_REATTACH_REPAINT_CLASS"
 }
 
 if budget_exhausted; then
@@ -1904,9 +1992,7 @@ CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS="com.pocketshell.core.terminal.selection.T
 OVERLAY_UNBOUNDED_STATUS="PASS"
 
 run_core_terminal_overlay_unbounded() {
-  "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class="$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS" \
-    --stacktrace
+  run_ct_class "$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS"
 }
 
 if budget_exhausted; then
@@ -1974,10 +2060,10 @@ echo "=========================================================="
   echo
   echo "| Selection | Args | Exit | Elapsed | Result |"
   echo "| --- | --- | --- | --- | --- |"
-  echo "| ${#JOURNEY_CLASSES[@]} load-bearing journey classes (per-class retry-once) | \`pocketshellCi=true\` | $JOURNEY_EXIT | ${SUITE_ELAPSED}s | **$journey_status** |"
+  echo "| ${#EFFECTIVE_JOURNEY_CLASSES[@]} load-bearing journey classes (shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL}; per-class retry-once) | \`pocketshellCi=true\` | $JOURNEY_EXIT | ${SUITE_ELAPSED}s | **$journey_status** |"
   echo
   echo "Classes exercised:"
-  for c in "${JOURNEY_CLASSES[@]}"; do
+  for c in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
     echo "- \`$c\`"
   done
   echo

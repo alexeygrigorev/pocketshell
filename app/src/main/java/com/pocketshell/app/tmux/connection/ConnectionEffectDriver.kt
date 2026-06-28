@@ -133,7 +133,8 @@ import kotlinx.coroutines.launch
  *   foreground return (#766 slice 2a). The VM supplies the body that re-homes the inline
  *   `reduceConnection(Foreground)` arm dispatch: it replays the stashed `pendingReattach`
  *   (a fresh connect to the detached session) or resumes a `pausedAutoReconnect`, selected
- *   via the inline-equivalent `reduceForeground` predicate. This is the post-grace
+ *   by the connection-core `ForegroundReturnEffects` (EPIC #687 Slice 0 / #1047 — the
+ *   hard-cut replacement for the deleted inline `reduceForeground` selector). This is the post-grace
  *   counterpart of [foregroundReattachEffect]: a within-grace foreground keeps the warm
  *   `-CC` channel and reseeds; a beyond-grace foreground (lease evicted on the App-grace
  *   teardown) re-dials. Defaults to a no-op so the observe-only test harness keeps its
@@ -281,8 +282,9 @@ class ConnectionEffectDriver(
             // edge (the App-grace teardown evicted the warm lease, so the controller's
             // own grace predicate is not-warm -> Reconnecting). On that edge the driver
             // fires the VM-supplied effect that replays `pendingReattach` / resumes a
-            // `pausedAutoReconnect` (selected via the inline-equivalent reduceForeground
-            // predicate). Only the Backgrounded -> Reconnecting edge fires this; a
+            // `pausedAutoReconnect` (selected by the connection-core ForegroundReturnEffects
+            // — EPIC #687 Slice 0 / #1047 — the hard-cut replacement for the deleted inline
+            // reduceForeground selector). Only the Backgrounded -> Reconnecting edge fires this; a
             // Reconnecting reached from the reconnect LADDER (a transport drop, not a
             // foreground return) is NOT a foreground arm.
             if (current is ConnectionState.Reconnecting && previous is ConnectionState.Backgrounded) {

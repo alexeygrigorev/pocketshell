@@ -5104,7 +5104,7 @@ class TmuxSessionViewModelTest {
 
             // Beyond grace (the lease was evicted on the detach teardown -> controller's grace
             // predicate is not-warm), the controller walks Backgrounded -> Reconnecting, which
-            // fires the re-homed foreground arm (ConnectionDecision.ReplayPendingReattach).
+            // fires the re-homed foreground arm (ForegroundReturnArm.ReplayPendingReattach).
             vm.onAppForegrounded()
             assertFalse(
                 "app foreground hook must arm post-grace reattach without waiting on a later driver turn",

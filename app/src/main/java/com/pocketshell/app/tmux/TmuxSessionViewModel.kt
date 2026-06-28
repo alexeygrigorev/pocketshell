@@ -61,6 +61,7 @@ import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.ForegroundReturnEffects
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
@@ -905,10 +906,11 @@ public class TmuxSessionViewModel @Inject constructor(
             foregroundReattachEffect = { graceEffects.onForegroundReattachReseed() },
             // EPIC #766 Slice 2a: the controller's Backgrounded -> Reconnecting edge (the
             // BEYOND-grace foreground) now DRIVES the foreground arm dispatch (the re-home
-            // of the inline foreground dispatch). [onControllerForegrounded]
-            // selects replay-vs-resume via the inline-equivalent [reduceForeground]
-            // predicate (pendingReattach / pausedAutoReconnect) — the controller edge is
-            // only the TRIGGER, not the divergent display-status gate.
+            // of the inline foreground dispatch). [onControllerForegrounded] delegates to
+            // the connection-core [ForegroundReturnEffects] (EPIC #687 Slice 0 / #1047),
+            // which selects replay-vs-resume from the live pendingReattach /
+            // pausedAutoReconnect payloads — the controller edge is only the TRIGGER, not
+            // the divergent display-status gate.
             foregroundReconnectEffect = { onControllerForegrounded() },
             // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
             // TransportDropped from the real flows, re-project _connectionStatus from
@@ -3406,10 +3408,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // above) the App-grace teardown evicted the warm lease, so the controller's own
         // grace predicate is not-warm and it walks Backgrounded -> Reconnecting, firing
         // [onControllerForegrounded] which replays `pendingReattach` / resumes a
-        // `pausedAutoReconnect` (selected via the inline-equivalent [reduceForeground]
-        // predicate — the #685 trap: the controller edge is the trigger, the inline
-        // predicate the gate). The inline foreground event arm is no longer
-        // consulted (Slice 2a).
+        // `pausedAutoReconnect` (selected by the connection-core [ForegroundReturnEffects]
+        // — EPIC #687 Slice 0 / #1047 — re-reading the live payloads per the #685 trap:
+        // the controller edge is the trigger, the connection-core dispatcher the gate).
+        // The inline foreground event arm is no longer consulted (Slice 2a).
         if (launchPostGraceHeldForegroundProbeIfNeeded()) return
         connectionManager.observeForeground()
         dispatchPostGraceForegroundArmIfPending()
@@ -3563,25 +3565,30 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #766 Slice 2a — the controller-EDGE-driven beyond-grace FOREGROUND effect.
-     * Fired by the [ConnectionEffectDriver] when the [ConnectionController] transitions
-     * [ConnectionState.Backgrounded] -> [ConnectionState.Reconnecting] (the beyond-grace
-     * foreground return). This is the re-home of the former inline
-     * inline foreground dispatch: the controller edge is the TRIGGER, but
-     * the replay-vs-resume SELECTION still runs through the inline-equivalent
-     * [reduceForeground] predicate (`pendingReattach` / `pausedAutoReconnect`) so behavior
-     * is byte-identical (the #685 non-byte-identical-predicate trap — the arm selection
-     * MUST re-read VM state, not the controller's display state). The no-arm case
-     * ([ConnectionDecision.Ignore]) logs the same "no-pending" skip the inline `else` arm
-     * logged.
+     * EPIC #766 Slice 2a — the controller-EDGE-driven beyond-grace FOREGROUND effect, fired
+     * by the [ConnectionEffectDriver] on the [ConnectionController]'s Backgrounded ->
+     * Reconnecting edge (the controller edge is the TRIGGER). EPIC #687 Slice 0 (#1047): a
+     * thin delegate to the connection-core [foregroundReturnEffects] — the inline
+     * `reduceForeground()` selector (the second decision authority D28 ends) is DELETED.
      */
     private fun onControllerForegrounded() {
-        when (reduceForeground()) {
-            ConnectionDecision.ReplayPendingReattach ->
-                replayPendingReattach()
-            ConnectionDecision.ResumePausedReconnect ->
-                pausedAutoReconnect?.let { resumePausedAutoReconnect(it) }
-            else ->
+        foregroundReturnEffects.dispatch()
+    }
+
+    /**
+     * EPIC #687 Slice 0 (#1047): the connection-core foreground-return decision authority,
+     * the hard-cut replacement for the deleted inline `reduceForeground()`. The payload
+     * predicates re-read the VM's live `pendingReattach` / `pausedAutoReconnect` each
+     * dispatch (the #685 re-read trap); the arm bodies are the VM's existing replay/resume
+     * IO; the no-arm case preserves the prior inline `else` "no-pending" skip log.
+     */
+    private val foregroundReturnEffects: ForegroundReturnEffects =
+        ForegroundReturnEffects(
+            hasPendingReattach = { pendingReattach != null },
+            hasPausedAutoReconnect = { pausedAutoReconnect != null },
+            replayPendingReattach = { replayPendingReattach() },
+            resumePausedAutoReconnect = { pausedAutoReconnect?.let { resumePausedAutoReconnect(it) } },
+            onNoPendingArm = {
                 latestConnectIntent?.let { intent ->
                     Log.i(
                         ISSUE_235_LIFECYCLE_TAG,
@@ -3590,8 +3597,8 @@ public class TmuxSessionViewModel @Inject constructor(
                             targetLogFields(intent.target),
                     )
                 }
-        }
-    }
+            },
+        )
 
     /**
      * EPIC #687 slice 1c-iv-c (#754): the within-grace foreground gate. We can run
@@ -3854,9 +3861,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // edge (the driver fires [onControllerForegrounded]); the inline
             // inline foreground consultation is removed. By construction this
             // branch has NO `pendingReattach`/`pausedAutoReconnect` (the `target`-deriving
-            // expression above already proved both null), so [reduceForeground] is `Ignore`
-            // and the driver-fired effect is a no-op — exactly the prior inline `else`
-            // behavior, just without re-consulting the classifier here.
+            // expression above already proved both null), so the connection-core
+            // [ForegroundReturnEffects] selects the `None` arm and the driver-fired effect
+            // is a no-op — exactly the prior inline `else` behavior, just without
+            // re-consulting the classifier here.
             connectionManager.observeForeground()
             projectStatusFromController()
             return
@@ -3943,9 +3951,10 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.ReplayPendingReattach] body —
-     * formerly the second half of [onAppForegrounded]. Unchanged behavior; only
-     * the entry decision moved to [reduceForeground].
+     * EPIC #687 slice 1a: the foreground replay body — formerly the second half of
+     * [onAppForegrounded]. Unchanged behavior; the entry decision now lives in the
+     * connection-core [ForegroundReturnEffects] (EPIC #687 Slice 0 / #1047), which fires
+     * this as its `ReplayPendingReattach` arm.
      */
     private fun replayPendingReattach() {
         val detachJob = backgroundDetachJob
@@ -16150,12 +16159,9 @@ public class TmuxSessionViewModel @Inject constructor(
         /** Detach the live `-CC` control client and stash a pending reattach. */
         data object DetachForBackground : ConnectionDecision
 
-        // --- Foreground ---
-        /** Resume an auto-reconnect that was paused while backgrounded. */
-        data object ResumePausedReconnect : ConnectionDecision
-
-        /** Replay the [pendingReattach] stashed when we backgrounded. */
-        data object ReplayPendingReattach : ConnectionDecision
+        // --- Foreground --- EPIC #687 Slice 0 (#1047): the replay-vs-resume arm decision
+        // moved into the connection core ([ForegroundReturnEffects]); the inline
+        // `reduceForeground()` + its two variants are DELETED (D22 hard-cut).
 
         // --- NetworkChanged ---
         /** Schedule a proactive reconnect for a real validated network handoff. */
@@ -16237,17 +16243,10 @@ public class TmuxSessionViewModel @Inject constructor(
         return ConnectionDecision.DetachForBackground
     }
 
-    private fun reduceForeground(): ConnectionDecision {
-        if (pendingReattach != null) return ConnectionDecision.ReplayPendingReattach
-        if (pausedAutoReconnect != null) return ConnectionDecision.ResumePausedReconnect
-        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground (no pending
-        // reattach, live session) is now handled BEFORE this reducer in
-        // [onAppForegrounded] via the driver-owned RESEED-ONLY effect — the old
-        // `ProbeForeground → probeCurrentRuntimeOnForegroundIfNeeded → connect(...)`
-        // decision is DELETED (D22 hard-cut). A foreground that is NOT within grace
-        // and has no pending reattach is a no-op here.
-        return ConnectionDecision.Ignore
-    }
+    // EPIC #687 Slice 0 (#1047): `reduceForeground()` is DELETED. The beyond-grace
+    // foreground replay-vs-resume decision now lives in the connection core
+    // ([ForegroundReturnEffects], the SINGLE foreground authority); the inline selector
+    // was the second decision authority D28 exists to end (D22 hard-cut — no shadow).
 
     private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
         if (!appActive) return ConnectionDecision.Ignore

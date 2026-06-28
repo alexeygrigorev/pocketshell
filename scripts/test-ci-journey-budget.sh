@@ -4,7 +4,7 @@
 #
 # The recurring failure: the in-emulator #470 tmux `list-sessions` enumeration
 # stall makes session/reconnect journeys burn their retry windows; with no
-# suite-level deadline the 45-min workflow job cap SIGKILLs the suite mid-loop
+# suite-level deadline the workflow job cap SIGKILLs the suite mid-loop
 # before summary.md is written, so the workflow classifier mis-routes the red to
 # "EMULATOR INFRA UNAVAILABLE (#771)".
 #
@@ -17,8 +17,11 @@
 #       (NOT `JOURNEY_FAILED` and NOT a missing file),
 #   (d) the suite still exits NON-ZERO so the first attempt outcome records the
 #       timeout and the classifier can inspect the summary,
-#   (e) the workflow classifier grep that distinguishes a #470 timeout from a
-#       genuine failure / infra abort routes this summary to advisory-green.
+#   (e) the DURABLE GUARD (issue #835 REOPENED, D31): the workflow classifier
+#       routes a budget-timeout summary to a HARD-RED timeout verdict — NOT
+#       advisory-green (which used to MASK a cut-short load-bearing class) and
+#       NOT the #771 infra branch. A budget timeout = a load-bearing class did
+#       not reach a verdict = the gate FAILS.
 #   (f) a cancelled retry is classified before any `Failed BOTH attempts`
 #       summary, because summary.md can be stale from the first cold boot.
 #   (g) first-attempt diagnostics are snapshotted before the workflow retry can
@@ -40,8 +43,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/tests.yml"
 THIS_TEST="$SCRIPT_DIR/test-ci-journey-budget.sh"
 
-# (pre) #908 budget/default/comment guard: prove the suite budget leaves
-# explicit slack under the workflow cap after a worst-case emulator boot.
+# (pre) #835 right-sized budget/default/comment guard: prove the suite budget is
+# large enough to run the full load-bearing selection to a verdict AND still
+# leaves explicit slack under the workflow cap after a worst-case emulator boot.
 job_cap_min="$(awk '
   /^  emulator-journey:/ { in_job=1; next }
   in_job && /^  [A-Za-z0-9_-]+:/ { in_job=0 }
@@ -50,8 +54,8 @@ job_cap_min="$(awk '
 [[ "$job_cap_min" =~ ^[0-9]+$ ]] \
   || fail "(pre) could not parse emulator-journey timeout-minutes from tests.yml"
 job_cap_secs=$((job_cap_min * 60))
-[[ "$job_cap_secs" -eq 2700 ]] \
-  || fail "(pre) emulator-journey job cap must stay 45 min / 2700s (got ${job_cap_secs}s)"
+[[ "$job_cap_secs" -eq 5700 ]] \
+  || fail "(pre) emulator-journey job cap must be 95 min / 5700s after the #835 right-size (got ${job_cap_secs}s)"
 
 mapfile -t emulator_boot_timeout_values < <(awk '/emulator-boot-timeout:/ { print $2 }' "$WORKFLOW")
 [[ "${#emulator_boot_timeout_values[@]}" -gt 0 ]] \
@@ -69,25 +73,65 @@ emulator_boot_timeout_secs="${emulator_boot_timeout_values[0]}"
 default_suite_budget_secs="$(sed -n 's/^JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-\([0-9][0-9]*\)}"$/\1/p' "$REAL_SUITE")"
 [[ "$default_suite_budget_secs" =~ ^[0-9]+$ ]] \
   || fail "(pre) could not parse default JOURNEY_STEP_BUDGET_SECS from ci-journey-suite.sh"
-[[ "$default_suite_budget_secs" -eq 1200 ]] \
-  || fail "(pre) default JOURNEY_STEP_BUDGET_SECS must stay 1200s / 20 min (got ${default_suite_budget_secs}s)"
+[[ "$default_suite_budget_secs" -eq 4200 ]] \
+  || fail "(pre) default JOURNEY_STEP_BUDGET_SECS must be 4200s / 70 min after the #835 right-size (got ${default_suite_budget_secs}s)"
 
 remaining_slack_secs=$((job_cap_secs - emulator_boot_timeout_secs - default_suite_budget_secs))
 [[ "$remaining_slack_secs" -ge 600 ]] \
   || fail "(pre) insufficient post-boot slack: ${job_cap_secs}s job cap - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s (< 600s)"
 
-grep -q 'default 20 min' "$REAL_SUITE" \
-  || fail "(pre) ci-journey-suite.sh budget comment must document the 20-min default"
-grep -q '45-min job cap (2700s) - worst-case emulator boot (900s) - default suite' "$REAL_SUITE" \
-  || fail "(pre) ci-journey-suite.sh budget comment must show the safe arithmetic"
-grep -q 'workflow job cap: 45 min' "$REAL_SUITE" \
-  || fail "(pre) ci-journey-suite.sh log line must refer to the 45-min job cap"
-grep -q '20-min suite budget' "$WORKFLOW" \
-  || fail "(pre) tests.yml first-summary comment must match the 20-min suite budget"
+grep -q '95-min job cap (5700s) - worst-case emulator boot (900s) - default suite' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh budget comment must show the right-sized arithmetic"
+grep -q 'budget (4200s) = 600s' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh budget comment must document the 4200s/600s arithmetic"
+grep -q 'workflow job cap: 95 min' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh log line must refer to the 95-min job cap"
+grep -q '95-min cap (5700s) - 900s worst-case boot - 4200s' "$WORKFLOW" \
+  || fail "(pre) tests.yml timeout-minutes comment must show the 5700s/900s/4200s arithmetic"
+# The masking the #835 reopen is about: a budget timeout must NOT be downgraded
+# to advisory-green. Pin DIRECTLY on the real workflow classifier text: the
+# timeout verdict must be reported as a `::error` (red), and the old advisory
+# `::warning title=Emulator journey TIMEOUT` (which paired with `exit 0`) must be
+# GONE. A regression that re-downgrades it to a warning/green trips this.
+grep -q 'HARD RED' "$WORKFLOW" \
+  || fail "(pre) tests.yml classifier must document the budget timeout is now a HARD RED (#835 durable guard)"
+grep -q '::error title=Emulator journey TIMEOUT' "$WORKFLOW" \
+  || fail "(pre) tests.yml classifier must report the journey TIMEOUT as a ::error (red), not advisory"
+if grep -q '::warning title=Emulator journey TIMEOUT' "$WORKFLOW"; then
+  fail "(pre) tests.yml still has an advisory ::warning journey-TIMEOUT branch — the #835 masking regressed"
+fi
+# Each TIMEOUT ::error must be immediately followed by `exit 1` (red), never
+# `exit 0`. Walk the file: after a line containing the timeout error title, the
+# next `exit N` we see must be `exit 1` (set a `bad` flag otherwise; print the
+# verdict ONCE at END so awk's `exit`-runs-END quirk can't mask it).
+timeout_exit_verdict="$(awk '
+  /::error title=Emulator journey TIMEOUT/ { armed=1; next }
+  armed && /[[:space:]]exit 0([[:space:]]|$)/ { bad=1; armed=0 }
+  armed && /[[:space:]]exit 1([[:space:]]|$)/ { armed=0 }
+  END { print (bad ? "ADVISORY" : "OK") }
+' "$WORKFLOW")"
+[[ "$timeout_exit_verdict" == "OK" ]] \
+  || fail "(pre) a journey-TIMEOUT ::error is followed by exit 0 (advisory-green) — the #835 masking regressed"
+# Stale pre-#835 budget/cap wording must not survive in the suite or workflow.
+# Scan ONLY $REAL_SUITE + $WORKFLOW (not $THIS_TEST) so the regex literal below
+# can't match its own definition line. Tokens use a split ("12""00") so even
+# this assertion's source text never contains the contiguous stale string.
+stale_budget_re="JOURNEY_STEP_BUDGET_SECS:-12""00|default 2""0 min|45-min job cap \(27""00s\)|workflow job cap: 4""5 min"
+if grep -qE "$stale_budget_re" "$REAL_SUITE" "$WORKFLOW"; then
+  fail "(pre) stale pre-#835 budget/cap wording found; use the right-sized 4200s budget / 95-min cap"
+fi
+# #835 REOPENED tax-cut pin: the journey class invocation must REUSE the Gradle
+# daemon (no `--no-daemon` on :app:connectedDebugAndroidTest). Scan $REAL_SUITE
+# only so this regex literal can't match its own definition. The daemon reuse is
+# what makes ~89 serial invocations fit the right-sized budget; a regression back
+# to `--no-daemon` would blow the budget and re-introduce the STEP_TIMEOUT.
+if grep -qE -- '--no-daemon[[:space:]]+:app:connectedDebugAndroidTest' "$REAL_SUITE"; then
+  fail "(pre) journey :app:connectedDebugAndroidTest still passes --no-daemon; the #835 daemon-reuse tax cut regressed"
+fi
 stale_step_cap_re="workflow ste""p|ste""p cap|45-min ste""p|45 min ste""p"
 if grep -qE "$stale_step_cap_re" \
   "$REAL_SUITE" "$WORKFLOW" "$THIS_TEST"; then
-  fail "(pre) stale workflow-timeout wording found; use 45-min job cap"
+  fail "(pre) stale workflow-timeout wording found; refer to the job cap, not a workflow ste""p timeout"
 fi
 
 preserve_line="$(grep -n 'name: Preserve first journey attempt diagnostics' "$WORKFLOW" | cut -d: -f1)"
@@ -105,7 +149,7 @@ grep -q 'cp -a artifacts/ci-journey/.' "$WORKFLOW" \
   || fail "(pre) preservation step must snapshot artifacts/ci-journey before retry overwrites summary.md"
 grep -q 'summary-missing.txt' "$WORKFLOW" \
   || fail "(pre) preservation step must record first-attempt missing-summary infra aborts"
-pass "(pre) #908 budget arithmetic pinned (${job_cap_secs}s job - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s slack)"
+pass "(pre) #835 right-sized budget arithmetic pinned (${job_cap_secs}s job - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s slack)"
 pass "(pre) first-attempt diagnostics are preserved before emulator retry"
 
 # ---------------------------------------------------------------------------
@@ -185,13 +229,19 @@ pass "(c) summary has the timeout marker and NOT a genuine-failure marker"
 
 # (d) the suite exited NON-ZERO so the workflow sees a failed first attempt and
 #     then lets the classifier decide whether the summary is genuine-failure red
-#     or timeout-only advisory-green.
+#     or timeout red.
 [[ "$rc" -ne 0 ]] || fail "(d) suite exited 0 on a budget timeout — classifier would never inspect the timeout summary"
 pass "(d) suite exited non-zero (rc=$rc) on a budget timeout"
 
-# (e) classifier routing: replicate the workflow's grep ladder against this
-#     summary and assert it lands on the TIMEOUT branch, not genuine-failure,
-#     not infra-abort.
+# (e) DURABLE GUARD (issue #835 REOPENED, D31): replicate the workflow's
+#     classifier ladder against this summary and assert a budget timeout is now a
+#     HARD-RED timeout verdict — NOT advisory-green (which used to mask a
+#     cut-short load-bearing class), NOT genuine-failure, NOT infra-abort.
+#
+# classify() mirrors .github/workflows/tests.yml "Classify emulator-journey
+# result"; verdict_is_red() mirrors its exit code (exit 0 = green, exit 1 = red).
+# A regression that re-downgrades the timeout to green would flip
+# verdict_is_red() and fail this test.
 classify() {
   local s="$1"
   local first_outcome="${2:-failure}"
@@ -218,7 +268,8 @@ classify() {
     echo "FIRST_GENUINE_FAILURE"; return
   fi
   if [[ "$first_timeout" == "true" ]]; then
-    echo "JOURNEY_TIMEOUT_ADVISORY"; return
+    # #835 REOPENED: the first-attempt budget timeout is now a HARD RED.
+    echo "FIRST_TIMEOUT_RED"; return
   fi
   if [[ "$first_outcome" == "cancelled" || "$retry_outcome" == "cancelled" || "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
     echo "STEP_CANCELLED"; return
@@ -227,14 +278,27 @@ classify() {
     echo "GENUINE_FAILURE"; return
   fi
   if [[ -f "$s" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$s"; then
-    echo "JOURNEY_TIMEOUT"; return
+    # #835 REOPENED: the both-failed budget timeout is now a HARD RED.
+    echo "JOURNEY_TIMEOUT_RED"; return
   fi
   echo "INFRA_UNAVAILABLE"
 }
+
+# verdict_is_red — exit 0 (true) iff this verdict turns the job RED, mirroring
+# the workflow classifier's exit code. ONLY a clean first/retry pass is green.
+verdict_is_red() {
+  case "$1" in
+    PASS_FIRST|PASS_RETRY) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 verdict="$(classify "$summary")"
-[[ "$verdict" == "JOURNEY_TIMEOUT_ADVISORY" ]] \
-  || fail "(e) classifier routed to '$verdict', expected JOURNEY_TIMEOUT_ADVISORY"
-pass "(e) workflow classifier grep ladder routes this summary to advisory timeout"
+[[ "$verdict" == "FIRST_TIMEOUT_RED" ]] \
+  || fail "(e) classifier routed to '$verdict', expected FIRST_TIMEOUT_RED (a budget timeout must NOT be advisory-green — #835 durable guard)"
+verdict_is_red "$verdict" \
+  || fail "(e) budget-timeout verdict '$verdict' was classified GREEN — the #835 masking regressed"
+pass "(e) workflow classifier routes a budget timeout to a HARD-RED verdict (#835 durable guard)"
 
 # (f) stale-summary guard: the two cold-boot attempts share the same summary.md
 #     path. If the retry is cancelled, an old `Failed BOTH attempts` summary
@@ -343,13 +407,22 @@ grep -q 'GRADLE_TIMEOUT_CLEANUP:' "$out_lock" \
   || fail "(i) cleanup marker was not logged after timeout"
 grep -q 'JOURNEY_FLAKE_RECOVERED:' "$out_lock" \
   || fail "(i) timed-out class did not recover on retry"
-grep -q -- '--no-daemon :app:connectedDebugAndroidTest' "$lock_stub_dir/args.log" \
-  || fail "(i) per-class journey invocation did not use --no-daemon"
+# #835 REOPENED: the per-class journey invocation now REUSES the Gradle daemon
+# (no `--no-daemon` flag) to cut the cold-Gradle tax, but it is STILL one targeted
+# `class=` invocation (per-class isolation preserved). Assert both: the journey
+# task ran AND it did NOT carry the old `--no-daemon` flag.
+grep -q -- ':app:connectedDebugAndroidTest' "$lock_stub_dir/args.log" \
+  || fail "(i) per-class journey task did not run"
+grep -q -- 'class=' "$lock_stub_dir/args.log" \
+  || fail "(i) per-class journey invocation lost its single-class targeting"
+if grep -q -- '--no-daemon' "$lock_stub_dir/args.log"; then
+  fail "(i) journey invocation still passes --no-daemon; the #835 daemon-reuse tax cut regressed"
+fi
 if grep -q 'Cannot lock file hash cache' "$out_lock"; then
   sed -n '1,160p' "$out_lock"
   fail "(i) retry still saw the simulated Gradle file-hash lock"
 fi
-pass "(i) per-class timeout stops Gradle and retry avoids the poisoned file-hash lock"
+pass "(i) daemon-reused per-class timeout stops Gradle and retry avoids the poisoned file-hash lock"
 
 # The hard timeout path matters too: GNU `timeout --kill-after` returns 137 when
 # the child ignores TERM and is killed by the SIGKILL backstop. That path must
@@ -571,11 +644,41 @@ fi
 # "first attempt outcome == success -> exit 0" short-circuit; in the real
 # workflow a clean PASS never reaches the grep ladder at all. We only assert
 # the summary itself does NOT carry the timeout marker (so it could not be
-# mis-routed to JOURNEY_TIMEOUT if the ladder were reached).
+# mis-routed to JOURNEY_TIMEOUT_RED if the ladder were reached).
 neg_verdict="$(classify "$summary2")"
-[[ "$neg_verdict" != "JOURNEY_TIMEOUT" ]] \
-  || fail "(neg) clean run mis-classified as JOURNEY_TIMEOUT"
+[[ "$neg_verdict" != "JOURNEY_TIMEOUT_RED" && "$neg_verdict" != "FIRST_TIMEOUT_RED" ]] \
+  || fail "(neg) clean run mis-classified as a timeout"
+[[ "$rc2" -eq 0 ]] \
+  || { cat "$out2"; fail "(neg) clean run (generous budget, every class verdicts) exited non-zero (rc=$rc2)"; }
 pass "(neg) clean run: no false timeout (summary has no timeout marker; rc=$rc2)"
+
+# (neg-2) ACCEPTANCE CRITERION 2 (#835 REOPENED): with a budget that fits, EVERY
+# selected load-bearing class reaches a verdict — none is silently cut short.
+# Assert the historically cut-short classes (BackgroundGrace, LiveHold) and a
+# share/composer/folder tail representative are present in the run AND that NO
+# class is bucketed as a budget timeout (no "cut short / not run" section).
+for cut_short_class in \
+  com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest \
+  com.pocketshell.app.proof.SessionForegroundServiceLiveHoldJourneyE2eTest; do
+  grep -q "$cut_short_class" "$summary2" \
+    || { cat "$summary2"; fail "(neg-2) $cut_short_class missing from a healthy full run — selection drifted"; }
+done
+# The "cut short / not run" budget bucket must be ABSENT on a healthy run.
+if grep -q 'cut short / not run' "$summary2"; then
+  cat "$summary2"
+  fail "(neg-2) a healthy full run wrongly bucketed a class as cut-short / not-run"
+fi
+# Every selected class launched gradle (one daemon-reused invocation each) —
+# count the per-class launches in the run log and assert it matches the FULL
+# class count (all quoted JOURNEY_CLASSES entries, not just the $FQCN_PREFIX
+# ones), so a healthy run is proven to reach a verdict for EVERY class.
+class_count="$(awk '/^JOURNEY_CLASSES=\(/{f=1;next} /^\)/{f=0} f && /^[[:space:]]*"/{c++} END{print c+0}' "$SANDBOX/scripts/ci-journey-suite.sh")"
+[[ "$class_count" -ge 80 ]] \
+  || fail "(neg-2) parsed only $class_count journey classes — enumeration changed unexpectedly (expected the full ~83-class load-bearing set)"
+launched="$(grep -c '>>> JOURNEY CLASS:.*(attempt 1)' "$out2" || true)"
+[[ "$launched" -eq "$class_count" ]] \
+  || { sed -n '1,40p' "$out2"; fail "(neg-2) launched $launched/$class_count journey classes on a healthy run — some class never reached a verdict"; }
+pass "(neg-2) healthy run reaches a verdict for all $class_count load-bearing classes (none cut short)"
 
 echo
 echo "ALL TESTS PASSED"

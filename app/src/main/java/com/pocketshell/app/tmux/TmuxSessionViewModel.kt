@@ -67,6 +67,8 @@ import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
 import com.pocketshell.app.tmux.connection.ForegroundReturnEffects
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
+import com.pocketshell.app.tmux.connection.PassiveDropArm
+import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
@@ -937,7 +939,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // keeping the submit itself inside the driver-owned path.
             controlChannelDrops = connectionTmuxPort.disconnectedClients,
             shouldSubmitControlChannelDrop = { client ->
-                classifyPassiveTransportDrop(client) != ConnectionDecision.Ignore
+                passiveTransportDropEffects.classify(client) != PassiveDropArm.Ignore
             },
             controlChannelDroppedEffect = { client -> onControllerTransportDropped(client) },
             // Issue #972: on the current host's lease coming back `Up` after a
@@ -1171,7 +1173,7 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun triggerCleanPassiveDropForTest(): Boolean {
         val client = clientRef ?: return false
-        if (classifyPassiveTransportDrop(client) == ConnectionDecision.Ignore) return false
+        if (passiveTransportDropEffects.classify(client) == PassiveDropArm.Ignore) return false
         connectionManager.submit(
             CoreConnectionEvent.TransportDropped(reason = "test_clean_outage_seam"),
         )
@@ -3195,6 +3197,40 @@ public class TmuxSessionViewModel @Inject constructor(
                 // The clean-detach teardown reads the bookkeeping just set above; run it
                 // AFTER, through the single [GraceEffects] owner.
                 graceEffects.onBackgrounded()
+            },
+        )
+
+    /**
+     * EPIC #687 Slice 2 (#1047): the connection-core PASSIVE-TRANSPORT-DROP authority — the
+     * hard-cut replacement for the deleted inline `classifyPassiveTransportDrop()` selector
+     * (D28 single active path; D22 hard-cut). All four passive-drop call sites (the driver's
+     * [ConnectionEffectDriver] `shouldSubmitControlChannelDrop` stale-client gate, the
+     * [triggerCleanPassiveDropForTest] seam, the stale-client breadcrumb observer, and the
+     * real [handlePassiveClientDisconnect] dispatch) route their decision through
+     * [PassiveTransportDropEffects.classify]. The predicates re-read the VM's live state at
+     * call time (the #685 re-read trap: the live `clientRef` identity, the
+     * `activeTarget`/`connectingTarget`, the in-app-navigation intent). The per-arm recovery
+     * IO stays in [handlePassiveClientDisconnect] (it threads handler-local
+     * `target`/`reason`/`disconnectEvent`, including the [triggerCleanPassiveDropForTest]
+     * synthetic event); only the DECISION moved to the connection core.
+     */
+    private val passiveTransportDropEffects: PassiveTransportDropEffects =
+        PassiveTransportDropEffects(
+            isExplicitDetach = { client ->
+                val disconnectEvent = client.disconnectEvent.value
+                disconnectEvent?.reason == TmuxDisconnectReason.ExplicitDetach ||
+                    disconnectEvent?.intent == "detach_or_replace"
+            },
+            isCurrentClient = { client -> clientRef === client },
+            hasTarget = { (activeTarget ?: connectingTarget) != null },
+            screenStartedForCleared = { screenStartedForCleared },
+            navigatingToDifferentSession = {
+                val target = activeTarget ?: connectingTarget
+                connectJob?.isActive == true ||
+                    (
+                        target != null &&
+                            latestConnectIntent?.let { it.target.sessionName != target.sessionName } == true
+                    )
             },
         )
 
@@ -7333,8 +7369,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 // driver-owned handler records the canonical `passive_disconnect`
                 // diagnostic so silent reattach cannot cancel this collector before
                 // observability lands.
-                val decision = classifyPassiveTransportDrop(client)
-                if (decision == ConnectionDecision.Ignore) {
+                val decision = passiveTransportDropEffects.classify(client)
+                if (decision == PassiveDropArm.Ignore) {
                     DiagnosticEvents.record(
                         "connection",
                         "passive_disconnect_ignored",
@@ -7422,9 +7458,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // nothing tappable. A transport drop is real regardless of the display
         // status; the controller's `onTransportDropped` already walks `Attaching`/
         // `Live`/`Reattaching`/`Reconnecting` into the silent-heal ladder, and the
-        // [classifyPassiveTransportDrop] self-gates the IO arm by client identity
-        // (a stale-client drop is ignored there). The display status no longer
-        // gates recovery — only the client-identity guard in [classifyPassiveTransportDrop]
+        // connection-core [PassiveTransportDropEffects] self-gates the IO arm by client
+        // identity (a stale-client drop is ignored there). The display status no longer
+        // gates recovery — only the client-identity guard in [PassiveTransportDropEffects]
         // does.
         val target = activeTarget ?: connectingTarget
         val reason = passiveDisconnectMessage(target, disconnectEvent)
@@ -7483,8 +7519,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // Classify the drop FIRST (status-agnostic — #895/#766). `Ignore` means the
         // dropped client is not the current one (a stale `-CC` close on a healthy
         // fast switch, the #635 spurious-band case) — for that we surface NOTHING.
-        val decision = classifyPassiveTransportDrop(client)
-        if (decision == ConnectionDecision.Ignore) {
+        val decision = passiveTransportDropEffects.classify(client)
+        if (decision == PassiveDropArm.Ignore) {
             projectStatusFromController()
             return
         }
@@ -7498,13 +7534,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // checkpoint); the controller-fed band above is the escapable state, this
         // drives the recovery underneath it.
         when (decision) {
-            ConnectionDecision.SkipPassiveInAppNavigation ->
+            PassiveDropArm.SkipInAppNavigation ->
                 if (target != null) skipPassiveInAppNavigation(target)
-            ConnectionDecision.PausePassiveUntilForeground ->
+            PassiveDropArm.PauseUntilForeground ->
                 if (target != null) pausePassiveUntilForeground(target, reason, disconnectEvent)
-            ConnectionDecision.SilentReattachWithinGrace ->
+            PassiveDropArm.SilentReattachWithinGrace ->
                 silentReattachWithinPassiveGrace(client, target, reason, disconnectEvent)
-            else -> Unit
+            PassiveDropArm.Ignore -> Unit
         }
         // APPROVED #685 divergence #1 (silent recovery): a recoverable live-channel
         // drop moves the controller Live → Reattaching, so the displayed status is a
@@ -7516,7 +7552,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.SkipPassiveInAppNavigation]
+     * EPIC #687 slice 1a: the [PassiveDropArm.SkipInAppNavigation]
      * body (#630) — formerly inline in [handlePassiveClientDisconnect].
      * Unchanged behavior.
      */
@@ -7533,7 +7569,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.PausePassiveUntilForeground]
+     * EPIC #687 slice 1a: the [PassiveDropArm.PauseUntilForeground]
      * body — formerly inline in [handlePassiveClientDisconnect]. Unchanged
      * behavior.
      */
@@ -7558,7 +7594,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.SilentReattachWithinGrace]
+     * EPIC #687 slice 1a: the [PassiveDropArm.SilentReattachWithinGrace]
      * body — formerly the grace-job tail of [handlePassiveClientDisconnect].
      * Unchanged behavior.
      */
@@ -16264,21 +16300,12 @@ public class TmuxSessionViewModel @Inject constructor(
          */
         data object SuppressNetworkTransportProvenAlive : ConnectionDecision
 
-        // --- TransportDropped (passive disconnect) ---
-        /**
-         * The screen stopped for an in-app navigation to a DIFFERENT session
-         * (#630) — skip the pause entirely so it cannot race the new connect.
-         */
-        data object SkipPassiveInAppNavigation : ConnectionDecision
-
-        /**
-         * The screen stopped (app background / explicit leave) — pause the
-         * auto-reconnect until foreground rather than racing a grace reattach.
-         */
-        data object PausePassiveUntilForeground : ConnectionDecision
-
-        /** Foreground passive disconnect — race the within-grace silent reattach. */
-        data object SilentReattachWithinGrace : ConnectionDecision
+        // --- TransportDropped (passive disconnect) --- EPIC #687 Slice 2 (#1047): the
+        // passive-drop classification moved into the connection core
+        // ([PassiveTransportDropEffects], the SINGLE passive-drop authority); the inline
+        // `classifyPassiveTransportDrop()` + its three variants (`SkipPassiveInAppNavigation`
+        // / `PausePassiveUntilForeground` / `SilentReattachWithinGrace`) are DELETED (D22
+        // hard-cut). The arms are now [com.pocketshell.app.tmux.connection.PassiveDropArm].
     }
 
     // EPIC #687 Slice 1 (#1047): `reduceBackground()` is DELETED. The background
@@ -16354,43 +16381,13 @@ public class TmuxSessionViewModel @Inject constructor(
         return ConnectionDecision.ScheduleNetworkReconnect
     }
 
-    private fun classifyPassiveTransportDrop(client: TmuxClient): ConnectionDecision {
-        val disconnectEvent = client.disconnectEvent.value
-        if (
-            disconnectEvent?.reason == TmuxDisconnectReason.ExplicitDetach ||
-            disconnectEvent?.intent == "detach_or_replace"
-        ) {
-            return ConnectionDecision.Ignore
-        }
-        // Issue #895 (#766 down-payment): STATUS-AGNOSTIC. The old
-        // `inlineConnectionStatus !is Connected -> Ignore` gate swallowed a drop
-        // that landed during the `Switching` (Attaching) window — the R1
-        // switch-while-black freeze. The real protection against acting on the
-        // brief tmux `-CC` close of a NORMAL fast switch (the #635 spurious-band
-        // risk) is the client-identity guard below: during a healthy switch the
-        // old client's `disconnected` edge fires AFTER `clientRef` already points
-        // at the new client, so it is correctly ignored. A drop on the CURRENT
-        // client — whatever the display status — is a real transport loss and
-        // must drive recovery, so it is no longer gated by the status. An
-        // Idle/Gone session has no current client, so the identity guard below
-        // returns Ignore for it; the controller also self-gates a drop from a
-        // non-live-ish state, so no spurious band can surface there.
-        //
-        // Only react if this is still THE active client (a fresh connect may have
-        // swapped in a new client whose state this drop must not stomp).
-        if (clientRef !== client) return ConnectionDecision.Ignore
-        val target = activeTarget ?: connectingTarget
-        if (target != null && !screenStartedForCleared) {
-            val navigatingToDifferentSession = connectJob?.isActive == true ||
-                latestConnectIntent?.let { it.target.sessionName != target.sessionName } == true
-            return if (navigatingToDifferentSession) {
-                ConnectionDecision.SkipPassiveInAppNavigation
-            } else {
-                ConnectionDecision.PausePassiveUntilForeground
-            }
-        }
-        return ConnectionDecision.SilentReattachWithinGrace
-    }
+    // EPIC #687 Slice 2 (#1047): `classifyPassiveTransportDrop()` is DELETED. The passive
+    // `-CC` drop classification now lives in the connection core
+    // ([PassiveTransportDropEffects], the SINGLE passive-drop authority), fed the live
+    // `clientRef` identity / `activeTarget`/`connectingTarget` / in-app-navigation context
+    // the controller's display state lacks; the inline selector was the second decision
+    // authority D28 exists to end (D22 hard-cut — no shadow). The status-agnostic #895/#766
+    // contract + the #635 client-identity guard now live in [selectPassiveDropArm].
 
     /** Coarse-grained connection state. Mirrors `SessionViewModel.ConnectionStatus`. */
     public sealed interface ConnectionStatus {

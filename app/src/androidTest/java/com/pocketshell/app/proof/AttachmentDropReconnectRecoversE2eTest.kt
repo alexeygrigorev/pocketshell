@@ -43,9 +43,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
-import org.junit.rules.TestRule
 import org.junit.runner.RunWith
-import org.junit.runners.model.Statement
 import java.io.File
 
 /**
@@ -83,13 +81,17 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AttachmentDropReconnectRecoversE2eTest {
 
+    // Issue #788/#848: createAndroidComposeRule<MainActivity>() + the shared
+    // SeedBeforeLaunchRule own the harness — the durable launch-owned shape the CI
+    // journey-harness guard pins. The compose rule launches MainActivity in its
+    // `before()`, so the remote tmux session + DB host row are seeded BEFORE launch
+    // by the chain (outer `before()` first): grant perms -> seed -> launch.
     val compose = createAndroidComposeRule<MainActivity>()
-    private val grantPermissions = PreGrantPermissionsRule()
 
     @get:Rule
     val ruleChain: RuleChain = RuleChain
-        .outerRule(grantPermissions)
-        .around(seedFixtureRule())
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
         .around(compose)
 
     private var seededKey: String? = null
@@ -98,24 +100,24 @@ class AttachmentDropReconnectRecoversE2eTest {
     private val uploadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val timings = mutableListOf<String>()
 
-    private fun seedFixtureRule(): TestRule = TestRule { base, _ ->
-        object : Statement() {
-            override fun evaluate() {
-                runBlocking {
-                    val key = readFixtureKey()
-                    seededKey = key
-                    waitForSshFixtureReady(SshKey.Pem(key))
-                    seedTmuxSession(key)
-                    seededHostRowTag = seedDockerHost(key)
-                }
-                base.evaluate()
-            }
-        }
+    /**
+     * Issue #788: all LAUNCH-time state established BEFORE MainActivity launches
+     * (run by [SeedBeforeLaunchRule], which evaluates before the compose rule's
+     * `before()`): clear the last-session pref so the app reads a clean baseline on
+     * its first composition (read at launch — clearing it in @Before, post-launch,
+     * would be too late), then seed the remote tmux session + DB host row.
+     */
+    private suspend fun seedBeforeLaunch() {
+        clearLastSessionPrefs()
+        val key = readFixtureKey()
+        seededKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSession(key)
+        seededHostRowTag = seedDockerHost(key)
     }
 
     @Before
     fun setUp() {
-        clearLastSessionPrefs()
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
     }
 

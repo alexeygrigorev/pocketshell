@@ -528,76 +528,58 @@ internal class RealSshSession(
             // forever, hanging the calling coroutine (and any caller that didn't
             // wrap us in its own timeout — six gateways did not).
             //
-            // Issue #1046: the bound is now a per-read NO-PROGRESS budget, NOT a
-            // whole-call wall-clock ceiling. The old design wrapped the ENTIRE
-            // read+join in one [WallClockCeiling] of [execReadTimeoutMs] and
-            // CLOSED the shared lease transport the instant the call exceeded that
-            // budget in TOTAL — so a slow-but-*progressing* control exec (large
-            // directory listing, `cat`, git probe) on a high-RTT cellular link
-            // could trip the ceiling, tear the shared `-CC` session, and trigger a
-            // spurious reconnect even though bytes were still arriving. That is a
-            // mobile spurious-reconnect cause. Upload/download already bound by
-            // no-progress windows (UPLOAD_/DOWNLOAD_STALL_TIMEOUT_MS); exec now
-            // mirrors that shape: the budget RESETS on every byte that arrives on
-            // EITHER stream, so a progressing exec keeps the transport alive for
-            // as long as it keeps making progress, and only a genuinely wedged
-            // read (no bytes on any stream for the whole window) is bounded. See
-            // [InputStream.readStepUnderStallBudget] / [ExecReadStallBudget].
+            // The bound is a REAL wall-clock watchdog ([WallClockCeiling]), NOT a
+            // coroutine `withTimeout`/`withTimeoutOrNull` (issue #940 / the #937
+            // regression). `withTimeout` reads the delay source from the CALLER's
+            // coroutine context — under `runTest`'s virtual, auto-advancing clock
+            // (every `:shared:core-ssh:integrationTest`) the ceiling fires
+            // INSTANTLY in virtual time and interrupts a HEALTHY live sshj read,
+            // aborting it as `InterruptedException` (the 13/21 integration-suite
+            // break). The wall-clock watchdog interrupts the worker thread only
+            // after [execReadTimeoutMs] of REAL elapsed time, identically in
+            // production and under any test scheduler, so a healthy read is never
+            // cut short while a genuinely-wedged read is still reclaimed. The body
+            // runs inside `runInterruptible(Dispatchers.IO)` so the watchdog's
+            // `Thread.interrupt()` actually unparks the blocking JDK read.
             //
-            // The mechanism is still the REAL wall-clock watchdog
-            // ([WallClockCeiling]), NOT a coroutine `withTimeout`/`withTimeoutOrNull`
-            // (issue #940 / the #937 regression): `withTimeout` reads the delay
-            // source from the CALLER's coroutine context, so under `runTest`'s
-            // virtual auto-advancing clock it fires INSTANTLY and aborts a HEALTHY
-            // live read. The watchdog interrupts the blocking worker only after
-            // REAL elapsed time, identically in production and under any test
-            // scheduler. The reads run on [execDrainExecutor] worker threads and
-            // the post-EOF join runs inside `runInterruptible(Dispatchers.IO)` so
-            // the watchdog's `Thread.interrupt()` actually unparks the blocking
-            // JDK read/join.
-            //
-            // On a genuine no-progress stall the read is mapped to a clear,
-            // RETRYABLE [SshExecTimeoutException], and we then CLOSE the session
-            // (lease pool self-heals — a now-disconnected session is discarded +
-            // re-dialed on next acquire). This is the SAME close-on-timeout intent
-            // the three bespoke gateway wraps (`FolderListGateway.execBounded`,
-            // `TreeRemoteSource`, `AgentKindRemoteSource`) implement per-caller —
-            // pulled down to the `exec` boundary so EVERY caller inherits it (D22
-            // hard-cut).
+            // On a real timeout the watchdog interrupt makes the read throw; that
+            // is mapped to a clear, RETRYABLE [SshExecTimeoutException], and we
+            // then CLOSE the session (lease pool self-heals — a now-disconnected
+            // session is discarded + re-dialed on next acquire). This is the SAME
+            // close-on-timeout intent the three bespoke gateway wraps
+            // (`FolderListGateway.execBounded`, `TreeRemoteSource`,
+            // `AgentKindRemoteSource`) implement per-caller — pulled down to the
+            // `exec` boundary so EVERY caller inherits it (D22 hard-cut), now with
+            // the wall-clock mechanism #940 established for the dispatcher.
             try {
                 runInterruptible(Dispatchers.IO) {
-                    val output = try {
-                        readExecOutputConcurrently(liveCommand, command)
-                    } finally {
-                        execDrainPermits.release()
-                        drainPermitAcquired = false
-                    }
-                    // Both streams have reached EOF, so the command has exited and
-                    // `join()` returns immediately; bound it with a fresh
-                    // no-progress window as belt-and-braces against a wedged join.
                     WallClockCeiling.runUnderWallClockCeiling(
                         timeoutMs = execReadTimeoutMs,
                         onTimeout = { cause -> SshExecTimeoutException(command, execReadTimeoutMs, cause) },
                     ) {
+                        val output = try {
+                            readExecOutputConcurrently(liveCommand)
+                        } finally {
+                            execDrainPermits.release()
+                            drainPermitAcquired = false
+                        }
                         liveCommand.join()
+                        // Issue #974: a completed exec round-trip is decoded server
+                        // bytes — proof the transport is alive. Record it so a busy
+                        // exec workload keeps the keepalive's inbound-activity
+                        // timestamp fresh (honouring the contract).
+                        recordInboundActivity()
+                        // sshj returns null exitStatus when the server didn't send
+                        // one (e.g. signal-killed). Map to -1 so the caller can
+                        // still tell it wasn't a clean 0.
+                        val exitCode = liveCommand.exitStatus ?: -1
+                        ExecResult(stdout = output.stdout, stderr = output.stderr, exitCode = exitCode)
                     }
-                    // Issue #974: a completed exec round-trip is decoded server
-                    // bytes — proof the transport is alive. Record it so a busy
-                    // exec workload keeps the keepalive's inbound-activity
-                    // timestamp fresh (honouring the contract). The per-chunk
-                    // drain also bumps this (issue #1046) so a long progressing
-                    // exec keeps the keepalive fresh throughout, not only at the end.
-                    recordInboundActivity()
-                    // sshj returns null exitStatus when the server didn't send
-                    // one (e.g. signal-killed). Map to -1 so the caller can
-                    // still tell it wasn't a clean 0.
-                    val exitCode = liveCommand.exitStatus ?: -1
-                    ExecResult(stdout = output.stdout, stderr = output.stderr, exitCode = exitCode)
                 }
             } catch (timeout: SshExecTimeoutException) {
                 EXEC_LOGGER.warning(
-                    "exec read made no progress for ${execReadTimeoutMs}ms (real wall-clock); closing " +
-                        "wedged session + surfacing retryable SshExecTimeoutException. cmd=${command.takeLast(48)}",
+                    "exec read wedged >${execReadTimeoutMs}ms (real wall-clock); closing wedged " +
+                        "session + surfacing retryable SshExecTimeoutException. cmd=${command.takeLast(48)}",
                 )
                 // CLOSE the session to tear down the transport so the lease pool
                 // discards the corpse (the watchdog already interrupted+unparked
@@ -643,21 +625,12 @@ internal class RealSshSession(
         }
     }
 
-    private fun readExecOutputConcurrently(command: Command, commandText: String): ExecOutput {
-        // Issue #1046: one no-progress budget SHARED across both concurrent
-        // drains. A byte on either stream resets it, so a long progressing exec
-        // (bytes trickling on stdout while stderr stays silent until exit) is
-        // never bounded by the slowest stream — only a genuine all-stream stall
-        // is. The budget bumps the keepalive's inbound-activity timestamp on each
-        // chunk so a busy exec keeps the transport's liveness fresh.
-        val stallBudget = ExecReadStallBudget(execReadTimeoutMs, onProgress = ::recordInboundActivity)
+    private fun readExecOutputConcurrently(command: Command): ExecOutput {
         val stdout = execDrainExecutor.submit<String> {
-            command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout", commandText, stallBudget)
-                .toString(Charsets.UTF_8)
+            command.inputStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stdout").toString(Charsets.UTF_8)
         }
         val stderr = execDrainExecutor.submit<String> {
-            command.errorStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stderr", commandText, stallBudget)
-                .toString(Charsets.UTF_8)
+            command.errorStream.readBytesCapped(EXEC_STREAM_MAX_BYTES, "stderr").toString(Charsets.UTF_8)
         }
         return try {
             ExecOutput(
@@ -684,17 +657,12 @@ internal class RealSshSession(
             }
         }
 
-    private fun InputStream.readBytesCapped(
-        maxBytes: Int,
-        streamName: String,
-        commandText: String,
-        stallBudget: ExecReadStallBudget,
-    ): ByteArray {
+    private fun InputStream.readBytesCapped(maxBytes: Int, streamName: String): ByteArray {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         val output = ByteArrayOutputStream()
         var total = 0
         while (true) {
-            val read = readStepUnderStallBudget(buffer, commandText, stallBudget)
+            val read = read(buffer)
             if (read < 0) break
             if (total + read > maxBytes) {
                 throw SshException(
@@ -703,55 +671,8 @@ internal class RealSshSession(
             }
             output.write(buffer, 0, read)
             total += read
-            // A byte arrived — reset the SHARED no-progress budget (issue #1046)
-            // and bump the keepalive inbound-activity timestamp.
-            stallBudget.recordProgress()
         }
         return output.toByteArray()
-    }
-
-    /**
-     * Read one block under the per-read NO-PROGRESS budget (issue #1046).
-     *
-     * Each blocking `read` is bounded by a fresh [WallClockCeiling] of the budget
-     * window (interrupting only THIS worker thread, never another exec's reused
-     * pool thread). When a single read produces no byte for the window it is only
-     * treated as a wedged exec when NEITHER stream made progress within that
-     * window: stderr is typically silent until the command exits, so its single
-     * blocking read parks for the whole command duration while stdout keeps
-     * flowing — re-arming on the other stream's progress keeps a slow-but-
-     * progressing exec alive indefinitely, exactly like the upload/download
-     * per-step stall budgets. This REPLACES the old whole-call wall-clock ceiling
-     * that closed the shared lease transport whenever a progressing exec exceeded
-     * the budget in TOTAL.
-     *
-     * A genuinely silent-and-slow command (no output for the whole window) is
-     * still bounded — that was already true under the old whole-call ceiling, so
-     * this is no regression for the no-progress case while it fixes the
-     * progressing case.
-     */
-    private fun InputStream.readStepUnderStallBudget(
-        buffer: ByteArray,
-        commandText: String,
-        stallBudget: ExecReadStallBudget,
-    ): Int {
-        while (true) {
-            try {
-                return WallClockCeiling.runUnderWallClockCeiling(
-                    timeoutMs = stallBudget.windowMs,
-                    onTimeout = { cause -> ExecReadStallSignal(cause) },
-                ) {
-                    read(buffer)
-                }
-            } catch (stall: ExecReadStallSignal) {
-                // No byte on THIS stream for the window. As long as SOME stream
-                // made progress within the window the exec is still alive — re-arm
-                // and keep waiting. Only when NEITHER stream progressed for the
-                // whole window is the read genuinely wedged.
-                if (stallBudget.progressedWithinWindow()) continue
-                throw SshExecTimeoutException(commandText, stallBudget.windowMs, stall.cause)
-            }
-        }
     }
 
     private data class ExecOutput(
@@ -2031,21 +1952,10 @@ internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
  * RETRYABLE [SshExecTimeoutException]. On expiry the session is closed so the
  * lease pool discards the corpse and re-dials on the next acquire.
  *
- * Issue #1046: this is now a per-read NO-PROGRESS window, NOT a whole-call
- * wall-clock ceiling. The budget RESETS on every byte that arrives on either
- * stream, so a slow-but-progressing exec on a high-RTT cellular link keeps the
- * shared lease transport alive for as long as it keeps making progress; only a
- * genuinely wedged read (no bytes on any stream for the whole window) is
- * bounded. The old whole-call ceiling closed the shared `-CC` session whenever a
- * progressing control exec exceeded 30s in TOTAL — a mobile spurious-reconnect
- * cause. This mirrors the per-step no-progress shape the transfer path already
- * uses ([UPLOAD_STALL_TIMEOUT_MS] / [DOWNLOAD_STALL_TIMEOUT_MS]).
- *
- * 30s is a generous no-progress window relative to a normal control exec (tens
- * of ms between bytes — env edit, profile list, start-dir autocomplete,
- * manual-kind write, watched-folder discovery, the file-viewer
- * `mkdir`/`pwd`/`cat`) yet bounds a truly wedged transport. It sits ABOVE the
- * three bespoke per-caller wraps
+ * 30s is generous relative to a normal control exec (tens of ms — env edit,
+ * profile list, start-dir autocomplete, manual-kind write, watched-folder
+ * discovery, the file-viewer `mkdir`/`pwd`/`cat`) yet bounds an indefinite
+ * hang. It sits ABOVE the three bespoke per-caller wraps
  * ([com.pocketshell.app.projects.SshFolderListGateway]'s `EXEC_READ_TIMEOUT_MS`
  * = 3.5s, `TreeRemoteSource`, `AgentKindRemoteSource`) so those tighter,
  * latency-sensitive enumeration bounds still fire FIRST on their hot paths and
@@ -2065,50 +1975,6 @@ private class TransferStallTimeoutException(
     val timeoutMs: Long,
     cause: Throwable?,
 ) : IOException("$operation made no progress for ${timeoutMs}ms", cause)
-
-/**
- * Internal signal raised when a single exec read step (one blocking `read`)
- * produces no byte for the no-progress window (issue #1046). Caught locally in
- * [RealSshSession.readStepUnderStallBudget]; it never escapes a reader thread —
- * it is either re-armed (some stream still progressing) or converted into a
- * [SshExecTimeoutException] (the whole exec is wedged).
- */
-private class ExecReadStallSignal(cause: Throwable?) : RuntimeException(cause)
-
-/**
- * Shared NO-PROGRESS budget across an exec's concurrent stdout + stderr drain
- * (issue #1046).
- *
- * The exec read drains two streams concurrently. stderr is typically silent
- * until the command exits — its single blocking `read` parks for the whole
- * command duration — so the budget must reset on progress from EITHER stream
- * rather than per individual read; a per-stream per-read budget would false-trip
- * a long-but-progressing stdout while stderr waits for EOF. A byte on either
- * stream pushes [lastProgressNanos] forward, so a progressing exec is never
- * bounded by the slowest stream; only an all-stream stall for the whole
- * [windowMs] is treated as a wedged transport. This mirrors the per-step
- * no-progress shape the transfer path uses
- * ([UPLOAD_STALL_TIMEOUT_MS] / [DOWNLOAD_STALL_TIMEOUT_MS]).
- */
-private class ExecReadStallBudget(
-    val windowMs: Long,
-    private val onProgress: () -> Unit,
-) {
-    private val windowNanos = windowMs * 1_000_000L
-
-    @Volatile
-    private var lastProgressNanos = System.nanoTime()
-
-    /** A byte arrived on some stream — reset the shared window. */
-    fun recordProgress() {
-        lastProgressNanos = System.nanoTime()
-        onProgress()
-    }
-
-    /** True iff SOME stream made progress within the last [windowMs]. */
-    fun progressedWithinWindow(): Boolean =
-        System.nanoTime() - lastProgressNanos < windowNanos
-}
 
 /**
  * Hard ceiling on the caller-visible wait inside [RealSshSession.close] for the

@@ -136,6 +136,59 @@ class RealSshSessionExecReadTimeoutTest {
     }
 
     /**
+     * Keystone for #1046's shared-budget re-arm (AC3 — the real mobile scenario).
+     *
+     * stderr is PARKED silent (no data, no EOF) across the WHOLE no-progress
+     * window while stdout keeps trickling bytes at sub-window gaps for a total
+     * duration exceeding the window — i.e. a long stdout-heavy `cat`/listing/git
+     * probe with silent stderr on a slow link. The shared no-progress budget
+     * resets off stdout's progress, so stderr's parked read is re-armed
+     * (`if (stallBudget.progressedWithinWindow()) continue` in
+     * `readStepUnderStallBudget`) rather than tripping the budget; both streams
+     * EOF when the command completes and the exec succeeds WITHOUT tearing the
+     * transport.
+     *
+     * This PINS the shared-budget design: under a naive per-stream budget (each
+     * stream bounded by its OWN window, no cross-stream re-arm) the parked stderr
+     * read would trip at the window and throw [SshExecTimeoutException] + close
+     * the session even though stdout is progressing — the exact false
+     * spurious-reconnect this issue fixes. Removing the re-arm `continue` turns
+     * this test RED; the shipped shared budget keeps it GREEN.
+     */
+    @Test
+    fun `progressing stdout re-arms the shared budget while stderr is parked silent`() = runBlocking {
+        val command = SilentParkingStderrSlowStdoutCommand(chunkCount = 8, gapMillis = 100L)
+        val client = ConnectedClient(RecordingSessionChannel(command))
+        // window 500ms < total stdout duration (~800ms); stderr stays parked the
+        // whole time (longer than one window) yet must not bound the exec.
+        val session = RealSshSession(client, execReadTimeoutMs = 500L)
+
+        try {
+            val result = withTimeout(10_000L) {
+                session.exec("stdout-heavy-listing-silent-stderr")
+            }
+
+            assertEquals(
+                "every trickled stdout byte must be drained",
+                "x".repeat(8),
+                result.stdout,
+            )
+            assertEquals("silent stderr must drain to empty", "", result.stderr)
+            assertEquals(0, result.exitCode)
+            assertTrue(
+                "stderr must actually have parked silently (not instant EOF)",
+                command.stderrParked.isCompleted,
+            )
+            assertTrue(
+                "a parked-silent stderr must NOT trip the shared budget while stdout progresses",
+                session.isConnected,
+            )
+        } finally {
+            session.close()
+        }
+    }
+
+    /**
      * Class coverage for #1046: an exec that PROGRESSES for a while and THEN
      * wedges (no further bytes on either stream) must still be bounded and still
      * close the session — the no-progress budget must not be defeated by earlier
@@ -499,6 +552,104 @@ class RealSshSessionExecReadTimeoutTest {
 
         override fun close() {
             closed = true
+        }
+    }
+
+    /**
+     * Models the real #1046 mobile scenario (AC3): stdout trickles [chunkCount]
+     * single bytes (each after a sub-window [gapMillis] gap), while stderr is
+     * PARKED silent — it returns no bytes and does NOT EOF until the command
+     * completes (stdout reaches EOF). stderr therefore stays blocked across the
+     * whole no-progress window, and only the SHARED budget re-armed off stdout's
+     * progress keeps the exec alive. Both streams EOF when stdout finishes.
+     */
+    private class SilentParkingStderrSlowStdoutCommand(
+        chunkCount: Int,
+        gapMillis: Long,
+    ) : FakeChannel(), Session.Command {
+        val firstStdoutReadStarted = CompletableDeferred<Unit>()
+        val stderrParked = CompletableDeferred<Unit>()
+
+        @Volatile
+        private var closedFlag = false
+        private val stdoutComplete = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val delivered = AtomicInteger(0)
+
+        private val stdout = object : InputStream() {
+            override fun read(): Int {
+                val one = ByteArray(1)
+                val n = read(one, 0, 1)
+                return if (n < 0) -1 else one[0].toInt() and 0xff
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                firstStdoutReadStarted.complete(Unit)
+                if (delivered.get() >= chunkCount) {
+                    // All bytes delivered: the command has finished — signal EOF
+                    // and release the parked stderr.
+                    stdoutComplete.set(true)
+                    return -1
+                }
+                val deadlineNanos = System.nanoTime() + gapMillis * 1_000_000L
+                while (System.nanoTime() < deadlineNanos) {
+                    if (closedFlag) return -1
+                    try {
+                        Thread.sleep(5L)
+                    } catch (e: InterruptedException) {
+                        throw java.io.InterruptedIOException("stdout trickle interrupted")
+                    }
+                }
+                delivered.incrementAndGet()
+                b[off] = 'x'.code.toByte()
+                return 1
+            }
+
+            override fun close() {
+                closedFlag = true
+            }
+        }
+
+        private val stderr = object : InputStream() {
+            override fun read(): Int {
+                val one = ByteArray(1)
+                val n = read(one, 0, 1)
+                return if (n < 0) -1 else one[0].toInt() and 0xff
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                stderrParked.complete(Unit)
+                // Park silently — no data, no EOF — until the command completes
+                // (stdout reached EOF). Honour interrupt so the per-read
+                // wall-clock watchdog can unpark us: under the SHARED budget the
+                // watchdog interrupts this parked read every window, the budget
+                // re-arms off stdout's progress, and we re-park here.
+                while (!stdoutComplete.get()) {
+                    if (closedFlag) return -1
+                    try {
+                        Thread.sleep(5L)
+                    } catch (e: InterruptedException) {
+                        throw java.io.InterruptedIOException("stderr parked read interrupted")
+                    }
+                }
+                return -1
+            }
+
+            override fun close() {
+                closedFlag = true
+            }
+        }
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = stderr
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+
+        override fun close() {
+            super.close()
+            closedFlag = true
         }
     }
 

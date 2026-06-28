@@ -8,7 +8,7 @@ name = "pocketshell"
 # scripts/check-pypi-version.sh enforces this; .github/workflows/build.yml
 # runs that check before publishing to PyPI. See
 # tools/pocketshell/README.md ("Release flow") for the bump procedure.
-version = "0.4.18"
+version = "0.4.19"
 description = "Unified server-side Python utility for the PocketShell Android client."
 readme = "README.md"
 requires-python = ">=3.11"

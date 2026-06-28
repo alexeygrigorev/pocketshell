@@ -847,6 +847,21 @@ JOURNEY_CLASSES=(
   # split so the intentional crash cannot poison the GREEN tests' compose rule.
   "com.pocketshell.app.portfwd.PortForwardDuplicateKeyCrashTest"
   "com.pocketshell.app.portfwd.PortForwardDuplicateKeyRenderTest"
+  # ADDED (#1058 — #843 audit R1, trigger T11 / coverage gap C1, D33/G10): the
+  # port-forward tunnel must ride through a cellular handoff / bare loss / restore
+  # the SAME liveness-first way the terminal transport does (#981/#997/#1042/#1045)
+  # instead of force-redialling on EVERY network change (the cellular-churn defect).
+  # Stands up a REAL forward against the deterministic agents:2222 fixture (real
+  # SshSession + always-on keepalive), injects the network event SYNTHETICALLY
+  # through the production TerminalNetworkObserver detector + emit pipeline (the
+  # SAME `changes` stream the controller subscribes to — the #780 hard-inject
+  # model, no self-skip), and asserts from the controller's `portforward`
+  # diagnostics across all three arms: (a) NetworkLost → HOLD (zero redial),
+  # (b) proven-alive handoff/restore → RIDE THROUGH (zero redial, no restoring
+  # churn), (c) genuinely-dead handoff → REDIAL. RED on base (the old controller
+  # recorded no loss_hold/ride_through and force-redialled the loss + proven-alive
+  # restore); GREEN with #1058. Same agents:2222 fixture; runs on CI.
+  "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest"
   # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
   # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
   # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the

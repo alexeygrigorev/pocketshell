@@ -896,7 +896,9 @@ class PortForwardPanelViewModelTest {
         // (the service's raw force-tear callback was deleted). Emit a real
         // validated-handoff change through that flow to trigger the rebuild.
         val networkChanges =
-            kotlinx.coroutines.flow.MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+            kotlinx.coroutines.flow.MutableSharedFlow<com.pocketshell.app.connectivity.TerminalNetworkChange>(
+                extraBufferCapacity = 16,
+            )
         val forwardingController = newForwardingController(
             connector = connector,
             validatedNetworkChanges = networkChanges,
@@ -921,9 +923,31 @@ class PortForwardPanelViewModelTest {
 
             firstSession.simulateDeadForwardButStillConnected()
             // A real validated default-network handoff reaches the controller's
-            // hardened subscription, which forces a rebuild on every active host
-            // even after the panel is gone.
-            assertTrue(networkChanges.tryEmit(Any()))
+            // hardened subscription. The stale session is NOT keepalive-proven
+            // alive (FakeSshSession returns the interface default `false`), so the
+            // #1058 liveness-first policy classifies it genuinely dead and forces a
+            // rebuild on every active host even after the panel is gone.
+            assertTrue(
+                networkChanges.tryEmit(
+                    com.pocketshell.app.connectivity.TerminalNetworkChange(
+                        previous = com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                            networkHandle = "wifi-1",
+                            transports = setOf("WIFI"),
+                        ),
+                        current = com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                            networkHandle = "cell-1",
+                            transports = setOf("CELLULAR"),
+                        ),
+                        previousValidated = com.pocketshell.app.connectivity.TerminalNetworkSnapshot.Validated(
+                            networkHandle = "wifi-1",
+                            transports = setOf("WIFI"),
+                        ),
+                        reason = "issue980-handoff",
+                        sequence = 1L,
+                        kind = com.pocketshell.app.connectivity.TerminalNetworkChangeKind.ValidatedIdentityChange,
+                    ),
+                ),
+            )
             advanceTimeBy(1_100L)
             runCurrent()
 
@@ -1594,8 +1618,8 @@ class PortForwardPanelViewModelTest {
     private fun newForwardingController(
         connector: PortForwardConnector,
         portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
-        validatedNetworkChanges: kotlinx.coroutines.flow.Flow<*> =
-            kotlinx.coroutines.flow.emptyFlow<Any?>(),
+        validatedNetworkChanges: kotlinx.coroutines.flow.Flow<com.pocketshell.app.connectivity.TerminalNetworkChange> =
+            kotlinx.coroutines.flow.emptyFlow(),
     ): ForwardingController =
         ForwardingController(
             appContext = context,

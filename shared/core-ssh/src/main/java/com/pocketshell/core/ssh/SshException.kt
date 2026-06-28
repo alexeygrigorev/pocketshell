@@ -44,12 +44,16 @@ public class SshFileTooLargeException(
 )
 
 /**
- * Thrown by [SshSession.exec] when the command's stdout/stderr read does not
- * reach EOF within the per-exec wall-clock ceiling (#935 S4-2). A half-open /
+ * Thrown by [SshSession.exec] when the command's stdout/stderr read makes NO
+ * PROGRESS for the per-read no-progress budget (#935 S4-2; #1046). A half-open /
  * wedged transport leaves the blocking `readBytes()` parked forever; this
  * timeout is the boundary bound that turns "the action silently never returns"
  * into a fast, clear, RETRYABLE failure. The session is closed on the way out
  * so the lease pool discards the corpse and re-dials on the next acquire.
+ *
+ * Issue #1046: [timeoutMs] is now the per-read NO-PROGRESS window, not a
+ * whole-call ceiling — a slow-but-progressing exec (bytes still arriving) is
+ * NOT bounded, so this is raised only for a genuinely stalled read.
  *
  * A subclass of [SshException] so existing catch-all `catch (e: SshException)`
  * sites keep working; lease-exec retry logic catches it specifically to treat a
@@ -60,6 +64,6 @@ public class SshExecTimeoutException(
     public val timeoutMs: Long,
     cause: Throwable? = null,
 ) : SshException(
-    "exec read wedged >${timeoutMs}ms (no EOF): ${command.takeLast(64)}",
+    "exec read made no progress for ${timeoutMs}ms: ${command.takeLast(64)}",
     cause,
 )

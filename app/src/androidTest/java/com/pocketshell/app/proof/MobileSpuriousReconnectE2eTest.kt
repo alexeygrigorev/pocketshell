@@ -291,6 +291,138 @@ class MobileSpuriousReconnectE2eTest {
         writeTimings("issue1042b2")
     }
 
+    // (b3) ISSUE #1065 (R5, audit C5) — the BOUNDED-PROBE ride-through arm after a
+    // LONG IDLE OUTAGE, distinct from the keepalive-proven FAST PATH.
+    //
+    // The seam #843/C5 named: neither this class nor BareNetworkLossRestoreReconnectE2eTest
+    // chained loss → (keepalive ages past its ~90s ride-through budget) → restore to
+    // prove `scheduleNetworkReconnectOnRestore` STEP 2 (the bounded probe,
+    // TmuxSessionViewModel.kt:4905-4917) actually fires on a quiet idle link rather
+    // than STEP 1 (the keepalive-proven fast path, :4901-4904). The existing
+    // [briefLossRestoreWhereBoundedProbeAnswersRidesThrough] drives a back-to-back
+    // brief dip and never (a) survives a long idle outage nor (b) asserts that the
+    // fast path was BYPASSED — so a regression that made step 1 always win would not
+    // be caught by it.
+    //
+    // This journey closes that seam against the live agents:2222 `-CC` session:
+    //   1. attach, connected.
+    //   2. drive a bare NetworkLost → assert lease HELD, calm band, NO churn.
+    //   3. SURVIVE A LONG IDLE OUTAGE: hold the loss-suspended state across a real
+    //      idle window and assert ZERO redial churn across the whole window (proves
+    //      the hold survives a long outage, not just a synchronous brief dip).
+    //   4. model the keepalive AGED OUT: the real socket to agents:2222 never drops,
+    //      so its keepalive would stay fresh and step 1 would (wrongly for this
+    //      scenario) win; we pin `forceTransportProvenAliveForTest = false` — the
+    //      documented #780 synthetic equivalent of "the keepalive aged past
+    //      RIDE_THROUGH_BUDGET_MS during the idle" — and leave the probe seam OFF so
+    //      the bounded probe answers over the REAL live channel.
+    //   5. ASSERT (before restore) the fast path is bypassed:
+    //      `isTransportKeepAliveProvenAliveRecentlyForTest()` is false — step 1 cannot
+    //      fire, so the restore MUST reach step 2 (distinct-from-fast-path, G2/D33).
+    //   6. drive the restore → assert the bounded probe answered: a
+    //      `network_restore_ride_through` attributed to cause "probe_answered" (NOT
+    //      "transport_proven_alive", which would mean step 1 won) and ZERO redial.
+    //   7. the session rides through to Connected with a painted viewport — recovered.
+    @Test
+    fun longIdleOutageThenRestoreRidesThroughViaBoundedProbeNotFastPath() = runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForNoSwitchingOverlay("pre-loss attach settle")
+        captureViewport("issue1065-01-attached")
+
+        val vm = currentViewModel()
+        val observer = terminalNetworkObserver()
+
+        // Seed a baseline validated WIFI identity so the restore below is a
+        // same-identity round-trip (the airplane-mode / long-tunnel round-trip). Pin
+        // proven-alive so this baseline transition never tears the session down before
+        // the load-bearing loss → long-idle → restore chain runs.
+        vm.forceTransportProvenAliveForTest = true
+        observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1065-baseline-wifi",
+        )
+        waitForConnected("post-baseline wifi")
+        waitForNoSwitchingOverlay("post-baseline wifi settle")
+        diagnostics!!.clear()
+
+        // (2) THE LOSS: a bare NoValidatedNetwork — a real long outage starts.
+        val lost = observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "issue1065-bare-network-loss",
+        )
+        assertEquals(
+            "the surfaced change must be a NetworkLost",
+            TerminalNetworkChangeKind.NetworkLost,
+            lost!!.kind,
+        )
+        assertTrue(
+            "the VM must record a network_loss_hold for the bare loss (proves the hold " +
+                "arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
+        )
+
+        // (3) SURVIVE THE LONG IDLE OUTAGE: no churn across the whole idle window.
+        watchNoRedialDiagnostics("across the long idle outage", LONG_IDLE_OUTAGE_MS)
+        captureViewport("issue1065-02-long-idle-held")
+
+        // (4) Model the keepalive AGED OUT during the idle; probe seam OFF so the
+        // bounded probe answers over the REAL live agents:2222 channel.
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = false
+
+        // (5) Distinct-from-fast-path proof: step 1 cannot fire on restore.
+        assertTrue(
+            "the keepalive must be NOT-proven-alive on restore (aged out during the long " +
+                "idle) so scheduleNetworkReconnectOnRestore step 1 is bypassed and step 2 " +
+                "(the bounded probe) takes the decision — issue #1065/C5",
+            !vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+        diagnostics!!.clear()
+
+        // (6) THE RESTORE: validation returns to the SAME WIFI identity.
+        val restore = TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+            current = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            previousValidated = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1065-network-restored",
+            sequence = 9L,
+            kind = TerminalNetworkChangeKind.NetworkRestored,
+        )
+        compose.activityRule.scenario.onActivity { vm.onNetworkChanged(restore) }
+
+        // The bounded probe runs async over the live channel — wait for its attribution.
+        compose.waitUntil(timeoutMillis = RESTORE_RECONNECT_TIMEOUT_MS) {
+            diagnostics!!.eventsNamed("network_restore_ride_through").isNotEmpty()
+        }
+        watchNoRedialDiagnostics("across the bounded-probe-answered restore", WATCH_NO_REDIAL_AFTER_RESTORE_MS)
+        val rideThrough = diagnostics!!.eventsNamed("network_restore_ride_through")
+        assertTrue(
+            "expected a network_restore_ride_through (proves step 2 fired, not a vacuous " +
+                "pass); events=${diagnostics!!.events.map { it.name }}",
+            rideThrough.isNotEmpty(),
+        )
+        // THE load-bearing distinction: the ride-through came from the BOUNDED PROBE
+        // answering (step 2), NOT the keepalive-proven fast path (step 1). A regression
+        // that let step 1 win after a long idle would record cause="transport_proven_alive"
+        // here and FAIL this assertion.
+        assertEquals(
+            "the long-idle restore must ride through via the BOUNDED PROBE (step 2), not " +
+                "the keepalive-proven fast path (step 1) — issue #1065/C5",
+            "probe_answered",
+            rideThrough.last().fields["cause"],
+        )
+
+        // (7) recovered: Connected, no overlay, viewport painted.
+        waitForConnected("after bounded-probe ride-through")
+        waitForNoSwitchingOverlay("after bounded-probe ride-through settle")
+        waitForVisibleTerminal("after bounded-probe terminal") { it.contains(READY_MARKER) }
+        captureViewport("issue1065-03-rode-through")
+        writeTimings("issue1065")
+    }
+
     // (c) cause #2 — a same-identity {CELLULAR} reassoc must NOT redial.
     @Test
     fun cellularSameIdentityReassocDoesNotRedial() = runBlocking<Unit> {
@@ -683,6 +815,11 @@ class MobileSpuriousReconnectE2eTest {
         const val READY_MARKER: String = "ISSUE1042-SPURIOUS-READY"
 
         const val WATCH_NO_REDIAL_AFTER_RESTORE_MS: Long = 3_000L
+
+        // Issue #1065 (R5): the modelled long idle outage held across the loss window.
+        // Bounded so the connected journey stays affordable; long enough to be a
+        // genuine "survived an outage" hold rather than a synchronous brief dip.
+        const val LONG_IDLE_OUTAGE_MS: Long = 6_000L
 
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

@@ -5602,35 +5602,17 @@ class TmuxSessionViewModelTest {
                 }
             }
 
-            // Issue #1042 follow-up (CI-only flake, PR #1045): the live `%output`
-            // drain feeds the REAL SshTerminalBridge, whose tail render runs on a
-            // wall-clock background thread and whose budgeted main-thread drain
-            // reposts a `postDelayed` continuation that a bare `idle()` never fires.
-            // The old pump here was bounded ONLY by the virtual `runTest` clock
-            // (`delay(10)` + a virtual `withTimeoutOrNull`), so the entire loop
-            // elapsed in ~0 wall-clock time and gave the background feed no real
-            // time to drain — under a contended JVM (CI) the sender stayed suspended
-            // behind the full SharedFlow buffer and `completed` flaked false (the
-            // pre-existing real-dispatcher-vs-virtual-clock race the sibling
-            // `codexLike...` test documents; #1042's network-change-only diff cannot
-            // reach this path). Pump on the WALL clock instead: advance the looper a
-            // frame (`idleFor(16ms)`) so the budgeted continuations fire, drive the
-            // virtual scheduler (`runCurrent()`) so the sender coroutine progresses,
-            // and give the background thread real time (`Thread.sleep`). This
-            // STRENGTHENS the assertion — a genuine stall still exhausts the deadline
+            // Issue #1042 follow-up (CI-only flake, PR #1045) / #1050: the live
+            // `%output` drain feeds the REAL SshTerminalBridge, whose tail render
+            // runs on a wall-clock background thread and whose budgeted main-thread
+            // drain reposts a `postDelayed` continuation that a bare `idle()` never
+            // fires. The old pump here was bounded ONLY by the virtual `runTest`
+            // clock, so the entire loop elapsed in ~0 wall-clock time and starved
+            // that background feed under a contended JVM (CI), flaking `completed`
+            // false. `drainMainLooperUntil` pumps on the WALL clock instead — it
+            // STRENGTHENS the assertion: a genuine stall still exhausts the deadline
             // and `completed` stays false.
-            var completed = false
-            val drainDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
-            do {
-                shadowOf(Looper.getMainLooper())
-                    .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                runCurrent()
-                if (!sender.isActive) {
-                    completed = true
-                    break
-                }
-                Thread.sleep(20)
-            } while (System.currentTimeMillis() < drainDeadline)
+            val completed = drainMainLooperUntil { !sender.isActive }
             if (completed) {
                 sender.await()
             } else {
@@ -5725,34 +5707,21 @@ class TmuxSessionViewModelTest {
                     }
                 }
 
-                // Issue #1042 follow-up (CI-only flake, PR #1045): the off-main live
-                // `%output` drain is frame-paced — the MainThreadDrainScheduler
-                // `postDelayed`s its continuation one frame (16ms) out between bounded
-                // parse turns so the looper is guaranteed a servicing gap (the #803/#804
-                // ANR fix). Under the Robolectric PAUSED looper a plain `idle()` only
-                // runs tasks already DUE, so the looper MUST be advanced a frame
-                // (`idleFor(16ms)`) for those delayed continuations to fire and the
-                // burst to drain. The pump ALSO drives the real off-main SshTerminalBridge
-                // feed (a wall-clock background thread). The old budget here was the
-                // virtual `runTest` clock (`delay(10)` + a virtual `withTimeoutOrNull`),
-                // which elapsed in ~0 wall-clock time and starved that background thread
-                // under a contended JVM (CI) — the sender stayed suspended behind the
-                // full SharedFlow buffer and `completed` flaked false. Pump on the WALL
-                // clock instead so the background feed gets real time (`Thread.sleep`),
-                // mirroring the marker loop below. This does NOT weaken the assertion: a
-                // genuine stall still exhausts the deadline and `completed` stays false.
-                var completed = false
-                val drainDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
-                do {
-                    shadowOf(Looper.getMainLooper())
-                        .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    runCurrent()
-                    if (!sender.isActive) {
-                        completed = true
-                        break
-                    }
-                    Thread.sleep(20)
-                } while (System.currentTimeMillis() < drainDeadline)
+                // Issue #1042 follow-up (CI-only flake, PR #1045) / #1050: the
+                // off-main live `%output` drain is frame-paced — the
+                // MainThreadDrainScheduler `postDelayed`s its continuation one frame
+                // (16ms) out between bounded parse turns so the looper is guaranteed a
+                // servicing gap (the #803/#804 ANR fix). Under the Robolectric PAUSED
+                // looper a plain `idle()` only runs tasks already DUE, so the looper
+                // MUST be advanced a frame (`idleFor(16ms)`) for those delayed
+                // continuations to fire and the burst to drain. The old budget here was
+                // the virtual `runTest` clock, which elapsed in ~0 wall-clock time and
+                // starved the real background SshTerminalBridge feed under a contended
+                // JVM (CI), flaking `completed` false. `drainMainLooperUntil` pumps on
+                // the WALL clock instead so the background feed gets real time. This
+                // does NOT weaken the assertion: a genuine stall still exhausts the
+                // deadline and `completed` stays false.
+                val completed = drainMainLooperUntil { !sender.isActive }
                 if (completed) {
                     sender.await()
                 } else {
@@ -7113,6 +7082,40 @@ class TmuxSessionViewModelTest {
             ),
             sent,
         )
+    }
+
+    /**
+     * Wall-clock-bounded looper pump for the flood-drain tests whose REAL
+     * [SshTerminalBridge] feed runs on an Android Handler / background thread
+     * that a virtual-clock-only `runTest` loop starves under a contended (CI)
+     * JVM (#1042/#1050). Each turn advances the main looper a frame
+     * (`idleFor(16ms)`) so the budgeted `postDelayed` drain continuations fire
+     * (a bare `idle()` never runs them — the #803/#804 ANR drain scheduler
+     * shape), drives the virtual scheduler (`runCurrent()`) so suspended
+     * coroutines progress, and yields real wall-clock time (`Thread.sleep`) to
+     * the background feed. Returns true if [condition] becomes true before
+     * [deadlineMs] wall-clock milliseconds elapse, false on timeout.
+     *
+     * This STRENGTHENS, never weakens, the caller's assertion: a genuine stall
+     * still exhausts the deadline so the caller's `assertTrue(...)` fails. It
+     * replaces the old virtual-clock pump (`withTimeoutOrNull(...) { ...
+     * idle(); runCurrent(); delay(10) }`) that elapsed in ~0 wall-clock time
+     * and flaked `completed` false under load (#1050: the unfixed sibling of
+     * the codexScale/codexLike loops #1042 already de-flaked).
+     */
+    private fun TestScope.drainMainLooperUntil(
+        deadlineMs: Long = SLOW_FEED_DRAIN_TIMEOUT_MS,
+        condition: () -> Boolean,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + deadlineMs
+        do {
+            shadowOf(Looper.getMainLooper())
+                .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            runCurrent()
+            if (condition()) return true
+            Thread.sleep(20)
+        } while (System.currentTimeMillis() < deadline)
+        return false
     }
 
     private fun TestScope.waitForSentCommandCount(client: FakeTmuxClient, expectedCount: Int) {
@@ -11883,15 +11886,15 @@ class TmuxSessionViewModelTest {
                     client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
                 }
             }
-            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
-                    runCurrent()
-                    delay(10)
-                }
-                sender.await()
-                true
-            } ?: false
+            // Issue #1050: the unfixed flood-drain sibling. The old pump here was
+            // bounded only by the virtual `runTest` clock (`withTimeoutOrNull` +
+            // `idle()` + `delay(10)`), so the whole loop elapsed in ~0 wall-clock
+            // time and starved the REAL SshTerminalBridge feed's budgeted
+            // `postDelayed` drain under a contended (CI) JVM -> the flood never
+            // landed and `completed` flaked false. Route through the same
+            // wall-clock-bounded pump #1042 used for codexScale/codexLike.
+            val completed = drainMainLooperUntil { !sender.isActive }
+            if (completed) sender.await() else sender.cancel()
 
             assertTrue(
                 "Codex-scale terminal output must not stall while Conversation retries",

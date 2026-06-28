@@ -74,6 +74,30 @@
 #       are baselined, and stale J1 baseline entries hard-fail so the baseline
 #       only shrinks as classes are promoted or removed.
 #
+#   --- #1048 addition (the runTest virtual-clock-vs-real-dispatcher flake class) ---
+#
+#   TIMING1 (ADVISORY warning, with ONE narrow HARD-FAIL) — scoped to the
+#       connection/terminal test roots (core-ssh, core-tmux, core-connection, and
+#       the app tmux/connectivity test dirs). The recurring "passes-locally /
+#       flakes-on-CI" JVM failure is ONE class: a `runTest` virtual clock drives
+#       code whose owned background work runs on a REAL dispatcher / Android
+#       Handler/Looper / raw Thread not pinned to the test scheduler, so
+#       runCurrent()/advanceUntilIdle() returns before the real thread finishes and
+#       CI CPU contention loses the race. TIMING1 flags a `runTest` test that
+#       touches a real dispatcher/thread (Dispatchers.IO/Dispatchers.Default/
+#       Executors.new/Thread.sleep/Thread(/CountDownLatch on a code line) UNLESS the
+#       file also (a) injects a StandardTestDispatcher(/UnconfinedTestDispatcher(
+#       seam for its owned scopes, (b) shows the bounded-pump signature (idleFor(
+#       together with a System.currentTimeMillis()/System.nanoTime() deadline loop),
+#       or (c) carries an inline `// JUSTIFIED:` opt-out. The two corrective shapes
+#       are Shape A (pinnable seam — SshLeaseAcquireBoundCharacterizationTest) and
+#       Shape B (wall-clock-bounded pump — TmuxSessionWarmOpenTest.pumpUntil / the
+#       codex pump). Current matches are baselined (advisory; the baseline only
+#       shrinks as tests adopt a seam). The lone HARD-FAIL is the narrow,
+#       high-signal NEW case: a `runTest` test with a bare small `Thread.sleep(<N>)`
+#       immediately preceding its load-bearing assert and NO bounded-deadline loop
+#       (the banned "fixed sleep as the only sync" shape).
+#
 # A BASELINE allowlist records the offenders the audits catalogued but that are
 # intentionally NOT rewritten here (the rewrites are per-issue follow-up work).
 # Those are reported as KNOWN-baseline (advisory) so this guard does not redden
@@ -83,7 +107,7 @@
 # intended direction of travel; a stale baseline entry is pruned + noted.
 #
 # Usage:
-#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1 smell
+#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1/TIMING1 hard-fail smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
 #
 # This is intentionally a grep-guard, not a custom lint rule, for affordability
@@ -257,6 +281,36 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
   "com.pocketshell.app.usage.UsageScreenE2eTest"
   "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"
 )
+
+# --------------------------------------------------------------------------
+# BASELINE — TIMING1 (#1048): connection/terminal `runTest` tests that touch a
+# real dispatcher/thread without a pinned seam or bounded pump, catalogued now.
+# Each is advisory; converting it to Shape A (a StandardTestDispatcher seam) or
+# Shape B (a bounded pump) is per-test follow-up. The baseline only shrinks as
+# tests adopt a seam — a stale entry (file gone) is pruned + noted. The NEW
+# narrow hard-fail (a bare Thread.sleep(N) immediately before a load-bearing
+# assert with no bounded loop) is NEVER baselined; baselined files are advisory.
+# --------------------------------------------------------------------------
+TIMING1_BASELINE=(
+  "app/src/test/java/com/pocketshell/app/tmux/TmuxSessionOpenFailedReconnectTest.kt"           # real-IO factoryScope
+  "app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelVoiceTest.kt"                # real-IO factoryScope
+  "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/SshConnectionCancellationTest.kt"    # CountDownLatch cross-thread sync
+  "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/TransportDispatcherWedgeBoundTest.kt" # deliberate wall-clock wedge harness
+)
+
+# Connection/terminal test roots TIMING1 is scoped to (path-prefix match).
+timing1_in_scope() {
+  case "$1" in
+    shared/core-ssh/src/test/*) return 0 ;;
+    shared/core-tmux/src/test/*) return 0 ;;
+    shared/core-connection/src/test/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/tmux/*) return 0 ;;
+    app/src/androidTest/java/com/pocketshell/app/tmux/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/connectivity/*) return 0 ;;
+    app/src/androidTest/java/com/pocketshell/app/connectivity/*) return 0 ;;
+  esac
+  return 1
+}
 
 in_list() {
   local file="$1"; shift
@@ -662,10 +716,125 @@ scan_j1() {
 }
 
 # --------------------------------------------------------------------------
+# TIMING1 scan (#1048) — connection/terminal `runTest` tests whose owned
+# background work runs on a real dispatcher/thread not pinned to the test
+# scheduler, with neither a TestDispatcher seam nor a bounded pump. Advisory,
+# with ONE narrow hard-fail: a bare small `Thread.sleep(<N>)` immediately before
+# a load-bearing assert and no bounded-deadline loop (the banned "fixed sleep as
+# the only sync" shape).
+# --------------------------------------------------------------------------
+declare -a TIMING1_NEW_HARD=()
+declare -a TIMING1_FINDINGS=()
+declare -a TIMING1_KNOWN=()
+declare -a TIMING1_JUSTIFIED=()
+
+# The real-dispatcher/thread tokens that signal an owned background hop is not
+# pinned to the virtual scheduler.
+timing1_dispatcher_smell='Dispatchers\.IO|Dispatchers\.Default|Executors\.new|Thread\.sleep|Thread\(|CountDownLatch'
+
+# (a) the file injects a TestDispatcher seam for its owned scopes.
+timing1_has_test_dispatcher() {
+  grep -Eq 'StandardTestDispatcher[[:space:]]*\(|UnconfinedTestDispatcher[[:space:]]*\(' "$1"
+}
+
+# (b) the file shows the bounded-pump signature: an `idleFor(` pump AND a
+# `System.currentTimeMillis()` / `System.nanoTime()` deadline loop.
+timing1_has_bounded_pump() {
+  grep -Eq 'idleFor[[:space:]]*\(' "$1" \
+    && grep -Eq 'System\.currentTimeMillis\(\)|System\.nanoTime\(\)' "$1"
+}
+
+# A `runTest` builder call in either the paren or trailing-lambda form.
+timing1_has_run_test() {
+  grep -Eq '(^|[^.[:alnum:]])runTest[[:space:]]*[({]' "$1"
+}
+
+# A real-dispatcher/thread smell on a genuine CODE line (not a comment/import).
+timing1_has_code_smell() {
+  local file="$1" lineno text
+  while IFS= read -r lineno; do
+    [[ -z "$lineno" ]] && continue
+    text="$(sed -n "${lineno}p" "$file")"
+    is_code_line "$text" && return 0
+  done < <(grep -nE "$timing1_dispatcher_smell" "$file" | cut -d: -f1)
+  return 1
+}
+
+# The narrow hard-fail: a bare numeric `Thread.sleep(<N>)` on a code line whose
+# next up-to-2 non-blank, non-comment lines contain a load-bearing assert, while
+# the file has NO bounded-deadline loop (the "fixed sleep as the only sync"
+# shape). A `// JUSTIFIED:` on the sleep line or the line above opts out.
+timing1_has_bare_sleep_before_assert() {
+  local file="$1"
+  # If the file already has a bounded-deadline loop, the sleep is part of a pump
+  # (Shape B), not a "fixed sleep as the only sync" — not the hard-fail shape.
+  if grep -Eq 'System\.currentTimeMillis\(\)|System\.nanoTime\(\)' "$file" \
+     && grep -Eq '(^|[^[:alnum:]])(while|do)([^[:alnum:]]|$)' "$file"; then
+    return 1
+  fi
+  local lineno text prev
+  while IFS= read -r lineno; do
+    [[ -z "$lineno" ]] && continue
+    text="$(sed -n "${lineno}p" "$file")"
+    is_code_line "$text" || continue
+    prev="$(sed -n "$((lineno - 1))p" "$file")"
+    if printf '%s\n%s' "$prev" "$text" | grep -q 'JUSTIFIED:'; then
+      continue
+    fi
+    # Look at the next up-to-2 non-blank, non-comment lines for an assert call.
+    local look n=0 seen=0
+    while IFS= read -r look; do
+      [[ "$look" =~ ^[[:space:]]*$ ]] && continue
+      is_code_line "$look" || continue
+      seen=$((seen + 1))
+      if printf '%s' "$look" | grep -Eq '(^|[^.[:alnum:]])(assert[A-Za-z]*|fail)[[:space:]]*\('; then
+        return 0
+      fi
+      n=$((n + 1))
+      [[ "$n" -ge 2 ]] && break
+    done < <(sed -n "$((lineno + 1)),$((lineno + 6))p" "$file")
+  done < <(grep -nE 'Thread\.sleep[[:space:]]*\([[:space:]]*[0-9][0-9_]*L?[[:space:]]*\)' "$file" | cut -d: -f1)
+  return 1
+}
+
+scan_timing1() {
+  local file
+  for file in "${ALL_TEST_FILES[@]}"; do
+    [[ -z "$file" ]] && continue
+    timing1_in_scope "$file" || continue
+    timing1_has_run_test "$file" || continue
+    timing1_has_code_smell "$file" || continue
+
+    # The narrow NEW hard-fail (never baselined): a bare sleep-before-assert with
+    # no bounded loop.
+    if ! in_list "$file" "${TIMING1_BASELINE[@]}" \
+       && timing1_has_bare_sleep_before_assert "$file"; then
+      TIMING1_NEW_HARD+=("$file")
+      continue
+    fi
+
+    # Spared (advisory clean): a TestDispatcher seam or a bounded pump.
+    if timing1_has_test_dispatcher "$file" || timing1_has_bounded_pump "$file"; then
+      continue
+    fi
+    # Opted out via an inline // JUSTIFIED: comment.
+    if grep -Eq '//[[:space:]]*JUSTIFIED:' "$file"; then
+      TIMING1_JUSTIFIED+=("$file")
+      continue
+    fi
+    if in_list "$file" "${TIMING1_BASELINE[@]}"; then
+      TIMING1_KNOWN+=("$file")
+    else
+      TIMING1_FINDINGS+=("$file")
+    fi
+  done
+}
+
+# --------------------------------------------------------------------------
 # Validate baselines: prune entries whose file no longer exists.
 # --------------------------------------------------------------------------
 declare -a STALE_BASELINE=()
-for b in "${A5_BASELINE[@]}" "${C1_BASELINE[@]}" "${FAKE1_BASELINE[@]}" "${AWAIT1_BASELINE[@]}"; do
+for b in "${A5_BASELINE[@]}" "${C1_BASELINE[@]}" "${FAKE1_BASELINE[@]}" "${AWAIT1_BASELINE[@]}" "${TIMING1_BASELINE[@]}"; do
   [[ -f "$b" ]] || STALE_BASELINE+=("$b")
 done
 
@@ -675,9 +844,10 @@ scan_c1
 scan_fake1
 scan_await1
 scan_j1
+scan_timing1
 
 echo "=============================================================="
-echo " Test-validity guard (issue #657 / F4; extended #848 / #850)"
+echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048)"
 echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
@@ -720,6 +890,10 @@ print_list "J1 — KNOWN unwired androidTest E2e/Docker baseline (#848 follow-up
 print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisory]" "${J1_JUSTIFIED[@]:-}"
 print_list "J1 — STALE unwired baseline entry [HARD FAIL]" "${J1_STALE_BASELINE[@]:-}"
 print_list "J1 — PARSER failure reading ci-journey-suite.sh [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
+print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, no bounded loop [HARD FAIL]" "${TIMING1_NEW_HARD[@]:-}"
+print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
+print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"
+print_list "TIMING1 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${TIMING1_JUSTIFIED[@]:-}"
 
 if [[ "${#STALE_BASELINE[@]}" -gt 0 ]]; then
   echo
@@ -742,16 +916,23 @@ echo " AWAIT1 bound the warm-session RPC with withTimeout so a"
 echo "        non-returning exec cannot pin the cold-start coroutine (#847)."
 echo " J1     wire the androidTest journey into scripts/ci-journey-suite.sh"
 echo "        or add a local // CI_JOURNEY_SUITE_JUSTIFIED: reason."
+echo " TIMING1 Shape A: inject StandardTestDispatcher(testScheduler) for every"
+echo "        owned scope (SshLeaseAcquireBoundCharacterizationTest:191-219)."
+echo "        Shape B: drive an Android Handler/Thread worker with a bounded"
+echo "        advanceUntilIdle()+idleFor(16ms) pump to a currentTimeMillis/"
+echo "        nanoTime deadline that HARD-FAILS (TmuxSessionWarmOpenTest.pumpUntil"
+echo "        :131-150; codex pump TmuxSessionViewModelTest:5602-5657)."
 echo "--------------------------------------------------------------"
 
-# Collect the HARD-FAIL categories (A5 + C1 + J1).
+# Collect the HARD-FAIL categories (A5 + C1 + J1 + TIMING1).
 real_hard_fail=()
 for x in \
   "${A5_NEW[@]:-}" \
   "${C1_NEW[@]:-}" \
   "${J1_NEW[@]:-}" \
   "${J1_STALE_BASELINE[@]:-}" \
-  "${J1_PARSER_FAILURE[@]:-}"; do
+  "${J1_PARSER_FAILURE[@]:-}" \
+  "${TIMING1_NEW_HARD[@]:-}"; do
   [[ -n "$x" ]] && real_hard_fail+=("$x")
 done
 
@@ -763,12 +944,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848)::A NEW load-bearing self-skip or ungated androidTest journey was found. An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), and a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason. Remove stale J1 baselines when a class is promoted or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048)::A NEW load-bearing self-skip, ungated androidTest journey, or fixed-sleep-before-assert was found. An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips or ungated androidTest journeys (A5 + C1 + J1)."
+echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, or fixed-sleep-before-assert flakes (A5 + C1 + J1 + TIMING1)."
 exit 0

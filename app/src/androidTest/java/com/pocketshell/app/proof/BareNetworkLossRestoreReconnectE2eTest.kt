@@ -273,6 +273,133 @@ class BareNetworkLossRestoreReconnectE2eTest {
         writeTimings()
     }
 
+    /**
+     * ISSUE #1065 (R5, audit C5) — the BOUNDED-PROBE redial arm after a LONG IDLE
+     * OUTAGE, distinct from the keepalive-proven fast path.
+     *
+     * [bareLossHoldsTheLeaseThenRestoreDrivesAFastReconnect] above proves a
+     * genuinely-dead post-outage socket still reconnects, but it drives a back-to-back
+     * loss→restore and never (a) survives a long idle outage nor (b) asserts that
+     * `scheduleNetworkReconnectOnRestore` STEP 1 (the keepalive-proven fast path,
+     * TmuxSessionViewModel.kt:4901-4904) was BYPASSED so the redial came from STEP 2
+     * (the bounded probe, :4905-4917). This is the redial-side companion to
+     * [MobileSpuriousReconnectE2eTest.longIdleOutageThenRestoreRidesThroughViaBoundedProbeNotFastPath]
+     * (the ride-through side): together they cover BOTH step-2 outcomes after a long
+     * idle (G2 class coverage — probe answers ⇒ ride through; probe dead ⇒ redial).
+     *
+     * The chain: attach → bare loss → SURVIVE A LONG IDLE OUTAGE (lease held, no
+     * churn) → model the keepalive AGED OUT (forceTransportProvenAliveForTest=false,
+     * the #780 synthetic equivalent of "aged past RIDE_THROUGH_BUDGET_MS during the
+     * idle") AND the bounded probe DEAD (forceLivenessProbeDeadForTest=true, a
+     * genuinely-dead post-outage socket) → ASSERT step 1 is bypassed
+     * (isTransportKeepAliveProvenAliveRecentlyForTest()==false) → restore →
+     * the bounded probe finds the socket dead so step 2 FALLS THROUGH to the
+     * fresh-lease redial: network_restore_reconnect_start fires AND there is NO
+     * network_restore_ride_through (a ride-through would mean step 1 or a live probe
+     * won — neither is true here) → recovers Connected with a painted viewport.
+     */
+    @Test
+    fun longIdleOutageThenRestoreRedialsViaBoundedProbeNotFastPath() = runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForNoSwitchingOverlay("pre-loss attach settle")
+        captureViewport("issue1065redial-01-attached")
+
+        val vm = currentViewModel()
+        val observer = terminalNetworkObserver()
+
+        // Baseline validated WIFI identity (proven-alive pinned so the baseline
+        // transition never tears the session before the load-bearing chain).
+        vm.forceTransportProvenAliveForTest = true
+        observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1065redial-baseline-wifi",
+        )
+        waitForConnected("post-baseline wifi")
+        waitForNoSwitchingOverlay("post-baseline wifi settle")
+        diagnostics!!.clear()
+
+        // THE LOSS: a bare NoValidatedNetwork — a real long outage starts.
+        val lost = observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "issue1065redial-bare-network-loss",
+        )
+        assertEquals(
+            "the surfaced change must be a NetworkLost",
+            TerminalNetworkChangeKind.NetworkLost,
+            lost!!.kind,
+        )
+        assertTrue(
+            "the VM must record a network_loss_hold for the bare loss (proves the hold " +
+                "arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
+        )
+
+        // SURVIVE THE LONG IDLE OUTAGE: no churn across the whole idle window.
+        watchNoRedialDiagnostics("across the long idle outage", LONG_IDLE_OUTAGE_MS)
+        captureViewport("issue1065redial-02-long-idle-held")
+
+        // Model the keepalive AGED OUT and the post-outage socket GENUINELY DEAD: the
+        // bounded probe must report dead so step 2 falls through to the fresh-lease
+        // redial (the #780 hard-inject model — no self-skip).
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = true
+
+        // Distinct-from-fast-path proof: step 1 cannot fire on restore.
+        assertTrue(
+            "the keepalive must be NOT-proven-alive on restore (aged out during the long " +
+                "idle) so scheduleNetworkReconnectOnRestore step 1 is bypassed and step 2 " +
+                "(the bounded probe) takes the decision — issue #1065/C5",
+            !vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+        diagnostics!!.clear()
+
+        // THE RESTORE: validation returns to the SAME WIFI identity.
+        val restored = observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1065redial-network-restored",
+        )
+        assertEquals(
+            "the surfaced change must be a NetworkRestored",
+            TerminalNetworkChangeKind.NetworkRestored,
+            restored!!.kind,
+        )
+
+        // LOAD-BEARING: the bounded probe found the socket dead, so step 2 fell through
+        // to the fresh-lease redial — network_restore_reconnect_start fires.
+        compose.waitUntil(timeoutMillis = RESTORE_RECONNECT_TIMEOUT_MS) {
+            diagnostics!!.eventsNamed("network_restore_reconnect_start").isNotEmpty()
+        }
+        assertTrue(
+            "expected the bounded-probe-dead arm to fire a fast network_restore_reconnect_start " +
+                "(proves step 2 redialled, not a vacuous pass); " +
+                "events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_restore_reconnect_start").isNotEmpty(),
+        )
+        // THE distinction from the ride-through arms: a DEAD bounded probe must NOT
+        // record a network_restore_ride_through (that would mean step 1, or a live
+        // probe, won — neither is true after a long idle on a dead socket).
+        assertTrue(
+            "a dead bounded probe must NOT ride through (step 2 must redial, not flip back " +
+                "to Live); events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_restore_ride_through").isEmpty(),
+        )
+
+        // Release the synthetic dead-probe seam so the freshly-redialled (real, healthy)
+        // transport is not immediately re-declared dead by the periodic probe loop.
+        vm.forceLivenessProbeDeadForTest = false
+
+        // Recovered: Connected, no overlay, viewport painted.
+        waitForConnected("after bounded-probe redial")
+        waitForNoSwitchingOverlay("after bounded-probe redial settle")
+        waitForVisibleTerminal("after bounded-probe redial terminal") { it.contains(READY_MARKER) }
+        captureViewport("issue1065redial-03-redialled")
+
+        writeTimings()
+    }
+
     private fun currentViewModel(): TmuxSessionViewModel {
         lateinit var vm: TmuxSessionViewModel
         compose.activityRule.scenario.onActivity { activity ->
@@ -566,6 +693,11 @@ class BareNetworkLossRestoreReconnectE2eTest {
         const val READY_MARKER: String = "ISSUE997-LOSS-READY"
 
         const val WATCH_NO_CHURN_MS: Long = 1_500L
+
+        // Issue #1065 (R5): the modelled long idle outage held across the loss window.
+        // Bounded so the connected journey stays affordable; long enough to be a
+        // genuine "survived an outage" hold rather than a synchronous brief dip.
+        const val LONG_IDLE_OUTAGE_MS: Long = 6_000L
 
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

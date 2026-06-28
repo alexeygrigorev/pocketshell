@@ -87,6 +87,148 @@ class RealSshSessionExecReadTimeoutTest {
             }
         }
 
+    /**
+     * Reproduce-first regression for #1046: a slow-but-PROGRESSING exec (bytes
+     * trickle in, each gap below the no-progress budget, total far above the
+     * budget) must NOT trip the bound and must NOT cascade-close the shared lease
+     * transport.
+     *
+     * On BASE (old whole-call wall-clock ceiling) the entire read+join was wrapped
+     * in ONE [WallClockCeiling] of `execReadTimeoutMs`, so this exec — whose total
+     * duration (~800ms) exceeds the 500ms budget — trips the ceiling at 500ms,
+     * throws [SshExecTimeoutException], and CLOSES the session (red: the exec
+     * fails / the transport is torn). With the per-read no-progress budget each
+     * 100ms gap is well under the 500ms window, the budget resets on every byte,
+     * the exec completes, and the transport stays connected (green).
+     */
+    @Test
+    fun `slow but progressing exec keeps the transport alive past the budget`() = runBlocking {
+        val command = SlowProgressingCommand(chunkCount = 8, gapMillis = 100L)
+        val client = ConnectedClient(RecordingSessionChannel(command))
+        // Budget (500ms) is far below the exec's total duration (~800ms) but well
+        // above each inter-byte gap (100ms) — the regression's whole-call ceiling
+        // closes on total time; the no-progress budget survives because each step
+        // makes progress.
+        val session = RealSshSession(client, execReadTimeoutMs = 500L)
+
+        try {
+            val result = withTimeout(10_000L) {
+                session.exec("slow-but-progressing-listing")
+            }
+
+            assertEquals(
+                "every trickled byte must be drained (no whole-call ceiling cut)",
+                "x".repeat(8),
+                result.stdout,
+            )
+            assertEquals(0, result.exitCode)
+            assertTrue(
+                "the first read must actually have started (not failed on open)",
+                command.firstReadStarted.isCompleted,
+            )
+            assertTrue(
+                "a slow-but-progressing exec must NOT cascade-close the shared lease transport",
+                session.isConnected,
+            )
+        } finally {
+            session.close()
+        }
+    }
+
+    /**
+     * Keystone for #1046's shared-budget re-arm (AC3 — the real mobile scenario).
+     *
+     * stderr is PARKED silent (no data, no EOF) across the WHOLE no-progress
+     * window while stdout keeps trickling bytes at sub-window gaps for a total
+     * duration exceeding the window — i.e. a long stdout-heavy `cat`/listing/git
+     * probe with silent stderr on a slow link. The shared no-progress budget
+     * resets off stdout's progress, so stderr's parked read is re-armed
+     * (`if (stallBudget.progressedWithinWindow()) continue` in
+     * `readStepUnderStallBudget`) rather than tripping the budget; both streams
+     * EOF when the command completes and the exec succeeds WITHOUT tearing the
+     * transport.
+     *
+     * This PINS the shared-budget design: under a naive per-stream budget (each
+     * stream bounded by its OWN window, no cross-stream re-arm) the parked stderr
+     * read would trip at the window and throw [SshExecTimeoutException] + close
+     * the session even though stdout is progressing — the exact false
+     * spurious-reconnect this issue fixes. Removing the re-arm `continue` turns
+     * this test RED; the shipped shared budget keeps it GREEN.
+     */
+    @Test
+    fun `progressing stdout re-arms the shared budget while stderr is parked silent`() = runBlocking {
+        val command = SilentParkingStderrSlowStdoutCommand(chunkCount = 8, gapMillis = 100L)
+        val client = ConnectedClient(RecordingSessionChannel(command))
+        // window 500ms < total stdout duration (~800ms); stderr stays parked the
+        // whole time (longer than one window) yet must not bound the exec.
+        val session = RealSshSession(client, execReadTimeoutMs = 500L)
+
+        try {
+            val result = withTimeout(10_000L) {
+                session.exec("stdout-heavy-listing-silent-stderr")
+            }
+
+            assertEquals(
+                "every trickled stdout byte must be drained",
+                "x".repeat(8),
+                result.stdout,
+            )
+            assertEquals("silent stderr must drain to empty", "", result.stderr)
+            assertEquals(0, result.exitCode)
+            assertTrue(
+                "stderr must actually have parked silently (not instant EOF)",
+                command.stderrParked.isCompleted,
+            )
+            assertTrue(
+                "a parked-silent stderr must NOT trip the shared budget while stdout progresses",
+                session.isConnected,
+            )
+        } finally {
+            session.close()
+        }
+    }
+
+    /**
+     * Class coverage for #1046: an exec that PROGRESSES for a while and THEN
+     * wedges (no further bytes on either stream) must still be bounded and still
+     * close the session — the no-progress budget must not be defeated by earlier
+     * progress. The budget resets while bytes flow, then bounds the final stall.
+     */
+    @Test
+    fun `exec that progresses then wedges is still bounded and closes the session`() = runBlocking {
+        val command = ProgressesThenWedgesCommand(chunkCount = 3, gapMillis = 100L)
+        val session = RealSshSession(
+            ConnectedClient(RecordingSessionChannel(command)),
+            execReadTimeoutMs = 400L,
+        )
+
+        try {
+            val thrown: SshExecTimeoutException = withTimeout(10_000L) {
+                try {
+                    session.exec("progress-then-wedge")
+                    throw AssertionError("a wedged-after-progress exec must not return")
+                } catch (e: SshExecTimeoutException) {
+                    e
+                }
+            }
+
+            assertTrue(
+                "the wedge must have followed real progress",
+                command.deliveredCount() >= 1,
+            )
+            assertTrue(
+                "timeout exception must carry the wedged command",
+                thrown.command.contains("progress-then-wedge"),
+            )
+            assertFalse(
+                "a mid-stream wedge must still close the session (lease self-heal)",
+                session.isConnected,
+            )
+        } finally {
+            session.close()
+        }
+    }
+
     @Test
     fun `exec drains stdout and stderr concurrently`() = runBlocking {
         val command = CoordinatedStdoutStderrCommand()
@@ -295,6 +437,219 @@ class RealSshSessionExecReadTimeoutTest {
         override fun close() {
             super.close()
             stdout.close()
+        }
+    }
+
+    /**
+     * Models a slow-but-PROGRESSING command (#1046): stdout yields [chunkCount]
+     * single bytes, each after a [gapMillis] gap (below the no-progress budget),
+     * then EOF. stderr is silent (empty). The total duration is `chunkCount *
+     * gapMillis`, deliberately set ABOVE the per-exec budget so a whole-call
+     * ceiling would close it while a per-read no-progress budget survives.
+     */
+    private class SlowProgressingCommand(
+        chunkCount: Int,
+        gapMillis: Long,
+    ) : FakeChannel(), Session.Command {
+        val firstReadStarted = CompletableDeferred<Unit>()
+        private val stdout = TricklingInputStream(firstReadStarted, chunkCount, gapMillis, wedgeAfter = false)
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+
+        override fun close() {
+            super.close()
+            stdout.close()
+        }
+    }
+
+    /**
+     * Models a command that progresses then wedges (#1046): stdout yields
+     * [chunkCount] single bytes (each after [gapMillis]) and then parks forever
+     * (until interrupt/close). The no-progress budget must reset while bytes flow
+     * and then bound the final stall.
+     */
+    private class ProgressesThenWedgesCommand(
+        chunkCount: Int,
+        gapMillis: Long,
+    ) : FakeChannel(), Session.Command {
+        val firstReadStarted = CompletableDeferred<Unit>()
+        private val stdout = TricklingInputStream(firstReadStarted, chunkCount, gapMillis, wedgeAfter = true)
+
+        fun deliveredCount(): Int = stdout.deliveredCount()
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+
+        override fun close() {
+            super.close()
+            stdout.close()
+        }
+    }
+
+    /**
+     * Trickles [chunkCount] single `x` bytes, one per blocking `read`, each after
+     * a [gapMillis] real-time gap. When [wedgeAfter] is true, after the last byte
+     * the stream parks indefinitely (no EOF) until closed/interrupted — modelling
+     * a command that progresses and then wedges. Otherwise it returns EOF after
+     * the last byte. The gap honours interruption so the per-read wall-clock
+     * watchdog (and the test's future cancel) can unpark a parked read.
+     */
+    private class TricklingInputStream(
+        private val firstReadStarted: CompletableDeferred<Unit>,
+        private val chunkCount: Int,
+        private val gapMillis: Long,
+        private val wedgeAfter: Boolean,
+    ) : InputStream() {
+        @Volatile
+        private var closed = false
+        private val delivered = AtomicInteger(0)
+
+        fun deliveredCount(): Int = delivered.get()
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            val n = read(one, 0, 1)
+            return if (n < 0) -1 else one[0].toInt() and 0xff
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            firstReadStarted.complete(Unit)
+            if (delivered.get() >= chunkCount) {
+                // All bytes delivered: either wedge forever or signal EOF.
+                if (!wedgeAfter) return -1
+                while (!closed) {
+                    if (Thread.interrupted()) throw java.io.InterruptedIOException("wedged read interrupted")
+                    Thread.sleep(10L)
+                }
+                return -1
+            }
+            // Real-time inter-byte gap (below the no-progress budget). Honour
+            // interrupt so the wall-clock watchdog / future-cancel can unpark us.
+            val deadlineNanos = System.nanoTime() + gapMillis * 1_000_000L
+            while (System.nanoTime() < deadlineNanos) {
+                if (closed) return -1
+                try {
+                    Thread.sleep(5L)
+                } catch (e: InterruptedException) {
+                    throw java.io.InterruptedIOException("trickle read interrupted")
+                }
+            }
+            delivered.incrementAndGet()
+            b[off] = 'x'.code.toByte()
+            return 1
+        }
+
+        override fun close() {
+            closed = true
+        }
+    }
+
+    /**
+     * Models the real #1046 mobile scenario (AC3): stdout trickles [chunkCount]
+     * single bytes (each after a sub-window [gapMillis] gap), while stderr is
+     * PARKED silent — it returns no bytes and does NOT EOF until the command
+     * completes (stdout reaches EOF). stderr therefore stays blocked across the
+     * whole no-progress window, and only the SHARED budget re-armed off stdout's
+     * progress keeps the exec alive. Both streams EOF when stdout finishes.
+     */
+    private class SilentParkingStderrSlowStdoutCommand(
+        chunkCount: Int,
+        gapMillis: Long,
+    ) : FakeChannel(), Session.Command {
+        val firstStdoutReadStarted = CompletableDeferred<Unit>()
+        val stderrParked = CompletableDeferred<Unit>()
+
+        @Volatile
+        private var closedFlag = false
+        private val stdoutComplete = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val delivered = AtomicInteger(0)
+
+        private val stdout = object : InputStream() {
+            override fun read(): Int {
+                val one = ByteArray(1)
+                val n = read(one, 0, 1)
+                return if (n < 0) -1 else one[0].toInt() and 0xff
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                firstStdoutReadStarted.complete(Unit)
+                if (delivered.get() >= chunkCount) {
+                    // All bytes delivered: the command has finished — signal EOF
+                    // and release the parked stderr.
+                    stdoutComplete.set(true)
+                    return -1
+                }
+                val deadlineNanos = System.nanoTime() + gapMillis * 1_000_000L
+                while (System.nanoTime() < deadlineNanos) {
+                    if (closedFlag) return -1
+                    try {
+                        Thread.sleep(5L)
+                    } catch (e: InterruptedException) {
+                        throw java.io.InterruptedIOException("stdout trickle interrupted")
+                    }
+                }
+                delivered.incrementAndGet()
+                b[off] = 'x'.code.toByte()
+                return 1
+            }
+
+            override fun close() {
+                closedFlag = true
+            }
+        }
+
+        private val stderr = object : InputStream() {
+            override fun read(): Int {
+                val one = ByteArray(1)
+                val n = read(one, 0, 1)
+                return if (n < 0) -1 else one[0].toInt() and 0xff
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                stderrParked.complete(Unit)
+                // Park silently — no data, no EOF — until the command completes
+                // (stdout reached EOF). Honour interrupt so the per-read
+                // wall-clock watchdog can unpark us: under the SHARED budget the
+                // watchdog interrupts this parked read every window, the budget
+                // re-arms off stdout's progress, and we re-park here.
+                while (!stdoutComplete.get()) {
+                    if (closedFlag) return -1
+                    try {
+                        Thread.sleep(5L)
+                    } catch (e: InterruptedException) {
+                        throw java.io.InterruptedIOException("stderr parked read interrupted")
+                    }
+                }
+                return -1
+            }
+
+            override fun close() {
+                closedFlag = true
+            }
+        }
+
+        override fun getInputStream(): InputStream = stdout
+        override fun getErrorStream(): InputStream = stderr
+        override fun getExitErrorMessage(): String? = null
+        override fun getExitSignal(): Signal? = null
+        override fun getExitStatus(): Int = 0
+        override fun getExitWasCoreDumped(): Boolean = false
+        override fun signal(signal: Signal) = Unit
+
+        override fun close() {
+            super.close()
+            closedFlag = true
         }
     }
 

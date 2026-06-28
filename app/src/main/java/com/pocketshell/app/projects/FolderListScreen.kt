@@ -1144,9 +1144,9 @@ internal fun FolderListContent(
     ) {
         // Issue #656: the action status no longer renders as a top-of-list row.
         // A routine success emits no status at all (the list change is the
-        // feedback) and a failure surfaces as a non-displacing overlay pinned to
-        // the bottom of this Box (see [FolderActionFailureBanner] below), so no
-        // action ever pushes the list down.
+        // feedback), while in-flight/failed work surfaces as a non-displacing
+        // overlay pinned to the bottom of this Box, so no action ever pushes the
+        // list down.
         if (showFlatFolderList) {
             // Flat view (#485 render fix, #489 visual polish): EVERY session on the
             // host, grouped by status into ACTIVE and IDLE sections instead of by
@@ -1297,14 +1297,23 @@ internal fun FolderListContent(
         // pull-to-refresh indicator is itself non-displacing (it overlays the
         // content and reflows no rows), so the #639 "don't push rows down on every
         // session switch" requirement still holds with the single indicator.
-        // Issue #656: failures surface as a non-displacing snackbar-style
-        // overlay pinned to the bottom edge of the content. Like the #639
-        // refresh bar it occupies zero layout slot in the list, so a failed
-        // action never pushes a row down. Successes emit no status at all, so
-        // this overlay only ever appears for [FolderActionStatus.Failed].
-        (actionStatus as? FolderActionStatus.Failed)?.let { failure ->
-            FolderActionFailureBanner(
-                message = failure.message,
+        // Issue #656: action feedback surfaces as a non-displacing snackbar-style
+        // overlay pinned to the bottom edge of the content. Like the #639 refresh
+        // bar it occupies zero layout slot in the list, so create/failure feedback
+        // never pushes a row down.
+        when (val status = actionStatus) {
+            FolderActionStatus.Idle -> Unit
+            is FolderActionStatus.Running -> FolderActionProgressBanner(
+                message = status.message,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(
+                        horizontal = FolderListBottomContentPadding,
+                        vertical = FolderListBottomContentPadding,
+                    ),
+            )
+            is FolderActionStatus.Failed -> FolderActionFailureBanner(
+                message = status.message,
                 onDismiss = onDismissActionStatus,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1396,12 +1405,45 @@ private fun PortForwardingSummaryRow(
 }
 
 /**
+ * Issue #656: non-displacing in-progress affordance for host-detail actions.
+ * Pinned as an overlay to the bottom edge of the content [Box], it occupies zero
+ * layout slot in the list (mirroring the #639 refresh progress bar), so a
+ * pending create is visible without pushing any list row down.
+ */
+@Composable
+private fun FolderActionProgressBanner(
+    message: String,
+    modifier: Modifier = Modifier,
+) {
+    val color = PocketShellColors.Accent
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .background(color.copy(alpha = 0.12f), PocketShellShapes.medium)
+            .border(1.dp, color.copy(alpha = 0.4f), PocketShellShapes.medium)
+            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm)
+            .testTag(FOLDER_LIST_ACTION_STATUS_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        LoadingIndicator.Spinner(size = SpinnerSize.Small)
+        Text(
+            text = message,
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
  * Issue #656: non-displacing failure affordance for host-detail actions. Pinned
  * as an overlay to the bottom edge of the content [Box], it occupies zero layout
  * slot in the list (mirroring the #639 refresh progress bar), so a failed action
- * is visible without pushing any list row down. Only failures render — a routine
- * success emits no [FolderActionStatus] at all, so the list change alone is the
- * feedback and nothing displaces the list.
+ * is visible without pushing any list row down. Routine success emits no
+ * [FolderActionStatus] at all, so the list change alone is the feedback and
+ * nothing displaces the list.
  */
 @Composable
 private fun FolderActionFailureBanner(

@@ -101,7 +101,36 @@ class FolderListGatewayExecTimeoutTest {
         )
     }
 
-    private fun newGateway(session: WedgingSshSession): SshFolderListGateway =
+    @Test
+    fun wedgedCreateSessionReadSurfacesBoundedFailureAndClosesSession() = runBlocking {
+        val session = CreateSessionWedgingSshSession()
+        val gateway = newGateway(session)
+
+        val failure = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = "telegram-writing-assistant",
+                cwd = "/home/me/telegram-writing-assistant",
+                startCommand = "pocketshell agent codex --dir '/home/me/telegram-writing-assistant'",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(
+            "wedged create must fail with the bounded exec timeout, got $failure",
+            failure is FolderListExecTimeoutException,
+        )
+        assertTrue(
+            "directory probe ran before the create wedge",
+            session.execCommands.any { it.contains("test -d") },
+        )
+        assertTrue("capped create command was attempted", session.execCommands.any { it.contains("create-detached") })
+        assertTrue(
+            "wedged session must be closed on create timeout (no orphaned exec channel/thread)",
+            session.closed,
+        )
+    }
+
+    private fun newGateway(session: SshSession): SshFolderListGateway =
         SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = ActiveTmuxClients(),
@@ -154,6 +183,52 @@ class FolderListGatewayExecTimeoutTest {
                 }
             }
             return ExecResult(stdout = "", stderr = "", exitCode = 0)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): SshPortForward = error("not used")
+
+        override fun startShell(): SshShell = error("not used")
+
+        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+
+        override suspend fun uploadStream(
+            input: InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("not used")
+
+        override fun close() {
+            closed = true
+        }
+    }
+
+    /**
+     * Create-session fake: directory exists, launch-target collision probe says
+     * "absent", then the capped create read never reaches EOF.
+     */
+    private class CreateSessionWedgingSshSession : SshSession {
+        val execCommands: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
+        @Volatile
+        var closed: Boolean = false
+
+        override val isConnected: Boolean
+            get() = !closed
+
+        override suspend fun exec(command: String): ExecResult {
+            execCommands += command
+            return when {
+                command.contains("test -d") -> ExecResult(stdout = "", stderr = "", exitCode = 0)
+                command.contains("has-session") -> ExecResult(stdout = "", stderr = "", exitCode = 1)
+                command.contains("create-detached") -> awaitCancellation()
+                else -> ExecResult(stdout = "", stderr = "", exitCode = 0)
+            }
         }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")

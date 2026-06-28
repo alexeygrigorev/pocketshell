@@ -540,7 +540,21 @@ class HostListViewModelTest {
         )
         val host = db.hostDao().getById(hostId)!!
         val session = FakeBootstrapSession()
-        val closeThread = CompletableDeferred<String>()
+        // The production close runs on a REAL background dispatcher
+        // (Dispatchers.IO) — see HostListViewModel.closeSession. Verifying it
+        // ran OFF the Robolectric main/test thread is intrinsic to this test:
+        // it inspects the executing thread's NAME, and a real off-main worker
+        // is the property under test. So we keep the real thread and await its
+        // completion with a generous WALL-CLOCK bound (CountDownLatch) rather
+        // than a `runTest` virtual-clock `withTimeout`. The virtual clock can
+        // skip ahead to the timeout instantly while the real off-main close is
+        // still in flight, which is exactly what reddened this test under CI
+        // CPU contention (issue #1048 Shape-B: wall-clock-bounded deterministic
+        // await over real off-main work). Injecting a test dispatcher (Shape-A)
+        // is NOT applicable here because it would confine the close back onto
+        // the test/main thread and defeat the off-main assertion.
+        val closeLatch = java.util.concurrent.CountDownLatch(1)
+        val closeThreadName = java.util.concurrent.atomic.AtomicReference<String>()
         val viewModel = newViewModel(
             sessionOpener = object : HostSessionOpener {
                 override suspend fun open(
@@ -550,14 +564,19 @@ class HostListViewModelTest {
                 ): SshSession = session
 
                 override suspend fun close(session: SshSession) {
-                    closeThread.complete(Thread.currentThread().name)
+                    closeThreadName.set(Thread.currentThread().name)
                     session.close()
+                    closeLatch.countDown()
                 }
             },
         )
 
         viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
-        val threadName = kotlinx.coroutines.withTimeout(5_000L) { closeThread.await() }
+        assertTrue(
+            "bootstrap probe session was not closed within the wall-clock bound",
+            closeLatch.await(10, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        val threadName = closeThreadName.get()
 
         assertEquals(true, viewModel.pendingNavigation.value!!.ready)
         assertEquals(1, session.closeCount)

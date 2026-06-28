@@ -16,6 +16,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshUploadProgress
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -257,15 +258,9 @@ internal class ShareViewModel internal constructor(
     /**
      * Build the lease target for the share connect.
      *
-     * The [SshLeaseKey] is byte-for-byte identical to the one the live
-     * tmux session uses (`TmuxSessionViewModel.toSshLeaseTarget`) — same
-     * `credentialId` (`"$id:$keyPath"`) and `knownHostsId` — so when the
-     * app already holds a warm lease for this host/key the share REUSES it
-     * (the passphrase is intentionally NOT part of the lease key, so a
-     * warm, already-unlocked lease is shared regardless of whether we have
-     * a passphrase here). The [passphrase] only matters on the
-     * fresh-connect fallback, when no reusable lease exists and the key is
-     * passphrase-protected (issue #654).
+     * File-transfer work gets its own lease-key purpose suffix instead of
+     * borrowing the live tmux terminal transport. A multi-megabyte upload can
+     * otherwise disturb the active control session on the same SSH connection.
      */
     private fun HostEntity.toShareLeaseTarget(
         keyPath: String,
@@ -797,7 +792,36 @@ internal class ShareViewModel internal constructor(
 
             for ((index, item) in payload.withIndex()) {
                 val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
-                val result = uploader.upload(host, keyEntity, item, target)
+                val itemNumber = index + 1
+                val estimatedBytes = estimatedUploadBytes(item)
+                _uploadState.value = UploadState.Running(
+                    host.name,
+                    uploadProgressDetail(
+                        label = itemLabel,
+                        itemNumber = itemNumber,
+                        totalCount = payload.size,
+                        bytesTransferred = 0L,
+                        totalBytes = estimatedBytes,
+                    ),
+                )
+                val result = uploader.upload(
+                    host = host,
+                    keyEntity = keyEntity,
+                    item = item,
+                    target = target,
+                    onProgress = { progress ->
+                        _uploadState.value = UploadState.Running(
+                            host.name,
+                            uploadProgressDetail(
+                                label = itemLabel,
+                                itemNumber = itemNumber,
+                                totalCount = payload.size,
+                                bytesTransferred = progress.bytesTransferred,
+                                totalBytes = progress.totalBytes.takeIf { it > 0L } ?: estimatedBytes,
+                            ),
+                        )
+                    },
+                )
                 val failure = result.exceptionOrNull()
                 // Issue #654: a fresh share connect (when no warm app lease
                 // is reusable — e.g. the live session's lease expired while
@@ -1095,6 +1119,12 @@ internal class ShareViewModel internal constructor(
         ShareUploadNotifications.showFailure(applicationContext, hostName, message)
     }
 
+    private fun estimatedUploadBytes(item: ShareableItem): Long? = when (item) {
+        is ShareableItem.FileItem -> item.file.length().takeIf { it > 0L }
+        is ShareableItem.TextItem -> item.text.toByteArray(Charsets.UTF_8).size.toLong()
+        is ShareableItem.UriItem -> item.size?.takeIf { it > 0L }
+    }
+
     private data class SessionStagingInput(
         val uris: List<Uri>,
         val tempFiles: List<File>,
@@ -1344,6 +1374,32 @@ internal class ShareViewModel internal constructor(
         }
 
         /**
+         * Live per-item upload detail (issue #1037). Unlike [runningDetail]'s
+         * static total computed before the transfer starts, this is rebuilt on
+         * every [SshUploadProgress] callback so the share UI shows bytes moving
+         * (`Uploading report.zip (2.1 MB / 4.8 MB)`), with an `(n/total)` item
+         * counter when more than one item is in the batch. The byte progress
+         * surfaced here rides the ISOLATED transfer lease (the `share-upload`
+         * purpose), never the live terminal tmux connection.
+         */
+        fun uploadProgressDetail(
+            label: String,
+            itemNumber: Int,
+            totalCount: Int,
+            bytesTransferred: Long,
+            totalBytes: Long?,
+        ): String {
+            val counter = if (totalCount > 1) " ($itemNumber/$totalCount)" else ""
+            val sizePart = when {
+                totalBytes != null && totalBytes > 0L ->
+                    "${formatRunningBytes(bytesTransferred)} / ${formatRunningBytes(totalBytes)}"
+                bytesTransferred > 0L -> formatRunningBytes(bytesTransferred)
+                else -> "size unknown"
+            }
+            return "Uploading $label$counter ($sizePart)"
+        }
+
+        /**
          * Single-quote escape for tmux command arguments. Mirrors the
          * private helper in [com.pocketshell.app.tmux.TmuxSessionViewModel] —
          * inlined here to keep the share package decoupled from
@@ -1469,6 +1525,13 @@ private class LeaseBackedShareSession(
     override suspend fun uploadFile(file: File, remotePath: String): String =
         session.uploadFile(file, remotePath)
 
+    override suspend fun uploadFile(
+        file: File,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
+        session.uploadFile(file, remotePath, onProgress)
+
     override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
         session.downloadFile(remotePath, maxBytes)
 
@@ -1479,6 +1542,15 @@ private class LeaseBackedShareSession(
         remotePath: String,
     ): String =
         session.uploadStream(input, length, name, remotePath)
+
+    override suspend fun uploadStream(
+        input: java.io.InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
+        session.uploadStream(input, length, name, remotePath, onProgress)
 
     override suspend fun listDirectory(
         remotePath: String,

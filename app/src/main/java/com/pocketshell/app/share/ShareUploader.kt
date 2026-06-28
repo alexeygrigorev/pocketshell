@@ -10,6 +10,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshUploadProgress
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,7 @@ internal interface ShareItemUploader {
         keyEntity: SshKeyEntity,
         item: ShareableItem,
         target: ShareTarget = ShareTarget.HostInbox,
+        onProgress: ((SshUploadProgress) -> Unit)? = null,
     ): Result<String>
 }
 
@@ -124,6 +126,7 @@ internal class ShareUploader(
         keyEntity: SshKeyEntity,
         item: ShareableItem,
         target: ShareTarget,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): Result<String> = withContext(Dispatchers.IO) {
         val preparedUriFile = if (item is ShareableItem.UriItem) {
             val resolver = context.contentResolver
@@ -167,9 +170,10 @@ internal class ShareUploader(
                         preparedUriFile
                             ?: throw SshException("Could not read shared file before upload"),
                         remotePath,
+                        onProgress,
                     )
-                    is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName)
-                    is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath)
+                    is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName, onProgress)
+                    is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath, onProgress)
                 }
                 Result.success("${destination.displayDirectory}/$remoteName")
             }
@@ -276,6 +280,7 @@ internal class ShareUploader(
         item: ShareableItem.TextItem,
         remotePath: String,
         remoteName: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ) {
         val bytes = item.text.toByteArray(Charsets.UTF_8)
         bytes.inputStream().use { input ->
@@ -284,6 +289,7 @@ internal class ShareUploader(
                 length = bytes.size.toLong(),
                 name = remoteName,
                 remotePath = remotePath,
+                onProgress = onProgress,
             )
         }
     }

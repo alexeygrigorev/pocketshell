@@ -1048,6 +1048,13 @@ internal class RealSshSession(
     }
 
     override suspend fun uploadFile(file: File, remotePath: String): String =
+        uploadFile(file, remotePath, onProgress = null)
+
+    override suspend fun uploadFile(
+        file: File,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
+    ): String =
         withContext(Dispatchers.IO) {
             ensureConnected()
             if (!file.exists()) {
@@ -1059,6 +1066,7 @@ internal class RealSshSession(
                     length = file.length(),
                     name = file.name,
                     remotePath = remotePath,
+                    onProgress = onProgress,
                 )
             }
             remotePath
@@ -1069,9 +1077,18 @@ internal class RealSshSession(
         length: Long,
         name: String,
         remotePath: String,
+    ): String =
+        uploadStream(input, length, name, remotePath, onProgress = null)
+
+    override suspend fun uploadStream(
+        input: InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): String = withContext(Dispatchers.IO) {
         ensureConnected()
-        uploadStreamInternal(input, length, name, remotePath)
+        uploadStreamInternal(input, length, name, remotePath, onProgress)
         remotePath
     }
 
@@ -1283,6 +1300,7 @@ internal class RealSshSession(
         length: Long,
         name: String,
         remotePath: String,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ) {
         // Atomic temp sibling of the final path: `<final>.part-<rand>`. A
         // dropped/timed-out transfer corrupts only THIS temp name, never the
@@ -1290,7 +1308,14 @@ internal class RealSshSession(
         // concurrent retries of the same attachment.
         val tempRemotePath = remotePath + ".part-" + java.util.UUID.randomUUID().toString().take(8)
         try {
-            val copied = streamToRemoteTemp(input, name, remotePath, tempRemotePath, length)
+            val copied = streamToRemoteTemp(
+                input = input,
+                name = name,
+                remotePath = remotePath,
+                tempRemotePath = tempRemotePath,
+                declaredLength = length,
+                onProgress = onProgress,
+            )
 
             // Integrity check BEFORE the rename: the bytes that actually landed
             // in the temp file must match what we copied, and — when the caller
@@ -1345,6 +1370,7 @@ internal class RealSshSession(
         remotePath: String,
         tempRemotePath: String,
         declaredLength: Long,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): Long {
         val coroutineJob = currentCoroutineContext()[Job]
         // Channel open + `cat >` exec are transport-mutating packets — serialise
@@ -1393,7 +1419,7 @@ internal class RealSshSession(
             val copied = try {
                 runInterruptible(Dispatchers.IO) {
                     val output = command!!.outputStream
-                    val n = copyToRemoteBlocking(input, output, declaredLength)
+                    val n = copyToRemoteBlocking(input, output, declaredLength, onProgress)
                     runTransferStepWithStallTimeout(
                         operation = "closing upload output",
                         timeoutMs = uploadStallTimeoutMs,
@@ -1546,9 +1572,11 @@ internal class RealSshSession(
         input: InputStream,
         output: OutputStream,
         declaredLength: Long,
+        onProgress: ((SshUploadProgress) -> Unit)?,
     ): Long {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0L
+        onProgress?.invoke(SshUploadProgress(bytesTransferred = 0L, totalBytes = declaredLength))
         while (true) {
             if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
             val read = runTransferStepWithStallTimeout(
@@ -1573,6 +1601,7 @@ internal class RealSshSession(
             }
             total += read
             recordOutboundActivity()
+            onProgress?.invoke(SshUploadProgress(bytesTransferred = total, totalBytes = declaredLength))
         }
         runTransferStepWithStallTimeout(
             operation = "flushing upload bytes",

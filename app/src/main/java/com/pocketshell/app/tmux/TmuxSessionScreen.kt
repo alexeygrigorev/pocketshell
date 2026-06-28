@@ -1717,33 +1717,38 @@ public fun TmuxSessionScreen(
             // Whether to render the Conversation *content* (real transcript) in
             // place of the terminal pager. This is the actual content swap,
             // distinct from whether the Conversation *tab* exists (#716
-            // presumed-agent — see [tmuxSessionTabState]). It still requires a
-            // live detection because the heavyweight [TmuxConversationPane] needs
-            // a real transcript — and keeping this detection-gated also preserves
-            // the #605 Conversation→Terminal swap latch, which keys off the real
-            // pane mounting/unmounting (the lightweight placeholder below never
-            // mounts that pane, so it cannot trigger the same-frame teardown
-            // race). Still gated on the ACTIVE `currentPane`: the transcript
-            // mounts only for the promoted active runtime's pane (#797).
-            val showConversation = currentPane != null &&
-                visibleConversation?.detection != null &&
-                visibleConversation.selectedTab == SessionTab.Conversation
-            // Issue #778: when the user has tapped Conversation on a
-            // presumed-agent pane but live detection has NOT landed yet
-            // (`detection == null`), render a lightweight "waiting for agent"
-            // placeholder INSTEAD of swallowing the tap and staying on the
-            // terminal. The tap is now honoured end-to-end (onClick → VM records
-            // `selectedTab = Conversation` on a detection-less row → this branch
-            // paints the placeholder). The real [TmuxConversationPane]
-            // (`showConversation`) takes over the instant detection seeds. Gated
-            // on `presumedAgent` so a confirmed shell can never show this.
-            // Issue #797: the placeholder follows the SURFACE pane so the
-            // "waiting for agent" state is shown on a settled cached presumed-
-            // agent pane too (the Conversation tab is no longer empty there).
-            val showConversationPlaceholder = surfacePane != null &&
-                presumedAgent &&
-                visibleConversation?.detection == null &&
-                visibleConversation?.selectedTab == SessionTab.Conversation
+            // presumed-agent — see [tmuxSessionTabState]). Routing is centralised
+            // in [tmuxSessionConversationSurface] (#1057) so a Conversation tap on
+            // a pane whose agent was mis-classified as a shell still surfaces the
+            // existing transcript (or the loading placeholder) instead of leaving
+            // the user stuck on the Terminal — the maintainer's "can't see
+            // conversation" symptom. Transcript still mounts only for the ACTIVE
+            // `currentPane` (preserves the #797 active-runtime gate and the #605
+            // Conversation→Terminal swap latch); it now also fires for an existing
+            // events transcript whose detection is currently null (an agent that
+            // exited / a recorded-shell pane), not solely live detection.
+            val conversationSurface = tmuxSessionConversationSurface(
+                showsConversationTab = tabState.showsConversationTab,
+                isActivePane = currentPane != null,
+                hasSurfacePane = surfacePane != null,
+                selectedTab = visibleConversation?.selectedTab,
+                hasDetection = visibleConversation?.detection != null,
+                hasEvents = visibleConversation?.events?.isNotEmpty() == true,
+            )
+            // The leading `visibleConversation != null` keeps the K2 smart-cast
+            // for the `showConversation` content branches below (they read
+            // `visibleConversation.events` / `.loadState` non-null); the surface
+            // routing already requires a non-null row to reach Transcript.
+            val showConversation = visibleConversation != null &&
+                conversationSurface == TmuxConversationSurface.Transcript
+            // Issue #778/#1057: a lightweight "Loading conversation…" / Failed
+            // placeholder when the user opened the Conversation tab on a pane with
+            // no transcript yet (detection null AND no events). No longer gated on
+            // `presumedAgent` — a confirmed-shell pane the user deliberately
+            // switched to Conversation must show this placeholder (with a way back
+            // to Terminal), not silently render the Terminal.
+            val showConversationPlaceholder =
+                conversationSurface == TmuxConversationSurface.Placeholder
             // Issue #605: hold the heavyweight terminal AndroidView re-attach
             // for exactly one frame on the Conversation → Terminal edge so the
             // leaving conversation pane's selection-toolbar/focus teardown
@@ -3539,22 +3544,86 @@ internal fun tmuxSessionTabState(
     // the slow-detection window (the tab was drawn but the index could never
     // become 1). Honouring the presumed-agent selection lets the screen render
     // a "waiting for agent" placeholder instead of swallowing the tap; the real
-    // transcript replaces it the instant detection seeds. The selection is still
-    // gated on `showsConversationTab` so a confirmed shell (no tab) can never
-    // land on the Conversation index from a stale row.
+    // transcript replaces it the instant detection seeds.
+    //
+    // Issue #1057 (maintainer dogfood blocker — "conversation is not visible in
+    // this app"): the old gate ALSO hid the Conversation tab entirely whenever a
+    // pane was NOT presumed-agent (a confirmed shell) and had no live detection.
+    // That made an agent conversation that genuinely EXISTS on the pane
+    // permanently unreachable when detection was wrong/pending/dropped — exactly
+    // the maintainer's symptom. The tab is now reachable whenever a conversation
+    // EXISTS or COULD exist for the pane, independent of correct auto-detection:
+    //  - a live-detected agent (`hasLiveDetection`), OR
+    //  - a presumed agent during the slow-detection window (`presumedAgent`), OR
+    //  - a transcript that already exists for the pane (events present, or a
+    //    seeded/remembered placeholder row) even though detection is currently
+    //    null and the pane is recorded as a shell (`hasConversationContent`), OR
+    //  - the user has DELIBERATELY opened the Conversation surface for this pane
+    //    (`userOpenedConversation`) — so the choice is honoured and persists
+    //    (per-pane `selectedTab`) even across a re-classification to shell.
+    // Hard-cut (D22): this replaces the "hide it on a confirmed shell" gate; no
+    // settings flag or legacy fallback is kept.
     val hasLiveDetection = currentAgentConversation?.detection != null
-    val showsConversationTab = hasLiveDetection || presumedAgent
+    val hasConversationContent = currentAgentConversation?.let { conversation ->
+        conversation.events.isNotEmpty() ||
+            conversation.autoSeededPlaceholder ||
+            conversation.rememberedAgentPlaceholder
+    } == true
+    val userOpenedConversation =
+        currentAgentConversation?.selectedTab == SessionTab.Conversation
+    val showsConversationTab =
+        hasLiveDetection || presumedAgent || hasConversationContent || userOpenedConversation
     return TmuxSessionTabState(
         labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
-        selectedIndex = if (showsConversationTab &&
-            currentAgentConversation?.selectedTab == SessionTab.Conversation
-        ) {
-            1
-        } else {
-            0
-        },
+        selectedIndex = if (showsConversationTab && userOpenedConversation) 1 else 0,
         showsConversationTab = showsConversationTab,
     )
+}
+
+/**
+ * Issue #1057: which surface the in-session content area renders for the visible
+ * pane — the heavyweight Conversation transcript, the lightweight Conversation
+ * placeholder ("Loading conversation…" / Failed), or the Terminal pager.
+ *
+ * Extracted from the inline `showConversation` / `showConversationPlaceholder`
+ * flags in [TmuxSessionScreen] so the tap-to-switch content routing is unit
+ * testable: when the user opens the Conversation tab on a pane whose agent was
+ * mis-classified as a shell (the maintainer's "can't see conversation"
+ * scenario), the existing transcript must render — and when no transcript has
+ * loaded yet, the placeholder must render — instead of silently staying on the
+ * Terminal.
+ *
+ *  - [Transcript]: mount [TmuxConversationPane]. Requires the ACTIVE pane
+ *    (`isActivePane`, the promoted runtime's pane — preserves the #797/#605
+ *    transcript mount/teardown invariants) AND a real transcript to show
+ *    (live detection OR already-loaded events). The #793 loading/failed/empty
+ *    sub-states are handled by the caller's branches on the row's `loadState`.
+ *  - [Placeholder]: a lightweight "Loading conversation…" / Failed placeholder
+ *    for a Conversation tab the user opened that has no transcript yet
+ *    (detection null AND no events). Requires only the surface pane and that the
+ *    Conversation tab is reachable ([showsConversationTab]) — so it shows on a
+ *    confirmed-shell pane the user deliberately switched to Conversation, not
+ *    only on a presumed-agent pane (the old `presumedAgent` gate left such a
+ *    tap rendering the Terminal).
+ *  - [Terminal]: the user is on the Terminal tab, or the pane has nothing to
+ *    show on the Conversation surface.
+ */
+internal enum class TmuxConversationSurface { Transcript, Placeholder, Terminal }
+
+internal fun tmuxSessionConversationSurface(
+    showsConversationTab: Boolean,
+    isActivePane: Boolean,
+    hasSurfacePane: Boolean,
+    selectedTab: SessionTab?,
+    hasDetection: Boolean,
+    hasEvents: Boolean,
+): TmuxConversationSurface {
+    if (selectedTab != SessionTab.Conversation) return TmuxConversationSurface.Terminal
+    if (isActivePane && (hasDetection || hasEvents)) return TmuxConversationSurface.Transcript
+    if (hasSurfacePane && showsConversationTab && !hasDetection && !hasEvents) {
+        return TmuxConversationSurface.Placeholder
+    }
+    return TmuxConversationSurface.Terminal
 }
 
 /**

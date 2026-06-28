@@ -1085,6 +1085,43 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1057: the in-session header Terminal|Conversation pill — the
+     * tap-to-switch affordance the maintainer asked for. The real pill
+     * (`ConsolidatedTabPill` in the `app` module) wraps exactly this shared
+     * `SegmentedToggle`, so this fixture verifies the affordance under the real
+     * theme in both states. The fix makes the Conversation segment REACHABLE on
+     * panes where agent detection is pending / mis-classified (a conversation
+     * that exists is no longer hidden); the segments below show Terminal-selected
+     * and Conversation-selected. The emulator screenshot of the real session
+     * screen is the acceptance check (#641/#657).
+     */
+    @Test
+    fun sessionTerminalConversationTabPill() = render("session-terminal-conversation-tab-pill") {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SectionHeader(label = "Terminal selected")
+            SegmentedToggle(
+                labels = listOf("Terminal", "Conversation"),
+                selectedIndex = 0,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+            SectionHeader(label = "Conversation selected (now reachable)")
+            SegmentedToggle(
+                labels = listOf("Terminal", "Conversation"),
+                selectedIndex = 1,
+                onSelected = {},
+                fillSegments = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+        }
+    }
+
+    /**
      * Issue #781: the conversation Markdown renderer now lays GFM pipe tables
      * out as aligned columns instead of raw `|` text. The real renderer
      * (`com.pocketshell.app.composer.MarkdownText` / its `TableBlock`) lives in

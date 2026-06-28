@@ -533,10 +533,15 @@ class TmuxSessionScreenTest {
     }
 
     @Test
-    fun tmuxSessionTabStateStaysTerminalForNonPresumedConversationSelectionWithoutDetection() {
-        // Defensive: a NON-presumed pane (confirmed shell) must never land on the
-        // Conversation index even if a stale row claims `selectedTab =
-        // Conversation` with no detection — there is no Conversation tab to show.
+    fun tmuxSessionTabStateHonoursUserConversationSelectionOnConfirmedShell() {
+        // Issue #1057 (was the OLD "stays Terminal" defensive case — that
+        // behaviour WAS the maintainer's "conversation is not visible" bug): a
+        // NON-presumed pane (confirmed shell / mis-classified agent) whose row
+        // records a DELIBERATE `selectedTab = Conversation` must now keep the
+        // Conversation tab reachable and land on the Conversation index, even
+        // with no live detection. The user explicitly opened the surface; the
+        // per-pane choice is honoured and persists (criterion #3) instead of
+        // being silently swallowed.
         val state = tmuxSessionTabState(
             currentAgentConversation = AgentConversationUiState(
                 detection = null,
@@ -545,9 +550,80 @@ class TmuxSessionScreenTest {
             presumedAgent = false,
         )
 
-        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(1, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForConfirmedShellWithExistingTranscript() {
+        // Issue #1057, class case (a): a pane recorded/mis-classified as a
+        // confirmed shell (presumedAgent == false) with NO current live
+        // detection but an existing transcript (events present — e.g. an agent
+        // that has since exited, or a reattach where detection has not re-bound)
+        // must keep the Conversation tab reachable so the user can read it.
+        // On base (the pre-#1057 `hasLiveDetection || presumedAgent` gate) this
+        // FAILS — the tab is hidden and the conversation is unreachable.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                events = listOf(
+                    com.pocketshell.core.agents.ConversationEvent.Message(
+                        id = "m1",
+                        agent = AgentKind.ClaudeCode,
+                        role = com.pocketshell.core.agents.ConversationRole.Assistant,
+                        text = "hello from the agent",
+                    ),
+                ),
+                selectedTab = SessionTab.Terminal,
+            ),
+            presumedAgent = false,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        // Not opened yet, so the active index stays on Terminal — but the tab
+        // is now reachable (the bug fix).
         assertEquals(0, state.selectedIndex)
-        assertTrue(!state.showsConversationTab)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForConfirmedShellWithRememberedPlaceholder() {
+        // Issue #1057, class case (a) cont.: a remembered-agent placeholder row
+        // (the #495/#819 reattach seed) on a pane that is momentarily NOT
+        // presumed-agent must still expose the Conversation tab so the remembered
+        // conversation is reachable while live re-detection re-anchors it.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Terminal,
+                rememberedAgentPlaceholder = true,
+            ),
+            presumedAgent = false,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForDetectionPendingPresumedAgent() {
+        // Issue #1057, class case (b): a detection-pending pane (presumed-agent,
+        // detection == null, no events yet) must keep the Conversation tab
+        // reachable throughout the slow-detection window so the user is never
+        // locked out of the conversation while detection warms.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Terminal,
+            ),
+            presumedAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
     }
 
     @Test
@@ -579,6 +655,101 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("Terminal", "Conversation"), state.labels)
         assertEquals(1, state.selectedIndex)
         assertTrue(state.showsConversationTab)
+    }
+
+    // ─── Issue #1057: tap-to-switch content routing. The Conversation tab being
+    // reachable is only half the fix — opening it must actually render the
+    // conversation (transcript or placeholder), not silently stay on Terminal. ─
+
+    @Test
+    fun conversationSurfaceIsTerminalWhenTerminalTabSelected() {
+        // On the Terminal tab the content area is the Terminal, regardless of
+        // detection / events.
+        assertEquals(
+            TmuxConversationSurface.Terminal,
+            tmuxSessionConversationSurface(
+                showsConversationTab = true,
+                isActivePane = true,
+                hasSurfacePane = true,
+                selectedTab = SessionTab.Terminal,
+                hasDetection = true,
+                hasEvents = true,
+            ),
+        )
+    }
+
+    @Test
+    fun conversationSurfaceShowsTranscriptForExistingEventsWithoutDetection() {
+        // Issue #1057 class case (a): the user opens Conversation on an
+        // active pane recorded as a shell whose agent has since dropped its live
+        // detection but whose transcript events are still loaded. The existing
+        // transcript must render (Transcript), NOT the Terminal. On base
+        // (`showConversation` required `detection != null`) this routed to
+        // Terminal — the conversation was unreachable even after tapping.
+        assertEquals(
+            TmuxConversationSurface.Transcript,
+            tmuxSessionConversationSurface(
+                showsConversationTab = true,
+                isActivePane = true,
+                hasSurfacePane = true,
+                selectedTab = SessionTab.Conversation,
+                hasDetection = false,
+                hasEvents = true,
+            ),
+        )
+    }
+
+    @Test
+    fun conversationSurfaceShowsPlaceholderForOpenedConversationWithoutTranscript() {
+        // Issue #1057: the user opened Conversation on a confirmed-shell pane
+        // (no detection, no events yet). The lightweight placeholder must render
+        // (with a way back to Terminal), not the Terminal — the old gate required
+        // `presumedAgent`, so a confirmed-shell tap stayed on the Terminal.
+        assertEquals(
+            TmuxConversationSurface.Placeholder,
+            tmuxSessionConversationSurface(
+                showsConversationTab = true,
+                isActivePane = true,
+                hasSurfacePane = true,
+                selectedTab = SessionTab.Conversation,
+                hasDetection = false,
+                hasEvents = false,
+            ),
+        )
+    }
+
+    @Test
+    fun conversationSurfaceShowsTranscriptForLiveDetectedAgent() {
+        // Unchanged happy path: a live-detected agent on the Conversation tab
+        // mounts the transcript.
+        assertEquals(
+            TmuxConversationSurface.Transcript,
+            tmuxSessionConversationSurface(
+                showsConversationTab = true,
+                isActivePane = true,
+                hasSurfacePane = true,
+                selectedTab = SessionTab.Conversation,
+                hasDetection = true,
+                hasEvents = false,
+            ),
+        )
+    }
+
+    @Test
+    fun conversationSurfaceStaysTerminalWhenTabNotReachableAndNoTranscript() {
+        // A genuine shell the user never opened Conversation on (tab hidden, no
+        // transcript) stays on the Terminal — no empty Conversation surface.
+        assertEquals(
+            TmuxConversationSurface.Terminal,
+            tmuxSessionConversationSurface(
+                showsConversationTab = false,
+                isActivePane = true,
+                hasSurfacePane = true,
+                selectedTab = SessionTab.Terminal,
+                hasDetection = false,
+                hasEvents = false,
+            ),
+        )
     }
 
     @Test

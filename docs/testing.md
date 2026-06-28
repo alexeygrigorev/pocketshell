@@ -1055,6 +1055,53 @@ actions used by the tests never open SSH sessions or execute shell commands.
 
 ---
 
+## Test reliability — the one de-flake convention (issue #1048)
+
+The recurring "passes-locally / flakes-on-CI" JVM failure (the SshLease abort,
+the codexScale/codexLike output-flood drain, the oversubscription siblings) is
+ONE narrow class: a `runTest` virtual clock drives code whose owned background
+work runs on a REAL dispatcher / Android `Handler`/`Looper` / raw `Thread` not
+pinned to the test scheduler, so `runCurrent()`/`advanceUntilIdle()` returns
+before the real thread finishes and CI CPU contention loses the race.
+
+**Rule:** in a `runTest` test, every owned background hop of the
+code-under-test must resolve on the test scheduler; if the work is intrinsically
+wall-clock (Android Handler/Looper/Thread), drive it with a hard-failing,
+generously-bounded pump whose load-bearing assertion is the pump's exit
+condition.
+
+- **Shape A (default) — pinnable seam:** production exposes an injectable
+  `CoroutineContext`/`Dispatcher` (+ `nowMillis` when timing matters); tests
+  inject `StandardTestDispatcher(testScheduler)` for EVERY owned scope.
+  Reference: `SshLeaseAcquireBoundCharacterizationTest.kt:191-219` /
+  `SshLeaseManager.kt:63,79,80`. The deliberate real-`Dispatchers.IO` exception
+  (blocking cleanup off the test thread) must be commented.
+- **Shape B — wall-clock-bounded pump** (only when the worker is an Android
+  Handler/Thread, e.g. `SshTerminalBridge`): loop `advanceUntilIdle()` +
+  `shadowOf(Looper.getMainLooper()).idleFor(16ms)` + small sleep to a
+  `System.currentTimeMillis()` deadline that HARD-FAILS; assert the exit
+  condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
+  (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`).
+
+**Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
+output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing
+assert.
+
+`scripts/check-test-validity.sh` carries an advisory `TIMING1` smell scoped to
+the connection/terminal test roots (`core-ssh`, `core-tmux`, `core-connection`,
+and the app `tmux`/`connectivity` test dirs): it flags a `runTest` test that
+touches a real dispatcher/thread (`Dispatchers.IO`/`Dispatchers.Default`/
+`Executors.new`/`Thread.sleep`/`Thread(`/`CountDownLatch`) WITHOUT (a) a
+`StandardTestDispatcher`/`UnconfinedTestDispatcher` seam, (b) the bounded-pump
+signature (`idleFor(` + a `System.currentTimeMillis()`/`System.nanoTime()`
+deadline loop), or (c) an inline `// JUSTIFIED:` opt-out. Current matches are
+baselined (advisory, the baseline only shrinks as tests adopt a seam); the lone
+HARD-FAIL is the narrow NEW case — a `runTest` test with a bare small
+`Thread.sleep(N)` immediately preceding its load-bearing assert and no bounded
+loop.
+
+---
+
 ## CI matrix
 
 GitHub Actions runs:

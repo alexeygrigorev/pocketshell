@@ -401,6 +401,35 @@ are looking at before proposing a fix:
   `factoryScope` in tearDown). For CI-gated emulator tests, the win condition is
   **CI-green, not local-green** — make environment-divergent capabilities (real
   soft IME, GPU) synthetic (inject a `Type.ime()` inset), do not `assumeTrue`-skip.
+- **The one de-flake convention for `runTest` virtual-clock-vs-real-dispatcher
+  fragility (the #708/#882/#1048 class).** The recurring "passes-locally /
+  flakes-on-CI" JVM failure is ONE narrow class: a `runTest` virtual clock drives
+  code whose owned background work runs on a REAL dispatcher / Android
+  `Handler`/`Looper` / raw `Thread` not pinned to the test scheduler, so
+  `runCurrent()`/`advanceUntilIdle()` returns before the real thread finishes and
+  CI CPU contention loses the race. The **rule:** in a `runTest` test, every owned
+  background hop of the code-under-test must resolve on the test scheduler; if the
+  work is intrinsically wall-clock (Android Handler/Looper/Thread), drive it with
+  a hard-failing, generously-bounded pump whose load-bearing assertion is the
+  pump's exit condition. Two shapes:
+  - **Shape A (default) — pinnable seam:** production exposes an injectable
+    `CoroutineContext`/`Dispatcher` (+ `nowMillis` when timing matters); tests
+    inject `StandardTestDispatcher(testScheduler)` for EVERY owned scope.
+    Reference: `SshLeaseAcquireBoundCharacterizationTest.kt:191-219` /
+    `SshLeaseManager.kt:63,79,80`. The deliberate real-`Dispatchers.IO` exception
+    (blocking cleanup off the test thread) must be commented.
+  - **Shape B — wall-clock-bounded pump** (only when the worker is an Android
+    Handler/Thread, e.g. `SshTerminalBridge`): loop `advanceUntilIdle()` +
+    `shadowOf(Looper.getMainLooper()).idleFor(16ms)` + small sleep to a
+    `System.currentTimeMillis()` deadline that HARD-FAILS; assert the exit
+    condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
+    (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`).
+  - **Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
+    output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing
+    assert. `scripts/check-test-validity.sh`'s advisory `TIMING1` smell surfaces
+    connection/terminal `runTest` tests that touch a real dispatcher/thread
+    without a pinned seam or bounded pump, and hard-fails a NEW bare
+    `Thread.sleep(N)`-before-assert with no bounded loop.
 - **File CI failures as issues.** Every red CI run on `main` (or local release-gate
   failure) becomes a GitHub issue with the run URL, failure snippet, and fix
   proposal — don't retry silently. Recurring classes (AVD contention) get one

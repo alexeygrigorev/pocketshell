@@ -31,15 +31,18 @@ FIX_TAG="selftest_$$"
 TEST_FIX_DIR="app/src/test/java/com/pocketshell/app/$FIX_TAG"
 ANDROID_FIX_DIR="app/src/androidTest/java/com/pocketshell/app/$FIX_TAG"
 SRC_FIX_DIR="app/src/main/java/com/pocketshell/app/$FIX_TAG"
+# TIMING1 is scoped to the connection/terminal roots, so its fixtures must live
+# under one of those dirs (here: the app tmux JVM test root).
+TIMING_FIX_DIR="app/src/test/java/com/pocketshell/app/tmux/$FIX_TAG"
 
 # Remove ONLY this invocation's own (PID-suffixed) fixture dirs, so a concurrent
 # sibling self-test (different PID) is never disturbed.
 cleanup() {
-  rm -rf "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR"
+  rm -rf "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
 }
 trap cleanup EXIT
 cleanup
-mkdir -p "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR"
+mkdir -p "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
 
 PASS=0
 FAIL=0
@@ -294,6 +297,109 @@ assert_exit 1 "A5 unjustified IME skip hard-fails the guard"
 
 # Remove the A5 bad so the final clean-state assertion holds.
 rm -f "$ANDROID_FIX_DIR/A5BadImeTest.kt"
+
+# --------------------------------------------------------------------------
+# TIMING1 — runTest virtual-clock-vs-real-dispatcher fragility (#1048).
+# --------------------------------------------------------------------------
+echo
+echo "[TIMING1] runTest over a real dispatcher/thread (connection/terminal roots)"
+
+# BAD (HARD-FAIL): a runTest test with a bare Thread.sleep(N) immediately before
+# its load-bearing assert and NO bounded-deadline loop (the banned shape).
+cat > "$TIMING_FIX_DIR/Timing1BadSleepBeforeAssertTest.kt" <<'KT'
+package com.pocketshell.app.tmux.validityselftest
+import kotlinx.coroutines.test.runTest
+class Timing1BadSleepBeforeAssertTest {
+    fun reattachWritesMarker() = runTest {
+        val out = startRealThreadWorker()
+        Thread.sleep(50)
+        assertEquals("MARKER", out.value)
+    }
+    private fun startRealThreadWorker(): Holder = Holder()
+    class Holder { val value: String = "MARKER" }
+    private fun assertEquals(expected: String, actual: String) {}
+}
+KT
+
+# GOOD-A (Shape A: pinnable seam): runTest + Dispatchers.IO but injects a
+# StandardTestDispatcher seam for its owned scope -> spared.
+cat > "$TIMING_FIX_DIR/Timing1GoodSeamTest.kt" <<'KT'
+package com.pocketshell.app.tmux.validityselftest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
+class Timing1GoodSeamTest {
+    fun pinnedScope() = runTest {
+        // owned scope pinned to the test scheduler (production uses Dispatchers.IO)
+        val ctx = StandardTestDispatcher(testScheduler)
+        require(ctx != Dispatchers.IO)
+    }
+}
+KT
+
+# GOOD-B (Shape B: bounded pump): runTest + Thread.sleep inside a bounded
+# idleFor()+currentTimeMillis() deadline loop -> spared.
+cat > "$TIMING_FIX_DIR/Timing1GoodBoundedPumpTest.kt" <<'KT'
+package com.pocketshell.app.tmux.validityselftest
+import kotlinx.coroutines.test.runTest
+class Timing1GoodBoundedPumpTest {
+    fun pumpUntilMarker() = runTest {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            looper().idleFor(16)
+            if (markerRendered()) break
+            Thread.sleep(20)
+        }
+        assertTrue(markerRendered())
+    }
+    private fun looper() = FakeLooper()
+    private fun markerRendered() = true
+    class FakeLooper { fun idleFor(ms: Long) {} }
+    private fun assertTrue(b: Boolean) {}
+}
+KT
+
+# GOOD-C (// JUSTIFIED:): runTest + Thread.sleep but opted out inline.
+cat > "$TIMING_FIX_DIR/Timing1GoodJustifiedTest.kt" <<'KT'
+package com.pocketshell.app.tmux.validityselftest
+import kotlinx.coroutines.test.runTest
+class Timing1GoodJustifiedTest {
+    fun deliberateWallClock() = runTest {
+        Thread.sleep(50) // JUSTIFIED: deliberate wall-clock wedge harness, not a sync proxy
+        assertTrue(true)
+    }
+    private fun assertTrue(b: Boolean) {}
+}
+KT
+
+# ADVISORY (non-hard): runTest + a real-IO owned scope, no sleep-before-assert,
+# no seam, no pump -> advisory NEW finding (must NOT hard-fail).
+cat > "$TIMING_FIX_DIR/Timing1AdvisoryRealScopeTest.kt" <<'KT'
+package com.pocketshell.app.tmux.validityselftest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.test.runTest
+class Timing1AdvisoryRealScopeTest {
+    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    fun connects() = runTest {
+        require(factoryScope.coroutineContext != null)
+    }
+}
+KT
+
+assert_report present "Timing1BadSleepBeforeAssertTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 hard-fails a bare sleep-before-assert with no bounded loop"
+assert_report absent  "Timing1GoodSeamTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 spares a StandardTestDispatcher seam (Shape A) from hard-fail"
+assert_report absent  "Timing1GoodSeamTest.kt" "TIMING1 — NEW runTest over a real dispatcher" "TIMING1 spares a StandardTestDispatcher seam (Shape A) advisory"
+assert_report absent  "Timing1GoodBoundedPumpTest.kt" "TIMING1 — NEW runTest over a real dispatcher" "TIMING1 spares a bounded pump (Shape B)"
+assert_report present "Timing1GoodJustifiedTest.kt" "TIMING1 — JUSTIFIED" "TIMING1 lists a // JUSTIFIED: opt-out as justified"
+assert_report present "Timing1AdvisoryRealScopeTest.kt" "TIMING1 — NEW runTest over a real dispatcher" "TIMING1 advisory-flags a real-IO owned scope with no seam"
+assert_report absent  "Timing1AdvisoryRealScopeTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 advisory real-IO scope is NOT a hard-fail"
+assert_exit 1 "TIMING1 bare sleep-before-assert hard-fails the guard"
+
+# Remove the BAD TIMING1 so the final clean-state assertion (exit 0 with only
+# advisory/justified findings) holds.
+rm -f "$TIMING_FIX_DIR/Timing1BadSleepBeforeAssertTest.kt"
 
 # --------------------------------------------------------------------------
 # Clean state: only corrective/advisory fixtures remain -> guard must PASS.

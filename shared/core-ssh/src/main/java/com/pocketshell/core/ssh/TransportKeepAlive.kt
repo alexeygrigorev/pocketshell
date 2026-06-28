@@ -115,16 +115,43 @@ internal class TransportKeepAlive(
     private var consecutiveMisses: Int = 0
 
     /**
+     * Issue #1059 (R2) — the inbound-activity watermark captured at the START of the
+     * current miss streak. If it ADVANCES before the streak would declare the peer
+     * dead, a late keepalive reply (or any server byte) landed mid-streak — the link
+     * is slow-but-alive (idle high-RTT / bufferbloat cellular) and must NOT be
+     * redialed. A genuinely half-open dead peer can never advance this timestamp, so
+     * keying the death decision off a real inbound advance (not the raw per-reply-
+     * budget miss count) bounds the false positive WITHOUT weakening the #945
+     * truly-silent-peer detection.
+     */
+    private var missStreakStartActivityNanos: Long = 0L
+
+    /**
      * Start the keepalive loop in [scope]. Idempotent: a second [start] while a
      * loop is active is a no-op. Each tick sleeps [intervalMs], then — only if
      * [KeepAliveIo.isAlive] and there was no recent inbound activity — sends one
      * keepalive through the dispatcher, counting consecutive misses; on
      * [countMax] it fires [KeepAliveIo.onKeepAliveDead] ONCE and stops counting
      * (the recovery path now owns the transport).
+     *
+     * ## Issue #1059 (R2) — idle high-RTT / bufferbloat false-positive bound
+     *
+     * Reset-on-inbound only credits inbound seen within the LAST interval. On an
+     * idle `-CC` link with bufferbloat pushing the keepalive round-trip past the
+     * 5s per-reply budget, the per-tick send reports a "miss" each tick even though
+     * the reply DOES land (late) — so the raw `countMax` consecutive-miss count
+     * could declare a live link dead and redial it. The death decision therefore
+     * does NOT fire on the miss count alone: before declaring dead it confirms that
+     * the inbound-activity watermark did NOT advance across the whole streak
+     * ([missStreakStartActivityNanos]). A half-open DEAD peer produces zero inbound
+     * and can never advance it, so a genuinely silent peer is STILL declared dead
+     * within `countMax × interval` (~90s) — the #945 contract is preserved exactly,
+     * while a slow-but-answering link rides through.
      */
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return
         consecutiveMisses = 0
+        missStreakStartActivityNanos = 0L
         job = scope.launch {
             while (isActive) {
                 delay(intervalMs)
@@ -154,6 +181,16 @@ internal class TransportKeepAlive(
                     }
                     consecutiveMisses = 0
                 } else {
+                    if (consecutiveMisses == 0) {
+                        // Issue #1059 — snapshot the inbound-activity watermark at the
+                        // START of this miss streak. A slow-but-alive idle/bufferbloat
+                        // link answers LATE: its keepalive reply (or any server byte)
+                        // lands after the 5s per-reply budget — so the per-tick send
+                        // reports a "miss" — but well within the ~90s death budget. That
+                        // late inbound advances this watermark; a half-open DEAD peer
+                        // never can.
+                        missStreakStartActivityNanos = io.lastInboundActivityNanos()
+                    }
                     consecutiveMisses += 1
                     log("keepalive: miss consecutive=$consecutiveMisses countMax=$countMax")
                     if (consecutiveMisses >= countMax) {
@@ -162,8 +199,26 @@ internal class TransportKeepAlive(
                         // close path already owns recovery and an extra reaction
                         // would be a spurious teardown.
                         if (io.isAlive()) {
-                            log("keepalive: DECLARED DEAD consecutive=$consecutiveMisses")
-                            io.onKeepAliveDead(consecutiveMisses)
+                            if (io.lastInboundActivityNanos() != missStreakStartActivityNanos) {
+                                // Issue #1059 (R2) — slow-but-alive: inbound activity
+                                // advanced during the streak, so the peer DID answer
+                                // (late). A genuinely half-open dead peer can never move
+                                // this timestamp, so this can only be a real round-trip
+                                // on a high-RTT/bufferbloat idle link — ride it through
+                                // instead of redialing a live link (the #945 contract is
+                                // preserved precisely because we only ride through on
+                                // PROVEN inbound).
+                                log(
+                                    "keepalive: $consecutiveMisses misses but inbound activity " +
+                                        "advanced during the streak — slow-but-alive idle " +
+                                        "high-RTT/bufferbloat link, not declaring dead",
+                                )
+                            } else {
+                                // Sustained silence across the full death budget (no
+                                // inbound at all) — a genuine half-open dead peer.
+                                log("keepalive: DECLARED DEAD consecutive=$consecutiveMisses")
+                                io.onKeepAliveDead(consecutiveMisses)
+                            }
                         }
                         // The recovery path now owns the transport; reset so we do
                         // not re-fire every interval against the dead/reconnecting

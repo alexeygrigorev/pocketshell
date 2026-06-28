@@ -57,6 +57,9 @@ import com.pocketshell.app.session.canRetryAgentStream
 import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
+import com.pocketshell.app.tmux.connection.BackgroundArm
+import com.pocketshell.app.tmux.connection.BackgroundEffects
+import com.pocketshell.app.tmux.connection.selectBackgroundArm
 import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
@@ -888,7 +891,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // EPIC #766 Slice 2a: the controller's `-> Backgrounded` edge now DRIVES the
             // full background decision (the re-home of the inline background
             // dispatch). [onControllerBackgrounded] selects pause-vs-detach via the
-            // inline-equivalent [reduceBackground] predicate (the #685 trap) and, on the
+            // connection-core [backgroundEffects] dispatcher (#1047 Slice 1) and, on the
             // detach arm, routes the clean-detach teardown through the single [GraceEffects]
             // owner ([graceEffects.onBackgrounded] -> launchBackgroundDetachTeardown).
             backgroundedEffect = { onControllerBackgrounded() },
@@ -3136,9 +3139,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // teardown which runs AFTER the bookkeeping inside the same effect).
         //
         // The inline background event arm is no longer consulted (Slice
-        // 2a); the #685 trap is avoided because [onControllerBackgrounded] re-applies
-        // the inline-equivalent [reduceBackground] predicate (reading
-        // `clientRef`/`sessionRef`/`inlineConnectionStatus`) to select the arm — the
+        // 2a); the #685 trap is avoided because [onControllerBackgrounded] selects the arm
+        // through the connection-core [backgroundEffects] dispatcher, whose injected
+        // predicates re-read `clientRef`/`sessionRef`/`inlineConnectionStatus` — the
         // controller edge is only the TRIGGER, not the divergent display-status gate.
         connectionManager.observeBackground()
         // The controller moved to Backgrounded (mapped → Connected, the inline
@@ -3151,38 +3154,54 @@ public class TmuxSessionViewModel @Inject constructor(
      * [ConnectionEffectDriver] when the [ConnectionController] transitions INTO
      * [ConnectionState.Backgrounded]. This is the re-home of the former inline
      * inline background dispatch: the controller edge is the TRIGGER, but
-     * the pause-vs-detach SELECTION still runs through the inline-equivalent
-     * [reduceBackground] predicate so behavior is byte-identical (the #685
-     * non-byte-identical-predicate trap — the controller transitions to Backgrounded
-     * whenever it holds a host, e.g. even from `Reconnecting`, but the inline predicate
-     * also gates on `clientRef`/`sessionRef`, so the arm selection MUST re-read VM state
-     * rather than trust the controller's display state).
+     * the pause-vs-detach SELECTION runs through the connection-core [backgroundEffects]
+     * dispatcher so behavior is byte-identical (the #685 non-byte-identical-predicate trap —
+     * the controller transitions to Backgrounded whenever it holds a host, e.g. even from
+     * `Reconnecting`, but the [backgroundEffects] arm also gates on the injected
+     * `hasLiveControlChannel` (`clientRef`/`sessionRef`) liveness, so the arm selection
+     * re-reads VM state rather than trust the controller's display state).
      *
      * Ordering: the SELECTION ([detachForBackground] sets `pendingReattach` /
      * `pendingBackgroundDetachPreserveTarget`) runs FIRST, then the teardown
      * ([graceEffects.onBackgrounded] -> [launchBackgroundDetachTeardown], which reads
-     * those fields). [reduceBackground] returning [ConnectionDecision.Ignore] (no
-     * client/session) is the no-detach case — neither the bookkeeping nor the teardown
-     * runs, matching the inline `else -> Unit` arm.
+     * those fields). The [BackgroundArm.None] arm (no client/session, or no target) is the
+     * no-detach case — neither the bookkeeping nor the teardown runs, matching the inline
+     * `else -> Unit` arm.
      */
     private fun onControllerBackgrounded() {
-        when (reduceBackground()) {
-            ConnectionDecision.PauseReconnectForBackground ->
-                pauseReconnectForBackground()
-            ConnectionDecision.DetachForBackground -> {
+        backgroundEffects.dispatch()
+    }
+
+    /**
+     * EPIC #687 Slice 1 (#1047): the connection-core background-transition decision authority,
+     * the hard-cut replacement for the deleted inline `reduceBackground()`. The predicates
+     * re-read the VM's live state each dispatch (the #685 re-read trap): `isReconnecting`
+     * reads `inlineConnectionStatus`, `hasTarget` reads `activeTarget`/`connectingTarget`, and
+     * the INJECTED [BackgroundEffects.hasLiveControlChannel] port feeds the
+     * `clientRef != null || sessionRef != null` liveness the controller's display state lacks
+     * (a `Backgrounded` transition does not imply a live `-CC` channel). The arm bodies are the
+     * VM's existing IO; the detach arm runs the [detachForBackground] bookkeeping FIRST then the
+     * teardown through the single [GraceEffects] owner (identical order to the deleted inline
+     * `when`); the no-arm case is the inline `else -> Unit` no-op.
+     */
+    private val backgroundEffects: BackgroundEffects =
+        BackgroundEffects(
+            isReconnecting = { inlineConnectionStatus is ConnectionStatus.Reconnecting },
+            hasTarget = { activeTarget != null || connectingTarget != null },
+            hasLiveControlChannel = { clientRef != null || sessionRef != null },
+            pauseReconnectForBackground = { pauseReconnectForBackground() },
+            detachForBackground = {
                 detachForBackground()
                 // The clean-detach teardown reads the bookkeeping just set above; run it
                 // AFTER, through the single [GraceEffects] owner.
                 graceEffects.onBackgrounded()
-            }
-            else -> Unit
-        }
-    }
+            },
+        )
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.PauseReconnectForBackground]
-     * body — formerly inline at the top of [onAppBackgrounded]. Unchanged
-     * behavior; only the decision moved to [reduceBackground].
+     * EPIC #687 slice 1a: the [BackgroundArm.PauseReconnect] body — formerly inline at the
+     * top of [onAppBackgrounded]. Unchanged behavior; only the decision moved to the
+     * connection-core [backgroundEffects] dispatcher (#1047 Slice 1).
      */
     private fun pauseReconnectForBackground() {
         val reconnecting = inlineConnectionStatus as? ConnectionStatus.Reconnecting ?: return
@@ -3216,11 +3235,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.DetachForBackground] body —
+     * EPIC #687 slice 1a: the [BackgroundArm.DetachForBackground] body —
      * formerly the lower half of [onAppBackgrounded]. The `target`/`clientRef||
-     * sessionRef` guards already passed in [reduceBackground] but are kept here so
-     * the side-effect body is self-contained and the field reads happen at the same
-     * point in time as before.
+     * sessionRef` guards already passed in the [backgroundEffects] selection
+     * ([selectBackgroundArm]) but are kept here so the side-effect body is self-contained
+     * and the field reads happen at the same point in time as before.
      *
      * EPIC #687 slice 1c-iv-b-B1 (#738): this method keeps ONLY the SYNCHRONOUS
      * bookkeeping — `pendingReattach`, the detach telemetry, and stashing the
@@ -16149,15 +16168,10 @@ public class TmuxSessionViewModel @Inject constructor(
         /** No lifecycle action — the event is a no-op in the current state. */
         data object Ignore : ConnectionDecision
 
-        // --- Background ---
-        /**
-         * A reconnect was in flight; pause it until foreground and surface the
-         * "paused while backgrounded" [ConnectionStatus.Failed] band.
-         */
-        data object PauseReconnectForBackground : ConnectionDecision
-
-        /** Detach the live `-CC` control client and stash a pending reattach. */
-        data object DetachForBackground : ConnectionDecision
+        // --- Background --- EPIC #687 Slice 1 (#1047): the pause-vs-detach arm decision
+        // moved into the connection core ([BackgroundEffects], the SINGLE background
+        // authority); the inline `reduceBackground()` + its two variants
+        // (`PauseReconnectForBackground` / `DetachForBackground`) are DELETED (D22 hard-cut).
 
         // --- Foreground --- EPIC #687 Slice 0 (#1047): the replay-vs-resume arm decision
         // moved into the connection core ([ForegroundReturnEffects]); the inline
@@ -16234,14 +16248,11 @@ public class TmuxSessionViewModel @Inject constructor(
         data object SilentReattachWithinGrace : ConnectionDecision
     }
 
-    private fun reduceBackground(): ConnectionDecision {
-        if (inlineConnectionStatus is ConnectionStatus.Reconnecting) {
-            return ConnectionDecision.PauseReconnectForBackground
-        }
-        if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
-        if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
-        return ConnectionDecision.DetachForBackground
-    }
+    // EPIC #687 Slice 1 (#1047): `reduceBackground()` is DELETED. The background
+    // pause-vs-detach decision now lives in the connection core ([BackgroundEffects], the
+    // SINGLE background authority), fed the injected `hasLiveControlChannel` liveness the
+    // controller's display state lacks; the inline selector was the second decision authority
+    // D28 exists to end (D22 hard-cut — no shadow).
 
     // EPIC #687 Slice 0 (#1047): `reduceForeground()` is DELETED. The beyond-grace
     // foreground replay-vs-resume decision now lives in the connection core

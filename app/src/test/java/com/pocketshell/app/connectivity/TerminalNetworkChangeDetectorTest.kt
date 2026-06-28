@@ -338,6 +338,80 @@ class TerminalNetworkChangeDetectorTest {
         assertEquals("cell-handle", handoff.current.networkHandle)
     }
 
+    // --- Issue #1042 (cause #2) — a `{CELLULAR}` RAT/band/dual-stack re-association
+    // mints a NEW networkHandle while staying on the SAME single cellular transport.
+    // Pre-#1042 the same-identity relaxation was scoped to pure `{WIFI}` ONLY, so a
+    // cellular reassoc on a quiet/idle session was treated as a real handoff → a
+    // self-inflicted fresh-lease redial (the maintainer's "constant reconnects on
+    // mobile internet"). The relaxation now also covers a same-transport `{CELLULAR}`
+    // reassoc; a real cross-transport WIFI↔CELLULAR handoff still redials.
+
+    @Test
+    fun `same-transport cellular reassociation to a new handle does not emit a reconnect (issue 1042)`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("cell-handle-A", setOf("CELLULAR")),
+        )
+
+        // RAT/band re-association (or a v4↔v6 dual-stack re-validation): SAME single
+        // CELLULAR transport, NEW handle. RED on base (handle inequality + the pure-WIFI
+        // -only relaxation → emits a handoff → redial); GREEN with the #1042
+        // generalisation (a same-transport cellular reassoc = same network identity).
+        assertNull(
+            "a same-transport {CELLULAR} reassoc to a new handle must NOT emit (issue 1042)",
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.Validated("cell-handle-B", setOf("CELLULAR")),
+                reason = "default-network-capabilities",
+            ),
+        )
+
+        // The new handle is still LEARNED, so a subsequent REAL transport change
+        // (CELLULAR→WIFI) is still caught as a handoff against the latest cell handle.
+        val realHandoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("wifi-handle", setOf("WIFI")),
+            reason = "real-handoff",
+        )
+        assertTrue("a real CELLULAR→WIFI handoff must still emit", realHandoff != null)
+        assertEquals("cell-handle-B", realHandoff!!.previousValidated!!.networkHandle)
+        assertEquals("wifi-handle", realHandoff.current.networkHandle)
+    }
+
+    @Test
+    fun `cellular to wifi cross-transport handoff still emits (issue 1042 scope guard)`() {
+        // The #1042 relaxation is per-transport-set: a real cross-transport handoff
+        // (CELLULAR→WIFI here, the inverse of the #875 WIFI→CELLULAR guard) crosses
+        // transport sets, so it is NOT a benign reassoc and must still redial.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("cell-handle", setOf("CELLULAR")),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("wifi-handle", setOf("WIFI")),
+            reason = "real-handoff",
+        )
+
+        assertTrue("CELLULAR→WIFI must still be a handoff", handoff != null)
+        assertEquals("cell-handle", handoff!!.previousValidated!!.networkHandle)
+        assertEquals("wifi-handle", handoff.current.networkHandle)
+    }
+
+    @Test
+    fun `cellular reassoc that adds a VPN transport still emits a reconnect (issue 1042 scope guard)`() {
+        // The relaxation is scoped to a SINGLE benign transport ({WIFI} or {CELLULAR})
+        // on both sides. A VPN coming up over cellular is NOT a benign reassoc — it can
+        // legitimately need the fresh lease, so it keeps the strict handle check.
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("cell-handle-A", setOf("CELLULAR")),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell-vpn-handle", setOf("CELLULAR", "VPN")),
+            reason = "vpn-up",
+        )
+
+        assertTrue("a CELLULAR→CELLULAR+VPN change must still emit (not a benign reassoc)", handoff != null)
+        assertEquals("cell-vpn-handle", handoff!!.current.networkHandle)
+    }
+
     @Test
     fun `wifi reassoc that adds a VPN transport still emits a reconnect (issue 875 scope guard)`() {
         // The relaxation is scoped to PURE {WIFI} on both sides. A VPN coming up

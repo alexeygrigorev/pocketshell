@@ -4004,6 +4004,13 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
 
+        // Issue #1042: this case proves a restore CAN redial FROM the loss-suspended
+        // (non-Connected) state — the #997 gap. Under #1042 the restore is now
+        // liveness-first, so inject a GENUINELY-DEAD transport (keepalive not proven
+        // alive by default + the bounded restore probe DEAD) so the liveness gate
+        // falls through to the fresh-lease redial being asserted here.
+        vm.forceLivenessProbeDeadForTest = true
+
         // Loss: hold + flip to Reconnecting (the loss-suspended state).
         registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
         runCurrent()
@@ -4029,11 +4036,15 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun issue997NetworkRestoreReconnectsEvenWhenTransportWasProvenAlive() = runTest(scheduler) {
-        // A real loss means the old socket is DEAD, so the proven-alive
-        // ride-through (#981) must NOT suppress a restore-driven reconnect. Pin
-        // proven-alive=true and confirm the restore still redials (unlike a bare
-        // validated handoff, which #981 rides through when proven alive).
+    fun issue1042NetworkRestoreRidesThroughWhenTransportProvenAlive() = runTest(scheduler) {
+        // Issue #1042 (cause #1) REFINES the pre-#1042 #997 restore behaviour. The old
+        // assumption — "a loss means the socket is DEAD, so always redial" — fired a
+        // spurious fresh-lease reconnect on every brief cellular dip even when the TCP
+        // socket survived. The restore is now LIVENESS-FIRST: when the existing
+        // transport is proven alive it RIDES THROUGH with NO redial. Pin
+        // proven-alive=true and confirm the restore does NOT redial and the session
+        // returns to Connected. (The genuinely-dead case still redials —
+        // issue997NetworkRestoreDrivesFastReconnectFromLossSuspendedState guards it.)
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
@@ -4063,13 +4074,102 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         assertEquals(
-            "a restore after a real loss bypasses the proven-alive gate and reconnects",
-            TmuxConnectTrigger.NetworkReconnect,
-            vm.latestRestoreIntentSnapshot()?.trigger,
+            "a restore over a PROVEN-ALIVE transport must NOT redial (rides through) — #1042",
+            0,
+            connector.connectCount,
         )
-        assertEquals(1, connector.connectCount)
+        assertNull(
+            "a ride-through restore must not schedule a network-reconnect redial",
+            vm.latestRestoreIntentSnapshot(),
+        )
+        assertTrue(
+            "the ride-through clears the loss-hold band back to Connected",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
 
         vm.forceTransportProvenAliveForTest = null
+    }
+
+    @Test
+    fun issue1042NetworkRestoreRidesThroughWhenBoundedProbeAnswers() = runTest(scheduler) {
+        // Issue #1042 (cause #1) ARM 2 — the headline symptom path: a quiet/idle
+        // cellular session whose transport keepalive has AGED OUT of its ride-through
+        // window (so the proven-alive fast gate does NOT fire) but whose TCP socket is
+        // still alive. The restore must then issue ONE bounded control-channel probe
+        // and, when it ANSWERS, RIDE THROUGH with no redial — NOT redial. This arm is
+        // distinct from arm 1 (keepalive proven alive) and arm 3 (neither answers ->
+        // fresh-lease redial). Asserted via the `cause="probe_answered"` device trail
+        // so it cannot be confused with the proven-alive arm.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        // Keepalive NOT proven alive (the fast gate must MISS so the bounded-probe arm
+        // runs) but the bounded probe ANSWERS (healthy attached client, probe-dead seam
+        // off) — the surviving-but-quiet-link case.
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = false
+
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+            runCurrent()
+            registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+            advanceUntilIdle()
+
+            assertEquals(
+                "a restore whose bounded probe ANSWERS must NOT redial (rides through) — #1042 arm 2",
+                0,
+                connector.connectCount,
+            )
+            assertNull(
+                "a probe-answered ride-through must not schedule a network-reconnect redial",
+                vm.latestRestoreIntentSnapshot(),
+            )
+            assertTrue(
+                "the probe-answered ride-through clears the loss-hold band back to Connected",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertTrue(
+                "no redial diagnostic may fire on the probe-answered arm; events=" +
+                    diagnostics.events.map { it.name },
+                diagnostics.eventsNamed("network_restore_reconnect_start").isEmpty() &&
+                    diagnostics.eventsNamed("reconnect_start").isEmpty(),
+            )
+            val rideThrough = diagnostics.eventsNamed("network_restore_ride_through")
+            assertTrue(
+                "expected a network_restore_ride_through (proves arm 2 fired, not a vacuous " +
+                    "pass); events=${diagnostics.events.map { it.name }}",
+                rideThrough.isNotEmpty(),
+            )
+            assertEquals(
+                "the ride-through must be attributed to the bounded probe answering " +
+                    "(distinguishes arm 2 from the proven-alive arm 1)",
+                "probe_answered",
+                rideThrough.single().fields["cause"],
+            )
+        } finally {
+            diagnostics.close()
+            vm.forceTransportProvenAliveForTest = null
+        }
     }
 
     @Test
@@ -5502,22 +5602,30 @@ class TmuxSessionViewModelTest {
                 }
             }
 
-            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
-                    runCurrent()
-                    delay(10)
-                }
+            // Issue #1042 follow-up (CI-only flake, PR #1045) / #1050: the live
+            // `%output` drain feeds the REAL SshTerminalBridge, whose tail render
+            // runs on a wall-clock background thread and whose budgeted main-thread
+            // drain reposts a `postDelayed` continuation that a bare `idle()` never
+            // fires. The old pump here was bounded ONLY by the virtual `runTest`
+            // clock, so the entire loop elapsed in ~0 wall-clock time and starved
+            // that background feed under a contended JVM (CI), flaking `completed`
+            // false. `drainMainLooperUntil` pumps on the WALL clock instead — it
+            // STRENGTHENS the assertion: a genuine stall still exhausts the deadline
+            // and `completed` stays false.
+            val completed = drainMainLooperUntil { !sender.isActive }
+            if (completed) {
                 sender.await()
-                true
-            } ?: false
+            } else {
+                sender.cancel()
+            }
 
             assertTrue(
                 "tmux %output flood must not stall terminal pane output",
                 completed,
             )
             advanceUntilIdle()
-            shadowOf(Looper.getMainLooper()).idle()
+            shadowOf(Looper.getMainLooper())
+                .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
 
             assertTrue(
                 "tmux %output flood should still publish best-effort side-channel chunks",
@@ -5599,30 +5707,26 @@ class TmuxSessionViewModelTest {
                     }
                 }
 
-                val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                    while (sender.isActive) {
-                        // Issue #803/#804: the off-main live `%output` drain is now
-                        // frame-paced — the MainThreadDrainScheduler `postDelayed`s its
-                        // continuation one frame (16ms) out between bounded parse turns
-                        // so the looper is guaranteed a servicing gap (the ANR fix).
-                        // Under the Robolectric PAUSED looper a plain `idle()` only runs
-                        // tasks already DUE, so it never fires those delayed
-                        // continuations and the 64KB process queue stays full, blocking
-                        // the real off-main producer forever. Advance the virtual main
-                        // looper one frame per pump (as SshTerminalBridgeTest.
-                        // drainMainLooperUntil does) so the budgeted continuations fire
-                        // and the burst drains. This models a real device looper that
-                        // advances time; it does NOT weaken the assertion — if the burst
-                        // genuinely stalled behind the slow side-channel the loop still
-                        // times out and `completed` stays false.
-                        shadowOf(Looper.getMainLooper())
-                            .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        runCurrent()
-                        delay(10)
-                    }
+                // Issue #1042 follow-up (CI-only flake, PR #1045) / #1050: the
+                // off-main live `%output` drain is frame-paced — the
+                // MainThreadDrainScheduler `postDelayed`s its continuation one frame
+                // (16ms) out between bounded parse turns so the looper is guaranteed a
+                // servicing gap (the #803/#804 ANR fix). Under the Robolectric PAUSED
+                // looper a plain `idle()` only runs tasks already DUE, so the looper
+                // MUST be advanced a frame (`idleFor(16ms)`) for those delayed
+                // continuations to fire and the burst to drain. The old budget here was
+                // the virtual `runTest` clock, which elapsed in ~0 wall-clock time and
+                // starved the real background SshTerminalBridge feed under a contended
+                // JVM (CI), flaking `completed` false. `drainMainLooperUntil` pumps on
+                // the WALL clock instead so the background feed gets real time. This
+                // does NOT weaken the assertion: a genuine stall still exhausts the
+                // deadline and `completed` stays false.
+                val completed = drainMainLooperUntil { !sender.isActive }
+                if (completed) {
                     sender.await()
-                    true
-                } ?: false
+                } else {
+                    sender.cancel()
+                }
 
                 assertTrue(
                     "Codex-like tmux %output burst must not stall behind a slow terminal side-channel",
@@ -6978,6 +7082,40 @@ class TmuxSessionViewModelTest {
             ),
             sent,
         )
+    }
+
+    /**
+     * Wall-clock-bounded looper pump for the flood-drain tests whose REAL
+     * [SshTerminalBridge] feed runs on an Android Handler / background thread
+     * that a virtual-clock-only `runTest` loop starves under a contended (CI)
+     * JVM (#1042/#1050). Each turn advances the main looper a frame
+     * (`idleFor(16ms)`) so the budgeted `postDelayed` drain continuations fire
+     * (a bare `idle()` never runs them — the #803/#804 ANR drain scheduler
+     * shape), drives the virtual scheduler (`runCurrent()`) so suspended
+     * coroutines progress, and yields real wall-clock time (`Thread.sleep`) to
+     * the background feed. Returns true if [condition] becomes true before
+     * [deadlineMs] wall-clock milliseconds elapse, false on timeout.
+     *
+     * This STRENGTHENS, never weakens, the caller's assertion: a genuine stall
+     * still exhausts the deadline so the caller's `assertTrue(...)` fails. It
+     * replaces the old virtual-clock pump (`withTimeoutOrNull(...) { ...
+     * idle(); runCurrent(); delay(10) }`) that elapsed in ~0 wall-clock time
+     * and flaked `completed` false under load (#1050: the unfixed sibling of
+     * the codexScale/codexLike loops #1042 already de-flaked).
+     */
+    private fun TestScope.drainMainLooperUntil(
+        deadlineMs: Long = SLOW_FEED_DRAIN_TIMEOUT_MS,
+        condition: () -> Boolean,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + deadlineMs
+        do {
+            shadowOf(Looper.getMainLooper())
+                .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            runCurrent()
+            if (condition()) return true
+            Thread.sleep(20)
+        } while (System.currentTimeMillis() < deadline)
+        return false
     }
 
     private fun TestScope.waitForSentCommandCount(client: FakeTmuxClient, expectedCount: Int) {
@@ -11748,15 +11886,15 @@ class TmuxSessionViewModelTest {
                     client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
                 }
             }
-            val completed = withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
-                while (sender.isActive) {
-                    shadowOf(Looper.getMainLooper()).idle()
-                    runCurrent()
-                    delay(10)
-                }
-                sender.await()
-                true
-            } ?: false
+            // Issue #1050: the unfixed flood-drain sibling. The old pump here was
+            // bounded only by the virtual `runTest` clock (`withTimeoutOrNull` +
+            // `idle()` + `delay(10)`), so the whole loop elapsed in ~0 wall-clock
+            // time and starved the REAL SshTerminalBridge feed's budgeted
+            // `postDelayed` drain under a contended (CI) JVM -> the flood never
+            // landed and `completed` flaked false. Route through the same
+            // wall-clock-bounded pump #1042 used for codexScale/codexLike.
+            val completed = drainMainLooperUntil { !sender.isActive }
+            if (completed) sender.await() else sender.cancel()
 
             assertTrue(
                 "Codex-scale terminal output must not stall while Conversation retries",

@@ -49,8 +49,15 @@ class TerminalNetworkChangeDetectorConcurrencyTest {
             // Each iteration starts from a fresh, known identity. Threads race
             // to flip the validated network to many DISTINCT new identities so
             // most updates are real handoffs that bump `sequence`.
+            //
+            // Issue #1042: a same-transport-set {WIFI}/{CELLULAR} reassoc to a new
+            // handle is now SUPPRESSED (not a handoff), so the targets carry a
+            // VPN-bearing transport set — a distinct handle on a non-benign set is
+            // still a genuine identity handoff, keeping this race test exercising the
+            // emission path it is about (the #995 sequence-tearing race), not the
+            // identity policy (covered by TerminalNetworkChangeDetectorTest).
             val detector = TerminalNetworkChangeDetector(
-                initial = TerminalNetworkSnapshot.Validated("net-0", setOf("CELLULAR")),
+                initial = TerminalNetworkSnapshot.Validated("net-0", setOf("CELLULAR", "VPN")),
             )
             val emitted = ConcurrentLinkedQueue<TerminalNetworkChange>()
             val startLatch = CountDownLatch(1)
@@ -64,7 +71,7 @@ class TerminalNetworkChangeDetectorConcurrencyTest {
                     // wins is a genuine transport/identity handoff.
                     val target = TerminalNetworkSnapshot.Validated(
                         networkHandle = "net-$iteration-$t",
-                        transports = setOf("CELLULAR"),
+                        transports = setOf("CELLULAR", "VPN"),
                     )
                     val change = detector.update(target, "race-$t")
                     if (change != null) emitted.add(change)
@@ -110,9 +117,10 @@ class TerminalNetworkChangeDetectorConcurrencyTest {
      * max-sequence that does not equal the emission count). A lost slot is the
      * "suppress a real handoff → no reconnect → dead socket" symptom.
      *
-     * Class-cover: this is the WIFI→CELLULAR-style real-handoff case (every
-     * target is a distinct CELLULAR identity off a CELLULAR start, all genuine
-     * transitions), driven under contention.
+     * Class-cover: this is the real-handoff case (every target is a distinct
+     * VPN-bearing identity off a VPN-bearing start, all genuine transitions —
+     * #1042: a VPN-bearing set keeps the strict handle check, so distinct handles
+     * stay distinct identities), driven under contention.
      */
     @Test
     fun `no concurrent real handoff is lost or torn`() {
@@ -120,8 +128,12 @@ class TerminalNetworkChangeDetectorConcurrencyTest {
         val iterations = 400
 
         repeat(iterations) { iteration ->
+            // Issue #1042: VPN-bearing identities so a distinct handle is still a
+            // genuine handoff (a bare same-transport {CELLULAR} reassoc is now
+            // suppressed — that is the identity policy, covered elsewhere; this test
+            // is about the #995 sequence-tearing race on the emission path).
             val detector = TerminalNetworkChangeDetector(
-                initial = TerminalNetworkSnapshot.Validated("net-init", setOf("CELLULAR")),
+                initial = TerminalNetworkSnapshot.Validated("net-init", setOf("CELLULAR", "VPN")),
             )
             val emitted = ConcurrentLinkedQueue<TerminalNetworkChange>()
             val startLatch = CountDownLatch(1)
@@ -135,7 +147,7 @@ class TerminalNetworkChangeDetectorConcurrencyTest {
                     // handoff that MUST surface exactly once.
                     val target = TerminalNetworkSnapshot.Validated(
                         networkHandle = "net-$iteration-$t",
-                        transports = setOf("CELLULAR"),
+                        transports = setOf("CELLULAR", "VPN"),
                     )
                     val change = detector.update(target, "handoff-$t")
                     if (change != null) emitted.add(change)

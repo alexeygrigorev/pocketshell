@@ -594,7 +594,28 @@ JOURNEY_CLASSES=(
   # back to Connected with a painted viewport. RED on base (loss + same-identity
   # restore both swallowed → no NetworkLost, no fast reconnect); GREEN after #997.
   # Same deterministic agents:2222 fixture; runs on CI.
+  #
+  # ISSUE #1042: this class is now the GENUINELY-DEAD-SOCKET preservation guard —
+  # it synthetically injects a dead transport across the restore (keepalive
+  # NOT-proven-alive + the bounded restore probe DEAD) so the #1042 liveness-first
+  # gate must fall through to the #997 fresh-lease redial. The companion
+  # ride-through (socket SURVIVED ⇒ NO redial) journey is below.
   "$FQCN_PREFIX.BareNetworkLossRestoreReconnectE2eTest"
+  # ADDED (#1042): stop SPURIOUS reconnects on mobile/cellular when the link/socket
+  # ACTUALLY SURVIVED the dip. Three deterministic agents:2222 journeys (no toxiproxy,
+  # synthetic snapshot injection through the production TerminalNetworkObserver — the
+  # #780 hard-inject model, no self-skip):
+  #   (a) a brief NetworkLost→NetworkRestored where the transport SURVIVED (keepalive
+  #       pinned proven-alive) → the #1042 liveness-first restore RIDES THROUGH with NO
+  #       redial. RED on base (the restore arm redialled unconditionally →
+  #       network_restore_reconnect_start); GREEN with #1042 (network_restore_ride_through,
+  #       ZERO redial diagnostics).
+  #   (c) a {CELLULAR}→{CELLULAR} same-transport reassoc (new handle) is SUPPRESSED by
+  #       the detector → no event → no redial. RED on base (the same-identity relaxation
+  #       was pure-{WIFI}-only → network_reconnect_start); GREEN with #1042.
+  #   (d) the scope guard: a REAL cross-transport WIFI↔CELLULAR handoff STILL redials
+  #       (network_reconnect_start) — the #548 proactive-handoff feature is preserved.
+  "$FQCN_PREFIX.MobileSpuriousReconnectE2eTest"
   # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
   # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
   # reproduces the #964 budget mismatch on the plain deterministic agents:2222

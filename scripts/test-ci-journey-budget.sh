@@ -680,5 +680,100 @@ launched="$(grep -c '>>> JOURNEY CLASS:.*(attempt 1)' "$out2" || true)"
   || { sed -n '1,40p' "$out2"; fail "(neg-2) launched $launched/$class_count journey classes on a healthy run — some class never reached a verdict"; }
 pass "(neg-2) healthy run reaches a verdict for all $class_count load-bearing classes (none cut short)"
 
+# ---------------------------------------------------------------------------
+# (shard) ACCEPTANCE — Issue #835 (REOPENED): CI-matrix sharding partitions
+# JOURNEY_CLASSES round-robin so each leg runs a DISJOINT ~1/N slice and the
+# UNION of all legs is the FULL set. This is the structural fix that lets the
+# suite finish within the budget+cap (each leg ~1/N the wall-clock + a far
+# healthier emulator). Drive the REAL suite once per shard (instant gradle stub,
+# generous budget) and assert: (a) each shard launches ~class_count/N classes,
+# (b) the slices are pairwise DISJOINT (no class on two shards), (c) the UNION is
+# every class (none dropped), (d) the core-terminal proofs run on EVERY shard.
+echo "== CI-matrix sharding: round-robin partition is disjoint + complete =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+shard_total=3
+declare -A seen_class_shard=()
+shard_union_count=0
+for shard_idx in 0 1 2; do
+  shard_log="$SANDBOX/run-shard-$shard_idx.log"
+  set +e
+  PATH="$STUBBIN:$PATH" \
+    JOURNEY_STEP_BUDGET_SECS=3600 \
+    JOURNEY_CLASS_TIMEOUT_SECS=420 \
+    POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$shard_total" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$shard_idx" \
+    bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$shard_log" 2>&1
+  rc_shard=$?
+  set -e
+  [[ "$rc_shard" -eq 0 ]] \
+    || { sed -n '1,40p' "$shard_log"; fail "(shard) shard $shard_idx exited $rc_shard; expected clean pass on the instant stub"; }
+  mapfile -t shard_classes < <(grep -E '>>> JOURNEY CLASS: [^ ]+ \(attempt 1\)' "$shard_log" | awk '{print $4}')
+  shard_n="${#shard_classes[@]}"
+  lo=$(( class_count / shard_total - 2 ))
+  hi=$(( class_count / shard_total + 2 ))
+  [[ "$shard_n" -ge "$lo" && "$shard_n" -le "$hi" ]] \
+    || fail "(shard) shard $shard_idx launched $shard_n classes; expected ~$((class_count / shard_total)) (±2)"
+  for sc in "${shard_classes[@]}"; do
+    [[ -z "${seen_class_shard[$sc]:-}" ]] \
+      || fail "(shard) class $sc ran on BOTH shard ${seen_class_shard[$sc]} and shard $shard_idx — partition not disjoint"
+    seen_class_shard["$sc"]="$shard_idx"
+    shard_union_count=$((shard_union_count + 1))
+  done
+  grep -q 'CORE-TERMINAL #796 OUTPUT-BURST-IME PROOF' "$shard_log" \
+    || fail "(shard) shard $shard_idx did not run the core-terminal proofs (they must run on EVERY leg, not be sharded)"
+done
+[[ "$shard_union_count" -eq "$class_count" ]] \
+  || fail "(shard) union of all shards = $shard_union_count classes, expected the full $class_count (a class ran on no shard or twice)"
+pass "(shard) round-robin partition: 3 shards each ~1/3, disjoint, union = all $class_count classes; proofs on every shard"
+
+# ---------------------------------------------------------------------------
+# (m) ACCEPTANCE — Issue #835 (REOPENED): the six core-terminal proofs are now
+# wrapped in the SAME budget-capped `timeout` as the journey classes
+# (run_ct_class). Before, they ran UNBOUNDED — the #796 proof HUNG in run
+# 28307686762 and ran until the JOB cap SIGKILLed the step, producing a
+# "cancelled" with NO trustworthy summary.md (the exact reopen symptom). Model a
+# proof that HANGS (the core-terminal task sleeps far longer than the per-class
+# cap). With the bound, the suite must SELF-FINISH (write summary, exit red)
+# inside an outer wall-clock guard; WITHOUT the bound the suite would hang and
+# the outer `timeout` would have to KILL it (rc 124) — exactly the cancel we are
+# eliminating.
+echo "== Core-terminal proofs are bounded: a hung proof cannot hang the suite =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--stop" ]]; then exit 0; fi
+if [[ "$*" == *":shared:core-terminal:connectedDebugAndroidTest"* ]]; then
+  sleep 30
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+out_ct="$SANDBOX/run-ct-bound.log"
+set +e
+timeout --signal=TERM --kill-after=10 150s \
+  env PATH="$STUBBIN:$PATH" \
+    JOURNEY_STEP_BUDGET_SECS=3600 \
+    JOURNEY_CLASS_TIMEOUT_SECS=2 \
+    JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+    JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+    bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_ct" 2>&1
+rc_ct=$?
+set -e
+
+[[ "$rc_ct" -ne 124 ]] \
+  || { sed -n '1,60p' "$out_ct"; fail "(m) the outer guard had to KILL the suite — a core-terminal proof was NOT bounded (the #835 unbounded-proof regression that caused the 95-min cancel)"; }
+summary_ct="$SANDBOX/artifacts/ci-journey/summary.md"
+[[ -f "$summary_ct" ]] \
+  || fail "(m) a bounded hung proof must still write summary.md (the artifact the classifier needs — no silent cancel)"
+grep -qE 'output-burst-IME ANR proof.*\*\*FAIL\*\*' "$summary_ct" \
+  || { cat "$summary_ct"; fail "(m) the hung #796 proof must surface as FAIL in the summary (classifiable red, not a cancel)"; }
+pass "(m) core-terminal proofs are timeout-bounded — a hung proof yields a classifiable summary, never a job-cap cancel"
+
 echo
 echo "ALL TESTS PASSED"

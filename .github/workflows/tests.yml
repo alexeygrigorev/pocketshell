@@ -319,22 +319,42 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: [unit, python, integration]
     runs-on: ubuntu-latest
-    # Issue #835 (REOPENED, RIGHT-SIZE): raised 45 -> 95 so the suite can run the
-    # FULL load-bearing selection (~83 journey classes + 6 core-terminal proofs ≈
-    # 89 connected-test invocations) to a verdict in one serial pass instead of
-    # being SIGKILLed mid-loop. The dominant cost — a fresh `--no-daemon` Gradle
-    # JVM per class — is removed by reusing the Gradle daemon in
-    # scripts/ci-journey-suite.sh (per-class isolation preserved; see that note),
-    # which is what makes the serial wall-clock fit this cap at all.
-    # `timeout-minutes` is a CAP, not a fixed duration: the job ENDS when the
-    # suite ends (early on a healthy run), so this only lets the worst case
-    # finish. The suite owns its OWN 4200s budget and bails cleanly before this
-    # cap; the arithmetic is 95-min cap (5700s) - 900s worst-case boot - 4200s
-    # suite budget = 600s for the classifier + Docker log collection + artifact
-    # upload (the same 600s slack the #908 invariant kept). A wedging test still
-    # fails fast via the per-test `timeout_msec` in the suite; this cap only
-    # bounds the absolute worst case so a hang can never burn the runner
-    # indefinitely.
+    # Issue #835 (REOPENED, SHARD): the right-size-only fix (#1055, 45->95 cap +
+    # 4200s budget + Gradle daemon reuse) STILL could not finish the full
+    # selection serially on ONE swiftshader AVD — its own validation run
+    # (98384e91, run 28307686762) ran the full 95 min and was CANCELLED. ~83
+    # journey classes + 6 proofs run serially is ~69+ min of wall-clock AND
+    # degrades the single emulator (the #470 enumeration stall worsens the more
+    # the one AVD is churned). Fix: SHARD the journey class list across a matrix
+    # of runners — each leg is its OWN runner + cold-booted emulator + Docker
+    # `agents` fixtures and runs only its 1/N round-robin slice (the suite reads
+    # POCKETSHELL_JOURNEY_CI_SHARD_INDEX/_TOTAL; see scripts/ci-journey-suite.sh).
+    # That cuts each leg's wall-clock to ~1/N (comfortably inside the budget) and
+    # keeps each emulator far healthier (~1/N install/teardown cycles), attacking
+    # the #470 root. `fail-fast: false` so one shard's failure does not cancel the
+    # others (we want every shard's verdict). The 6 core-terminal proofs are NOT
+    # sharded — they run on every leg (cheap in-process Compose UI tests).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      # Set by the matrix; the suite partitions JOURNEY_CLASSES round-robin by
+      # (index % total). Keep _TOTAL in sync with the length of matrix.shard.
+      POCKETSHELL_JOURNEY_CI_SHARD_INDEX: ${{ matrix.shard }}
+      POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 3
+    # Issue #835 (REOPENED, RIGHT-SIZE): raised 45 -> 95 originally so the FULL
+    # serial selection could finish; with sharding each leg runs ~1/3 the classes
+    # and finishes well under this cap. `timeout-minutes` is a CAP, not a fixed
+    # duration: the job ENDS when the suite ends (early on a healthy run), so this
+    # only bounds the absolute worst case. The suite owns its OWN 4200s budget and
+    # bails cleanly before this cap; the arithmetic is
+    # 95-min cap (5700s) - 900s worst-case boot - 4200s suite budget = 600s for
+    # the classifier + Docker log collection + artifact upload (the same 600s
+    # slack the #908 invariant kept).
+    # A wedging test still fails fast via the per-test `timeout_msec` in the
+    # suite; this cap only bounds the absolute worst case so a hang can never burn
+    # the runner indefinitely.
     timeout-minutes: 95
 
     steps:
@@ -944,7 +964,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: emulator-journey-android-test-reports
+          # Issue #835: per-shard name so matrix legs don't collide on upload.
+          name: emulator-journey-android-test-reports-shard-${{ matrix.shard }}
           path: |
             **/build/reports/androidTests/
             **/build/outputs/androidTest-results/
@@ -957,7 +978,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: emulator-journey-docker-logs
+          # Issue #835: per-shard name so matrix legs don't collide on upload.
+          name: emulator-journey-docker-logs-shard-${{ matrix.shard }}
           path: artifacts/docker/
           if-no-files-found: ignore
 

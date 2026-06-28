@@ -30,9 +30,14 @@ class TransportKeepAliveTest {
         var pingsSent: Int = 0
         var deadDeclaredWith: Int? = null
         var lastActivityNanos: Long = Long.MIN_VALUE // "no recent activity"
+        // Issue #1072 — the most recent OUTBOUND upload-progress timestamp. Default
+        // MIN_VALUE ("no recent outbound") so existing tests behave exactly as before
+        // (inbound-only); the #1072 tests advance it to model a streaming upload.
+        var lastOutboundActivityNanos: Long = Long.MIN_VALUE
 
         override fun isAlive(): Boolean = alive
         override fun lastInboundActivityNanos(): Long = lastActivityNanos
+        override fun lastOutboundActivityNanos(): Long = lastOutboundActivityNanos
         override suspend fun sendKeepAlive(): Boolean {
             pingsSent += 1
             return pingResult
@@ -200,6 +205,92 @@ class TransportKeepAliveTest {
         assertEquals(
             "once inbound data ALSO stops, a genuinely dead link must still be declared " +
                 "dead within countMax — the #974 data-bump must not mask a real death",
+            3,
+            io.deadDeclaredWith,
+        )
+        keepAlive.stop()
+    }
+
+    @Test
+    fun `outbound upload progress alone rides through starved replies - never declares dead (#1072)`() = runTest {
+        // Issue #1072 (the maintainer's "attaching breaks the connection"): a large
+        // attachment upload over a QUIET `-CC` session is almost pure OUTBOUND —
+        // `cat > tmp` emits nothing until EOF, so ZERO inbound bytes arrive for the
+        // whole upload, and on a slow/high-RTT link not even a keepalive reply lands.
+        // Before #1072 the loop keyed liveness off inbound ONLY, so it declared the
+        // peer dead and tore the LIVE transport down mid-upload. With outbound folded
+        // into the reset-on-activity / ride-through decision, a steadily-progressing
+        // upload (outbound advancing every tick) proves the peer is consuming our
+        // window, so the loop SKIPS the ping and NEVER declares dead.
+        //
+        // RED on base: revert the loop's `lastActivityNanos()` helper back to
+        // `lastInboundActivityNanos()` and this fails — inbound stays MIN_VALUE
+        // (no server bytes), every ping misses, and it declares dead within countMax.
+        // GREEN with the fix: outbound advancing rides it through.
+        val io = FakeIo()
+        val keepAlive = TransportKeepAlive(io = io, intervalMs = 1_000L, countMax = 3)
+        keepAlive.start(this)
+
+        // Inbound is FROZEN stale the whole time (quiet `-CC`, no server bytes), and
+        // any ping that DID fire would miss (starved replies on a saturated uplink).
+        io.lastActivityNanos = Long.MIN_VALUE
+        io.pingResult = false
+        // Hold for FOUR budgets (12 ticks, budget = 3) with OUTBOUND progress fresh
+        // every tick — the streaming upload. The loop must ride through indefinitely.
+        repeat(12) {
+            io.lastOutboundActivityNanos = System.nanoTime() // a chunk just went out
+            advanceTimeBy(1_000L)
+            runCurrent()
+        }
+
+        assertEquals(
+            "a steadily-progressing upload (outbound advancing) must NEVER be declared " +
+                "dead even with zero inbound and starved keepalive replies — the outbound " +
+                "progress proves the transport alive (#1072). RED on base: outbound was " +
+                "ignored, so the loop pinged, every ping missed, and it tore the live " +
+                "transport down mid-upload.",
+            null,
+            io.deadDeclaredWith,
+        )
+        assertEquals(
+            "the loop must SKIP every ping while outbound is fresh (reset-on-activity), so " +
+                "a saturated uplink with an in-flight upload sends ZERO pings",
+            0,
+            io.pingsSent,
+        )
+        keepAlive.stop()
+    }
+
+    @Test
+    fun `upload finishes then transport genuinely dies - still declared dead within budget (#1072)`() = runTest {
+        // Issue #1072 class-coverage (the genuine-death contract the fix must preserve):
+        // once the upload FINISHES (outbound stops advancing) AND the link is genuinely
+        // dead (no inbound, no reply), the outbound bump no longer fires, the
+        // reset-on-activity shortcut goes silent, and the loop MUST still declare the
+        // peer dead within countMax. The outbound proof must NOT make a truly-dead link
+        // look alive forever.
+        val io = FakeIo()
+        val keepAlive = TransportKeepAlive(io = io, intervalMs = 1_000L, countMax = 3)
+        keepAlive.start(this)
+
+        // Phase 1: upload streaming (outbound fresh) + replies starved -> ridden through.
+        io.lastActivityNanos = Long.MIN_VALUE
+        io.pingResult = false
+        repeat(5) {
+            io.lastOutboundActivityNanos = System.nanoTime()
+            advanceTimeBy(1_000L); runCurrent()
+        }
+        assertEquals("ridden through while the upload streamed", null, io.deadDeclaredWith)
+
+        // Phase 2: upload DONE (outbound stops) and the link is dead (no inbound) -> dead.
+        io.lastOutboundActivityNanos = Long.MIN_VALUE // no more outbound progress
+        advanceTimeBy(1_000L); runCurrent() // miss 1
+        advanceTimeBy(1_000L); runCurrent() // miss 2
+        advanceTimeBy(1_000L); runCurrent() // miss 3 -> declare dead
+        assertEquals(
+            "once the upload ends AND the link is genuinely dead, the peer must STILL be " +
+                "declared dead within countMax — the #1072 outbound bump must not mask a " +
+                "real death once outbound progress stops",
             3,
             io.deadDeclaredWith,
         )

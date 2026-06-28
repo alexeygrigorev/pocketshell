@@ -123,6 +123,7 @@ import com.pocketshell.core.tmux.TmuxSessionNotFoundException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
@@ -1198,6 +1199,35 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun currentClientIdentityForTest(): Int? =
         clientRef?.let { System.identityHashCode(it) }
 
+    /**
+     * Issue #1072 test seam — own an attachment upload through the EXACT production
+     * ownership line ([attachmentUploadJob] = a [viewModelScope] child) so a unit
+     * proof can assert [closeCurrentConnectionAndJoin] cancel-and-joins it. The
+     * composer path's own `stagePromptAttachments` needs an Android `contentResolver`
+     * + `Uri`s (Robolectric-only), so this seam drives the SAME field + scope the
+     * production upload uses, letting the JVM gate assert the teardown-cancels-upload
+     * wiring (the Failure-2 root cause) deterministically.
+     */
+    internal fun startTrackedAttachmentUploadForTest(block: suspend () -> Unit): Job {
+        val job = viewModelScope.async { block() }
+        attachmentUploadJob = job
+        return job
+    }
+
+    /** Issue #1072 test seam: is the tracked attachment upload still in flight? */
+    internal fun attachmentUploadActiveForTest(): Boolean =
+        attachmentUploadJob?.isActive == true
+
+    /** Issue #1072 test seam: drive the production connection teardown directly so a
+     *  unit proof can assert it cancels an in-flight attachment upload (the reconnect
+     *  wedge's root cause) — the SAME `closeCurrentConnectionAndJoin` the reconnect
+     *  ladder runs. */
+    internal suspend fun closeCurrentConnectionAndJoinForTest() =
+        closeCurrentConnectionAndJoin()
+
+    /** Issue #1072 test seam: is a connect attempt's single-flight guard active? */
+    internal fun connectJobActiveForTest(): Boolean = connectJob?.isActive == true
+
     @androidx.annotation.VisibleForTesting
     internal fun paneProducerClientIdentityForTest(paneId: String): Int? =
         paneProducerClients[paneId]?.let { System.identityHashCode(it) }
@@ -1833,6 +1863,25 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var autoReconnectJob: Job? = null
+
+    /**
+     * Issue #1072 — the in-flight attachment-upload coroutine, OWNED by the VM so
+     * a connection teardown can cancel it.
+     *
+     * The composer attach (`onStageAttachments`) used to run the upload directly in
+     * the SCREEN's coroutine scope, so [closeCurrentConnectionAndJoin] (the reconnect
+     * ladder's teardown) cancel-and-joined every OTHER job but NOT this one: a
+     * large/slow upload stayed blocked in `output.write`/`command.join` on the dying
+     * `-CC` session while the teardown drained/closed the same dispatcher, racing it.
+     * That race could leave the single-flight `connectJob`/`autoReconnectJob` guards
+     * stuck `isActive`, which then suppressed ALL subsequent auto + manual reconnects
+     * until the app was restarted (the maintainer's "reconnect wedges" — #1072).
+     *
+     * Tracking the upload as a [viewModelScope] job lets the teardown deterministically
+     * `cancelAndJoin` it BEFORE it drops the transport, so the reconnect ladder never
+     * races a free-floating writer on the dead session.
+     */
+    private var attachmentUploadJob: Job? = null
     // Issue #938 (S2-3): `appActive` is written on Main (onStart/onStop) but
     // read off-Main from the port-detection dispatcher (e.g. [scanDecoded],
     // [confirmAndSurfaceDetectedPort]). @Volatile guarantees cross-thread
@@ -2362,7 +2411,20 @@ public class TmuxSessionViewModel @Inject constructor(
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,
         )
-        if (connectJob?.isActive == true && connectingTarget == target) return
+        // Issue #1072: an EXPLICIT manual Reconnect must be able to PREEMPT an
+        // in-flight connect to the same target, never be deduped into a no-op. If a
+        // prior connect attempt ever wedged (the upload-teardown race, now fixed by
+        // owning+cancelling the upload job), this same-target dedup would otherwise
+        // suppress the user's Reconnect tap forever — exactly the "I have to restart
+        // the app" report. The new connectJob below cancel-and-joins the previous
+        // one, so preempting is clean. The dedup still holds for non-manual triggers
+        // (rapid UserTap / network) so a healthy in-flight connect is not restarted.
+        if (connectJob?.isActive == true &&
+            connectingTarget == target &&
+            trigger != TmuxConnectTrigger.Reconnect
+        ) {
+            return
+        }
         if (
             !interruptedPassiveRecovery &&
             !shouldForceFreshLease(trigger) &&
@@ -12268,10 +12330,42 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             )
         }
-        val result = PromptAttachmentStager(
+        // Issue #1072: OWN the upload as a [viewModelScope] job so a connection
+        // teardown ([closeCurrentConnectionAndJoin]) can cancel-and-join it BEFORE
+        // it drops the transport, instead of leaving a free-floating writer blocked
+        // on the dying `-CC` session that races teardown and wedges reconnect. We
+        // run it in viewModelScope (a SupervisorJob) rather than the caller's
+        // screen scope so a screen recomposition does not abandon the upload, and
+        // the VM stays the single owner that the reconnect ladder coordinates with.
+        val stager = PromptAttachmentStager(
             resolver = context.contentResolver,
             cacheDir = context.cacheDir,
-        ).stage(session, scopeKey, uris)
+        )
+        val uploadDeferred = viewModelScope.async { stager.stage(session, scopeKey, uris) }
+        attachmentUploadJob = uploadDeferred
+        val result = try {
+            uploadDeferred.await()
+        } catch (ce: CancellationException) {
+            // Our own (caller) coroutine was cancelled — propagate.
+            if (!currentCoroutineContext().isActive) throw ce
+            // The upload deferred was cancelled by a connection teardown (#1072):
+            // surface a clear, draft-preserving error so a post-attach drop stays
+            // recoverable (the reconnect ladder owns recovery) instead of crashing
+            // the caller or silently misrouting.
+            DiagnosticEvents.record(
+                "action",
+                "tmux_attachment_stage_cancelled_by_teardown",
+                "requestedCount" to uris.size,
+                "scope" to scopeKey,
+            )
+            Result.failure(
+                IllegalStateException(
+                    "Connection closed during the upload — attachment not applied. Re-attach.",
+                ),
+            )
+        } finally {
+            if (attachmentUploadJob === uploadDeferred) attachmentUploadJob = null
+        }
         result.fold(
             onSuccess = { paths ->
                 DiagnosticEvents.record(
@@ -15568,6 +15662,17 @@ public class TmuxSessionViewModel @Inject constructor(
         cacheEviction: RuntimeCacheEviction = RuntimeCacheEviction.HostWide,
     ) {
         val closingHostId = activeTarget?.hostId ?: registeredHostId
+        // Issue #1072: cancel-and-join any in-flight attachment upload FIRST, before
+        // we touch the SSH transport. An upload is a free-floating writer blocked in
+        // `output.write`/`command.join` on the `-CC` session we are about to drop;
+        // if we tore the transport down while it was still streaming, its teardown
+        // (`dispatcher.run { command.close() }`) would race this close draining the
+        // SAME dispatcher — the race that left the reconnect single-flight guards
+        // wedged and required an app restart. Cancelling it here makes the upload
+        // unwind deterministically (its `runInterruptible` is interrupted) so the
+        // reconnect ladder never races it.
+        attachmentUploadJob?.cancelAndJoin()
+        attachmentUploadJob = null
         // Issue #257: drain any background detach left in flight by a
         // prior same-host fast-switch before we tear the rest down, so a
         // full teardown (background-detach / cross-host reconnect) never

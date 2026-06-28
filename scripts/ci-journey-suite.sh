@@ -142,6 +142,23 @@ JOURNEY_CLASSES=(
   # runs on the deterministic agents:2222 fixture (no toxiproxy) and does NOT
   # self-skip on CI, so the server-death class regression cannot silently return.
   "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"
+  # Issue #1072 (v0.4.19 release blocker): attaching a file dropped the live
+  # connection AND the post-attach drop wedged reconnect (had to restart the
+  # app). Failure 2 — "a post-attach drop must RECOVER WITHOUT AN APP RESTART" —
+  # is a reconnect-core (D28) change and the maintainer's "worse half"; the
+  # v0.4.19 review BLOCKED because it had only a VM/Robolectric proof, no
+  # end-to-end journey on the real path. This journey attaches a real `tmux -CC`
+  # session, starts a REAL large attachment upload over the warm `-CC` lease,
+  # INDUCES a drop DURING the in-flight upload via the deterministic
+  # liveness-probe drop seam (no toxiproxy — gates per-push), asserts the
+  # teardown OWNS + CANCELS the in-flight upload
+  # (tmux_attachment_stage_cancelled_by_teardown — the deterministic red→green
+  # discriminator; RED on base where the un-owned upload races teardown and
+  # wedges reconnect), then drives a manual Reconnect and asserts the SAME
+  # session recovers to Live + a fresh marker round-trips WITHOUT an app restart
+  # (the literal acceptance criterion). agents:2222, no toxiproxy; no
+  # assumeFalse(isRunningOnCi()) on the load-bearing assertions.
+  "$FQCN_PREFIX.AttachmentDropReconnectRecoversE2eTest"
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   # Issue #754 (slice 1c-iv-c): this class is the per-PR-CI deterministic regression
   # catcher for the within-grace "Attaching…" reconnect bug. It now (a) forbids the

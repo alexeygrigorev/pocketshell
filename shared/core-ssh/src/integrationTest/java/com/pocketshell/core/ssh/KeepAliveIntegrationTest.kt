@@ -380,6 +380,113 @@ class KeepAliveIntegrationTest {
     }
 
     @Test
+    fun keepAliveRidesThroughWhileAnUploadStreamsOutboundOnAQuietSession() {
+        // Issue #1072 (reproduce-first, the maintainer's "attaching breaks the
+        // connection"): a large/slow attachment upload over a QUIET `-CC` session is
+        // almost pure OUTBOUND — `cat > tmp` streams client→server bytes and emits
+        // NOTHING back until EOF, so ZERO inbound arrives for the whole upload and not
+        // even a keepalive reply lands on a saturated/high-RTT uplink. Before #1072 the
+        // keepalive (and the LivenessProbe deferral oracle) counted INBOUND only, so it
+        // declared a silent drop and tore the LIVE transport down MID-UPLOAD.
+        //
+        // Real path: a real [RealSshSession] uploading a multi-MB file over a real
+        // OpenSSH transport, with the REQUEST (upload) direction THROTTLED so the copy
+        // streams for well past the keepalive budget while inbound stays quiet. We drive
+        // a synthetic [TransportKeepAlive] whose `lastOutboundActivityNanos()` reads the
+        // REAL session's outbound timestamp (bumped per-chunk by the upload copy loop)
+        // and whose replies are STARVED. GREEN with the fix: outbound progress proves the
+        // transport alive, so the loop rides through and never declares dead. RED on base:
+        // revert the loop's `lastActivityNanos()` helper to `lastInboundActivityNanos()`
+        // and the loop pings, every ping misses, inbound never advances → declares dead.
+        val relay = PausableTcpRelay(sshHost, sshPort).also { it.start() }
+        try {
+            val session = connectThroughRelay(relay)
+            val real = session as RealSshSession
+            val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val deadDeclared = AtomicBoolean(false)
+            try {
+                // ~6 MB at 256 KB/s ≈ 24s of pure-outbound copy — well past the 3s
+                // synthetic keepalive budget below.
+                val uploadFile = File.createTempFile("ps1072-upload", ".bin")
+                uploadFile.deleteOnExit()
+                uploadFile.outputStream().use { out ->
+                    val chunk = ByteArray(64 * 1024) { (it % 251).toByte() }
+                    repeat(96) { out.write(chunk) } // 96 × 64KB = 6 MB
+                }
+                relay.throttleRequestDirection(256L * 1024L)
+
+                val beforeOutbound = real.lastOutboundActivityNanosForTest()
+                val uploadJob = ioScope.launch {
+                    runCatching { session.uploadFile(uploadFile, "/tmp/ps1072-upload.bin") }
+                }
+
+                val keepAlive = TransportKeepAlive(
+                    io = object : TransportKeepAlive.KeepAliveIo {
+                        override fun isAlive(): Boolean = session.isConnected
+                        // Inbound reads the REAL field — frozen during the copy (no server
+                        // bytes until EOF). Outbound reads the REAL field — advancing per
+                        // chunk (the #1072 wiring). Replies are STARVED.
+                        override fun lastInboundActivityNanos(): Long =
+                            real.lastInboundActivityNanosForTest()
+                        override fun lastOutboundActivityNanos(): Long =
+                            real.lastOutboundActivityNanosForTest()
+                        override suspend fun sendKeepAlive(): Boolean = false
+                        override fun onKeepAliveDead(consecutiveMisses: Int) {
+                            deadDeclared.set(true)
+                        }
+                    },
+                    intervalMs = 1_000L,
+                    countMax = 3,
+                )
+                keepAlive.start(ioScope)
+
+                // Watch for ~10s (3× the synthetic budget) while the upload streams.
+                var sawOutboundAdvance = false
+                val watchDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                while (System.nanoTime() < watchDeadline && uploadJob.isActive) {
+                    if (real.lastOutboundActivityNanosForTest() > beforeOutbound) {
+                        sawOutboundAdvance = true
+                    }
+                    // The production oracle the LivenessProbe defers to must report ALIVE
+                    // throughout the upload (max of inbound/outbound within the window).
+                    assertTrue(
+                        "the transport-liveness oracle the LivenessProbe defers to must report " +
+                            "ALIVE while an upload streams outbound — else the probe declares a " +
+                            "silent drop mid-upload (#1072)",
+                        session.isTransportProvenAliveWithinKeepAliveWindow(),
+                    )
+                    Thread.sleep(500)
+                }
+
+                keepAlive.stop()
+                uploadJob.cancel()
+
+                assertTrue(
+                    "test precondition: the throttled upload must have streamed outbound bytes",
+                    sawOutboundAdvance,
+                )
+                assertFalse(
+                    "a steadily-progressing upload (outbound advancing) must NOT be declared " +
+                        "dead by the keepalive even with zero inbound and starved replies — the " +
+                        "outbound progress proves the transport alive (#1072). RED on base: " +
+                        "outbound ignored, the loop pinged, every ping missed, inbound never " +
+                        "advanced → it tore the live transport down mid-upload.",
+                    deadDeclared.get(),
+                )
+                assertTrue(
+                    "the session must still be connected after riding through the upload window",
+                    session.isConnected,
+                )
+            } finally {
+                ioScope.cancel()
+                runCatching { session.close() }
+            }
+        } finally {
+            relay.close()
+        }
+    }
+
+    @Test
     fun genuinelyDeadHalfOpenPeerWithNoDataIsStillDeclaredDeadWithDataBumpHonoured() {
         // Issue #974 class-coverage (the dual of the ride-through case — the fix must
         // NOT make a truly-dead link look alive forever). A HALF-OPEN dead peer: no
@@ -1006,6 +1113,11 @@ private class PausableTcpRelay(
     // [holdReplyDirectionOnce] and cleared the moment it elapses.
     private val replyHoldUntilNanos = AtomicLong(0L)
     private val replyHoldArmed = AtomicBoolean(false)
+    // #1072 — when > 0, throttle the REQUEST direction (client→server) to this many
+    // bytes/sec so a real upload streams OUTBOUND for a controllable wall-clock window
+    // (the maintainer's large/slow attachment), keeping inbound quiet long past the
+    // keepalive budget.
+    private val requestThrottleBps = AtomicLong(0L)
     private val tunnels = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
     private var acceptThread: Thread? = null
 
@@ -1089,6 +1201,15 @@ private class PausableTcpRelay(
                     if (closed.get() || cut.get()) break
                     output.write(buf, 0, n)
                     output.flush()
+                    // #1072 — throttle the REQUEST direction so a real upload streams
+                    // outbound over a controllable wall-clock window (a slow uplink).
+                    if (!isReplyDirection) {
+                        val bps = requestThrottleBps.get()
+                        if (bps > 0) {
+                            val sleepMs = n.toLong() * 1_000L / bps
+                            if (sleepMs > 0) Thread.sleep(sleepMs)
+                        }
+                    }
                 }
             } catch (t: Throwable) {
                 // tunnel broken — let the join() finish and clean up.
@@ -1097,6 +1218,9 @@ private class PausableTcpRelay(
 
     fun pause() { paused.set(true) }
     fun resume() { paused.set(false) }
+
+    /** #1072 — throttle the REQUEST (client→server / upload) direction to [bytesPerSec]. */
+    fun throttleRequestDirection(bytesPerSec: Long) { requestThrottleBps.set(bytesPerSec) }
 
     /**
      * #985 — hold the REPLY direction (server→client) for [ms] milliseconds ONCE,

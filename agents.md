@@ -157,6 +157,23 @@ regression-prone subsystem (locked decision **D28**). The story so far:
   silently dropped with no indicator (#822), only discovered when a file send
   wedged; needs proactive drop detection + a connection-lost indicator + an
   actionable reconnect (#823). "I don't want half-measures anymore."
+- **God-object ratchet guards (#1047).** Three sub-second static greps over
+  `app/.../tmux/TmuxSessionViewModel.kt` stop the dual-authority / god-object
+  from GROWING while the consolidation lands (Path-B guardrails — protective
+  under BOTH the consolidate-into-`ConnectionController` path and the
+  keep-patching path). `scripts/check-connection-vm-ratchet.sh` runs in the Unit
+  job of `tests.yml` and fails when, vs the pinned baseline
+  (`scripts/connection-vm-ratchet-baseline.txt`, measured on `main` @ `4be77a22`:
+  IO=16, runBlocking=7, ConnectionDecision variants=14, lines=17598):
+  **G-A** the count of `Dispatchers.IO` OR `runBlocking` grows (new owned IO must
+  go through an injectable dispatcher seam); **G-B** the `ConnectionDecision`
+  variant count grows (new lifecycle/reconnect decisions belong in
+  `core-connection.ConnectionController`, not the inline mirror); **G-C** the
+  file's line count grows (the VM may only shrink). Each is a ONE-WAY DOWNWARD
+  ratchet: after an extraction slice LOWERS a count, re-bake the lower cap with
+  `scripts/check-connection-vm-ratchet.sh --update` (it refuses to raise any
+  cap). `--self-test` proves its own red→green logic. Sibling of the
+  `check-component-drift.sh` / `check-design-tokens.sh` static guards.
 - **The "loading tree won't connect" hang** (broke v0.4.10 AND v0.4.11) was
   THREE compounding bugs, all fixed in **v0.4.12** (#847) and only nailed after a
   real emulator→hetzner reproduction (Docker fixtures masked all three):

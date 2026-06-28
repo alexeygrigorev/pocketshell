@@ -1,0 +1,9 @@
+# connection-core god-object ratchet baseline (issue #1047)
+# Measured over app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt.
+# ONE-WAY DOWNWARD ratchet: scripts/check-connection-vm-ratchet.sh --update may
+# only LOWER these (after an extraction slice removes IO / a decision / lines).
+# Never hand-raise a value — that is exactly the growth the guard exists to stop.
+io_count 16
+runblocking_count 7
+connection_decision_variants 14
+vm_line_count 17598

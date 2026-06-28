@@ -117,6 +117,24 @@ jobs:
           chmod +x scripts/check-design-tokens.sh
           scripts/check-design-tokens.sh
 
+      # Issue #1047: connection-core god-object ratchet. Three fast static greps
+      # over app/.../tmux/TmuxSessionViewModel.kt that stop the dual-authority /
+      # god-object from GROWING (Path-B guardrails, protective under both the
+      # consolidate-into-ConnectionController path and the keep-patching path):
+      #   G-A no new Dispatchers.IO / runBlocking (use an injectable seam),
+      #   G-B freeze the ConnectionDecision variant count (new decisions go to
+      #       core-connection.ConnectionController), G-C no-growth line cap (the
+      #   VM may only shrink). Each is a ONE-WAY DOWNWARD ratchet — re-baseline
+      #   with `scripts/check-connection-vm-ratchet.sh --update` only after an
+      #   extraction slice LOWERS a count. --self-test first proves the guard's
+      #   own red->green logic, then the bare run checks the real VM. Cheap
+      #   (< 1 s grep), no emulator — belongs in the Unit job.
+      - name: Connection-VM ratchet guard (issue #1047)
+        run: |
+          chmod +x scripts/check-connection-vm-ratchet.sh
+          scripts/check-connection-vm-ratchet.sh --self-test
+          scripts/check-connection-vm-ratchet.sh
+
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
       # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite

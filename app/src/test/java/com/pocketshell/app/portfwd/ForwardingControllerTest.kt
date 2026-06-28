@@ -8,6 +8,9 @@ import android.content.Intent
 import androidx.core.app.NotificationCompat
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -261,14 +264,14 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `validated network change forces a reconnect on every active host`() {
-        // Issue #329 / #439: the port-forward sessions are independent
-        // transports from the terminal/tmux flow, so a wifi↔cellular
-        // handoff (which can leave sshj reporting "connected" while the
-        // forwards are dead) must reach the supervisor force-reconnect
-        // hook. The controller subscribes to the validated-default-network
-        // change signal and forces a rebuild on each emission.
-        val networkChanges = MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+    fun `validated handoff on a not-proven-alive tunnel forces a reconnect`() {
+        // Issue #329 / #439 / #1058: a real validated handoff on a tunnel whose
+        // transport is NOT keepalive-proven alive (a panel-only registration with
+        // no live session, or a genuinely dead socket) must reach the supervisor
+        // force-reconnect hook so the forwards re-establish. The liveness-first
+        // policy (#1058) only suppresses the redial when the transport is proven
+        // alive — the genuinely-dead/handoff case still redials.
+        val networkChanges = MutableSharedFlow<TerminalNetworkChange>(extraBufferCapacity = 16)
         val controller = ForwardingController(
             appContext = context,
             connector = TestUnavailableConnector,
@@ -285,24 +288,101 @@ class ForwardingControllerTest {
             forceReconnectHook = { forceCalls.incrementAndGet() },
         )
 
-        // A validated-network change forces a reconnect, not a no-churn one.
-        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        // A validated handoff on a not-proven-alive tunnel forces a reconnect.
+        assertTrue(networkChanges.tryEmit(handoffChange(seq = 1L)))
         idleMainLooper()
-        assertEquals("validated-network change must force a reconnect", 1, forceCalls.get())
-        assertEquals("validated-network change must not use the no-churn hook", 0, normalCalls.get())
+        assertEquals("validated handoff must force a reconnect", 1, forceCalls.get())
+        assertEquals("validated handoff must not use the no-churn hook", 0, normalCalls.get())
 
         // A second handoff forces again — the subscription is durable.
-        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        assertTrue(networkChanges.tryEmit(handoffChange(seq = 2L)))
         idleMainLooper()
         assertEquals(2, forceCalls.get())
         assertEquals(0, normalCalls.get())
     }
 
     @Test
+    fun `bare network loss holds the tunnels and never redials`() {
+        // Issue #1058 (#843 R1, trigger T11) — load-bearing arm (a): a bare
+        // network LOSS is HELD; the tunnels are NOT torn down (a loss is
+        // frequently transient). On BASE the controller called forceReconnectNow
+        // on EVERY change → a loss redialled (RED). With #1058 a NetworkLost is
+        // a no-redial hold (GREEN).
+        val networkChanges = MutableSharedFlow<TerminalNetworkChange>(extraBufferCapacity = 16)
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = networkChanges,
+        )
+        idleMainLooper()
+        val normalCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            reconnectHook = { normalCalls.incrementAndGet() },
+            forceReconnectHook = { forceCalls.incrementAndGet() },
+        )
+        // Even pinning the transport NOT-proven-alive (the redial-eligible state
+        // for a handoff/restore), a bare LOSS must still hold — the loss is its
+        // own arm, independent of liveness.
+        controller.forceTransportProvenAliveForTest = false
+
+        assertTrue(networkChanges.tryEmit(lossChange(seq = 1L)))
+        idleMainLooper()
+        assertEquals("a bare network loss must NOT redial (held)", 0, forceCalls.get())
+        assertEquals("a bare network loss must NOT use the no-churn hook either", 0, normalCalls.get())
+    }
+
+    @Test
+    fun `restore rides through a proven-alive tunnel with zero redial, redials a dead one`() {
+        // Issue #1058 (#843 R1) — load-bearing arms (b) ride-through + (c)
+        // genuinely-dead redial. This is the JVM analogue of the connected
+        // ForwardingNetworkRideThroughE2eTest, using the keepalive-proven
+        // liveness seam to pin survived/dead deterministically.
+        val networkChanges = MutableSharedFlow<TerminalNetworkChange>(extraBufferCapacity = 16)
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = networkChanges,
+        )
+        idleMainLooper()
+        val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            forceReconnectHook = { forceCalls.incrementAndGet() },
+        )
+
+        // (b) The tunnel SURVIVED the dip (keepalive proven alive) → RIDE THROUGH:
+        // a restore must NOT redial. On BASE every change redialled → RED.
+        controller.forceTransportProvenAliveForTest = true
+        assertTrue(networkChanges.tryEmit(restoreChange(seq = 1L)))
+        idleMainLooper()
+        assertEquals(
+            "a restore on a proven-alive tunnel must RIDE THROUGH with zero redial",
+            0,
+            forceCalls.get(),
+        )
+
+        // (c) The tunnel is genuinely DEAD (keepalive aged out) → REDIAL.
+        controller.forceTransportProvenAliveForTest = false
+        assertTrue(networkChanges.tryEmit(restoreChange(seq = 2L)))
+        idleMainLooper()
+        assertEquals(
+            "a restore on a genuinely-dead tunnel must redial (preserves #997 recovery)",
+            1,
+            forceCalls.get(),
+        )
+    }
+
+    @Test
     fun `validated network change with no active hosts is a no-op`() {
         // Before any host is auto-forwarding, a network change must not
         // crash or start the service — the fan-out is over an empty set.
-        val networkChanges = MutableSharedFlow<Any?>(extraBufferCapacity = 16)
+        val networkChanges = MutableSharedFlow<TerminalNetworkChange>(extraBufferCapacity = 16)
         val controller = ForwardingController(
             appContext = context,
             connector = TestUnavailableConnector,
@@ -312,7 +392,7 @@ class ForwardingControllerTest {
         idleMainLooper()
         drainStartedServices()
 
-        assertTrue(networkChanges.tryEmit(NetworkChangeMarker))
+        assertTrue(networkChanges.tryEmit(handoffChange(seq = 1L)))
         idleMainLooper()
 
         assertEquals(0, controller.flowOfActiveHostCount().value)
@@ -793,8 +873,44 @@ class ForwardingControllerTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
     }
 
-    /** Marker payload for the validated-network-change signal in tests. */
-    private object NetworkChangeMarker
+    // --- Issue #1058: real TerminalNetworkChange builders for the policy tests.
+
+    private fun handoffChange(seq: Long): TerminalNetworkChange {
+        val wifi = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-$seq", transports = setOf("WIFI"))
+        val cell = TerminalNetworkSnapshot.Validated(networkHandle = "cell-$seq", transports = setOf("CELLULAR"))
+        return TerminalNetworkChange(
+            previous = wifi,
+            current = cell,
+            previousValidated = wifi,
+            reason = "test-handoff-$seq",
+            sequence = seq,
+            kind = TerminalNetworkChangeKind.ValidatedIdentityChange,
+        )
+    }
+
+    private fun lossChange(seq: Long): TerminalNetworkChange {
+        val wifi = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-$seq", transports = setOf("WIFI"))
+        return TerminalNetworkChange(
+            previous = wifi,
+            current = TerminalNetworkSnapshot.NoValidatedNetwork,
+            previousValidated = wifi,
+            reason = "test-loss-$seq",
+            sequence = seq,
+            kind = TerminalNetworkChangeKind.NetworkLost,
+        )
+    }
+
+    private fun restoreChange(seq: Long): TerminalNetworkChange {
+        val wifi = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-$seq", transports = setOf("WIFI"))
+        return TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+            current = wifi,
+            previousValidated = wifi,
+            reason = "test-restore-$seq",
+            sequence = seq,
+            kind = TerminalNetworkChangeKind.NetworkRestored,
+        )
+    }
 
     private object TestUnavailableConnector : PortForwardConnector {
         override suspend fun connect(

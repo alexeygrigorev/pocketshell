@@ -3,7 +3,10 @@ package com.pocketshell.app.portfwd
 import android.content.Context
 import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.portfwd.service.ForwardingService
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
@@ -28,6 +31,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * App-singleton owner for active port-forwarding sessions and the
@@ -66,18 +70,17 @@ class ForwardingController(
     private val portRemappingDao: PortRemappingDao,
     private val scope: CoroutineScope,
     /**
-     * Validated-default-network change signal (issue #329 / #439). Each
-     * emission is a real handoff of the validated default network (e.g.
-     * wifi ↔ cellular), which is exactly the case sshj can leave a
-     * port-forward session reporting "connected" while the phone-side
-     * forwards are already dead. The controller subscribes from the
-     * port-forward side and forces a transport rebuild so the user's
-     * forwards re-establish without toggling auto-forward off/on.
+     * Validated-default-network change signal (issue #329 / #439 / #1058).
+     * The SAME [com.pocketshell.app.connectivity.TerminalNetworkObserver.changes]
+     * stream the terminal transport consumes — a kind-aware
+     * [TerminalNetworkChange] (handoff / bare loss / restore), NOT a bare
+     * marker. The controller applies the SAME liveness-first ride-through the
+     * terminal does (see [onValidatedNetworkChange]).
      *
      * Defaults to [emptyFlow] for the test constructor so unit tests that
      * don't exercise the network path stay light.
      */
-    validatedNetworkChanges: Flow<*> = emptyFlow<Any?>(),
+    validatedNetworkChanges: Flow<TerminalNetworkChange> = emptyFlow(),
 ) {
     @Inject
     constructor(
@@ -99,7 +102,7 @@ class ForwardingController(
         connector = UnavailablePortForwardConnector,
         portRemappingDao = EmptyPortRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
-        validatedNetworkChanges = emptyFlow<Any?>(),
+        validatedNetworkChanges = emptyFlow(),
     )
 
     @VisibleForTesting
@@ -107,7 +110,7 @@ class ForwardingController(
         appContext: Context,
         connector: PortForwardConnector,
         portRemappingDao: PortRemappingDao,
-        validatedNetworkChanges: Flow<*>,
+        validatedNetworkChanges: Flow<TerminalNetworkChange>,
     ) : this(
         appContext = appContext,
         connector = connector,
@@ -134,20 +137,143 @@ class ForwardingController(
         MutableStateFlow<Map<Long, AutoForwarderSupervisor.ConnectionState>>(emptyMap())
     private val hostErrors = MutableStateFlow<Map<Long, String?>>(emptyMap())
 
+    /**
+     * Issue #1058 test seam (the #780/#964 hard-inject model): pin the
+     * keepalive-proven liveness verdict the network-change policy reads, so a
+     * connected journey can drive the ride-through (`true`) and genuinely-dead
+     * (`false`) arms deterministically WITHOUT reproducing the real ~90s
+     * keepalive ride-through window on the AVD. `null` (production default)
+     * reads the real per-host live [SshSession] keepalive oracle. `@Volatile`
+     * so the collector coroutine sees a flip from the test thread.
+     */
+    @Volatile
+    @VisibleForTesting
+    var forceTransportProvenAliveForTest: Boolean? = null
+
     init {
         // Subscribe to the validated-default-network change signal from the
-        // port-forward side (issue #329). A real handoff forces a transport
-        // rebuild on every active host's supervisor, mirroring what the
-        // terminal/tmux flow already does for its own sessions — but the
-        // port-forward sessions are independent transports and were missing
-        // this hook, so a clean wifi↔cellular handoff (onAvailable without a
-        // preceding onLost) left them stale-connected with dead forwards.
+        // port-forward side (issue #329 / #1058). Mirrors the terminal
+        // transport's kind-aware, liveness-first policy — see
+        // [onValidatedNetworkChange].
         scope.launch {
-            validatedNetworkChanges.collect {
-                Log.i(TAG, "validated-network-change → forceReconnectNow active=${activeHosts.size}")
-                forceReconnectNow()
+            validatedNetworkChanges.collect { change ->
+                onValidatedNetworkChange(change)
             }
         }
+    }
+
+    /**
+     * Issue #1058 (#843 R1, trigger T11 / coverage gap C1): liveness-first
+     * network-change policy for the port-forward tunnels, identical in shape to
+     * the terminal transport's (#981/#997/#1042/#1045).
+     *
+     * Before this, the controller called [forceReconnectNow] on EVERY emitted
+     * change — so on cellular, where the device dips into no-validated-network
+     * constantly (tunnel, elevator, RAT handover, congestion re-validation),
+     * the user's forwards churned "restoring…" on every blip even though the
+     * tunnel transport never died, while the terminal stayed Live.
+     *
+     * The policy now mirrors the terminal, reusing the SAME keepalive-proven
+     * liveness oracle ([SshSession.isTransportProvenAliveWithinKeepAliveWindow],
+     * #964 — the exact oracle the terminal's
+     * `isTransportKeepAliveProvenAliveRecently` also reads), with NO second
+     * liveness notion:
+     *
+     *  - [TerminalNetworkChangeKind.NetworkLost] → HOLD. A bare loss is
+     *    frequently transient; do NOT redial. Mirrors the terminal's
+     *    `holdNetworkLost` — the tunnels are held, not torn down.
+     *  - [TerminalNetworkChangeKind.NetworkRestored] /
+     *    [TerminalNetworkChangeKind.ValidatedIdentityChange] → liveness-first:
+     *    a host whose tunnel transport is keepalive-PROVEN alive RIDES THROUGH
+     *    with no redial and no "restoring…" churn; a host whose transport is
+     *    genuinely dead (or has no live session) is REDIALLED via the existing
+     *    force hook. A real cross-transport handoff on a dead/quiet tunnel
+     *    therefore still re-establishes (the #329/#439/#980 contract).
+     */
+    @VisibleForTesting
+    fun onValidatedNetworkChange(change: TerminalNetworkChange) {
+        when (change.kind) {
+            TerminalNetworkChangeKind.NetworkLost -> holdNetworkLoss(change)
+            TerminalNetworkChangeKind.NetworkRestored,
+            TerminalNetworkChangeKind.ValidatedIdentityChange,
+            -> rideThroughOrRedial(change)
+        }
+    }
+
+    /**
+     * Issue #1058: a bare network LOSS is HELD — the tunnels are NOT torn down
+     * (a loss is frequently transient: pocket, elevator, RAT handover).
+     * Recovery is driven by the matching [TerminalNetworkChangeKind.NetworkRestored].
+     */
+    private fun holdNetworkLoss(change: TerminalNetworkChange) {
+        Log.i(
+            TAG,
+            "network-loss-hold reason=${change.reason} active=${activeHosts.size} " +
+                "(bare loss — tunnels held, no redial)",
+        )
+        DiagnosticEvents.record(
+            "portforward",
+            "network_loss_hold",
+            "reason" to change.reason,
+            "kind" to change.kind.name,
+            "activeHosts" to activeHosts.size,
+        )
+    }
+
+    /**
+     * Issue #1058: a handoff / restore — ride through the hosts whose tunnel
+     * transport is keepalive-proven alive (no redial, no churn), redial the
+     * hosts whose transport is genuinely dead.
+     */
+    private fun rideThroughOrRedial(change: TerminalNetworkChange) {
+        activeHosts.forEach { host ->
+            if (isTunnelTransportProvenAlive(host)) {
+                Log.i(
+                    TAG,
+                    "network-change ride-through host=${host.hostId} reason=${change.reason} " +
+                        "kind=${change.kind} (transport proven alive)",
+                )
+                DiagnosticEvents.record(
+                    "portforward",
+                    "network_ride_through",
+                    "reason" to change.reason,
+                    "kind" to change.kind.name,
+                    "hostId" to host.hostId,
+                    "cause" to "transport_proven_alive",
+                )
+            } else {
+                Log.i(
+                    TAG,
+                    "network-change redial host=${host.hostId} reason=${change.reason} " +
+                        "kind=${change.kind} (transport not proven alive)",
+                )
+                DiagnosticEvents.record(
+                    "portforward",
+                    "network_redial",
+                    "reason" to change.reason,
+                    "kind" to change.kind.name,
+                    "hostId" to host.hostId,
+                    "cause" to "transport_dead",
+                )
+                runCatching { (host.forceReconnectHook ?: host.reconnectHook)?.invoke() }
+            }
+        }
+    }
+
+    /**
+     * Issue #1058: reuse the terminal's keepalive-proven liveness oracle
+     * ([SshSession.isTransportProvenAliveWithinKeepAliveWindow], #964) on this
+     * host's CURRENT live tunnel session. No second liveness notion — the
+     * always-on transport keepalive (#945) runs on every [SshSession]
+     * (including the port-forward sessions), so a brief sub-window dip keeps
+     * the oracle TRUE (ride through) while a genuinely dead post-outage socket
+     * ages out to FALSE (redial). A host with no live session reads FALSE.
+     */
+    private fun isTunnelTransportProvenAlive(host: ActiveHost): Boolean {
+        forceTransportProvenAliveForTest?.let { return it }
+        val session = host.liveSession?.get() ?: return false
+        return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
+            .getOrDefault(false)
     }
 
     fun flowOfActiveHostCount(): StateFlow<Int> = activeHostCount.asStateFlow()
@@ -250,6 +376,7 @@ class ForwardingController(
                 activeRemotePorts = existing.activeRemotePorts,
                 forwardedPortMap = existing.forwardedPortMap,
                 restoring = existing.restoring,
+                liveSession = existing.liveSession,
             )
         } else {
             activeHosts += ActiveHost(
@@ -355,10 +482,16 @@ class ForwardingController(
     }
 
     /**
-     * Stronger network-recovery hint used after the foreground service
-     * has observed an actual default-network loss. This may rebuild a
-     * session that still reports "connected" but whose forwards died
-     * under the old network.
+     * Stronger explicit redial-all hint: force-rebuilds every active host's
+     * transport even if it still reports "connected". Used for an explicit
+     * user/manual recovery action.
+     *
+     * Issue #1058: this is NOT the network-change path any more. A
+     * validated-network change goes through [onValidatedNetworkChange], which
+     * is liveness-first (it holds on a bare loss and rides a handoff/restore
+     * through when the tunnel transport is keepalive-proven alive) — it does
+     * NOT redial unconditionally, which was the cellular-churn defect (#843
+     * trigger T11).
      */
     fun forceReconnectNow() {
         activeHosts.forEach {
@@ -377,11 +510,20 @@ class ForwardingController(
     ) {
         val reconnectPassphrase = passphrase?.copyOf()
         var first: SshSession? = firstSession
+        // Issue #1058: track the CURRENT live tunnel session so the
+        // network-change policy can read its keepalive-proven liveness oracle.
+        // The supervisor owns the session lifecycle (it swaps/closes on every
+        // drop+reconnect), so we capture the freshest session at its single
+        // creation point — the factory. A stale (closed) reference reads
+        // not-proven-alive, which is the correct "redial" direction.
+        val liveSession = AtomicReference<SshSession?>(firstSession)
         val supervisor = AutoForwarderSupervisor(
             sessionFactory = {
-                first?.also { first = null }
+                val session = first?.also { first = null }
                     ?: connector.connect(host, keyPath, reconnectPassphrase?.copyOf())
                         .getOrElse { throw it }
+                liveSession.set(session)
+                session
             },
             config = host.toAutoForwardConfig(),
             initialRemappings = initialRemappings,
@@ -440,6 +582,7 @@ class ForwardingController(
                 activeRemotePorts = existing?.activeRemotePorts.orEmpty(),
                 forwardedPortMap = existing?.forwardedPortMap.orEmpty(),
                 restoring = existing?.restoring ?: false,
+                liveSession = liveSession,
             )
             recomputeSnapshot()
             if (wasEmpty) ForwardingService.start(appContext)
@@ -489,6 +632,12 @@ class ForwardingController(
         // but its transport is currently down and reconnecting, so its
         // forwards are being restored rather than removed.
         val restoring: Boolean = false,
+        // Issue #1058: the CURRENT live tunnel session (swapped by the
+        // supervisor on every reconnect), read by the network-change policy
+        // for the keepalive-proven liveness oracle. Null for a panel-only
+        // registration with no live supervisor yet (reads not-proven-alive →
+        // redial on handoff, the safe direction).
+        val liveSession: AtomicReference<SshSession?>? = null,
     ) {
         fun stopOwnedSupervisor() {
             supervisorJob?.cancel()

@@ -93,6 +93,32 @@ internal class TransportKeepAlive(
         fun lastInboundActivityNanos(): Long
 
         /**
+         * Issue #1072 — nanos (monotonic, [System.nanoTime] domain) of the most
+         * recent OUTBOUND payload progress the session has made: a steadily
+         * advancing file/attachment upload pushing client→server bytes.
+         *
+         * Why outbound counts as proof of life: an upload's `output.write(...)`
+         * only keeps returning while the kernel send buffer drains, which on a
+         * sane TCP window means the PEER is still ACKing our segments — so RECENT
+         * outbound progress proves the transport is reachable just as inbound
+         * bytes do. A large/slow attachment over a QUIET `-CC` session is almost
+         * pure outbound (`cat > tmp` emits nothing until EOF), so WITHOUT this
+         * signal the loop saw ZERO inbound for the whole upload and tore the live
+         * transport down mid-upload — the maintainer's "attaching breaks the
+         * connection" (#1072). The loop folds this into the SAME reset-on-activity
+         * shortcut and ride-through death decision as inbound.
+         *
+         * Crucially this is RECENT outbound PROGRESS, not "an upload was started":
+         * a genuinely dead/half-open peer stalls the writes once the send buffer
+         * fills, so this timestamp stops advancing and ages out of the ride-through
+         * window — a truly dead transport (no inbound AND no outbound progress) is
+         * STILL declared dead within the budget. Default returns [Long.MIN_VALUE]
+         * ("no recent outbound") so a fake/test that does not override it behaves
+         * exactly as before (inbound-only).
+         */
+        fun lastOutboundActivityNanos(): Long = Long.MIN_VALUE
+
+        /**
          * Send ONE `keepalive@openssh.com` global request through the transport
          * dispatcher and await the reply. Returns `true` on ANY reply (including
          * the mandatory `SSH_MSG_REQUEST_FAILURE` for an unknown request type,
@@ -161,12 +187,14 @@ internal class TransportKeepAlive(
                     consecutiveMisses = 0
                     break
                 }
-                // Reset-on-inbound (OpenSSH semantics): a link that produced
-                // server bytes within the last interval is self-evidently alive,
-                // so skip the explicit ping and reset the miss counter. This is
-                // why a heavy `%output` burst is POSITIVE proof of life, not a
-                // missed probe.
-                val sinceActivityNanos = System.nanoTime() - io.lastInboundActivityNanos()
+                // Reset-on-activity (OpenSSH semantics, extended for outbound in
+                // #1072): a link that produced server bytes — OR made outbound
+                // upload progress — within the last interval is self-evidently
+                // alive, so skip the explicit ping and reset the miss counter.
+                // This is why a heavy `%output` burst is POSITIVE proof of life,
+                // not a missed probe; and why a steadily-streaming attachment
+                // upload (pure outbound) must NOT be torn down mid-upload (#1072).
+                val sinceActivityNanos = System.nanoTime() - io.lastActivityNanos()
                 if (sinceActivityNanos in 0 until intervalNanos()) {
                     if (consecutiveMisses != 0) {
                         log("keepalive: inbound activity, reset after $consecutiveMisses miss(es)")
@@ -188,8 +216,9 @@ internal class TransportKeepAlive(
                         // lands after the 5s per-reply budget — so the per-tick send
                         // reports a "miss" — but well within the ~90s death budget. That
                         // late inbound advances this watermark; a half-open DEAD peer
-                        // never can.
-                        missStreakStartActivityNanos = io.lastInboundActivityNanos()
+                        // never can. #1072: outbound upload progress advances it too,
+                        // so a steadily-progressing upload rides through the streak.
+                        missStreakStartActivityNanos = io.lastActivityNanos()
                     }
                     consecutiveMisses += 1
                     log("keepalive: miss consecutive=$consecutiveMisses countMax=$countMax")
@@ -199,12 +228,15 @@ internal class TransportKeepAlive(
                         // close path already owns recovery and an extra reaction
                         // would be a spurious teardown.
                         if (io.isAlive()) {
-                            if (io.lastInboundActivityNanos() != missStreakStartActivityNanos) {
-                                // Issue #1059 (R2) — slow-but-alive: inbound activity
-                                // advanced during the streak, so the peer DID answer
-                                // (late). A genuinely half-open dead peer can never move
-                                // this timestamp, so this can only be a real round-trip
-                                // on a high-RTT/bufferbloat idle link — ride it through
+                            if (io.lastActivityNanos() != missStreakStartActivityNanos) {
+                                // Issue #1059 (R2) / #1072 — slow-but-alive: inbound
+                                // activity OR outbound upload progress advanced during
+                                // the streak, so the peer DID answer (late) or we are
+                                // still actively pushing bytes it is ACKing. A genuinely
+                                // half-open dead peer can never move this timestamp, so
+                                // this can only be a real round-trip on a high-RTT/
+                                // bufferbloat idle link, or a progressing upload — ride
+                                // it through
                                 // instead of redialing a live link (the #945 contract is
                                 // preserved precisely because we only ride through on
                                 // PROVEN inbound).
@@ -238,6 +270,18 @@ internal class TransportKeepAlive(
     }
 
     private fun intervalNanos(): Long = intervalMs * 1_000_000L
+
+    /**
+     * Issue #1072 — the single "most recent proof of life" timestamp the loop
+     * keys every reset/ride-through decision off: the LATER of the last inbound
+     * server byte and the last outbound upload progress. Either one proves the
+     * transport is still carrying our traffic. The default
+     * [KeepAliveIo.lastOutboundActivityNanos] of [Long.MIN_VALUE] makes this fall
+     * back to inbound-only for fakes/tests that do not stream outbound, so the
+     * pre-#1072 behaviour is preserved exactly when there is no upload in flight.
+     */
+    private fun KeepAliveIo.lastActivityNanos(): Long =
+        maxOf(lastInboundActivityNanos(), lastOutboundActivityNanos())
 
     private suspend fun sendOne(): Boolean =
         try {

@@ -248,6 +248,11 @@ internal class RealSshSession(
         io = object : TransportKeepAlive.KeepAliveIo {
             override fun isAlive(): Boolean = isConnected
             override fun lastInboundActivityNanos(): Long = lastInboundActivityNanos
+            // Issue #1072 — feed outbound upload progress into the keepalive loop so
+            // a steadily-streaming attachment upload (pure outbound, zero inbound on
+            // a quiet `-CC` session) is NOT misread as a silent drop and torn down
+            // mid-upload. The loop folds this into reset-on-activity / ride-through.
+            override fun lastOutboundActivityNanos(): Long = lastOutboundActivityNanos
             override suspend fun sendKeepAlive(): Boolean = this@RealSshSession.sendKeepAlive()
             override fun onKeepAliveDead(consecutiveMisses: Int) {
                 // Issue #969: NAME the cause BEFORE the close so the lease layer
@@ -306,7 +311,20 @@ internal class RealSshSession(
      */
     override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean {
         if (!isConnected) return false
-        val sinceActivityNanos = System.nanoTime() - lastInboundActivityNanos
+        // Issue #1072 — count RECENT OUTBOUND upload progress as proof of life too,
+        // not just inbound server bytes. A large/slow attachment upload over a quiet
+        // `-CC` session is almost pure outbound (`cat > tmp` emits nothing until
+        // EOF), so the inbound-only oracle aged out within the ride-through window
+        // and the app-level LivenessProbe (which defers to this) declared a silent
+        // drop and tore the live transport down MID-UPLOAD (the maintainer's
+        // "attaching breaks the connection"). An actively-progressing upload means
+        // the peer is consuming our window — provably reachable — so the LATER of
+        // the inbound and outbound timestamps is the correct liveness watermark.
+        // Genuine-death contract preserved: a truly dead transport stalls the
+        // writes, outbound stops advancing, and BOTH timestamps age out past the
+        // ride-through window → returns false → the keepalive's own budget closes it.
+        val mostRecentActivityNanos = maxOf(lastInboundActivityNanos, lastOutboundActivityNanos)
+        val sinceActivityNanos = System.nanoTime() - mostRecentActivityNanos
         val rideThroughNanos = TransportKeepAlive.RIDE_THROUGH_BUDGET_MS * 1_000_000L
         return sinceActivityNanos in 0 until rideThroughNanos
     }

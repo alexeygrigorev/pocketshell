@@ -1251,7 +1251,7 @@ echo "=========================================================="
 #
 # ---------------------------------------------------------------------------
 # Issue #835: SUITE-LEVEL time budget so the recurring #470 enumeration stall
-# can never burn the whole 45-min job to a `cancelled` (which writes NO
+# can never burn the whole job to a `cancelled` (which writes NO
 # summary.md and mis-routes the workflow classifier to the #771
 # "EMULATOR INFRA UNAVAILABLE" branch).
 #
@@ -1262,19 +1262,61 @@ echo "=========================================================="
 # `summary.md` was ever written. Without an artifact the classifier cannot tell a
 # #470 time-budget stall from a never-booted emulator.
 #
-# Fix (#908): the suite owns its OWN deadline (JOURNEY_STEP_BUDGET_SECS,
-# default 20 min). Arithmetic against the workflow cap is explicit:
-# 45-min job cap (2700s) - worst-case emulator boot (900s) - default suite
-# budget (1200s) = 600s for setup, classifier, Docker log collection, and
-# artifact upload.
+# Fix (#908): the suite owns its OWN deadline (JOURNEY_STEP_BUDGET_SECS).
 # When the remaining budget is exhausted the suite STOPS launching new classes,
 # records the not-run classes as a distinct BUDGET-timeout bucket, ALWAYS writes
 # summary.md (with the greppable `JOURNEY_STEP_TIMEOUT` marker), and exits
-# non-zero. So a #470 stall now surfaces as a legible, correctly-labelled red
-# verdict WITH an artifact instead of a `cancelled` step with none. Each
-# individual class attempt is ALSO hard-capped (via `timeout`) at the smaller of
-# its own ceiling and the budget remaining, so one wedged class can never run
-# past the suite deadline.
+# non-zero. Each individual class attempt is ALSO hard-capped (via `timeout`) at
+# the smaller of its own ceiling and the budget remaining, so one wedged class
+# can never run past the suite deadline.
+#
+# Right-sizing (#835 REOPENED): the 1200s (20-min) budget could not run the full
+# load-bearing selection (~83 journey classes + 6 core-terminal proofs ≈ 89
+# connected-test invocations) to a verdict SERIALLY, so the slow heavy
+# reconnect/switch journeys at the front always ate the 1200s before
+# BackgroundGrace / LiveHold / the share/composer/folder tail could run. The root
+# cause is harness arithmetic, NOT an unbounded tmux hang (every enumeration
+# round-trip is hard-bounded post #687/#702/#1041). Two changes make the WHOLE
+# selection reach a verdict in one pass:
+#
+#   1. Kill the per-class cold-Gradle tax. Each journey class used to run as its
+#      OWN cold `--no-daemon` Gradle invocation (~30-60s of fresh-JVM config +
+#      APK install + runner spin-up BEFORE a single assertion) — ~89 of those is
+#      ~40-80 min of pure overhead, which no sane job cap can fit. `run_class`
+#      now reuses the Gradle DAEMON across invocations (the `--no-daemon` flag is
+#      dropped), so config/JVM-start is paid ~once instead of ~89×. This PRESERVES
+#      per-class isolation: every class is STILL its own `:app:
+#      connectedDebugAndroidTest` task targeting one `class=` FQCN, run in its own
+#      on-device `am instrument` process, so the #1042 grace-state-leak-across-
+#      test-methods-in-one-process hazard does NOT apply (we never batch multiple
+#      classes into one instrumentation process). It also matches how the six
+#      core-terminal proofs below ALREADY invoke Gradle (daemon, no `--no-daemon`).
+#      The #918 file-hash-lock poisoning a KILLED invocation could leave is still
+#      cleared by `cleanup_gradle_after_timeout` (`gradlew --stop` after a class
+#      is killed by `timeout`), so a wedged class cannot poison its retry.
+#
+#   2. Right-size the budget + job cap to the daemon-warm serial wall-clock.
+#      `timeout-minutes` is a CAP, not a fixed duration: the job ENDS when the
+#      suite ends (early on a healthy run), so a generous budget is pure
+#      correctness upside — it only lets the worst case finish instead of being
+#      SIGKILLed mid-loop.
+#
+# Arithmetic against the workflow cap is explicit (the same 600s post-boot slack
+# the #908 invariant preserved, scaled up):
+#   95-min job cap (5700s) - worst-case emulator boot (900s) - default suite
+#   budget (4200s) = 600s for setup, classifier, Docker log collection, and
+#   artifact upload.
+# A suite-budget timeout SKIPS the workflow retry: a budget timeout is
+# deterministic given the class set vs the budget (boot happens BEFORE
+# SUITE_START, so a slow boot never eats the suite budget), so a retry would only
+# burn the cap again. The job therefore never runs two full-budget attempts.
+#
+# Durable guard (#835 REOPENED, D31): a budget timeout is now a HARD RED, not an
+# advisory-green. The suite already exits non-zero on STEP_TIMEOUT; the workflow
+# classifier no longer downgrades a `JOURNEY_STEP_TIMEOUT` summary to green. So
+# if the stall ever returns — or a future class addition pushes the tail back
+# over the budget edge — the job goes RED with the cut-short classes named,
+# instead of silently masking a missing verdict (the exact reopen complaint).
 #
 # Override knobs (used by the suite's own unit test; CI uses the defaults):
 #   JOURNEY_STEP_BUDGET_SECS   — total wall-clock budget for the class loop.
@@ -1288,7 +1330,7 @@ echo "=========================================================="
 #   JOURNEY_CLASS_KILL_AFTER_SECS
 #                              — SIGKILL backstop after the per-class timeout
 #                                sends TERM (default 30s).
-JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-1200}"
+JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-4200}"
 JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
 JOURNEY_GRADLE_STOP_TIMEOUT_SECS="${JOURNEY_GRADLE_STOP_TIMEOUT_SECS:-60}"
 JOURNEY_CLASS_KILL_AFTER_SECS="${JOURNEY_CLASS_KILL_AFTER_SECS:-30}"
@@ -1344,7 +1386,18 @@ needs_gradle_cleanup_after_class_abort() {
 # one class per invocation (rather than all classes comma-joined into a single
 # invocation) is what makes the per-class retry below clean: the gradle exit
 # code IS the per-class verdict, with no XML parsing or fragile result-file
-# scraping required.
+# scraping required. It ALSO preserves per-class isolation — each class runs in
+# its own on-device `am instrument` process, so the #1042 grace-state leak across
+# test methods in one instrumentation process cannot occur.
+#
+# Issue #835 (REOPENED): the Gradle DAEMON is reused across invocations (no
+# `--no-daemon` flag — matching the core-terminal proofs below) so the ~30-60s
+# fresh-JVM config + spin-up cost is paid ~once instead of ~89×; that cold-Gradle
+# tax was the dominant reason the full selection could not finish in budget.
+# Per-class isolation is unchanged (still one `class=` FQCN per task). A KILLED
+# invocation's lingering daemon/file-hash lock (#918) is still cleared by
+# `cleanup_gradle_after_timeout` (`gradlew --stop`) before the retry, so a wedged
+# class cannot poison its retry even with the daemon reused.
 #
 # Issue #835: wrap the gradle invocation in `timeout` capped at the SMALLER of
 # the per-class ceiling and the budget remaining, so a single #470-stalled class
@@ -1368,7 +1421,7 @@ run_class() {
   fi
   attempt_start=$SECONDS
   timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${cap}s" \
-    "$GRADLEW" --no-daemon :app:connectedDebugAndroidTest \
+    "$GRADLEW" :app:connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
@@ -1520,7 +1573,7 @@ STEP_TIMEOUT_HIT=0    # issue #835: set to 1 once the suite-level budget is spen
 SUITE_START=$SECONDS
 
 echo ">>> Suite-level time budget (issue #835): ${JOURNEY_STEP_BUDGET_SECS}s"
-echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow job cap: 45 min)"
+echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow job cap: 95 min)"
 
 for fqcn in "${JOURNEY_CLASSES[@]}"; do
   # Issue #835: stop launching new classes once the suite-level budget is spent.
@@ -1958,7 +2011,7 @@ echo "=========================================================="
   # marker to label the red as a journey timeout / #470 stall — DISTINCT from a
   # genuine `JOURNEY_FAILED` regression and from a "no summary at all" #771
   # EMULATOR INFRA UNAVAILABLE abort. Writing this summary at all (instead of
-  # being SIGKILLed mid-loop by the 45-min job cap) is the whole point: an
+  # being SIGKILLed mid-loop by the workflow job cap) is the whole point: an
   # artifact exists, so the classifier can attribute the red correctly.
   if [[ "$STEP_TIMEOUT_HIT" -eq 1 ]]; then
     echo

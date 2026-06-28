@@ -746,6 +746,28 @@ JOURNEY_CLASSES=(
   # tests.yml already brings up, and does NOT self-skip on CI (no assumeTrue /
   # assumeFalse(isRunningOnCi())). Lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest"
+  # ADDED (#1057): the conversation stays REACHABLE after live detection drops.
+  # The maintainer dogfood report (2026-06-28): "conversation is not visible in
+  # this app" — they cannot reach the agent conversation view. The #975 sibling
+  # above proves the toggle RETURNS when detection re-binds; this class proves the
+  # OTHER half of the class — a conversation that genuinely EXISTS (a loaded
+  # transcript) must stay reachable + readable when live detection DROPS and never
+  # rebinds (the agent exited / masked no-rebind). It drives the REAL VM:
+  #   - conversationStaysReachableAfterLiveDetectionDropsWithLoadedTranscript: the
+  #     LOAD-BEARING real-path red->green. Detection binds via the #975 transcript
+  #     fallback + the transcript tails into events; tapping Conversation renders
+  #     the transcript (AC2 tap-to-switch); then the production agent-exit teardown
+  #     (clearAgentDetectionForPane, the #780 synthetic-injection of the
+  #     null-detection transition the deduped in-fixture detector won't fire) is
+  #     driven on the live row. On base the row is DROPPED -> the toggle vanishes ->
+  #     the conversation is unreachable (RED); with the #1057 fix the events-bearing
+  #     row is KEPT -> the toggle stays + tapping still shows the transcript (GREEN).
+  #   - plainShellShowsNoConversationToggleEvenThroughTeardown (#894 no-flap
+  #     ADJACENCY): a genuine no-agent recorded shell shows NO toggle and the
+  #     teardown does not synthesize one (the keep-events change must not resurrect
+  #     a toggle for a conversation-less shell).
+  # Uses ONLY agents:2222 that tests.yml already brings up; no self-skip on CI.
+  "com.pocketshell.app.tmux.ConversationStaysReachableAfterDetectionDropsDockerTest"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /

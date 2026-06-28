@@ -12289,6 +12289,96 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun conversationWithLoadedTranscriptIsKeptReadableWhenDetectionDrops() = runTest(scheduler) {
+        // Issue #1057 (maintainer dogfood — "conversation is not visible in this
+        // app"): a conversation that genuinely EXISTS (a loaded transcript, events
+        // present) must stay READABLE after live detection drops, so the
+        // Terminal/Conversation toggle stays reachable and the user can still read
+        // it. On base clearAgentDetectionForPane DROPPED the row the instant
+        // detection settled null → the transcript became unreachable (the exact
+        // symptom). This is the fast JVM red→green for the VM fix; the connected
+        // sibling is ConversationStaysReachableAfterDetectionDropsDockerTest.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "agent", paneIndex = 0),
+            ),
+        )
+        val event = ConversationEvent.Message(
+            id = "m1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "the transcript the user was reading",
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection(), listOf(event))
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+        assertEquals(
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+
+        // Live detection settles null (the agent exited / re-detection never
+        // rebinds) — the production teardown the null-detection poll calls.
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+
+        val row = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#1057: an events-bearing conversation row is KEPT readable after " +
+                "detection drops (on base it was dropped → conversation unreachable)",
+            row,
+        )
+        assertNull(
+            "#1057: the kept row's detection is null (the live agent is gone)",
+            row!!.detection,
+        )
+        assertTrue(
+            "#1057: the kept row preserves the loaded transcript so it stays readable",
+            row.events.isNotEmpty(),
+        )
+        assertEquals(
+            "#1057: the user's Conversation tab choice persists on the kept row",
+            SessionTab.Conversation,
+            row.selectedTab,
+        )
+        // agentForWindow still reports null (no LIVE agent) — the kept row is a
+        // frozen transcript, not a resurrected live detection.
+        assertNull(
+            "#1057: a kept frozen transcript must not resurrect a live agent",
+            vm.agentForWindow("@0"),
+        )
+    }
+
+    @Test
+    fun conversationWithNoTranscriptStillDropsWhenDetectionDrops() = runTest(scheduler) {
+        // Issue #1057 adjacency (#186/#894 contract unchanged): a row with NO
+        // loaded transcript (the agent exited before any transcript was read, a
+        // genuine shell) still DROPS when detection settles null — the keep-events
+        // change must NOT make a conversation-less window linger on the toggle.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "agent", paneIndex = 0),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        runCurrent()
+        assertNotNull(vm.agentConversations.value["%0"])
+
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+
+        assertNull(
+            "#1057 adjacency: a row with no loaded transcript still drops on exit",
+            vm.agentConversations.value["%0"],
+        )
+        assertNull(vm.agentForWindow("@0"))
+    }
+
+    @Test
     fun parsedPanePaneTtyDefaultsToEmptyWhenOmitted() = runTest(scheduler) {
         // Defensive: an older tmux that doesn't emit the new field, or
         // a unit test passing the legacy shape, must still produce a

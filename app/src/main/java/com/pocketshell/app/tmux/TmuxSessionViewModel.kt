@@ -11833,6 +11833,21 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * Cancels any active tail job and removes the conversation row from
      * [_agentConversations].
+     *
+     * Issue #1057 (maintainer dogfood blocker — "conversation is not visible in
+     * this app"): a row that has LOADED a real transcript ([events] non-empty)
+     * is the DURABLE "events present but detection currently null" state the
+     * Conversation tab must stay reachable for. Dropping such a row the instant
+     * live detection settles null (the agent exited, the live tail dropped, or
+     * re-detection never rebinds) is exactly what makes the conversation
+     * UNREACHABLE — the user can no longer read the transcript that genuinely
+     * exists. So an events-bearing row is now KEPT (detection nulled, transcript
+     * preserved, marked [AgentConversationSyncStatus.Stale]) instead of dropped,
+     * so [tmuxSessionTabState]'s `hasConversationContent` term keeps the toggle
+     * reachable and a Conversation tap still renders the transcript. A row with
+     * NO loaded transcript (a genuine shell / auto-seeded / remembered
+     * placeholder) still drops exactly as before — the #186/#894 "tab disappears
+     * for a window with no conversation" contract is unchanged.
      */
     private fun clearAgentDetectionForPane(paneId: String) {
         // Issue #495: live detection says this window no longer hosts an
@@ -11844,8 +11859,26 @@ public class TmuxSessionViewModel @Inject constructor(
         var rowDropped = false
         updateAgentConversation(paneId) { current ->
             when {
-                // A row that carries a real detection: the agent exited — drop
-                // it so the Conversation tab disappears for this window.
+                // Issue #1057: a row whose transcript has ALREADY loaded (events
+                // present) is a conversation that genuinely EXISTS. Keep it
+                // readable after the agent's live detection drops — null the
+                // detection (no live tail) but preserve the events + the user's
+                // tab choice, marking the frozen transcript Stale — so the
+                // Conversation toggle stays reachable and tapping it still shows
+                // the conversation instead of vanishing the user back to a raw
+                // Terminal. This is the durable real-path state the maintainer's
+                // "can't see the conversation" report needs.
+                current.detection != null && current.events.isNotEmpty() -> {
+                    current.copy(
+                        detection = null,
+                        syncStatus = AgentConversationSyncStatus.Stale,
+                        loadState = ConversationLoadState.Ready,
+                    )
+                }
+                // A row that carries a real detection but NO loaded transcript:
+                // the agent exited before any transcript was read — drop it so
+                // the Conversation tab disappears for this window (nothing to
+                // read; the #186/#894 contract).
                 current.detection != null -> {
                     rowDropped = true
                     null

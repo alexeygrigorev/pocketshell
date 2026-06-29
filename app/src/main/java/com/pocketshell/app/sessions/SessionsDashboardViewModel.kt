@@ -10,7 +10,9 @@ import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -87,6 +89,13 @@ class SessionsDashboardViewModel @Inject constructor(
 
     /** Override hook for tests — see [SessionsDashboardViewModelTest]. */
     internal var pollIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS
+
+    /**
+     * Dispatcher the active-session-count persistence runs on. Defaults to
+     * [Dispatchers.IO] so the [SystemSurfaceStateStore] disk read never lands
+     * on the Main thread (issue #1086, freeze cause F5). Overridable for tests.
+     */
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     private val _sessions: MutableStateFlow<List<SessionSummary>> =
         MutableStateFlow(emptyList())
@@ -240,10 +249,25 @@ class SessionsDashboardViewModel @Inject constructor(
         persistActiveSessionCount(sorted.size)
     }
 
+    /**
+     * Persist the live active-session count to the cross-surface store and
+     * refresh the home-screen widget.
+     *
+     * Issue #1086 (freeze cause F5): the [SystemSurfaceStateStore] prefs-file
+     * read is a ~648ms first-touch disk read. This is reached from
+     * [emitAggregate] on `viewModelScope` (Main), so it used to stall the
+     * cold-launch UI thread. We dispatch the construct-and-write onto
+     * [ioDispatcher] (default [Dispatchers.IO]) so neither the store build nor
+     * the write ever blocks Main. The count is idempotent (last write wins) and
+     * `apply()` writes are serialised by SharedPreferences, so dispatching each
+     * emission is safe.
+     */
     private fun persistActiveSessionCount(count: Int) {
         val context = appContext ?: return
-        SystemSurfaceStateStore(context).setActiveSessionCount(count)
-        ActiveSessionsWidgetProvider.updateAll(context)
+        viewModelScope.launch(ioDispatcher) {
+            SystemSurfaceStateStore(context).setActiveSessionCount(count)
+            ActiveSessionsWidgetProvider.updateAll(context)
+        }
     }
 
     override fun onCleared() {

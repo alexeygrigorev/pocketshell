@@ -15,6 +15,7 @@ import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.model.KeyBinding
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
 import androidx.compose.ui.platform.testTag
 
@@ -39,6 +40,9 @@ internal fun TerminalHotkeysSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    // Issue #1091: the sticky `Ctrl` modifier state so the panel can render the
+    // active accent on the `Ctrl` key.
+    ctrlModifierState: KeyModifierState = KeyModifierState.Off,
     // Skip the half-expand stop: the panel is short content-height chrome, so
     // it should land fully open in one go like the agent-command palette.
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -60,6 +64,7 @@ internal fun TerminalHotkeysSheet(
             onKey = onKey,
             onClose = onDismiss,
             enabled = enabled,
+            modifierState = ctrlModifierState,
             modifier = Modifier
                 .navigationBarsPadding()
                 .testTag(TERMINAL_HOTKEYS_PANEL_TAG),

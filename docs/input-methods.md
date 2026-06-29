@@ -7,8 +7,8 @@ The full alternative-to-typing strategy. PocketShell reduces keyboard reliance t
 | Surface | Purpose | Trigger |
 |---|---|---|
 | Prompt Composer | Voice/text composing for agent prompts | Tap mic FAB on session view |
-| Inline dictation | Voice straight into the terminal at cursor | Tap mic icon in the key bar |
-| Key bar | Single special keys + sticky modifiers (Esc, Tab, Ctrl, Alt, arrows) | Always visible above the system keyboard |
+| Inline dictation | Voice straight into the terminal at cursor | Tap mic icon in the bottom controls |
+| Terminal hotkeys panel | Special keys, control combos, the sticky `Ctrl` modifier + a–z letters, arrows | Tap the `⌨` launcher on the Terminal tab |
 | Command chips / snippets | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
 
 For tmux operations (detach, switch sessions, etc.) PocketShell uses native UI controls rather than a chord palette — see [Quick navigation](#quick-navigation-replaces-chord-palette) below.
@@ -102,26 +102,47 @@ Composer remains the preferred surface for prose and longer agent prompts.
 
 ---
 
-## Key bar
+## Terminal hotkeys panel
 
-Always visible above the system keyboard, only while the keyboard is up. Eight slots:
+The terminal control keys live in a dedicated **hotkeys panel** — its own
+bottom-sheet surface opened from the Terminal tab's `⌨` launcher (NOT crammed
+above the soft keyboard; #784/#789 hard-cut the old in-keyboard bar). The panel
+shows every key at once in a tidy grid and stays open after a tap so you can
+fire several keys in a row. It routes every tap through
+`TmuxSessionViewModel.onKeyBarKey`, which maps the visible label to its control
+byte (`send-keys -H` overlay) or tmux named key — no terminal resize / redraw.
+
+Sections:
 
 ```
-├─────────────────────────────────────────┤
-│ [Esc] [Tab] [Ctrl] [Alt] [<][^][v][>]   │
-├─────────────────────────────────────────┤
-│  q w e r t y u i o p                    │
-│   a s d f g h j k l                     │  system keyboard
-│    z x c v b n m  ⌫                     │
-└─────────────────────────────────────────┘
+KEYS             Esc  Tab  ⇧Tab  Enter
+CTRL COMBOS      ^A ^B ^C ^D ^E ^G ^J ^K ^L ^O ^R ^T ^U ^W ^X ^Z ^\
+INTERRUPT/EOF    ^C×2  ^D×2
+CTRL + LETTER    [Ctrl]                         ← sticky modifier
+LETTERS          a b c d e f g … x y z
+ARROWS           ←  ↑  ↓  →
 ```
 
-Interactions:
-- Tap a modifier (Ctrl/Alt) → next key sent with modifier; modifier auto-releases
-- Double-tap a modifier → sticky (stays on until tapped again or auto-releases after timeout)
-- Tap Esc/Tab/arrows → sends key immediately
+- **CTRL COMBOS** are one-tap direct buttons — the curated common chords plus
+  the keys nano (and many TUIs) need: `^G` Help, `^J` Justify, `^K` Cut, `^O`
+  Write Out, `^T` Execute, `^U` cut-to-start, `^W` Where-Is, `^X` Exit, `^\`
+  Replace. So you can save-and-exit `nano` (`^O`,Enter then `^X`) entirely from
+  PocketShell, no modifier dance (issue #1091).
+- **CTRL + LETTER** is the general escape hatch: tap the sticky **`Ctrl`**
+  modifier, then any letter in the **LETTERS** grid → that letter's control byte
+  (`Ctrl+A`=0x01 … `Ctrl+Z`=0x1A), so `Ctrl+<any key>` is reachable, not just
+  the curated subset.
 
-Active modifiers light up in the accent colour. Bar height ~40dp. For Ctrl+C, Ctrl+R, etc. — tap `Ctrl` then the letter (two taps).
+Modifier interactions (the `Ctrl` key):
+- Single tap → armed for the **next** key (one-shot), then auto-releases.
+- Double tap → **locked** sticky: stays on until tapped again, so you can fire
+  several `Ctrl+<letter>` combos in a row.
+- Active `Ctrl` lights up in the accent colour (accent-soft fill, accent-dim
+  border).
+- With `Ctrl` off, a LETTERS tap types that letter literally.
+- The doubled `^C×2`/`^D×2` send the byte twice (the "press again to
+  interrupt/exit" chord many REPLs/agents need; #787) — distinct from a single
+  `^C`/`^D`.
 
 ---
 
@@ -138,7 +159,7 @@ The original plan had a chord palette for tmux sequences (`Ctrl+B D` detach, `Ct
 | Next/prev window | Swipe within session |
 | Kill / rename | `⋮` menu on the breadcrumb |
 
-For things genuinely without native UI (vim `Esc :wq`, less `q`, copy mode entry) → key bar modifiers handle them via two-tap sequences.
+For things genuinely without native UI (vim `Esc :wq`, less `q`, copy mode entry) → the terminal hotkeys panel handles them (direct keys, or the sticky `Ctrl` + a letter).
 
 A power-user chord palette may return as opt-in settings post-v1 if real demand appears. v1 stays simple.
 
@@ -148,7 +169,7 @@ A power-user chord palette may return as opt-in settings post-v1 if real demand 
 
 Already covered in [vision.md](vision.md) §4. Whole commands or prompt templates. Per-host library.
 
-Distinct from key bar entries: chips send literal text strings; key bar sends key codes with modifier timing.
+Distinct from the terminal hotkeys panel: chips send literal text strings; the hotkeys panel sends key codes / control bytes (and `Ctrl+<key>` via the sticky modifier).
 
 ---
 
@@ -160,13 +181,16 @@ Keyboard up:
 ┌────────────────────────────┐
 │   terminal output          │
 ├────────────────────────────┤
-│ [Esc][Tab][Ctrl]...        │  key bar (~40dp)
+│                  [⌨ hotkeys]│  compact launcher above the IME
 ├────────────────────────────┤
 │  q w e r t y u i o p       │
 │   a s d f g h j k l        │  system keyboard
 │    z x c v b n m  ⌫        │
 └────────────────────────────┘
 ```
+
+(Tapping `⌨ hotkeys` opens the terminal hotkeys panel bottom-sheet described
+above.)
 
 Keyboard down:
 
@@ -186,7 +210,7 @@ Keyboard down:
 
 Single "Input methods" settings screen with sub-pages:
 - Voice: transcription provider, Whisper API key, language, auto-stop silence threshold for Whisper (30s default, 2s-60s range)
-- Key bar: which keys appear, ordering
+- Terminal hotkeys panel: which keys appear, ordering
 - Snippets: organize, share, per-host
 
 ---

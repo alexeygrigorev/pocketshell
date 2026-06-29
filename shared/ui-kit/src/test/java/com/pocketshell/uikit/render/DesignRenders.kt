@@ -126,71 +126,97 @@ class DesignRenders {
      * Issue #784: the dedicated terminal-hotkeys PANEL — its own bottom-sheet
      * surface (NOT inside the composer, NOT part of the soft keyboard). Shows
      * EVERY key at once in a tidy multi-row grid: no `…` overflow, no horizontal
-     * scroll, no lone `Ctrl` modifier, no duplicate `/`. `^B` (tmux prefix) is
-     * restored and every `^X` label is the byte it sends. Arrows use clean
-     * `← ↑ ↓ →` glyphs. This is the fast JVM-level visual check that the whole
-     * grid lays out cleanly; the emulator panel + keyboard-up composer
-     * screenshots are the acceptance.
+     * scroll, no duplicate `/`. `^B` (tmux prefix) is restored and every `^X`
+     * label is the byte it sends. Arrows use clean `← ↑ ↓ →` glyphs. Issue #1091
+     * adds the filled nano control keys, the sticky `Ctrl` MODIFIER (rendered
+     * ARMED here so its accent treatment is visually checked), and the a–z
+     * LETTERS grid for `Ctrl+<any letter>`. This is the fast JVM-level visual
+     * check that the whole grid lays out cleanly; the emulator panel +
+     * keyboard-up composer screenshots are the acceptance.
      */
     @Test
     fun terminalHotkeysPanel() = render("terminal-hotkeys-panel") {
         Surface(color = PocketShellColors.Surface) {
             com.pocketshell.uikit.components.TerminalHotkeysPanel(
-                sections = listOf(
-                    com.pocketshell.uikit.components.HotkeySection(
-                        title = "KEYS",
-                        keys = listOf(
-                            KeyBinding("Esc", KeyKind.Regular),
-                            KeyBinding("Tab", KeyKind.Regular),
-                            // Issue #893: ⇧Tab (back-tab / Shift+Tab) — cycles
-                            // Claude Code plan/permission mode. 4 columns keep
-                            // every label readable (Esc / Tab / ⇧Tab / Enter).
-                            KeyBinding("⇧Tab", KeyKind.Regular),
-                            KeyBinding("Enter", KeyKind.Regular),
-                        ),
-                        columns = 4,
-                    ),
-                    com.pocketshell.uikit.components.HotkeySection(
-                        title = "CTRL COMBOS",
-                        keys = listOf(
-                            KeyBinding("^A", KeyKind.Regular),
-                            KeyBinding("^B", KeyKind.Regular),
-                            KeyBinding("^C", KeyKind.Regular),
-                            KeyBinding("^D", KeyKind.Regular),
-                            KeyBinding("^E", KeyKind.Regular),
-                            KeyBinding("^L", KeyKind.Regular),
-                            KeyBinding("^R", KeyKind.Regular),
-                            KeyBinding("^Z", KeyKind.Regular),
-                        ),
-                        columns = 4,
-                    ),
-                    // Issue #787: the doubled interrupt/EOF chords re-homed from
-                    // the deleted `/ commands` palette (distinct from single
-                    // `^C`/`^D` — these send the byte twice).
-                    com.pocketshell.uikit.components.HotkeySection(
-                        title = "INTERRUPT / EOF",
-                        keys = listOf(
-                            KeyBinding("^C×2", KeyKind.Regular),
-                            KeyBinding("^D×2", KeyKind.Regular),
-                        ),
-                        columns = 2,
-                    ),
-                    com.pocketshell.uikit.components.HotkeySection(
-                        title = "ARROWS",
-                        keys = listOf(
-                            KeyBinding("←", KeyKind.Arrow),
-                            KeyBinding("↑", KeyKind.Arrow),
-                            KeyBinding("↓", KeyKind.Arrow),
-                            KeyBinding("→", KeyKind.Arrow),
-                        ),
-                        columns = 4,
-                    ),
-                ),
+                sections = sampleHotkeySections(),
                 onKey = {},
                 onClose = {},
+                // Issue #1091: render the sticky `Ctrl` modifier ARMED so the
+                // accent treatment on the `Ctrl` key is visually checked.
+                modifierState = com.pocketshell.uikit.model.KeyModifierState.OneShot,
             )
         }
     }
+
+    /**
+     * Issue #1091: the post-#1091 hotkeys panel — `CTRL COMBOS` filled with the
+     * nano keys (`^G`/`^J`/`^K`/`^O`/`^T`/`^U`/`^W`/`^X`/`^\`), the sticky
+     * `Ctrl` modifier, and the a–z LETTERS grid for `Ctrl+<any letter>`.
+     */
+    private fun sampleHotkeySections(): List<com.pocketshell.uikit.components.HotkeySection> =
+        listOf(
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "KEYS",
+                keys = listOf(
+                    KeyBinding("Esc", KeyKind.Regular),
+                    KeyBinding("Tab", KeyKind.Regular),
+                    KeyBinding("⇧Tab", KeyKind.Regular),
+                    KeyBinding("Enter", KeyKind.Regular),
+                ),
+                columns = 4,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "CTRL COMBOS",
+                keys = listOf(
+                    KeyBinding("^A", KeyKind.Regular),
+                    KeyBinding("^B", KeyKind.Regular),
+                    KeyBinding("^C", KeyKind.Regular),
+                    KeyBinding("^D", KeyKind.Regular),
+                    KeyBinding("^E", KeyKind.Regular),
+                    KeyBinding("^G", KeyKind.Regular),
+                    KeyBinding("^J", KeyKind.Regular),
+                    KeyBinding("^K", KeyKind.Regular),
+                    KeyBinding("^L", KeyKind.Regular),
+                    KeyBinding("^O", KeyKind.Regular),
+                    KeyBinding("^R", KeyKind.Regular),
+                    KeyBinding("^T", KeyKind.Regular),
+                    KeyBinding("^U", KeyKind.Regular),
+                    KeyBinding("^W", KeyKind.Regular),
+                    KeyBinding("^X", KeyKind.Regular),
+                    KeyBinding("^Z", KeyKind.Regular),
+                    KeyBinding("^\\", KeyKind.Regular),
+                ),
+                columns = 4,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "INTERRUPT / EOF",
+                keys = listOf(
+                    KeyBinding("^C×2", KeyKind.Regular),
+                    KeyBinding("^D×2", KeyKind.Regular),
+                ),
+                columns = 2,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "CTRL + LETTER",
+                keys = listOf(KeyBinding("Ctrl", KeyKind.Modifier)),
+                columns = 4,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "LETTERS",
+                keys = ('a'..'z').map { KeyBinding(it.toString(), KeyKind.Regular) },
+                columns = 7,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "ARROWS",
+                keys = listOf(
+                    KeyBinding("←", KeyKind.Arrow),
+                    KeyBinding("↑", KeyKind.Arrow),
+                    KeyBinding("↓", KeyKind.Arrow),
+                    KeyBinding("→", KeyKind.Arrow),
+                ),
+                columns = 4,
+            ),
+        )
 
     /** Host-list header (`ScreenHeader`) with a trailing status pill. */
     @Test

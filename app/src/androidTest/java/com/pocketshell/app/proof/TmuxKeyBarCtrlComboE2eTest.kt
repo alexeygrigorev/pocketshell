@@ -12,6 +12,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -28,6 +29,9 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TERMINAL_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TmuxHotkeyCtrlModifierLabel
+import com.pocketshell.app.tmux.TmuxHotkeyEnterLabel
+import com.pocketshell.uikit.components.HotkeyModifierActiveKey
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -140,17 +144,24 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true).performClick()
-        // The panel shows EVERY key at once in a tidy grid — Esc / Tab / Enter,
-        // the de-duped Ctrl combos incl. the restored ^B (tmux prefix), and the
-        // clean arrow glyphs. No `…` overflow, no lone Ctrl, no duplicate `/`.
+        // The panel shows EVERY key at once in a tidy grid — Esc / Tab / ⇧Tab /
+        // Enter, the de-duped Ctrl combos incl. the restored ^B (tmux prefix) AND
+        // the #1091-filled nano/TUI control keys (^G ^J ^K ^O ^T ^U ^W ^X ^\), the
+        // re-homed doubled interrupt/EOF chords, the sticky `Ctrl` modifier, and
+        // the clean arrow glyphs. No `…` overflow, no duplicate `/`.
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("^C", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        // Issue #787: the re-homed doubled interrupt/EOF controls are present too.
-        listOf("Esc", "Tab", "Enter", "^A", "^B", "^C", "^D", "^E", "^L", "^R", "^C×2", "^D×2", "←", "→")
-            .forEach { label ->
+        // Issue #787: doubled interrupt/EOF controls; issue #893: ⇧Tab; issue
+        // #1091: the previously-missing nano/TUI control keys are now present too.
+        listOf(
+            "Esc", "Tab", "⇧Tab", "Enter",
+            "^A", "^B", "^C", "^D", "^E", "^G", "^J", "^K", "^L", "^O",
+            "^R", "^T", "^U", "^W", "^X", "^Z", "^\\",
+            "^C×2", "^D×2", "←", "→",
+        ).forEach { label ->
                 assertTrue(
                     "expected the hotkeys panel to show '$label'",
                     compose.onAllNodesWithText(label, useUnmergedTree = true)
@@ -158,10 +169,25 @@ class TmuxKeyBarCtrlComboE2eTest {
                         .isNotEmpty(),
                 )
             }
-        // No lone Ctrl modifier and no `/` key — the maintainer's complaints.
+        // Issue #1091: the sticky `Ctrl` modifier is now INTENTIONALLY present —
+        // it is the general `Ctrl+<any letter>` escape hatch that frees the user
+        // from a TUI like `nano` whose keys the curated subset can't cover. It
+        // must render as a Modifier-kind key (carrying the HotkeyModifierActive
+        // semantics flag set only on `KeyKind.Modifier` slots), NOT a lone Regular
+        // button — mirroring the JVM guard `hotkeyPanelSectionsAreDeDupedAndCarry…`.
+        // Use the MERGED tree: HotkeySlot publishes the label `Text` and the
+        // `HotkeyModifierActive` flag onto the SAME merged node
+        // (`semantics(mergeDescendants = true)`), so only the merged node carries
+        // both the text and the property.
+        compose.onNode(
+            hasText(TmuxHotkeyCtrlModifierLabel)
+                .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG)))
+                .and(SemanticsMatcher.keyIsDefined(HotkeyModifierActiveKey)),
+        ).assertExists()
+        // No `/` key in the panel (the maintainer's "duplicate /" complaint).
         assertTrue(
-            "the hotkeys panel must NOT show a lone Ctrl modifier",
-            compose.onAllNodesWithText("Ctrl", useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
+            "the hotkeys panel must NOT show a `/` key",
+            compose.onAllNodesWithText("/", useUnmergedTree = true).fetchSemanticsNodes().isEmpty(),
         )
         captureViewport("issue784-02-hotkeys-panel-visible")
         // Advisory full-device frame so the reviewer sees the actual panel grid
@@ -318,6 +344,202 @@ class TmuxKeyBarCtrlComboE2eTest {
                 "key-bar Enter submitted the pending line; got:\n$transcript",
             transcript.split(ENTER_MARKER).size >= 3,
         )
+    }
+
+    /**
+     * Issue #1091 / AC1 — the maintainer was TRAPPED in `nano` (a fully
+     * Ctrl-driven TUI) on a real dogfood session: none of the keys nano needs to
+     * save/exit (`^O` Write Out, `^X` Exit) were reachable from PocketShell. This
+     * is the end-to-end reproduction on the real path (emulator + Docker `agents`
+     * shell, the `nano` fixture added to `Dockerfile.agents`): open a fresh nano
+     * buffer, type a marker line, then **save and exit entirely from the hotkeys
+     * panel** — tap `^O` (Write Out), tap `Enter` to confirm the filename, tap
+     * `^X` (Exit) — and prove from the authoritative visible-terminal transcript
+     * that nano actually wrote the file to disk and the shell prompt returned.
+     *
+     * Load-bearing assertions (NOT a byte-level proxy — the real nano TUI):
+     *  - nano prints `Wrote` only on a successful disk write → `^O` + `Enter`
+     *    reached nano and saved.
+     *  - a shell sentinel echoed AFTER `^X` proves nano exited back to an
+     *    interactive prompt.
+     *  - `cat` of the saved file reprints the typed marker → the bytes the panel
+     *    sent through `sendControlInputToPane` genuinely persisted to disk.
+     *
+     * Authoritative artifacts: `issue1091-nano-*-viewport.png` +
+     * `*-visible-terminal.txt` + `nano-summary.txt` + `timings.txt`.
+     */
+    @Test
+    fun hotkeysPanelCtrlOAndCtrlXSaveAndExitNanoFromPanelControls() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSession(key)
+
+        val hostRowTag = seedDockerHost(key, "Issue1091 Nano")
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        // ===== Attach to the session =====
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        val attachAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForSessionInPicker(rule = compose, sessionName = SESSION_NAME, timeoutMs = 20_000)
+        compose.onNodeWithText(SESSION_NAME).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForVisibleTerminal("nano-prompt-ready") { it.isNotBlank() }
+        recordTiming("nano_attach_ms", SystemClock.elapsedRealtime() - attachAt)
+        captureViewport("issue1091-nano-01-attached")
+
+        // ===== Open the hotkeys panel =====
+        compose.waitUntil(timeoutMillis = 30_000) {
+            compose.onAllNodesWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        // The #1091-filled nano control keys (incl. `^O` Write Out, `^X` Exit)
+        // must be present as direct buttons.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("^X", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        listOf("^G", "^J", "^K", "^O", "^T", "^U", "^W", "^X", "^\\").forEach { label ->
+            assertTrue(
+                "expected the hotkeys panel to expose the nano control key '$label'",
+                compose.onAllNodesWithText(label, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty(),
+            )
+        }
+
+        // ===== Open a fresh nano buffer in the pane =====
+        // Absorb the one-time first-send stray fragment: the VERY FIRST
+        // onCreateInputConnection/commitText after attach can prepend a `-t%0`
+        // tmux control-mode fragment to the line (observed `~ $ -t%0nano … :
+        // not found`). Fire a throwaway Enter first so that fragment errors
+        // harmlessly on its own line and the nano command lands on a clean prompt.
+        terminalInputConnection().commitText("\n", 1)
+        SystemClock.sleep(1_000)
+        val nanoFile = "/tmp/ps-nano-$NANO_MARKER.txt"
+        sendCommandThroughTerminalInput("nano $nanoFile", "nano-launch")
+        waitForVisibleTerminal("nano-loaded", timeoutMillis = 30_000) { transcript ->
+            // Wait for nano's ACTUAL UI (alt-screen) — its title bar `GNU nano`
+            // or the `Write Out` / `Exit` helpbar entries. Crucially NOT a bare
+            // `contains("nano")`, which would match the echoed `nano …` command
+            // line and pass vacuously even if nano never launched.
+            transcript.contains("GNU nano") ||
+                transcript.contains("Write Out") ||
+                transcript.contains("^X Exit")
+        }
+        captureViewport("issue1091-nano-02-editor-open")
+
+        // Type a unique marker line into nano's buffer (no trailing newline — it
+        // becomes the buffer's first line). This is what must end up on disk.
+        typePendingLine(NANO_CONTENT, "nano-type")
+        waitForVisibleTerminal("nano-typed", timeoutMillis = 20_000) { transcript ->
+            transcript.contains(NANO_CONTENT)
+        }
+        captureViewport("issue1091-nano-03-typed")
+
+        // ===== Save: tap `^O` (Write Out) from the panel, confirm with Enter ====
+        val saveAt = SystemClock.elapsedRealtime()
+        tapPanelKey("^O")
+        // nano prompts `File Name to Write: <nanoFile>` (pre-filled from the arg).
+        waitForVisibleTerminal("nano-write-prompt", timeoutMillis = 20_000) { transcript ->
+            transcript.contains("File Name to Write") || transcript.contains("Write")
+        }
+        captureViewport("issue1091-nano-04-write-prompt")
+        // Confirm the write with the panel's dedicated Enter key.
+        tapPanelKey(TmuxHotkeyEnterLabel)
+        waitForVisibleTerminal("nano-wrote", timeoutMillis = 20_000) { transcript ->
+            // nano prints `[ Wrote N line(s) ]` ONLY on a successful disk write.
+            transcript.contains("Wrote")
+        }
+        recordTiming("nano_ctrl_o_save_ms", SystemClock.elapsedRealtime() - saveAt)
+        captureViewport("issue1091-nano-05-saved")
+
+        // ===== Exit: tap `^X` from the panel =====
+        val exitAt = SystemClock.elapsedRealtime()
+        tapPanelKey("^X")
+        // Back at the shell — prove interactivity AND that the file persisted by
+        // cat-ing it and echoing a post-exit sentinel.
+        SystemClock.sleep(750)
+        sendCommandThroughTerminalInput(
+            "echo $NANO_CAT_TAG; cat $nanoFile; echo $NANO_DONE",
+            "nano-verify",
+        )
+        waitForVisibleTerminal("nano-exited-verified", timeoutMillis = 20_000) { transcript ->
+            transcript.contains(NANO_DONE)
+        }
+        recordTiming("nano_ctrl_x_exit_to_prompt_ms", SystemClock.elapsedRealtime() - exitAt)
+        captureViewport("issue1091-nano-06-exited-verified")
+
+        writeText("nano-summary.txt", buildNanoSummary(nanoFile))
+        writeTimings()
+
+        // NOTE on durability: nano's `[ Wrote 1 line ]` confirmation is HARD-
+        // asserted in-flow above (`waitForVisibleTerminal("nano-wrote") { contains
+        // ("Wrote") }` throws if it never appears) and captured durably in
+        // `issue1091-nano-05-saved-visible-terminal.txt`. It lives on nano's
+        // ALTERNATE screen, which `^X` discards — so the final post-exit transcript
+        // (the MAIN screen) no longer contains it. The durable post-exit proof of
+        // the save is the `cat` re-read below: the bytes are on disk only if `^O`
+        // + Enter actually wrote them.
+        val transcript = visibleTerminalText()
+        // AC1 — `^X` Exit returned to an interactive shell (the post-exit sentinel
+        // only runs if nano actually quit and handed the PTY back to `sh`).
+        assertTrue(
+            "expected the post-exit sentinel '$NANO_DONE' proving `^X` exited nano " +
+                "back to the shell prompt; got:\n$transcript",
+            transcript.contains(NANO_DONE),
+        )
+        // AC1 — the file on disk holds exactly what we typed (cat reprints it after
+        // the LAST `$NANO_CAT_TAG`, i.e. the command's output, not its echo), so
+        // the panel's `^O` + Enter genuinely persisted the buffer through the real
+        // path — the durable equivalent of nano's transient `Wrote` message.
+        val catOutput = transcript.substringAfterLast(NANO_CAT_TAG)
+        assertTrue(
+            "expected `cat $nanoFile` after the `^X` exit to reprint the typed marker " +
+                "'$NANO_CONTENT' from disk, proving the `^O` save persisted; got tail:\n$catOutput",
+            catOutput.contains(NANO_CONTENT),
+        )
+    }
+
+    private fun buildNanoSummary(nanoFile: String): String = buildString {
+        appendLine("issue=1091 scenario=nano-save-exit-from-hotkeys-panel")
+        appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER session=$SESSION_NAME")
+        appendLine("nano_file=$nanoFile")
+        appendLine("nano_marker=$NANO_CONTENT")
+        appendLine("saved_via=^O(panel)+Enter(panel)")
+        appendLine("exited_via=^X(panel)")
+        appendLine("artifacts:")
+        listOf(
+            "issue1091-nano-01-attached",
+            "issue1091-nano-02-editor-open",
+            "issue1091-nano-03-typed",
+            "issue1091-nano-04-write-prompt",
+            "issue1091-nano-05-saved",
+            "issue1091-nano-06-exited-verified",
+        ).forEach { appendLine("  $it-viewport.png + $it-visible-terminal.txt") }
+    }
+
+    /**
+     * Tap a key labelled [label] inside the hotkeys panel sheet (scoped to a
+     * descendant of [TERMINAL_HOTKEYS_PANEL_TAG] so it never collides with a
+     * same-text chip elsewhere — e.g. the keyboard-down Enter chip).
+     */
+    private fun tapPanelKey(label: String) {
+        compose.onNode(
+            hasText(label)
+                .and(hasClickAction())
+                .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG))),
+        ).performClick()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(150)
     }
 
     private fun buildSummary(
@@ -659,5 +881,10 @@ class TmuxKeyBarCtrlComboE2eTest {
         val RESUME_MARKER: String = "RESUMED-${System.currentTimeMillis().toString().takeLast(6)}"
         val RESUME_X2_MARKER: String = "RESUMEDX2-${System.currentTimeMillis().toString().takeLast(6)}"
         val ENTER_MARKER: String = "ENTERKEY-${System.currentTimeMillis().toString().takeLast(6)}"
+        // Issue #1091 nano leg.
+        val NANO_MARKER: String = System.currentTimeMillis().toString().takeLast(6)
+        val NANO_CONTENT: String = "ISSUE1091-NANO-$NANO_MARKER"
+        val NANO_CAT_TAG: String = "NANOCAT-$NANO_MARKER"
+        val NANO_DONE: String = "NANODONE-$NANO_MARKER"
     }
 }

@@ -12,6 +12,14 @@ on:
         required: false
         default: false
         type: boolean
+      disable_nightly_fault_gate:
+        description: >-
+          Waive the nightly-fault release guard (issue #851) for a deliberately
+          fault-suite-waived release, e.g. when Nightly Extensive itself is
+          broken by infra (issue #1056). Off by default.
+        required: false
+        default: false
+        type: boolean
 
 # Manual release validation owns a long emulator runner; queue one per ref
 # instead of letting duplicate dispatches pile up.
@@ -98,6 +106,10 @@ jobs:
           EMULATOR: ${{ env.ANDROID_SDK }}/emulator/emulator
           RELEASE_VALIDATION_SKIP_MAIN_GUARD: ${{ env.RELEASE_VALIDATION_SKIP_MAIN_GUARD }}
           TERMINAL_RELEASE_GATE: ${{ inputs.terminal_release_gate && '1' || '0' }}
+          # Issue #1056: allow waiving the nightly-fault guard when Nightly
+          # Extensive is broken by infra. Off by default (normal releases gate
+          # on a clean Nightly).
+          NIGHTLY_FAULT_GATE_DISABLED: ${{ inputs.disable_nightly_fault_gate && '1' || '0' }}
           # Issue #851: `gh` auth for the nightly-fault release guard.
           GH_TOKEN: ${{ github.token }}
         with:

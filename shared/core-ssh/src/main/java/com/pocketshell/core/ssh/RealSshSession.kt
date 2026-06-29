@@ -71,6 +71,33 @@ internal class RealSshSession(
      * interval.
      */
     private val downloadStallTimeoutMs: Long = DOWNLOAD_STALL_TIMEOUT_MS,
+    /**
+     * Issue #1080 — the wall-elapsed "now" clock (nanos) used for the
+     * transport-liveness STALENESS decision
+     * ([isTransportProvenAliveWithinKeepAliveWindow]) and for stamping the
+     * activity watermarks it compares against ([lastInboundActivityNanos] /
+     * [lastOutboundActivityNanos], the keepalive's reset-on-activity inputs).
+     *
+     * Production injects `SystemClock.elapsedRealtimeNanos()` (CLOCK_BOOTTIME),
+     * which COUNTS time the device spends in deep sleep. The old code used
+     * [System.nanoTime] (CLOCK_MONOTONIC), which STOPS during deep sleep — so
+     * after an Android Doze gap (carrier NAT mapping already timed out, socket
+     * silently half-open) the monotonic delta under-counted the real elapsed
+     * time and the staleness oracle FALSELY reported the dead socket "alive
+     * within the keepalive window," letting the #1042 restore ride-through and
+     * the #1078 handoff arm sail through a DEAD transport instead of redialing.
+     * Counting the sleep makes the oracle correctly report STALE so the existing
+     * reconnect machinery recovers (no new mechanism — D28).
+     *
+     * The default is [System.nanoTime] because the pure-JVM unit tests run
+     * against the android.jar stub where `SystemClock` throws "not mocked"; the
+     * single PRODUCTION construction site (`SshConnection.toSession`) injects the
+     * real boot clock, and the #1080 reproduce-first test injects a synthetic
+     * clock to model the frozen-monotonic-but-advancing-wall-time Doze gap. The
+     * SAME clock is handed to [keepAlive] so the loop's reset-on-activity
+     * `now - lastActivity` math never mixes clock domains.
+     */
+    private val nowNanos: () -> Long = { System.nanoTime() },
 ) : SshSession {
 
     /**
@@ -118,7 +145,8 @@ internal class RealSshSession(
     }
 
     /**
-     * Monotonic ([System.nanoTime]) timestamp of the most recent inbound
+     * Wall-elapsed timestamp ([nowNanos] — `SystemClock.elapsedRealtimeNanos()`
+     * in production, counting deep sleep; issue #1080) of the most recent inbound
      * transport activity — bumped on a successful keepalive reply (issue #945)
      * AND on ANY decoded application bytes the server sends back over the
      * transport: the live `-CC` control-mode reader's output, an exec/list/cat
@@ -152,16 +180,17 @@ internal class RealSshSession(
      * promptly (the fix must not make a dead link look alive forever).
      */
     @Volatile
-    private var lastInboundActivityNanos: Long = System.nanoTime()
+    private var lastInboundActivityNanos: Long = nowNanos()
 
     /**
-     * Monotonic timestamp of the most recent outbound upload payload bytes. This
+     * Wall-elapsed timestamp ([nowNanos], counting deep sleep; issue #1080) of
+     * the most recent outbound upload payload bytes. This
      * mirrors [lastInboundActivityNanos] for the high-volume client-to-server
      * path: an upload that is steadily writing payload is active even when the
      * server is quiet until EOF.
      */
     @Volatile
-    private var lastOutboundActivityNanos: Long = System.nanoTime()
+    private var lastOutboundActivityNanos: Long = nowNanos()
 
     /**
      * Record inbound transport activity (issue #974). Called from EVERY path
@@ -173,7 +202,7 @@ internal class RealSshSession(
      * promises. Cheap volatile store, safe to call from any reader thread.
      */
     private fun recordInboundActivity() {
-        lastInboundActivityNanos = System.nanoTime()
+        lastInboundActivityNanos = nowNanos()
     }
 
     /**
@@ -183,7 +212,7 @@ internal class RealSshSession(
      * not stalled.
      */
     private fun recordOutboundActivity() {
-        lastOutboundActivityNanos = System.nanoTime()
+        lastOutboundActivityNanos = nowNanos()
     }
 
     /**
@@ -281,6 +310,11 @@ internal class RealSshSession(
         // the 30s / 3 defaults (the override is null unless a test set it).
         intervalMs = KeepAliveTestOverride.intervalMs(),
         countMax = KeepAliveTestOverride.countMax(),
+        // Issue #1080 — feed the keepalive loop the SAME wall-elapsed clock the
+        // activity watermarks are stamped with, so its reset-on-activity
+        // `now - lastActivity` elapsed math stays in one clock domain (and counts
+        // deep sleep in production exactly like the staleness oracle above).
+        now = nowNanos,
         log = { msg -> KEEPALIVE_LOGGER.log(Level.FINE, "[$KEEPALIVE_LOG_TAG] $msg") },
     )
 
@@ -324,7 +358,13 @@ internal class RealSshSession(
         // writes, outbound stops advancing, and BOTH timestamps age out past the
         // ride-through window → returns false → the keepalive's own budget closes it.
         val mostRecentActivityNanos = maxOf(lastInboundActivityNanos, lastOutboundActivityNanos)
-        val sinceActivityNanos = System.nanoTime() - mostRecentActivityNanos
+        // Issue #1080 — [nowNanos] is the wall-elapsed boot clock in production
+        // (counts deep sleep), so after a Doze gap this delta reflects the REAL
+        // elapsed time and correctly ages past the ride-through window → returns
+        // false → the restore/handoff redials a dead socket instead of riding
+        // through it. With the old System.nanoTime() the monotonic clock froze in
+        // deep sleep, this delta under-counted, and a dead socket looked alive.
+        val sinceActivityNanos = nowNanos() - mostRecentActivityNanos
         val rideThroughNanos = TransportKeepAlive.RIDE_THROUGH_BUDGET_MS * 1_000_000L
         return sinceActivityNanos in 0 until rideThroughNanos
     }
@@ -483,6 +523,14 @@ internal class RealSshSession(
         // timestamp to advance (a reply OR any reader byte). "No inbound activity
         // within the budget" IS the liveness question, and it leaves the promise
         // intact — the late reply is delivered to its OWN promise, not the next one.
+        // Issue #1080 — this is a SHORT (≤ KEEPALIVE_REPLY_TIMEOUT_MS) local
+        // reply wait, and it stays on [System.nanoTime] DELIBERATELY: both ends of
+        // the deadline are monotonic so the elapsed math is self-consistent, and
+        // the liveness check below is an EQUALITY test on the watermark
+        // (`lastInboundActivityNanos != before`), not a staleness `now - watermark`
+        // subtraction — so it never mixes the boot-clock watermark with a
+        // monotonic now. The Doze-gap staleness decision lives in
+        // [isTransportProvenAliveWithinKeepAliveWindow], which uses [nowNanos].
         val deadline = System.nanoTime() + KEEPALIVE_REPLY_TIMEOUT_MS * 1_000_000L
         while (System.nanoTime() < deadline) {
             if (lastInboundActivityNanos != before) return true

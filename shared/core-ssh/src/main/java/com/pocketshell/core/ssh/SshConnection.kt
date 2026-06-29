@@ -1,5 +1,6 @@
 package com.pocketshell.core.ssh
 
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -369,7 +370,16 @@ public object SshConnection {
             clearLiveChannelReadTimeout(client)
         }
 
-        override fun toSession(client: SSHClient): SshSession = RealSshSession(client)
+        override fun toSession(client: SSHClient): SshSession =
+            // Issue #1080 — inject the wall-elapsed boot clock
+            // (`SystemClock.elapsedRealtimeNanos()`, CLOCK_BOOTTIME) so the
+            // transport-liveness staleness oracle COUNTS deep sleep. System.nanoTime
+            // (CLOCK_MONOTONIC) freezes in deep Doze, so after a Doze gap a dead
+            // socket looked "alive within the keepalive window" and the restore /
+            // handoff ride-through sailed through it instead of redialing. This is
+            // the single production construction site; the unit tests keep the
+            // System.nanoTime default (the android.jar stub can't run SystemClock).
+            RealSshSession(client, nowNanos = { SystemClock.elapsedRealtimeNanos() })
 
         override fun disconnect(client: SSHClient) {
             client.disconnect()

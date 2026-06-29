@@ -61,6 +61,20 @@ internal class TransportKeepAlive(
     private val io: KeepAliveIo,
     private val intervalMs: Long = DEFAULT_INTERVAL_MS,
     private val countMax: Int = DEFAULT_COUNT_MAX,
+    /**
+     * Issue #1080 — the "now" clock the reset-on-activity shortcut compares the
+     * [KeepAliveIo] activity watermarks against. It MUST be the SAME clock domain
+     * the session stamps [KeepAliveIo.lastInboundActivityNanos] /
+     * [KeepAliveIo.lastOutboundActivityNanos] with, or the
+     * `now() - lastActivity` elapsed math mixes domains and is garbage.
+     * Production [RealSshSession] stamps those watermarks with
+     * `SystemClock.elapsedRealtimeNanos()` (CLOCK_BOOTTIME, which COUNTS deep
+     * sleep) and passes the same clock here. Default is [System.nanoTime] so the
+     * pure-JVM unit tests (which run against the android.jar stub where
+     * `SystemClock` throws "not mocked") keep working — the [FakeIo] in those
+     * tests supplies its watermarks in whatever domain matches this default.
+     */
+    private val now: () -> Long = { System.nanoTime() },
     private val log: (String) -> Unit = {},
 ) {
     init {
@@ -83,7 +97,9 @@ internal class TransportKeepAlive(
         fun isAlive(): Boolean
 
         /**
-         * Nanos (monotonic, [System.nanoTime] domain) of the most recent inbound
+         * Nanos (in the loop's [now] clock domain — production uses the wall-
+         * elapsed `SystemClock.elapsedRealtimeNanos()`, issue #1080) of the most
+         * recent inbound
          * transport activity the session has observed — a keepalive reply, an
          * exec/tail round-trip, any bytes from the server. The loop SKIPS the
          * explicit ping when this is within [intervalMs] of now, so a busy link
@@ -93,7 +109,9 @@ internal class TransportKeepAlive(
         fun lastInboundActivityNanos(): Long
 
         /**
-         * Issue #1072 — nanos (monotonic, [System.nanoTime] domain) of the most
+         * Issue #1072 — nanos (in the loop's [now] clock domain — production uses
+         * the wall-elapsed `SystemClock.elapsedRealtimeNanos()`, issue #1080) of
+         * the most
          * recent OUTBOUND payload progress the session has made: a steadily
          * advancing file/attachment upload pushing client→server bytes.
          *
@@ -194,7 +212,7 @@ internal class TransportKeepAlive(
                 // This is why a heavy `%output` burst is POSITIVE proof of life,
                 // not a missed probe; and why a steadily-streaming attachment
                 // upload (pure outbound) must NOT be torn down mid-upload (#1072).
-                val sinceActivityNanos = System.nanoTime() - io.lastActivityNanos()
+                val sinceActivityNanos = now() - io.lastActivityNanos()
                 if (sinceActivityNanos in 0 until intervalNanos()) {
                     if (consecutiveMisses != 0) {
                         log("keepalive: inbound activity, reset after $consecutiveMisses miss(es)")

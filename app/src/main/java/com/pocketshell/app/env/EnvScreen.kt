@@ -50,6 +50,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -502,75 +503,66 @@ private fun EditKeyDialog(
     var revealed by remember(key) { mutableStateOf(false) }
     val loading = initialValue == null
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
+    // Shared ui-kit input dialog (#865 component-drift guard): FormDialog owns
+    // the title / confirm (Primary "Save") / Cancel (Text) / Surface scaffold;
+    // we only supply the read-only key+file header and the value field.
+    FormDialog(
+        title = "Edit $key",
+        confirmLabel = "Save",
+        onConfirm = { onConfirm(value) },
+        onDismiss = onDismiss,
         modifier = Modifier.testTag(ENV_EDIT_DIALOG_TAG),
-        title = { Text("Edit $key", color = PocketShellColors.Text) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = key,
-                        color = PocketShellColors.Text,
-                        style = PocketShellType.bodyMono,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.testTag(ENV_EDIT_KEY_LABEL_TAG),
-                    )
-                    FileTag(file = file.fileName)
-                }
-                if (loading) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 16.dp)
-                            .testTag(ENV_EDIT_LOADING_TAG),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        LoadingIndicator.Spinner(size = SpinnerSize.Medium)
-                    }
-                } else {
-                    OutlinedTextField(
-                        value = value,
-                        onValueChange = { value = it },
-                        label = { Text("Value") },
-                        singleLine = true,
-                        visualTransformation = if (revealed) {
-                            VisualTransformation.None
-                        } else {
-                            PasswordVisualTransformation()
-                        },
-                        trailingIcon = {
-                            PocketShellButton(
-                                text = if (revealed) "Hide" else "Show",
-                                onClick = { revealed = !revealed },
-                                variant = ButtonVariant.Text,
-                                compact = true,
-                                modifier = Modifier.testTag(ENV_EDIT_TOGGLE_TAG),
-                            )
-                        },
-                        colors = envFieldColors(),
-                        modifier = Modifier.fillMaxWidth().testTag(ENV_EDIT_VALUE_FIELD_TAG),
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Save",
-                onClick = { onConfirm(value) },
-                variant = ButtonVariant.Primary,
-                enabled = !busy && !loading,
-                modifier = Modifier.testTag(ENV_EDIT_CONFIRM_TAG),
+        confirmEnabled = !busy && !loading,
+        confirmTestTag = ENV_EDIT_CONFIRM_TAG,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = key,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyMono,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(ENV_EDIT_KEY_LABEL_TAG),
             )
-        },
-        dismissButton = {
-            PocketShellButton(text = "Cancel", onClick = onDismiss, variant = ButtonVariant.Text)
-        },
-        containerColor = PocketShellColors.Surface,
-    )
+            FileTag(file = file.fileName)
+        }
+        if (loading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp)
+                    .testTag(ENV_EDIT_LOADING_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Medium)
+            }
+        } else {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("Value") },
+                singleLine = true,
+                visualTransformation = if (revealed) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    PocketShellButton(
+                        text = if (revealed) "Hide" else "Show",
+                        onClick = { revealed = !revealed },
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                        modifier = Modifier.testTag(ENV_EDIT_TOGGLE_TAG),
+                    )
+                },
+                colors = envFieldColors(),
+                modifier = Modifier.fillMaxWidth().testTag(ENV_EDIT_VALUE_FIELD_TAG),
+            )
+        }
+    }
 }
 
 @Composable

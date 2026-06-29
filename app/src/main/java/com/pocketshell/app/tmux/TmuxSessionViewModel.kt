@@ -4782,17 +4782,59 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #981: the [ConnectionDecision.SuppressNetworkTransportProvenAlive]
+     * Issue #981 / #1042 / #1078: the [ConnectionDecision.SuppressNetworkTransportProvenAlive]
      * body. A real validated identity change WAS observed (we are past the
-     * `realValidatedIdentityChange` gate), but the live transport's keepalive
-     * has seen inbound bytes within its ride-through window, so the old socket
-     * is provably alive and a teardown+redial here would be the #974 spurious
-     * stable-wifi drop. We ride it through (no `unregisterCurrentClient` / no
-     * `scheduleAutoReconnect`) and emit the device trail showing WHY, mirroring
-     * [suppressNetworkNotValidated]. `realValidatedIdentityChange` is always
-     * `true` here (only a real handoff reaches this gate).
+     * `realValidatedIdentityChange` gate), and the live transport's keepalive
+     * has seen inbound bytes within its ride-through window — so the old socket
+     * is PASSIVELY proven alive and a teardown+redial would be the #974 spurious
+     * stable-wifi drop.
+     *
+     * Issue #1078: the passive keepalive timestamp only proves the link was alive
+     * RECENTLY. A genuine WIFI→CELLULAR handoff can leave the old socket DEAD while
+     * its last-inbound-byte age is still under the ~90s keepalive budget
+     * ([com.pocketshell.core.ssh.TransportKeepAlive]) — so a purely passive suppress
+     * here shows the session Live-but-FROZEN until that full budget finally trips
+     * (up to ~90s). The #1042 restore arm already solved the equivalent problem with
+     * a bounded ACTIVE probe; mirror it here through the SAME mechanism
+     * ([runLivenessProbePing] bounded by [RESTORE_LIVENESS_PROBE_BUDGET_MS], the
+     * authority the restore arm uses): confirm liveness with ONE bounded probe over
+     * the warm control channel before riding through. If it answers, RIDE THROUGH
+     * (the #981/#974/#1058 spurious-drop ride-through win is preserved); if it does
+     * NOT, the socket is dead post-handoff, so redial PROMPTLY via the SAME dead-link
+     * handoff authority the reducer already dispatches ([scheduleNetworkReconnect])
+     * instead of waiting out the keepalive budget. The probe is bounded so it cannot
+     * itself hang; the session stays Connected (no overlay) for at most the probe
+     * budget on the dead path. `realValidatedIdentityChange` is always `true` here
+     * (only a real handoff reaches this gate).
      */
     private fun suppressNetworkTransportProvenAlive(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        viewModelScope.launch {
+            val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
+                runLivenessProbePing()
+            } ?: false
+            if (alive) {
+                rideThroughNetworkHandoffProvenAlive(change, target)
+            } else {
+                // Issue #1078: passively proven alive but the bounded active probe
+                // did NOT answer — the old socket is genuinely dead after the
+                // handoff. Redial now rather than freezing Live for ~90s.
+                scheduleNetworkReconnect(change, target)
+            }
+        }
+    }
+
+    /**
+     * Issue #1078: the handoff RIDE-THROUGH arm — the bounded active probe
+     * ([suppressNetworkTransportProvenAlive]) confirmed the old socket is still
+     * alive after the validated handoff, so we do NOT redial (preserving the
+     * #981/#974/#1058 spurious-drop win). Emits the same `network_reconnect_skip`
+     * device trail as before, tagged `probeConfirmed=true` so a field log can tell
+     * the #1078 probe-confirmed ride-through apart from a purely passive suppress.
+     */
+    private fun rideThroughNetworkHandoffProvenAlive(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
@@ -4816,6 +4858,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 "cause" to "transport_proven_alive",
                 "classification" to "network_handoff_transport_alive",
                 "reconnect" to false,
+                // Issue #1078: this ride-through is now confirmed by a bounded
+                // ACTIVE probe, not the passive keepalive timestamp alone.
+                "probeConfirmed" to true,
                 "realValidatedIdentityChange" to true,
                 "sequence" to change.sequence,
                 "hostId" to target.hostId,

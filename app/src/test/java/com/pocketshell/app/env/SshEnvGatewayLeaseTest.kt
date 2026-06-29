@@ -45,6 +45,45 @@ class SshEnvGatewayLeaseTest {
     }
 
     @Test
+    fun editingValueTravelsViaStdinNeverArgv() = runTest {
+        // #1092 / D24: editing an existing key's value reuses setKeys, so the
+        // new secret VALUE must arrive over stdin (the uploaded JSON payload),
+        // never on the `env set` command line / argv.
+        val secret = "edited-sk-SECRET-1092"
+        val execCommands = mutableListOf<String>()
+        val uploads = mutableListOf<String>()
+        val session = RecordingSession(
+            onExec = { command ->
+                execCommands += command
+                ExecResult(stdout = "", stderr = "", exitCode = 0)
+            },
+            onUpload = { bytes -> uploads += bytes },
+        )
+        val connector = CountingConnector(session)
+        val gateway = SshEnvGateway(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 30_000L),
+        )
+
+        val result = gateway.setKeys(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            directory = "/home/dev/proj",
+            file = EnvFileTarget.Env,
+            updates = mapOf("API_KEY" to secret),
+        )
+
+        assertTrue(result is EnvOpResult.Success)
+        // The value arrived over stdin (uploaded JSON), and NOT on any argv.
+        assertTrue("value must travel via the uploaded stdin payload", uploads.any { it.contains(secret) })
+        assertTrue(
+            "no exec command line may contain the secret value (D24)",
+            execCommands.none { it.contains(secret) },
+        )
+        assertTrue("at least one exec ran", execCommands.isNotEmpty())
+    }
+
+    @Test
     fun connectFailureSurfacesConnectFailed() = runTest {
         val connector = object : SshLeaseConnector {
             override suspend fun connect(target: SshLeaseTarget): Result<SshSession> =
@@ -59,11 +98,32 @@ class SshEnvGatewayLeaseTest {
         assertTrue(result is EnvListResult.ConnectFailed)
     }
 
-    private class CountingConnector(private val session: FakeSshSession) : SshLeaseConnector {
+    private class CountingConnector(private val session: SshSession) : SshLeaseConnector {
         var connectCount: Int = 0
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             connectCount += 1
             return Result.success(session)
+        }
+    }
+
+    private class RecordingSession(
+        private val onExec: (String) -> ExecResult,
+        private val onUpload: (String) -> Unit,
+    ) : SshSession {
+        var closed: Boolean = false
+        override val isConnected: Boolean get() = !closed
+        override suspend fun exec(command: String): ExecResult = onExec(command)
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("not used")
+        override fun startShell(): SshShell = error("not used")
+        override suspend fun uploadFile(file: File, remotePath: String): String = error("not used")
+        override suspend fun uploadStream(input: InputStream, length: Long, name: String, remotePath: String): String {
+            onUpload(input.readBytes().toString(Charsets.UTF_8))
+            return remotePath
+        }
+        override fun close() {
+            closed = true
         }
     }
 

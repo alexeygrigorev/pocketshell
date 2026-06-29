@@ -43,12 +43,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
@@ -129,6 +131,8 @@ fun EnvScreen(
                     canCopy = state.copySources.isNotEmpty(),
                     onReveal = viewModel::revealKey,
                     onHide = viewModel::hideKey,
+                    onEdit = viewModel::beginEdit,
+                    onAddKey = { showAddDialog = true },
                     onCopyFrom = { showCopySheet = true },
                 )
             }
@@ -157,6 +161,28 @@ fun EnvScreen(
                 showAddDialog = false
                 viewModel.setKey(key, value, file)
             },
+        )
+    }
+
+    // In-place value editor (#1092): pre-loaded with the current value via the
+    // reveal/get path so the user tweaks the secret instead of retyping blind.
+    when (val editor = state.editor) {
+        EnvEditorState.Hidden -> Unit
+        is EnvEditorState.LoadingValue -> EditKeyDialog(
+            key = editor.key,
+            file = editor.file,
+            initialValue = null,
+            busy = state.busy,
+            onDismiss = viewModel::dismissEditor,
+            onConfirm = {},
+        )
+        is EnvEditorState.Editing -> EditKeyDialog(
+            key = editor.key,
+            file = editor.file,
+            initialValue = editor.currentValue,
+            busy = state.busy,
+            onDismiss = viewModel::dismissEditor,
+            onConfirm = { viewModel.saveEdit(it) },
         )
     }
 
@@ -251,6 +277,8 @@ private fun EnvKeyList(
     canCopy: Boolean,
     onReveal: (String) -> Unit,
     onHide: (String) -> Unit,
+    onEdit: (String) -> Unit,
+    onAddKey: () -> Unit,
     onCopyFrom: () -> Unit,
 ) {
     LazyColumn(
@@ -278,10 +306,10 @@ private fun EnvKeyList(
             }
         }
         if (keys.isEmpty()) {
-            item { EnvEmptyState() }
+            item { EnvEmptyState(onAddKey = onAddKey) }
         } else {
             items(keys, key = { "${it.file}:${it.key}" }) { row ->
-                EnvKeyCard(row = row, onReveal = onReveal, onHide = onHide)
+                EnvKeyCard(row = row, onReveal = onReveal, onHide = onHide, onEdit = onEdit)
             }
         }
         item { Spacer(modifier = Modifier.height(72.dp)) }
@@ -289,7 +317,7 @@ private fun EnvKeyList(
 }
 
 @Composable
-private fun EnvEmptyState() {
+private fun EnvEmptyState(onAddKey: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -301,17 +329,31 @@ private fun EnvEmptyState() {
         Text(text = "No env keys yet", color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "Tap + to add a key, or copy keys from another folder.",
+            // Adding the first key is how a new .env / .envrc file is created
+            // (the server writes it mode 0600) — make that obvious (#1092).
+            text = "This folder has no .env yet. Add a key to create one, or copy keys from another folder.",
             color = PocketShellColors.TextSecondary,
             style = PocketShellType.bodyDense,
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        PocketShellButton(
+            text = "Add key",
+            onClick = onAddKey,
+            variant = ButtonVariant.Primary,
+            modifier = Modifier.testTag(ENV_EMPTY_ADD_TAG),
         )
     }
 }
 
 @Composable
-private fun EnvKeyCard(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (String) -> Unit) {
+private fun EnvKeyCard(
+    row: EnvKeyUiRow,
+    onReveal: (String) -> Unit,
+    onHide: (String) -> Unit,
+    onEdit: (String) -> Unit,
+) {
     // One dense row per key: the key name rides the mono-adjacent title, the
-    // masked / revealed value rides the mono subtitle, and Reveal / Hide
+    // masked / revealed value rides the mono subtitle, and Reveal / Hide / Edit
     // consolidate into the single per-row kebab (#479 §4 decision 4). The file
     // pill stays as a right-aligned chip before the kebab.
     val display = when {
@@ -328,15 +370,29 @@ private fun EnvKeyCard(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (St
             if (row.revealing) {
                 LoadingIndicator.Spinner(size = SpinnerSize.Small)
             } else {
-                EnvKeyMenu(row = row, onReveal = onReveal, onHide = onHide)
+                EnvKeyMenu(row = row, onReveal = onReveal, onHide = onHide, onEdit = onEdit)
             }
         },
     )
 }
 
 @Composable
-private fun EnvKeyMenu(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (String) -> Unit) {
+private fun EnvKeyMenu(
+    row: EnvKeyUiRow,
+    onReveal: (String) -> Unit,
+    onHide: (String) -> Unit,
+    onEdit: (String) -> Unit,
+) {
     val items = buildList {
+        // Edit-in-place is offered for every key (#1092) — including an empty
+        // key, which Edit lets the user give a value for the first time.
+        add(
+            KebabItem(
+                label = "Edit",
+                onClick = { onEdit(row.key) },
+                testTag = envKeyEditTestTag(row.key),
+            ),
+        )
         when {
             row.revealedValue != null -> add(
                 KebabItem(
@@ -354,14 +410,10 @@ private fun EnvKeyMenu(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (St
             )
         }
     }
-    // No actions for an empty key (nothing to reveal/hide): suppress the kebab
-    // so the row carries no dead affordance.
-    if (items.isNotEmpty()) {
-        Kebab(
-            triggerTestTag = envKeyMenuTestTag(row.key),
-            items = items,
-        )
-    }
+    Kebab(
+        triggerTestTag = envKeyMenuTestTag(row.key),
+        items = items,
+    )
 }
 
 @Composable
@@ -426,6 +478,91 @@ private fun AddKeyDialog(
         },
         containerColor = PocketShellColors.Surface,
     )
+}
+
+/**
+ * In-place editor for an existing key's value (#1092).
+ *
+ * The key name and its file are read-only (renaming is out of scope); only
+ * the value changes. [initialValue] `null` means the current value is still
+ * being fetched via the reveal/get path — render a spinner. When it has
+ * loaded, the field is pre-populated, starts masked, and offers a Show/Hide
+ * toggle. Save routes the new value back through `setKeys` (stdin, never
+ * argv — D24).
+ */
+@Composable
+private fun EditKeyDialog(
+    key: String,
+    file: EnvFileTarget,
+    initialValue: String?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (value: String) -> Unit,
+) {
+    var value by remember(key, initialValue) { mutableStateOf(initialValue.orEmpty()) }
+    var revealed by remember(key) { mutableStateOf(false) }
+    val loading = initialValue == null
+
+    // Shared ui-kit input dialog (#865 component-drift guard): FormDialog owns
+    // the title / confirm (Primary "Save") / Cancel (Text) / Surface scaffold;
+    // we only supply the read-only key+file header and the value field.
+    FormDialog(
+        title = "Edit $key",
+        confirmLabel = "Save",
+        onConfirm = { onConfirm(value) },
+        onDismiss = onDismiss,
+        modifier = Modifier.testTag(ENV_EDIT_DIALOG_TAG),
+        confirmEnabled = !busy && !loading,
+        confirmTestTag = ENV_EDIT_CONFIRM_TAG,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = key,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyMono,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(ENV_EDIT_KEY_LABEL_TAG),
+            )
+            FileTag(file = file.fileName)
+        }
+        if (loading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp)
+                    .testTag(ENV_EDIT_LOADING_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Medium)
+            }
+        } else {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text("Value") },
+                singleLine = true,
+                visualTransformation = if (revealed) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    PocketShellButton(
+                        text = if (revealed) "Hide" else "Show",
+                        onClick = { revealed = !revealed },
+                        variant = ButtonVariant.Text,
+                        compact = true,
+                        modifier = Modifier.testTag(ENV_EDIT_TOGGLE_TAG),
+                    )
+                },
+                colors = envFieldColors(),
+                modifier = Modifier.fillMaxWidth().testTag(ENV_EDIT_VALUE_FIELD_TAG),
+            )
+        }
+    }
 }
 
 @Composable
@@ -619,7 +756,14 @@ const val ENV_LOADING_TAG: String = "env:loading"
 const val ENV_ERROR_TAG: String = "env:error"
 const val ENV_RETRY_TAG: String = "env:retry"
 const val ENV_EMPTY_TAG: String = "env:empty"
+const val ENV_EMPTY_ADD_TAG: String = "env:empty-add"
 const val ENV_ADD_FAB_TAG: String = "env:add-fab"
+const val ENV_EDIT_DIALOG_TAG: String = "env:edit-dialog"
+const val ENV_EDIT_KEY_LABEL_TAG: String = "env:edit-key-label"
+const val ENV_EDIT_LOADING_TAG: String = "env:edit-loading"
+const val ENV_EDIT_VALUE_FIELD_TAG: String = "env:edit-value-field"
+const val ENV_EDIT_TOGGLE_TAG: String = "env:edit-toggle"
+const val ENV_EDIT_CONFIRM_TAG: String = "env:edit-confirm"
 const val ENV_ADD_DIALOG_TAG: String = "env:add-dialog"
 const val ENV_ADD_KEY_FIELD_TAG: String = "env:add-key-field"
 const val ENV_ADD_VALUE_FIELD_TAG: String = "env:add-value-field"
@@ -635,6 +779,7 @@ fun envKeyMenuTestTag(key: String): String = "env:menu:$key"
 fun envKeyValueTestTag(key: String): String = "env:value:$key"
 fun envKeyRevealTestTag(key: String): String = "env:reveal:$key"
 fun envKeyHideTestTag(key: String): String = "env:hide:$key"
+fun envKeyEditTestTag(key: String): String = "env:edit:$key"
 fun envFileTargetTestTag(target: EnvFileTarget): String = "env:file-target:${target.fileName}"
 fun envCopySourceTestTag(path: String): String = "env:copy-source:$path"
 fun envCopyKeyTestTag(key: String): String = "env:copy-key:$key"

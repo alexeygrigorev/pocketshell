@@ -118,6 +118,90 @@ class EnvViewModelTest {
     }
 
     @Test
+    fun editingExistingKeyPreloadsValueThenSavesUpdateViaSetKeys() = runTest {
+        // Reproduce-first (#1092 / D33): the maintainer can reveal + add but
+        // CANNOT edit an existing key's value in place. This drives the
+        // edit-in-place journey: tap Edit -> current value fetched via the
+        // reveal/get path and pre-loaded -> change it -> Save routes the new
+        // value back through setKeys (update-in-place). On the unfixed code
+        // there is no editor entry point, so this fails to compile / run.
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(listOf(EnvKeyRow("API_KEY", ".env", true))),
+            getResult = EnvOpResult.Values(mapOf("API_KEY" to "old-secret")),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        // Open the in-place editor — the current value is fetched and shown.
+        vm.beginEdit("API_KEY")
+        advanceUntilIdle()
+        val editor = vm.state.value.editor as EnvEditorState.Editing
+        assertEquals("API_KEY", editor.key)
+        assertEquals(EnvFileTarget.Env, editor.file)
+        assertEquals("old-secret", editor.currentValue)
+
+        // Edit the value and Save — it must reach setKeys for the same key.
+        vm.saveEdit("new-secret")
+        advanceUntilIdle()
+
+        assertEquals(mapOf("API_KEY" to "new-secret"), gateway.lastSetUpdates)
+        assertEquals(EnvFileTarget.Env, gateway.lastSetFile)
+        // The editor closes and a refresh ran after the successful update.
+        assertTrue(vm.state.value.editor is EnvEditorState.Hidden)
+        assertTrue(gateway.listCalls >= 2)
+    }
+
+    @Test
+    fun editingEnvrcKeyPreservesItsFileAndAllowsEmptyToBeFilled() = runTest {
+        // Class coverage: a key that lives in .envrc edits back into .envrc
+        // (not the default .env), and an empty key (has_value=false) opens
+        // with a blank field and can be given a value.
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(
+                listOf(
+                    EnvKeyRow("EXPORTED", ".envrc", true),
+                    EnvKeyRow("EMPTY", ".envrc", false),
+                ),
+            ),
+            getResult = EnvOpResult.Values(emptyMap()),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        vm.beginEdit("EMPTY")
+        advanceUntilIdle()
+        val editor = vm.state.value.editor as EnvEditorState.Editing
+        assertEquals(EnvFileTarget.Envrc, editor.file)
+        // No value came back for the empty key — the field opens blank.
+        assertEquals("", editor.currentValue)
+
+        vm.saveEdit("now-has-a-value")
+        advanceUntilIdle()
+        assertEquals(mapOf("EMPTY" to "now-has-a-value"), gateway.lastSetUpdates)
+        assertEquals(EnvFileTarget.Envrc, gateway.lastSetFile)
+    }
+
+    @Test
+    fun dismissEditorClosesWithoutCallingSetKeys() = runTest {
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(listOf(EnvKeyRow("API_KEY", ".env", true))),
+            getResult = EnvOpResult.Values(mapOf("API_KEY" to "old-secret")),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        vm.beginEdit("API_KEY")
+        advanceUntilIdle()
+        vm.dismissEditor()
+
+        assertTrue(vm.state.value.editor is EnvEditorState.Hidden)
+        assertNull(gateway.lastSetUpdates)
+    }
+
+    @Test
     fun copyKeysCallsGatewayAndRefreshes() = runTest {
         val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
         val vm = EnvViewModel(gateway, FakeHostDao(host))

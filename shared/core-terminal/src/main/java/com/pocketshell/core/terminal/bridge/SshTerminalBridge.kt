@@ -334,6 +334,11 @@ public class SshTerminalBridge(
         val feedStartedAtNanos = System.nanoTime()
         val seedDrainStartedAtMillis = nowMillis()
         var chunks = 0
+        // #866 fast-device fix: bytes drained INLINE so far across this whole
+        // on-main feed. Feeds the byte budget ([SEED_INLINE_MAX_BYTES]) checked in
+        // [dispatchMainLooperDrains] so the inline parse stops after a bounded
+        // number of bytes regardless of how fast the device parses a slice.
+        var inlineDrainedBytes = 0
         synchronized(feedLock) {
             // Re-entrant on-looper feed while a seed tail is already being pumped:
             // append to the FIFO so ordering (seed tail -> this feed) is preserved,
@@ -382,11 +387,18 @@ public class SshTerminalBridge(
                 }
 
                 // On-main seed/reattach feed: drain inline (snapshot before live),
-                // bounded across the WHOLE feed by SEED_DRAIN_MAX_MILLIS (#866).
+                // bounded across the WHOLE feed by BOTH a wall-time budget
+                // (SEED_DRAIN_MAX_MILLIS, #866) AND a byte budget
+                // (SEED_INLINE_MAX_BYTES, the fast-device fix): on a fast/warm
+                // device the time budget alone lets the bulk of a multi-chunk seed
+                // parse inline within 24 ms (the regression that brought #866 back),
+                // so the byte budget caps the inline parse regardless of per-slice
+                // speed and the rest is always deferred to the frame-yielding pump.
                 val budgetExhausted = dispatchMainLooperDrains(
                     handler = handler,
                     queuedBytes = chunkLength,
                     startedAtMillis = seedDrainStartedAtMillis,
+                    feedDrainedBytesBefore = inlineDrainedBytes,
                     traceState = traceState,
                 )
                 if (budgetExhausted) {
@@ -419,6 +431,10 @@ public class SshTerminalBridge(
                     )
                     return
                 }
+                // The whole chunk drained inline within both budgets; accrue it so a
+                // later chunk's drain sees the running inline byte total (the byte
+                // budget is feed-scoped, like the wall-time budget).
+                inlineDrainedBytes += chunkLength
             }
         }
         traceState?.traceSink?.onFeedCompleted(
@@ -578,17 +594,22 @@ public class SshTerminalBridge(
      * one-shot before live bytes flow), so it deliberately drains inline so the
      * `capture-pane` snapshot paints before the live stream starts.
      *
-     * Issue #829/#866: the seed drain is TIME-BOUNDED for symmetry with the live
-     * [MainThreadDrainScheduler] turn budget. The budget is measured from
-     * [startedAtMillis] (the start of the WHOLE on-main feed, shared across its
-     * chunks), so a pathologically large seed cannot pin the main thread in one
-     * unbounded inline run. After at least one slice (forward progress), if the
-     * feed has spent more than [SEED_DRAIN_MAX_MILLIS] of main-thread wall time
-     * this stops early and returns `true`; the caller ([feedChunks]) then hands
-     * the remainder — the already-queued tail of THIS chunk plus the untouched
-     * later chunks — to the frame-budgeted path, which paces the rest across
-     * frames. The granularity floor is one slice, so the worst-case inline cost is
-     * [SEED_DRAIN_MAX_MILLIS] plus one 2 KB slice's parse.
+     * Issue #829/#866: the seed drain is DUAL-BOUNDED — by wall time AND by bytes,
+     * both feed-scoped — for symmetry with the live [MainThreadDrainScheduler] turn
+     * budget. The wall-time budget is measured from [startedAtMillis] (the start of
+     * the WHOLE on-main feed, shared across its chunks); the byte budget is measured
+     * from [feedDrainedBytesBefore] (the inline bytes already drained in earlier
+     * chunks of this feed) plus what this call drains. After at least one slice
+     * (forward progress), if the feed has spent more than [SEED_DRAIN_MAX_MILLIS] of
+     * main-thread wall time OR drained more than [SEED_INLINE_MAX_BYTES] inline, this
+     * stops early and returns `true`; the caller ([feedChunks]) then hands the
+     * remainder — the already-queued tail of THIS chunk plus the untouched later
+     * chunks — to the frame-budgeted path, which paces the rest across frames. The
+     * byte budget is the load-bearing guard on a FAST/warm device, where 24 ms of
+     * inline parsing would otherwise let the bulk of a multi-chunk seed through
+     * inline before the time budget could trip (the regression that reopened #866).
+     * The granularity floor is one slice, so the worst-case inline cost is bounded
+     * by whichever budget trips plus one 2 KB slice's parse.
      *
      * Deadlock-safety (#866): the budget is now honored for ANY chunk, not only
      * the final one. The pre-#866 code drained every non-final chunk FULLY inline
@@ -600,17 +621,21 @@ public class SshTerminalBridge(
      * looper, and yields a frame between turns) — so there is no full-queue
      * deadlock and no unbounded inline parse.
      *
-     * @return `true` if the on-main feed has spent its [SEED_DRAIN_MAX_MILLIS]
-     *   budget (the caller hands the remaining tail to the frame-yielding pump);
-     *   `false` if this chunk fully drained within budget.
+     * @param feedDrainedBytesBefore inline bytes already drained in earlier chunks
+     *   of this same on-main feed, so the byte budget is feed-scoped (not per-chunk).
+     * @return `true` if the on-main feed has spent its [SEED_DRAIN_MAX_MILLIS] OR
+     *   [SEED_INLINE_MAX_BYTES] budget (the caller hands the remaining tail to the
+     *   frame-yielding pump); `false` if this chunk fully drained within both budgets.
      */
     private inline fun dispatchMainLooperDrains(
         handler: Handler,
         queuedBytes: Int,
         startedAtMillis: Long,
+        feedDrainedBytesBefore: Int,
         traceState: TraceState?,
     ): Boolean {
         var remaining = queuedBytes
+        var drainedThisCall = 0
         while (remaining > 0) {
             val drainBudget = minOf(remaining, PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES)
             val dispatchStartedAtNanos = System.nanoTime()
@@ -620,11 +645,18 @@ public class SshTerminalBridge(
                 durationNanos = System.nanoTime() - dispatchStartedAtNanos,
             )
             remaining -= drainBudget
-            // Time budget (#829/#866): checked AFTER at least one slice so the seed
-            // always makes forward progress. Stop inline draining once the on-main
-            // feed has exceeded its wall-time budget, on ANY chunk; the caller hands
-            // the remaining tail to the frame-yielding pump (see deadlock-safety).
-            if (nowMillis() - startedAtMillis >= SEED_DRAIN_MAX_MILLIS) {
+            drainedThisCall += drainBudget
+            // Dual budget (#829/#866 + fast-device fix): checked AFTER at least one
+            // slice so the seed always makes forward progress. Stop inline draining
+            // on ANY chunk once the on-main feed has spent EITHER its wall-time
+            // budget (SEED_DRAIN_MAX_MILLIS) OR its byte budget (SEED_INLINE_MAX_BYTES,
+            // feed-scoped). The byte budget is what makes the bound robust on a fast/
+            // warm device, where 24 ms of inline parsing would otherwise let the bulk
+            // of a multi-chunk seed through inline (the regression that reopened #866).
+            // The caller hands the remaining tail to the frame-yielding pump.
+            if (nowMillis() - startedAtMillis >= SEED_DRAIN_MAX_MILLIS ||
+                feedDrainedBytesBefore + drainedThisCall >= SEED_INLINE_MAX_BYTES
+            ) {
                 return true
             }
         }
@@ -896,6 +928,29 @@ public class SshTerminalBridge(
          * only bounds the pathological case.
          */
         internal const val SEED_DRAIN_MAX_MILLIS: Long = 24L
+
+        /**
+         * Issue #866 (fast-device fix): byte budget for the on-main, synchronous
+         * seed drain ([dispatchMainLooperDrains]), enforced ACROSS the whole feed
+         * alongside the [SEED_DRAIN_MAX_MILLIS] wall-time budget.
+         *
+         * The original #866 fix bounded the inline seed drain by wall time only. On
+         * a SLOW device (the maintainer's phone) 24 ms parses only ~one slice inline
+         * and the multi-chunk tail is deferred — no ANR. But on a FAST/warm device
+         * (a hot-JIT emulator, or a flagship phone after warm-up) 24 ms parses the
+         * BULK of a multi-chunk seed inline before the time budget can trip, so the
+         * tail is NOT deferred — the #866 "Attaching…" ANR returns under load. (This
+         * is exactly how the on-device proof regressed: green cold/isolated, RED warm
+         * at test 9/45.) A pure time budget cannot bound inline WORK on a fast CPU;
+         * only a byte budget can. Capping the inline drain to one quarter of a queue
+         * chunk keeps the inline parse small (well under the on-device proof's
+         * full/4 deferral threshold) regardless of per-slice speed; the rest always
+         * goes to the frame-yielding [runSeedTailPumpTurn] pump. Set ABOVE the JVM
+         * budget tests' time-trip slice count (6 * 2 KB = 12 KB) so those tests
+         * still trip on time (their injected clock), and the byte budget is the
+         * real-wall-clock guard.
+         */
+        internal const val SEED_INLINE_MAX_BYTES: Int = PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES / 4
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }

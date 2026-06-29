@@ -81,7 +81,7 @@ class SshTerminalBridgeTest {
     }
 
     @Test(timeout = 5_000)
-    fun feedBytesOnMainLooperDrainsLargePayloadWithoutWaitingForPostedMessage() {
+    fun feedBytesOnMainLooperDrainsLargePayloadWithoutDeadlockOrLoss() {
         assertEquals(Looper.getMainLooper(), Looper.myLooper())
         val trace = RecordingTraceSink()
         val bridge = SshTerminalBridge(
@@ -97,15 +97,47 @@ class SshTerminalBridgeTest {
                 SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES +
                 SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES,
         )
+        // The payload must exceed the inline BYTE budget so the on-main feed cannot
+        // drain it all inline — it must defer the tail to the pump (#866 fast-device).
+        assertTrue(
+            "regression payload must exceed the inline byte budget so the tail defers",
+            payload.bytes.size > SshTerminalBridge.SEED_INLINE_MAX_BYTES,
+        )
 
         bridge.feedBytes(payload.bytes)
+
+        // #866 fast-device fix: a large on-main feed no longer drains the WHOLE
+        // payload inline (that synchronous parse is the "Attaching…" ANR on a
+        // multi-chunk seed). The inline drain is bounded by SEED_INLINE_MAX_BYTES;
+        // the untouched tail is handed to the frame-yielding pump. The producer must
+        // NOT deadlock waiting on a posted message it can't run, and the WHOLE
+        // payload must still render losslessly once the looper advances.
+        val expectedInline =
+            (
+                SshTerminalBridge.SEED_INLINE_MAX_BYTES +
+                    SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES - 1
+                ) / SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+        val inlineSlices = trace.directDrains.size
+        assertEquals(
+            "the on-main inline drain must stop at the byte budget, not run all slices " +
+                "inline (the #866 fast-device ANR); trace=$trace",
+            expectedInline,
+            inlineSlices,
+        )
+        assertTrue(
+            "the bounded inline drain must leave the bulk for the pump; inline=$inlineSlices " +
+                "total=${expectedDrainSlices(payload.bytes.size)}",
+            inlineSlices < expectedDrainSlices(payload.bytes.size),
+        )
+
+        // Advance the looper so the pump + frame-budgeted scheduler drain the tail.
+        drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
-        assertEquals(expectedChunks(payload.bytes.size), trace.queueWrites.size)
-        assertEquals(expectedDrainSlices(payload.bytes.size), trace.directDrains.size)
+        assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
         assertTrue(
-            "direct main-looper drains should stay within the bounded drain budget",
+            "every drain (inline + pump) must stay within the bounded drain slice",
             trace.directDrains.all {
                 it.bytes in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
             },
@@ -246,6 +278,79 @@ class SshTerminalBridgeTest {
         // frame-yielding pump once the looper advances — the FULL payload must render
         // with no lost bytes and no deadlock (the test's 10s timeout guards the
         // would-be full-queue deadlock if the tail were written inline).
+        drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
+        assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
+        assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)
+    }
+
+    /**
+     * Issue #866 REOPEN (fast-device fix): on a FAST/warm device the wall-time
+     * budget alone does NOT bound the inline seed drain — the regression that
+     * brought #866 back. A pure time budget caps WALL TIME, not WORK: when each
+     * 2 KB slice parses in well under [SshTerminalBridge.SEED_DRAIN_MAX_MILLIS] /
+     * sliceCount, 24 ms of inline parsing chews through the BULK of a multi-chunk
+     * seed before the time budget can trip, so the tail is NOT deferred and the
+     * "Attaching…" ANR returns under load (the on-device proof was green cold/
+     * isolated but RED warm at test 9/45, where hot-JIT slices parse fast).
+     *
+     * This reproduces that deterministically by holding the clock STABLE
+     * (`nowMillis = { 0L }`), so the wall-time budget can NEVER trip — exactly the
+     * limit of an infinitely-fast device. RED on the time-budget-only code: the
+     * inline drain runs EVERY slice of the whole multi-chunk feed inline
+     * (`directDrains == totalSlices`, the ANR). GREEN with the byte budget: the
+     * inline drain stops after [SshTerminalBridge.SEED_INLINE_MAX_BYTES] and hands
+     * the untouched tail to the frame-yielding pump — bounded inline parse, no
+     * lost bytes, no deadlock (the 10s timeout guards the would-be full-queue
+     * deadlock if the tail were written inline).
+     */
+    @Test(timeout = 10_000)
+    fun onMainMultiChunkSeedBoundsInlineDrainByBytesWhenTheClockNeverAdvances() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val trace = RecordingTraceSink()
+        // Stable clock: elapsed wall time is ALWAYS 0, so SEED_DRAIN_MAX_MILLIS can
+        // never trip — the fast-device case the byte budget exists to bound.
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = MULTI_CHUNK_SEED_LINES + 100,
+            traceSink = trace,
+            nowMillis = { 0L },
+        )
+        val payload = multiChunkDenseSgrSeedPayload()
+        val totalChunks = expectedChunks(payload.bytes.size)
+        val totalSlices = expectedDrainSlices(payload.bytes.size)
+        assertTrue(
+            "fixture must span MULTIPLE process-to-terminal queue chunks (the #866 ANR shape)",
+            totalChunks >= 3,
+        )
+
+        bridge.feedBytes(payload.bytes)
+
+        // Load-bearing assertion: with the clock frozen the ONLY thing that can stop
+        // the inline drain is the byte budget. The inline drain must stop after
+        // ceil(SEED_INLINE_MAX_BYTES / slice) slices — NOT run every slice inline
+        // (the time-budget-only code drained all totalSlices here → the ANR).
+        val inlineSlices = trace.directDrains.size
+        val expectedInline =
+            (
+                SshTerminalBridge.SEED_INLINE_MAX_BYTES +
+                    SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES - 1
+                ) / SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+        assertEquals(
+            "frozen-clock multi-chunk seed must stop inline draining at the BYTE budget " +
+                "(time-budget-only code drained all $totalSlices slices inline → the #866 " +
+                "fast-device ANR); trace=$trace",
+            expectedInline,
+            inlineSlices,
+        )
+        assertTrue(
+            "the byte-bounded inline drain must leave the bulk of the seed for the pump; " +
+                "inline=$inlineSlices total=$totalSlices",
+            inlineSlices < totalSlices,
+        )
+
+        // The handed-off tail drains via the frame-yielding pump once the looper
+        // advances — the FULL payload must render losslessly and without deadlock.
         drainMainLooperUntil { trace.outputDrainSnapshot().sum() >= payload.bytes.size }
         assertEquals(payload.bytes.size, trace.outputDrainSnapshot().sum())
         assertEquals(payload.transcriptText, bridge.emulator.screen.transcriptText)

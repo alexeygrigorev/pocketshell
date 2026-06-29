@@ -46,6 +46,32 @@ sealed interface EnvListState {
 }
 
 /**
+ * In-place editor for an existing key's value (issue #1092).
+ *
+ * Hidden by default. Opening it fetches the current value via the same
+ * `env get` reveal path ([EnvViewModel.revealKey] / [EnvGateway.getValue])
+ * so the user can tweak the secret instead of retyping it blind — and that
+ * fetch happens only on the explicit Edit action, consistent with the D24
+ * write-only-by-default contract. Renaming is out of scope (#1092
+ * non-goal): the key name and the file it lives in are fixed; only the
+ * value changes, and Save routes it back through [EnvGateway.setKeys]
+ * (stdin upload, never argv).
+ */
+sealed interface EnvEditorState {
+    data object Hidden : EnvEditorState
+
+    /** The current value is being fetched via `env get`. */
+    data class LoadingValue(val key: String, val file: EnvFileTarget) : EnvEditorState
+
+    /** Value loaded; the field is pre-populated and editable. */
+    data class Editing(
+        val key: String,
+        val file: EnvFileTarget,
+        val currentValue: String,
+    ) : EnvEditorState
+}
+
+/**
  * UI state for [EnvScreen] — issue #264.
  *
  * @property folderLabel user-visible folder label shown in the header.
@@ -63,6 +89,7 @@ data class EnvUiState(
     val busy: Boolean = false,
     val transientMessage: String? = null,
     val copySources: List<EnvCopySourceFolder> = emptyList(),
+    val editor: EnvEditorState = EnvEditorState.Hidden,
 )
 
 /**
@@ -169,6 +196,75 @@ class EnvViewModel @Inject constructor(
             _state.value = _state.value.copy(busy = false)
             applyOpResult(result, successMessage = "Saved $trimmedKey to ${file.fileName}.")
         }
+    }
+
+    /**
+     * Begin editing [key] in place (#1092): fetch its current value via the
+     * same `env get` reveal path and open the editor pre-loaded with it, so
+     * the user can tweak the secret instead of retyping it blind. Renaming is
+     * out of scope — the key name and the file it lives in are fixed.
+     */
+    fun beginEdit(key: String) {
+        val p = params ?: return
+        val current = _state.value.list as? EnvListState.Ready ?: return
+        val row = current.keys.firstOrNull { it.key == key } ?: return
+        val file = EnvFileTarget.fromFileName(row.file)
+        _state.value = _state.value.copy(editor = EnvEditorState.LoadingValue(key, file))
+        viewModelScope.launch {
+            val host = hostDao.getById(p.hostId) ?: run {
+                editorFailed("Host not found.")
+                return@launch
+            }
+            when (val result = gateway.getValue(host, p.keyPath, p.passphrase, p.directory, key)) {
+                is EnvOpResult.Values -> {
+                    // Ignore a late fetch if the user already closed / switched
+                    // the editor while the value was loading.
+                    val editor = _state.value.editor
+                    if (editor is EnvEditorState.LoadingValue && editor.key == key) {
+                        _state.value = _state.value.copy(
+                            editor = EnvEditorState.Editing(
+                                key = key,
+                                file = file,
+                                // An empty key (has_value=false) has no value in
+                                // the map — open the field blank so the user can
+                                // fill it.
+                                currentValue = result.values[key] ?: "",
+                            ),
+                        )
+                    }
+                }
+                EnvOpResult.ToolUnavailable -> editorFailed("pocketshell is not installed on this host.")
+                is EnvOpResult.Failed -> editorFailed(result.message)
+                is EnvOpResult.ConnectFailed ->
+                    editorFailed(result.cause.message ?: "Couldn't connect to the host.")
+                EnvOpResult.Success ->
+                    _state.value = _state.value.copy(editor = EnvEditorState.Hidden)
+            }
+        }
+    }
+
+    /**
+     * Save the in-place edit: route the new value back through [setKey]
+     * (which uploads it via stdin, never argv — D24) for the editor's fixed
+     * key + file, then close the editor.
+     */
+    fun saveEdit(value: String) {
+        val editor = _state.value.editor
+        if (editor !is EnvEditorState.Editing) return
+        _state.value = _state.value.copy(editor = EnvEditorState.Hidden)
+        setKey(editor.key, value, editor.file)
+    }
+
+    /** Close the in-place editor without saving. */
+    fun dismissEditor() {
+        _state.value = _state.value.copy(editor = EnvEditorState.Hidden)
+    }
+
+    private fun editorFailed(message: String) {
+        _state.value = _state.value.copy(
+            editor = EnvEditorState.Hidden,
+            transientMessage = message,
+        )
     }
 
     /** Reveal a single key's plain value via `env get` (D24: no biometric). */

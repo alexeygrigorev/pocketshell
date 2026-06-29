@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
@@ -209,6 +210,133 @@ class EnvScreenE2eTest {
             "logcat must not contain the secret value typed into the write-only field",
             logcat.contains(secret),
         )
+    }
+
+    /**
+     * #1092: the maintainer can now edit an existing key's value IN PLACE.
+     * Drives the reported gap end-to-end on the real screen: open the per-row
+     * kebab -> Edit -> the current value is fetched via the reveal/get path and
+     * pre-loaded (proven by the Show toggle revealing the old secret, i.e. NOT
+     * retyped blind) -> change it -> Save routes the new value through setKeys
+     * (update-in-place). logcat is asserted to never carry either secret (D24).
+     */
+    @Test
+    fun editExistingKeyInPlaceUpdatesValueViaSetKeys() {
+        clearLogcat()
+        val oldSecret = "sk-OLD-1092"
+        val newSecret = "sk-NEW-1092"
+        val gateway = FakeEnvGateway(
+            keys = listOf(EnvKeyRow("API_KEY", ".env", true)),
+            getValues = mapOf("API_KEY" to oldSecret),
+            sourceKeys = emptyList(),
+        )
+        val viewModel = EnvViewModel(gateway = gateway, hostDao = db.hostDao())
+
+        compose.setContent {
+            PocketShellTheme {
+                EnvScreen(
+                    hostId = hostId,
+                    hostName = "issue1092-host",
+                    keyPath = "/tmp/issue1092",
+                    passphrase = null,
+                    directory = "/home/u/code/pocketshell",
+                    folderLabel = "pocketshell",
+                    copySources = emptyList(),
+                    onBack = {},
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(envKeyRowTestTag("API_KEY")).fetchSemanticsNodes().isNotEmpty()
+        }
+        // Open the kebab and tap Edit.
+        compose.onNodeWithTag(envKeyMenuTestTag("API_KEY")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(envKeyEditTestTag("API_KEY")).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(envKeyEditTestTag("API_KEY")).performClick()
+
+        // The editor opens and pre-loads the current value (fetched via get).
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(ENV_EDIT_VALUE_FIELD_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        // Reveal the field — the OLD secret is already there (NOT blank), which
+        // is the whole point: edit, don't retype the secret from scratch.
+        compose.onNodeWithTag(ENV_EDIT_TOGGLE_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText(oldSecret).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText(oldSecret).assertExists()
+        captureFullDevice("issue1092-env-edit-dialog-viewport.png")
+
+        // Change the value and Save.
+        compose.onNodeWithTag(ENV_EDIT_VALUE_FIELD_TAG).performTextClearance()
+        compose.onNodeWithTag(ENV_EDIT_VALUE_FIELD_TAG).performTextInput(newSecret)
+        compose.onNodeWithTag(ENV_EDIT_CONFIRM_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { gateway.lastSetUpdates != null }
+
+        // The NEW value reached setKeys for the SAME key + its file.
+        assertEquals(newSecret, gateway.lastSetUpdates?.get("API_KEY"))
+        assertEquals(EnvFileTarget.Env, gateway.lastSetFile)
+
+        // D24: neither secret may appear in anything the app logs.
+        val logcat = dumpLogcat()
+        assertFalse("logcat must not contain the old secret", logcat.contains(oldSecret))
+        assertFalse("logcat must not contain the new secret", logcat.contains(newSecret))
+    }
+
+    /**
+     * #1092: an empty folder (no .env yet) must surface a clear "Add key" CTA,
+     * since adding the first key is how the .env file gets created. Proves the
+     * CTA is reachable and starts the create-first-key flow.
+     */
+    @Test
+    fun emptyFolderSurfacesAddKeyCtaThatCreatesFirstKey() {
+        val gateway = FakeEnvGateway(
+            keys = emptyList(),
+            getValues = emptyMap(),
+            sourceKeys = emptyList(),
+        )
+        val viewModel = EnvViewModel(gateway = gateway, hostDao = db.hostDao())
+
+        compose.setContent {
+            PocketShellTheme {
+                EnvScreen(
+                    hostId = hostId,
+                    hostName = "issue1092-host",
+                    keyPath = "/tmp/issue1092",
+                    passphrase = null,
+                    directory = "/home/u/code/fresh",
+                    folderLabel = "fresh",
+                    copySources = emptyList(),
+                    onBack = {},
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        // The empty-state CTA is present and reachable.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(ENV_EMPTY_ADD_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(ENV_EMPTY_ADD_TAG).assertExists()
+        captureFullDevice("issue1092-env-empty-cta-viewport.png")
+
+        // Tapping it opens the add dialog so the first key can be created.
+        compose.onNodeWithTag(ENV_EMPTY_ADD_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(ENV_ADD_KEY_FIELD_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(ENV_ADD_KEY_FIELD_TAG).performTextInput("FIRST_KEY")
+        compose.onNodeWithTag(ENV_ADD_VALUE_FIELD_TAG).performTextInput("first-value")
+        compose.onNodeWithTag(ENV_ADD_CONFIRM_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { gateway.lastSetUpdates != null }
+        // Creating the first key writes through setKeys (server creates the file).
+        assertEquals("first-value", gateway.lastSetUpdates?.get("FIRST_KEY"))
     }
 
     private fun clearLogcat() {

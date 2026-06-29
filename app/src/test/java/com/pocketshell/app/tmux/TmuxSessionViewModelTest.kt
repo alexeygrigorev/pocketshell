@@ -99,9 +99,13 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.Continuation
 import kotlin.coroutines.CoroutineContext
+import kotlin.system.measureTimeMillis
 
 /**
  * Unit tests for [TmuxSessionViewModel] that exercise the per-pane
@@ -146,6 +150,22 @@ class TmuxSessionViewModelTest {
     // `codexLikeTmuxOutputWithSlowTerminalSideChannel...` (verified empirically:
     // 30/30 green on IO vs ~8% failure on the virtual scheduler).
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Issue #1085 (F2) test isolation: the application-scoped teardown work
+    // ([TmuxSessionViewModel.deferConnectionTeardownOffMain]) is now handed off
+    // `onCleared`'s Main thread to a CoroutineScope. In production that is the
+    // never-cancelled process singleton [AppTeardownScope.scope]; under unit
+    // tests that real-`Dispatchers.IO` singleton is never drained, so every
+    // `clearForTest()` (including the `@After` clear of still-connected VMs)
+    // would leak an IO teardown coroutine past `runTest`/`resetMain` — and that
+    // coroutine touches the test Main dispatcher as it cancels viewModelScope
+    // pane jobs, racing the NEXT class's `setMain` ("Dispatchers.Main is used
+    // concurrently with setting it"). We instead inject THIS per-test-instance
+    // scope into every `newVm`, then cancel+JOIN it in `@After` (exactly like
+    // `factoryScope`) so no teardown coroutine survives into the next class.
+    // It is a real `Dispatchers.IO` scope (off-Main), so the F2 off-Main
+    // hand-off it backs is genuine, not a virtual-clock proxy.
+    private val defaultTeardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     private fun newVm(
@@ -233,6 +253,12 @@ class TmuxSessionViewModelTest {
             // Pin the card source calls to the test scheduler so card feed
             // assertions cannot time out before a background continuation runs.
             it.setSessionCardsDispatcherForTest(testMainDispatcher)
+            // Issue #1085 (F2) test isolation: route the off-Main connection
+            // teardown to this per-test-instance scope (drained in `@After`)
+            // instead of the never-cancelled production singleton, so no
+            // teardown coroutine leaks into the next test class. Individual F2
+            // off-Main tests may override this with a virtual-clock scope.
+            it.setTeardownScopeForTest(defaultTeardownScope)
             createdViewModels += it
         }
 
@@ -320,7 +346,20 @@ class TmuxSessionViewModelTest {
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 factoryScope.coroutineContext.job.children.forEach { it.join() }
             }
+            // Issue #1085 (F2) test isolation: JOIN the off-Main teardown
+            // coroutines the `@After` clears (and any in-test `clearForTest`)
+            // launched onto `defaultTeardownScope` BEFORE the rule's
+            // `resetMain()` runs. Join first (the teardown closes are FINITE —
+            // they complete after each close returns — so a natural join
+            // terminates without needing a cancel), then cancel as a safety
+            // net. Without this drain the IO teardown coroutine survives into
+            // the next class's `setMain` and throws "Dispatchers.Main is used
+            // concurrently with setting it".
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                defaultTeardownScope.coroutineContext.job.children.forEach { it.join() }
+            }
         }
+        defaultTeardownScope.cancel()
     }
 
     @Test
@@ -15181,6 +15220,11 @@ class TmuxSessionViewModelTest {
             ),
         )
         val vm = newVm(runtimeCache = runtimeCache)
+        // Issue #1085 (F2): the teardown closes evicted runtimes on the
+        // application-scoped teardown scope (off Main). Pin it to the shared
+        // virtual-clock scheduler so `advanceUntilIdle()` drives the async
+        // close deterministically (no real-IO race).
+        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
         val activeClient = FakeTmuxClient()
         val activeSession = FakeSshSession()
         vm.replaceClientForTest(
@@ -15197,7 +15241,7 @@ class TmuxSessionViewModelTest {
         vm.setProcessForegroundForClearedForTest(false)
 
         vm.clearForTest()
-        runCurrent()
+        advanceUntilIdle()
 
         assertTrue("evicted parked client must detach during background clear", evictedClient.detachCleanlyCalled)
         assertTrue("evicted parked client must close during background clear", evictedClient.closed)
@@ -15212,6 +15256,11 @@ class TmuxSessionViewModelTest {
     fun foregroundOnClearedStillClosesLiveRuntimeForUserNavigation() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(runtimeCache = runtimeCache)
+        // Issue #1085 (F2): the foreground clear hands the live runtime's
+        // detach/close to the application-scoped teardown scope (off Main).
+        // Pin it to the shared virtual-clock scheduler so `advanceUntilIdle()`
+        // drives the async close deterministically.
+        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
         val client = FakeTmuxClient()
         val session = FakeSshSession()
         vm.replaceClientForTest(
@@ -15228,7 +15277,7 @@ class TmuxSessionViewModelTest {
         vm.setProcessForegroundForClearedForTest(true)
 
         vm.clearForTest()
-        runCurrent()
+        advanceUntilIdle()
 
         assertTrue("foreground clear must keep the explicit detach/close behavior", client.detachCleanlyCalled)
         assertTrue("foreground clear must close the tmux client", client.closed)
@@ -16187,6 +16236,109 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    /**
+     * Issue #1085 (F2) reproduce-first — the MULTI-RUNTIME teardown class.
+     * `onCleared` → `closeCurrentConnection` runs on the Main thread and used to
+     * close every host-cached runtime via `runBlocking(Dispatchers.IO)` ON Main.
+     * Each runtime's `lease.release()` is a NON-suspending park whose bounded
+     * `SYNC_DETACH_TIMEOUT_MS` ceiling a coroutine cancel cannot interrupt — so
+     * on a wedged transport the real Main park is the SUM of the N runtimes'
+     * wedges (a multi-second / ANR-class freeze finishing a session).
+     *
+     * RED on base: `clearForTest()` parks the calling (Main) thread for ~3×800ms
+     * — the elapsed assertion fails.
+     *
+     * GREEN with the fix: `closeCurrentConnection` captures the runtimes, nulls
+     * the fields on Main, and hands the closes to the application-scoped teardown
+     * scope, so `onCleared` returns immediately AND every runtime is still closed
+     * to completion off-Main (all three latches fire) — no leak, no Main park.
+     */
+    @Test
+    fun onClearedClosesCachedRuntimesOffMainAndNeverParksTheCallingThread() = runTest(scheduler) {
+        val hostId = 7L
+        val released = CountDownLatch(3)
+        val wedgeMs = 800L
+        // maxEntries high enough that the three same-host runtimes coexist (the
+        // default per-host cap would evict one); nowMs pinned so no TTL expiry.
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 8, nowMs = { 0L })
+        // Issue #1085 (F2) test isolation: run the teardown on the per-test
+        // `defaultTeardownScope` `newVm` injects — a real `Dispatchers.IO` scope
+        // (so the hand-off genuinely leaves Main) that `@After` cancels+JOINs,
+        // so the wedged release coroutines cannot escape `runTest`/`resetMain`.
+        val vm = newVm(runtimeCache = runtimeCache)
+        try {
+            vm.replaceClientForTest(
+                hostId = hostId,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = FakeTmuxClient(),
+                session = FakeSshSession(),
+            )
+            runCurrent()
+            // Park three wedged cached runtimes under the ACTIVE host; the
+            // teardown's `runtimeCache.removeHost(hostId)` returns all three and
+            // must close every one off the Main thread.
+            repeat(3) { i ->
+                runtimeCache.put(
+                    cachedRuntimeForTest(
+                        sessionName = "cached-$i",
+                        hostId = hostId,
+                        lease = wedgedLeaseForTest(
+                            SshLeaseKey("alpha.example", 22, "alex", "$hostId:/keys/a-$i"),
+                            FakeSshSession(),
+                            wedgeMs,
+                        ) { released.countDown() },
+                    ),
+                )
+            }
+            assertEquals(3, runtimeCache.size())
+            vm.setProcessForegroundForClearedForTest(true)
+
+            val elapsedMs = measureTimeMillis { vm.clearForTest() }
+
+            assertTrue(
+                "onCleared parked the calling (Main) thread for ${elapsedMs}ms closing 3 wedged " +
+                    "cached runtimes — the #1085 F2 multi-runtime teardown ANR. The closes must " +
+                    "be handed to the application-scoped teardown scope so onCleared returns " +
+                    "immediately.",
+                elapsedMs < TEARDOWN_PARK_BUDGET_MS,
+            )
+            assertTrue(
+                "every cached runtime's lease release must still run to COMPLETION off the Main " +
+                    "thread (no leak) — only ${3 - released.count} of 3 fired.",
+                released.await(10, TimeUnit.SECONDS),
+            )
+        } finally {
+            vm.setProcessForegroundForClearedForTest(null)
+        }
+    }
+
+    /**
+     * Build an [SshLease] (internal constructor) whose `releaseAction` blocks
+     * the calling thread for [wedgeMs] then signals [onReleased] — a wedged
+     * transport close whose bounded ceiling is defeated because a coroutine
+     * cancel cannot unpark a parked thread. Mirrors the reflection-built lease
+     * the sibling nav-scoped suites use.
+     */
+    private fun wedgedLeaseForTest(
+        key: SshLeaseKey,
+        session: SshSession,
+        wedgeMs: Long,
+        onReleased: () -> Unit,
+    ): SshLease {
+        val releaseAction = { _: SshLeaseKey, _: Long, _: Continuation<Unit> ->
+            Thread.sleep(wedgeMs)
+            onReleased()
+            Unit
+        }
+        val constructor = SshLease::class.java.declaredConstructors.single()
+        return constructor.newInstance(key, session, false, 0L, releaseAction) as SshLease
+    }
+
     private fun cachedRuntimeForTest(
         sessionName: String,
         hostId: Long = 1L,
@@ -17009,6 +17161,11 @@ class TmuxSessionViewModelTest {
         // box (observed >5s under 15+ load) WITHOUT slowing a passing run. A
         // genuinely stuck feed still times out and fails the assertion below.
         const val SLOW_FEED_DRAIN_TIMEOUT_MS = 30_000L
+
+        // Issue #1085 (F2): the off-Main hand-off must let onCleared return
+        // within a small budget; on base closing the 3 wedged runtimes parks the
+        // calling thread for ~3×800ms.
+        const val TEARDOWN_PARK_BUDGET_MS = 500L
 
         // Issue #713: `runTest` enforces its OWN default 60s wall-clock budget.
         // The slow-feed drains above busy-wait (Thread.sleep / real-IO feed) for

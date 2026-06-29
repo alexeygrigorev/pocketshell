@@ -170,6 +170,7 @@ import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.PocketShellButton
+import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolArgsView
@@ -498,14 +499,41 @@ public fun TmuxSessionScreen(
     // bottom now shares the unified [PromptComposerSheet], whose draft
     // persists in [PromptComposerViewModel], so there is nothing to seed
     // here on the screen.
-    val agentConversations by viewModel.agentConversations.collectAsState()
+    // Issue #1085 (freeze F3 / R2 — agent-streaming recomposition jank): the
+    // agent transcript tail flushes a fresh `agentConversations` map every
+    // `tailBatchWindowMillis`=60ms while an agent is streaming (~16 Hz). Held as
+    // a `State<Map<...>>` (NOT a delegated `by` read) so the body's ROOT restart
+    // group is never subscribed to that 16 Hz churn directly: the body reads
+    // only STABLE projections of the surface pane's conversation via
+    // `derivedStateOf` (below), and the high-frequency `events` list is read
+    // inside the `surfaceContent` child scope — its OWN restart group — so a
+    // streaming flush recomposes ONLY the transcript view, not the chrome /
+    // composer / terminal scaffolding.
+    val agentConversationsState = viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     // Issue #463: the in-session project switcher's sibling list, sourced
     // from the warm live `-CC` client only (no SSH handshake) so tapping the
     // header project crumb and switching stays instant.
     val projectSwitcherState by sessionPickerViewModel.projectSwitcher.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
-    val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    // Issue #1085 (freeze F3 / R1 — dictation amplitude recomposition jank):
+    // the inline-dictation silence watchdog rewrites `uiState` with a fresh
+    // amplitude sample every SAMPLE_INTERVAL_MS=50ms (20 Hz) for the whole
+    // recording. Reading the WHOLE `uiState` State in this body (the old
+    // `val dictationState by ...collectAsState()`) subscribed the
+    // `TmuxSessionScreen` ROOT restart group — the group that hosts the
+    // terminal-render subtree — to that 20 Hz churn, so the entire ~7k-line body
+    // recomposed 20×/s while the user dictates (the voice-first jank vector).
+    // The body never reads the amplitude; it only needs the (low-frequency)
+    // dictation MODE (the transcript-routing LaunchedEffect below). Deriving
+    // just `mode` via `derivedStateOf` keeps the body OFF the 20 Hz path: the
+    // derived value only changes when the mode flips, so the amplitude emissions
+    // no longer recompose the body. The amplitude is consumed by the leaf mic UI
+    // ([KeyBarWithMic]), not here.
+    val dictationUiState = inlineDictationViewModel.uiState.collectAsState()
+    val dictationMode by remember(dictationUiState) {
+        derivedStateOf { dictationUiState.value.mode }
+    }
     // Issue #176: collected once at the screen root so the conversation
     // pane recomposes when the toggle flips in Settings.
     val appSettings by settingsViewModel.state.collectAsState()
@@ -658,7 +686,32 @@ public fun TmuxSessionScreen(
     // visible pane), not the active-only `currentPane` — so a cached-pane
     // detection (once promotion fires) and the presumed-agent default both reach
     // the surface the user is looking at.
-    val currentAgentConversation = surfacePane?.paneId?.let { agentConversations[it] }
+    val surfaceConversationPaneId = surfacePane?.paneId
+    // Issue #1085 (freeze F3 / R2): the body chrome needs only the STABLE
+    // projections of the surface pane's conversation — its detection, its
+    // selected tab, whether it has any events, and whether a row exists. The
+    // agent-streaming flush (60ms) changes the conversation's `events` LIST but
+    // NOT these projections (detection/selectedTab are unchanged mid-stream;
+    // `hasEvents`/`exists` only flip ONCE, on the first event / first row).
+    // Reading them through ONE `derivedStateOf` keeps the body's ROOT restart
+    // group OFF the per-flush invalidation path: `derivedStateOf` re-runs its
+    // (cheap) projection on each flush but only invalidates the body when the
+    // projected value actually changes — so the 16 Hz transcript stream no
+    // longer recomposes the chrome. The high-frequency `events` list itself is
+    // read inside `surfaceContent` (its own restart scope) for the transcript.
+    val surfaceChrome by remember(surfaceConversationPaneId) {
+        derivedStateOf {
+            val convo = surfaceConversationPaneId?.let { agentConversationsState.value[it] }
+            SurfaceConversationChrome(
+                detection = convo?.detection,
+                selectedTab = convo?.selectedTab,
+                hasEvents = convo?.events?.isNotEmpty() == true,
+                exists = convo != null,
+            )
+        }
+    }
+    val currentDetection: AgentDetection? = surfaceChrome.detection
+    val currentSelectedTab: SessionTab? = surfaceChrome.selectedTab
     val scope = rememberCoroutineScope()
 
     // Issue #463: the current session's project path (the active pane's
@@ -793,7 +846,7 @@ public fun TmuxSessionScreen(
     // record it as the sticky value for that pane id. A subsequent transient
     // `detection == null` leaves the recorded value intact, so the header
     // affordance and the palette keep working through the gap.
-    val liveAgentForPane = currentAgentConversation?.detection?.agent
+    val liveAgentForPane = currentDetection?.agent
     // Issue #797: the sticky/palette agent key follows the SURFACE pane so the
     // last-known agent kind sticks to the visible pane (active OR cached),
     // keeping the agent affordances and presumed-agent default reachable across
@@ -887,7 +940,7 @@ public fun TmuxSessionScreen(
     // exactly as it does on a fresh active pane.
     val presumedAgent = surfacePane != null &&
         tmuxSessionPresumedAgent(
-            hasLiveDetection = currentAgentConversation?.detection != null,
+            hasLiveDetection = currentDetection != null,
             stickyAgent = paletteAgent,
             // Issue #894 (Slice C): the visible pane's durable confirmed-shell
             // verdict — true only when the tree recorded `@ps_agent_kind=shell`.
@@ -897,7 +950,7 @@ public fun TmuxSessionScreen(
     // live detection/transcript yet: the sticky/last-known kind. Null when this
     // pane has never been an agent in the current attach (then a presumed send
     // falls back to raw bytes).
-    val presumedAgentKind: AgentKind? = if (currentAgentConversation?.detection == null) {
+    val presumedAgentKind: AgentKind? = if (currentDetection == null) {
         paletteAgent
     } else {
         null
@@ -1050,10 +1103,10 @@ public fun TmuxSessionScreen(
     // dictation while parked on a settled cached pane reaches the session the
     // user is looking at once promotion makes it active — not a no-op.
     val focusedPaneId = surfacePane?.paneId
-    LaunchedEffect(inlineDictationViewModel, dictationState.mode, focusedPaneId) {
+    LaunchedEffect(inlineDictationViewModel, dictationMode, focusedPaneId) {
         inlineDictationViewModel.transcriptions.collect { text ->
             val paneId = focusedPaneId ?: return@collect
-            when (dictationState.mode) {
+            when (dictationMode) {
                 InlineDictationViewModel.DictationMode.Prompt -> {
                     if (text.isNotEmpty()) {
                         viewModel.writeInputToPane(paneId, text.toByteArray(Charsets.UTF_8))
@@ -1469,7 +1522,22 @@ public fun TmuxSessionScreen(
             // currently visible pane only. A sibling pane/window's agent
             // no longer keeps Conversation mounted or routes sends away
             // from what the user is looking at.
-            val tabState = tmuxSessionTabState(currentAgentConversation, presumedAgent)
+            // Issue #1085 (freeze F3 / R2): derive `tabState` via `derivedStateOf`
+            // rather than reading the surface pane's conversation directly here.
+            // `tmuxSessionTabState` only consults `events.isNotEmpty()` (flips
+            // once), the placeholder flags, detection and selectedTab — all
+            // stable mid-stream — so deriving it keeps the body's tab-bar chrome
+            // OFF the 60ms agent-streaming flush. The projection re-runs each
+            // flush but the resulting [TmuxSessionTabState] is structurally equal,
+            // so the body is not invalidated.
+            val tabState by remember(surfaceConversationPaneId, presumedAgent) {
+                derivedStateOf {
+                    tmuxSessionTabState(
+                        surfaceConversationPaneId?.let { agentConversationsState.value[it] },
+                        presumedAgent,
+                    )
+                }
+            }
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
                     // Issue #778: honour a Conversation tap whenever the tab is
@@ -1554,7 +1622,7 @@ public fun TmuxSessionScreen(
                                 agentName = if (effectiveHidesTerminal) {
                                     null
                                 } else {
-                                    currentAgentConversation?.detection?.agent?.displayName
+                                    currentDetection?.agent?.displayName
                                 },
                                 tabLabels = tabState.labels,
                                 selectedTabIndex = tabState.selectedIndex,
@@ -1713,7 +1781,6 @@ public fun TmuxSessionScreen(
             // still additionally requires the pane to be ACTIVE (`currentPane`)
             // because a real transcript only exists once the warm switch
             // promoted the pane and detection seeded on the active runtime.
-            val visibleConversation = surfacePane?.paneId?.let { agentConversations[it] }
             // Whether to render the Conversation *content* (real transcript) in
             // place of the terminal pager. This is the actual content swap,
             // distinct from whether the Conversation *tab* exists (#716
@@ -1727,19 +1794,27 @@ public fun TmuxSessionScreen(
             // Conversation→Terminal swap latch); it now also fires for an existing
             // events transcript whose detection is currently null (an agent that
             // exited / a recorded-shell pane), not solely live detection.
+            //
+            // Issue #1085 (freeze F3 / R2): the routing inputs come from the
+            // STABLE [surfaceChrome] derivation, NOT a direct read of the surface
+            // pane's conversation here. Routing only depends on selectedTab,
+            // whether detection exists, and whether ANY events exist — all stable
+            // mid-stream — so computing it from `surfaceChrome` keeps this body
+            // group OFF the 60ms agent-streaming flush. The actual `events` LIST
+            // is read inside `surfaceContent` (its own restart scope) for the
+            // transcript render below.
             val conversationSurface = tmuxSessionConversationSurface(
                 showsConversationTab = tabState.showsConversationTab,
                 isActivePane = currentPane != null,
                 hasSurfacePane = surfacePane != null,
-                selectedTab = visibleConversation?.selectedTab,
-                hasDetection = visibleConversation?.detection != null,
-                hasEvents = visibleConversation?.events?.isNotEmpty() == true,
+                selectedTab = currentSelectedTab,
+                hasDetection = currentDetection != null,
+                hasEvents = surfaceChrome.hasEvents,
             )
-            // The leading `visibleConversation != null` keeps the K2 smart-cast
-            // for the `showConversation` content branches below (they read
-            // `visibleConversation.events` / `.loadState` non-null); the surface
-            // routing already requires a non-null row to reach Transcript.
-            val showConversation = visibleConversation != null &&
+            // `surfaceChrome.exists` mirrors the old `visibleConversation != null`
+            // guard (a row exists for the surface pane) so the Transcript branch
+            // is only chosen when there is a real conversation row to render.
+            val showConversation = surfaceChrome.exists &&
                 conversationSurface == TmuxConversationSurface.Transcript
             // Issue #778/#1057: a lightweight "Loading conversation…" / Failed
             // placeholder when the user opened the Conversation tab on a pane with
@@ -1892,7 +1967,7 @@ public fun TmuxSessionScreen(
                     // signal that drives the agent chips below — a stable Boolean, so
                     // the pager stays skippable across overlay toggles (#796 H3).
                     val terminalIsAgentPane = tmuxSessionIsAgentPane(
-                        hasLiveDetection = currentAgentConversation?.detection != null,
+                        hasLiveDetection = currentDetection != null,
                         presumedAgent = presumedAgent,
                     )
                     TmuxTerminalPager(
@@ -1911,6 +1986,20 @@ public fun TmuxSessionScreen(
                         onEngineCommandTap = stableEngineCommandTap,
                     )
                 }
+                // Issue #1085 (freeze F3 / R2): read the surface pane's FULL
+                // conversation — including the high-frequency `events` list — HERE,
+                // inside `surfaceContent`. This lambda is a non-inline
+                // `@Composable () -> Unit` passed as `content` to
+                // [SessionSurfaceReconnectWrapper], so it is its OWN Compose restart
+                // group: subscribing to the 60ms agent-streaming flush at THIS read
+                // recomposes ONLY the transcript subtree, never the
+                // `TmuxSessionScreen` body (chrome/composer/terminal). The body
+                // reads only the STABLE [surfaceChrome] projection (above). Within a
+                // single recomposition this read sees the same snapshot the chrome
+                // derivation did, so `showConversation` ⇒ a non-null row (the
+                // `!= null` guards below are for the compiler's smart-cast).
+                val visibleConversation =
+                    surfaceConversationPaneId?.let { agentConversationsState.value[it] }
                 if (effectiveHidesTerminal) {
                     // Issue #661 / EPIC #687 P1: a cross-session switch is in flight —
                     // never paint the leaving session's terminal (or its agent
@@ -1931,6 +2020,7 @@ public fun TmuxSessionScreen(
                     // teardown. The latch self-clears after one frame.
                     SwitchingLoadingPlaceholder()
                 } else if (showConversation &&
+                    visibleConversation != null &&
                     visibleConversation.events.isEmpty() &&
                     visibleConversation.loadState == ConversationLoadState.Loading
                 ) {
@@ -1944,6 +2034,7 @@ public fun TmuxSessionScreen(
                         loadState = ConversationLoadState.Loading,
                     )
                 } else if (showConversation &&
+                    visibleConversation != null &&
                     visibleConversation.events.isEmpty() &&
                     visibleConversation.loadState == ConversationLoadState.Failed
                 ) {
@@ -1954,7 +2045,7 @@ public fun TmuxSessionScreen(
                         loadState = ConversationLoadState.Failed,
                         onRetry = { viewModel.retryAgentConversationLoad(paneIdForSend) },
                     )
-                } else if (showConversation) {
+                } else if (showConversation && visibleConversation != null) {
                     val paneIdForSend = currentPane!!.paneId
                     // Issue #842: bind the image loader to THIS host + the active
                     // pane cwd (a relative pasted path resolves where the agent
@@ -2161,7 +2252,7 @@ public fun TmuxSessionScreen(
                 // not just live detection, so they don't flip to shell chips
                 // during the slow-detection window.
                 val isAgentPane = tmuxSessionIsAgentPane(
-                    hasLiveDetection = currentAgentConversation?.detection != null,
+                    hasLiveDetection = currentDetection != null,
                     presumedAgent = presumedAgent,
                 )
                 val bottomControlsModifier = if (isImeVisible) {
@@ -2245,7 +2336,7 @@ public fun TmuxSessionScreen(
                         pane != null &&
                         tmuxSessionShowsSnippetChip(
                             hasHost = hostId != 0L,
-                            hasLiveDetection = currentAgentConversation?.detection != null,
+                            hasLiveDetection = currentDetection != null,
                             hasStickyAgent = paletteAgent != null,
                         )
                     ) {
@@ -2658,9 +2749,15 @@ public fun TmuxSessionScreen(
             connectionLost = !sessionLive,
             sendTargetSnapshotProvider = { withEnter ->
                 val pane = surfacePane
-                val liveAgent = currentAgentConversation?.detection?.agent
-                val viewingConversationNow = currentAgentConversation?.detection != null &&
-                    currentAgentConversation.selectedTab == SessionTab.Conversation
+                // Issue #1085 (freeze F3 / R2): the send-route snapshot needs only
+                // the surface pane's detection + selected tab — both STABLE
+                // projections carried by [surfaceChrome] (`currentDetection` /
+                // `currentSelectedTab`). Same composition-time snapshot the old
+                // `currentAgentConversation` capture provided; they update whenever
+                // the body recomposes, which is exactly when detection/tab change.
+                val liveAgent = currentDetection?.agent
+                val viewingConversationNow = currentDetection != null &&
+                    currentSelectedTab == SessionTab.Conversation
                 val route = tmuxComposerSendRoute(
                     viewingConversation = viewingConversationNow,
                     liveAgent = liveAgent,
@@ -2701,7 +2798,7 @@ public fun TmuxSessionScreen(
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
-            kindFilter = if (currentAgentConversation?.detection != null) {
+            kindFilter = if (currentDetection != null) {
                 SnippetKind.Prompt
             } else {
                 SnippetKind.Command
@@ -3302,6 +3399,30 @@ internal data class TmuxSessionTabState(
     val labels: List<String>,
     val selectedIndex: Int,
     val showsConversationTab: Boolean,
+)
+
+/**
+ * Issue #1085 (freeze F3 / R2): the STABLE projection of the surface pane's
+ * agent conversation that the [TmuxSessionScreen] body chrome reads. The agent
+ * transcript tail flushes a fresh `agentConversations` map every ~60ms while an
+ * agent streams; that flush changes the conversation's `events` list but NOT
+ * these fields ([detection] / [selectedTab] are unchanged mid-stream, and
+ * [hasEvents] / [exists] only flip ONCE — on the first event / first row).
+ *
+ * The body derives this via `derivedStateOf`, so the per-flush map churn
+ * re-runs only the (cheap) projection lambda and invalidates the body's ROOT
+ * restart group ONLY when one of these stable fields actually changes — never
+ * once per streaming flush. It is a `data class` so `derivedStateOf`'s default
+ * structural-equality policy correctly suppresses no-op notifications. The
+ * high-frequency `events` list is deliberately NOT a field here: it is read
+ * inside the `surfaceContent` child scope (its own restart group) so a flush
+ * recomposes only the transcript, not the chrome/composer/terminal.
+ */
+internal data class SurfaceConversationChrome(
+    val detection: AgentDetection?,
+    val selectedTab: SessionTab?,
+    val hasEvents: Boolean,
+    val exists: Boolean,
 )
 
 /**

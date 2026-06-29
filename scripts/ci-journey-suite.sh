@@ -673,6 +673,24 @@ JOURNEY_CLASSES=(
   # fully-qualified name directly. The heavier live-burst on-device acceptance
   # (Issue796ComposerOpenDuringCodexBurstProofTest) stays out of this fast subset.
   "com.pocketshell.app.tmux.Issue796ComposerOpenTerminalScopeProofTest"
+  # ADDED (#1085 F3): the voice-first recomposition-jank scope proof. The
+  # maintainer's "app KEEPS FREEZING" report; F3 is the recomposition vector —
+  # inline-dictation amplitude (20 Hz) and agent-transcript streaming (60ms) were
+  # read at the ROOT of the 7k-line TmuxSessionScreen body, so the whole body
+  # recomposed at the flow's frequency while dictating / while an agent streamed.
+  # The fix derives the dictation MODE (not the amplitude) and a STABLE
+  # SurfaceConversationChrome projection (not the streaming events) in the body,
+  # and reads the high-frequency events list inside the surfaceContent child
+  # scope. This DETERMINISTIC scope proof drives a 20-sample amplitude burst and a
+  # 20-flush streaming burst against the production read structure (the real
+  # SurfaceConversationChrome data class + derivedStateOf projection) and
+  # HARD-asserts O(1) body recompositions, with sibling RED guards pinning the
+  # pre-fix whole-state / direct-map reads at ~N. In-process Compose UI test, NO
+  # Docker fixture, NO assumeTrue / assumeFalse(isRunningOnCi()) on the
+  # load-bearing assertion (process.md F3). Runs per-push so the recomposition
+  # jank cannot silently return (#638/#657). Lives under com.pocketshell.app.tmux,
+  # so it carries its fully-qualified name directly.
+  "com.pocketshell.app.tmux.Issue1085RecompositionScopeProofTest"
   # ADDED (#810): the composer-launcher ALWAYS-PRESENT switch journey. The
   # maintainer dogfooded the composer launcher DROPPING OUT after a session
   # switch (A->B->C->A): the launcher chip rendered on the first session but

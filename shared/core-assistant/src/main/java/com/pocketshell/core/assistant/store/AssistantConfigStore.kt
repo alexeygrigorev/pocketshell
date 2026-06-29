@@ -14,6 +14,13 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.core.assistant.AssistantSettings
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 
 /**
  * Secret-safe interface the app / view-model consumes. Mirrors the
@@ -61,16 +68,74 @@ public interface AssistantConfigStore {
  * disturb the Whisper key entry. Decision D25 + the issue's non-goal "no
  * change to voice transcription provider".
  *
+ * ## Off-main construction (issue #1085, freeze cause F1)
+ *
+ * Building [EncryptedSharedPreferences] eagerly in the constructor used to
+ * run Tink / Android-Keystore init (~1.2-1.3s cold) **on the Main thread**,
+ * because Hilt constructs this `@Singleton` the moment the activity's
+ * `TmuxSessionViewModel` is first dereferenced — and that deref happens
+ * inside the first `setContent {}` composition frame. The keystore build
+ * froze the first frame on every cold launch.
+ *
+ * The fix: never build the encrypted prefs on the calling thread. The
+ * constructor only *kicks off* the build on [ioDispatcher] (an eager
+ * [kotlinx.coroutines.async]); it returns immediately. The build runs on a
+ * background thread, so neither `<init>` nor composition blocks the UI
+ * thread. The first read warms-or-awaits that background result (the build
+ * is started at launch, so by the time the user opens Settings / sends an
+ * assistant message the value is ready and the read does not block). The
+ * encrypted-at-rest guarantee is unchanged — it is still
+ * [EncryptedSharedPreferences], just constructed off-main. Hard-cut (D22):
+ * there is no synchronous fallback path.
+ *
  * @param context any Context; the application context is held internally so
  *   an Activity isn't pinned.
  * @param fileName encrypted prefs file name; overridable for tests.
+ * @param ioDispatcher dispatcher the keystore-backed prefs are built on;
+ *   defaults to [Dispatchers.IO]. Overridable for tests.
  */
-public class AndroidKeystoreAssistantConfigStore(
+public class AndroidKeystoreAssistantConfigStore @JvmOverloads constructor(
     context: Context,
     fileName: String = DEFAULT_PREFERENCES_FILE,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AssistantConfigStore {
 
-    private val prefs: SharedPreferences = buildPrefs(context.applicationContext, fileName)
+    private val appContext = context.applicationContext
+
+    // Once the background build completes, the result is cached here so reads
+    // never re-enter runBlocking. @Volatile: written on [ioDispatcher],
+    // read from any consumer thread.
+    @Volatile
+    private var cachedPrefs: SharedPreferences? = null
+
+    // Test seam (issue #1085): records the name of the thread the keystore
+    // build actually ran on, so a regression test can hard-assert it is NOT
+    // the constructing/Main thread. Written on [ioDispatcher].
+    @Volatile
+    private var prefsBuildThreadName: String? = null
+
+    // Eager async: the build STARTS at construction (i.e. at launch) but on a
+    // background thread. `async` (DEFAULT start) dispatches immediately and
+    // returns without blocking the caller.
+    private val warmUpScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+    private val prefsDeferred: Deferred<SharedPreferences> = warmUpScope.async {
+        prefsBuildThreadName = Thread.currentThread().name
+        buildPrefs(appContext, fileName).also { cachedPrefs = it }
+    }
+
+    private val prefs: SharedPreferences
+        get() = cachedPrefs ?: runBlocking { prefsDeferred.await() }
+
+    /**
+     * Test-only: block until the off-main build completes and return the name
+     * of the thread it ran on. Lets a regression test prove the keystore
+     * construction did NOT happen on the constructing/Main thread (#1085).
+     */
+    internal fun awaitPrefsBuildThreadNameForTest(): String {
+        runBlocking { prefsDeferred.await() }
+        return prefsBuildThreadName
+            ?: error("prefs build thread was not recorded")
+    }
 
     override fun loadSettings(): AssistantSettings {
         val provider = AssistantProvider.fromName(prefs.getString(KEY_PROVIDER, null))

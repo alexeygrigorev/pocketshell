@@ -695,7 +695,12 @@ class HostListViewModel internal constructor(
                     .forEach { host ->
                         val key = sshKeyDao.getById(host.keyId) ?: return@forEach
                         if (key.hasPassphrase) return@forEach
-                        if (!File(key.privateKeyPath).exists()) return@forEach
+                        // #1085: this launch runs on Dispatchers.Main.immediate;
+                        // keep the key-file disk stat off the Main thread.
+                        val keyFileExists = withContext(Dispatchers.IO) {
+                            File(key.privateKeyPath).exists()
+                        }
+                        if (!keyFileExists) return@forEach
                         StartupTiming.markOnce(
                             "hostlist-reprobe-ssh-start",
                             "hostId" to host.id,
@@ -1792,8 +1797,12 @@ internal class LeaseBackedHostSessionOpener(
         java.util.Collections.synchronizedMap(IdentityHashMap())
 
     override suspend fun open(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
+        // #1085 (freeze cause F1, secondary): `File.exists()` is a synchronous
+        // disk stat. This suspend fn can be driven on the Main dispatcher on the
+        // hot session-open/retry path, so probe the key file off-main.
         val file = File(keyPath)
-        if (!file.exists()) return null
+        val exists = withContext(Dispatchers.IO) { file.exists() }
+        if (!exists) return null
         val target = SshLeaseTarget(
             leaseKey = SshLeaseKey(
                 host = host.hostname,

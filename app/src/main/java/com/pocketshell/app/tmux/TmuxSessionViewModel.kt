@@ -5664,6 +5664,33 @@ public class TmuxSessionViewModel @Inject constructor(
             ),
         )
         markSuccessfulAttachForNetworkCoalescing(target, trigger)
+        // Issue #1083 (the ONE residual #874 black-screen structural gap): the
+        // #874/#1004 dropped-Conversation-row re-seed only fired when the SCREEN
+        // happened to re-call [refreshCurrentSessionRecordedKind] after a switch
+        // (TmuxSessionScreen.kt). A cache-restore that does NOT trigger that
+        // screen recomposition left a presumed-agent pane whose row was dropped
+        // (the R3-B 2-null collapse — `restoreCachedRuntime` only restarts rows
+        // that carried a live `detection`) falling through to the always-mounted
+        // raw `TmuxTerminalPager` → the #807 black void, "very hard to force a
+        // redraw". Drive the recorded-kind read from the RESTORE OPERATION itself
+        // so the void close is coupled to the restore, not the screen lifecycle.
+        //
+        // This re-reads `@ps_agent_kind` over the just-restored warm session
+        // (D21 — no new connection) and applies the verdict
+        // ([applyRecordedShellVerdict]), which is the SINGLE re-seed point:
+        //  - a NOT-shell (foreign / agent / re-classified) verdict RE-SEEDS the
+        //    #878 Conversation placeholder for every presumed-agent pane that lost
+        //    its row, closing the void; and
+        //  - a confirmed-shell verdict does NOT re-seed (#894 no-flash invariant),
+        //    so driving this from restore — BEFORE we know the kind — never flashes
+        //    a genuine shell, because the re-seed runs AFTER the verdict resolves.
+        // It is idempotent with the still-live screen-driven path: the screen may
+        // also call [refreshCurrentSessionRecordedKind], but
+        // [seedPresumedAgentPlaceholder] self-gates on `containsKey`, so a row
+        // already (re-)seeded is never double-seeded. A failed read degrades to a
+        // null (not-shell) verdict, which still re-seeds — the void is closed even
+        // when the remote read cannot resolve.
+        refreshCurrentSessionRecordedKind()
     }
 
     private fun launchCachedRuntimeRemoteRefresh(
@@ -8817,6 +8844,31 @@ public class TmuxSessionViewModel @Inject constructor(
         bindProjectRootsForHost(hostId)
         setConnectionState(ConnectionState.Live(host, port, user))
         maybeRefreshControlClientSize()
+    }
+
+    /**
+     * Issue #1083 test seam: drive the exact PARK→RESTORE round trip a session
+     * switch performs — [deactivateCurrentRuntimeToCache] (the switch-away leg
+     * that parks the active runtime, capturing its current
+     * `agentConversations`) followed by [restoreCachedRuntime] (the switch-back
+     * leg). This reproduces a cache-restore WITHOUT routing through any screen
+     * recomposition / [refreshCurrentSessionRecordedKind] call, so a test can
+     * assert the void-closing re-seed now fires from the restore operation
+     * itself. The parked runtime keeps its own [SshSession]; the restore re-reads
+     * `@ps_agent_kind` over it, exactly as production does on a warm switch-back.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun parkAndRestoreActiveRuntimeForTest(
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.FastSwitch,
+    ) {
+        val target = activeTarget ?: error("#1083 test seam: no active runtime to park")
+        // Park the active runtime into the cache (the switch-away leg). The
+        // returned list is the EVICTED runtimes; the just-parked runtime stays in
+        // the cache under `target.toRuntimeKey()` and is NOT closed here.
+        deactivateCurrentRuntimeToCache()
+        val runtime = runtimeCache.activate(target.toRuntimeKey()).runtime
+            ?: error("#1083 test seam: parked runtime missing from cache after deactivate")
+        restoreCachedRuntime(target = target, runtime = runtime, trigger = trigger)
     }
 
     /**

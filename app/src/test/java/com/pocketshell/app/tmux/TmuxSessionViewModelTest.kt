@@ -9429,6 +9429,142 @@ class TmuxSessionViewModelTest {
         assertEquals("#815: the live detection is preserved", AgentKind.Codex, after.detection?.agent)
     }
 
+    // ─── Issue #1083: the cache-restore re-seed must fire from the RESTORE ──────
+    // OPERATION ITSELF, not only when the SCREEN re-calls
+    // refreshCurrentSessionRecordedKind. The #874/#1004 fix re-seeds the dropped
+    // Conversation row inside applyRecordedShellVerdict(isShell=false), but that
+    // verdict only resolved when the screen happened to re-read the recorded kind
+    // after a switch. A cache-restore that did NOT trigger that screen
+    // recomposition left the presumed-agent pane rowless → the #807 raw-Terminal
+    // black void ("switch stays black, very hard to force a redraw"). The fix
+    // drives refreshCurrentSessionRecordedKind() from restoreCachedRuntime, so the
+    // void close is coupled to the restore. These two tests are the G10/G2 gate:
+    // (1) restore alone re-seeds (RED on base — no re-seed without a screen call),
+    // (2) restore + a later screen read does NOT double-seed (the containsKey gate).
+
+    private fun TmuxSessionViewModel.connectPresumedAgentPaneWithDroppedRowForTest(
+        session: FakeSshSession,
+    ) {
+        // Default open-time tab = Conversation (the #878 black-screen cure) so a
+        // presumed-agent pane seeds the "Loading conversation…" placeholder.
+        setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Conversation,
+        )
+        replaceClientForTest(
+            hostId = 42L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "shell",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun cacheRestoreReseedsDroppedRowWithoutScreenRefresh() = runTest(scheduler) {
+        // G10 reproduce-first: a presumed-agent pane whose Conversation row was
+        // dropped (the R3-B 2-null collapse), then PARKED and RESTORED on a warm
+        // switch-back, must have its placeholder re-seeded by the restore itself —
+        // WITHOUT the test (or screen) calling refreshCurrentSessionRecordedKind.
+        // The restored session's `@ps_agent_kind` reads empty (foreign / not a
+        // confirmed shell), so the verdict resolves NOT-shell and the re-seed
+        // fires. RED on base (restore never read the recorded kind → row stays
+        // null → raw Terminal void); GREEN with the fix.
+        val session = FakeSshSession(recordedKindOutput = "")
+        val vm = newVm()
+        vm.connectPresumedAgentPaneWithDroppedRowForTest(session)
+        runCurrent()
+        // The R3-B collapse drops the auto-seeded row → the runtime parks with NO
+        // conversation row for this pane.
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+        assertNull(
+            "precondition: the presumed-agent pane has no conversation row before the switch",
+            vm.agentConversations.value["%0"],
+        )
+
+        // The warm switch-away/switch-back round trip. NO screen
+        // refreshCurrentSessionRecordedKind is called by the test.
+        vm.parkAndRestoreActiveRuntimeForTest()
+        awaitCondition { vm.agentConversations.value["%0"] != null }
+
+        val row = vm.agentConversations.value["%0"]
+        assertNotNull(
+            "#1083: a cache-restore re-seeds the dropped presumed-agent pane's " +
+                "Conversation placeholder from the restore operation itself — no " +
+                "residual black Terminal void, even without a screen refresh",
+            row,
+        )
+        assertEquals(
+            "#1083: the re-seed lands on the Conversation surface",
+            SessionTab.Conversation,
+            row!!.selectedTab,
+        )
+        assertNull("#1083: the re-seed is detection-less (the detecting placeholder)", row.detection)
+        assertEquals("#1083: the re-seed is in the Loading state", ConversationLoadState.Loading, row.loadState)
+        assertTrue("#1083: the re-seed is flagged as an auto-seed", row.autoSeededPlaceholder)
+    }
+
+    @Test
+    fun cacheRestoreThenScreenRefreshDoesNotDoubleSeed() = runTest(scheduler) {
+        // G2 class coverage: BOTH the restore-driven path AND the screen-driven
+        // path re-seed, and the two together must NOT double-seed — the
+        // restore's re-seed must survive a subsequent screen
+        // refreshCurrentSessionRecordedKind unchanged (the seedPresumedAgentPlaceholder
+        // `containsKey` gate). A double-seed would clobber the row or re-create it.
+        val session = FakeSshSession(recordedKindOutput = "")
+        val vm = newVm()
+        vm.connectPresumedAgentPaneWithDroppedRowForTest(session)
+        runCurrent()
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+
+        // Restore-driven re-seed fires first.
+        vm.parkAndRestoreActiveRuntimeForTest()
+        awaitCondition { vm.agentConversations.value["%0"] != null }
+        val afterRestore = vm.agentConversations.value["%0"]!!
+        assertTrue(
+            "#1083: the restore-driven re-seed produced the auto-seeded placeholder",
+            afterRestore.autoSeededPlaceholder,
+        )
+
+        // The screen now ALSO re-reads the recorded kind (the still-live
+        // screen-driven path). It must be a no-op over the already-seeded row.
+        val kindReadsBefore = session.execCommands.count {
+            it.contains("show-options -v") && it.contains("@ps_agent_kind")
+        }
+        vm.refreshCurrentSessionRecordedKind()
+        awaitCondition {
+            session.execCommands.count {
+                it.contains("show-options -v") && it.contains("@ps_agent_kind")
+            } > kindReadsBefore
+        }
+        runCurrent()
+
+        val afterScreen = vm.agentConversations.value["%0"]!!
+        assertSame(
+            "#1083: the screen-driven re-seed does NOT double-seed — the row " +
+                "re-seeded by the restore is preserved identically (containsKey gate)",
+            afterRestore,
+            afterScreen,
+        )
+    }
+
 
     @Test
     fun confirmedShellPaneSeedGateSuppressesConversationPlaceholder() = runTest(scheduler) {

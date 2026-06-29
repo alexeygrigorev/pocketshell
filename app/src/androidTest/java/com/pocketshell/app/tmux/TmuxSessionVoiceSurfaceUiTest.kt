@@ -599,7 +599,10 @@ class TmuxSessionVoiceSurfaceUiTest {
     @Test
     fun tmuxHotkeysPanelExposesEmergencyKeysAndRestoredCtrlB() {
         // Issue #784: Esc / ^C / ^D plus the restored ^B (tmux prefix) all show
-        // as direct, tappable buttons — no `…` overflow, no lone Ctrl.
+        // as direct, tappable buttons — no `…` overflow. (Issue #1091 added a
+        // sticky `Ctrl` MODIFIER for the general `Ctrl+<letter>` escape hatch; the
+        // direct combos below are unchanged and this test does not assert against
+        // the modifier.)
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {

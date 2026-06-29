@@ -39,6 +39,7 @@ import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.ManualKindWriter
 import com.pocketshell.app.projects.ProfilesResult
 import com.pocketshell.app.projects.RemoteProfile
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import com.pocketshell.app.share.FilenameSanitiser
@@ -15446,11 +15447,37 @@ public class TmuxSessionViewModel @Inject constructor(
      * choose the cursor-key encoding is more correct than us baking
      * ESC[A in here.
      */
+    /**
+     * Issue #1091: the sticky `Ctrl` modifier state, surfaced so the hotkeys
+     * panel can render the active (accent) treatment. `Off` -> not armed;
+     * `OneShot` -> the next composable key is sent as a control char then the
+     * modifier auto-releases; `Locked` -> stays armed until tapped off.
+     */
+    private val _ctrlModifier = MutableStateFlow(KeyModifierState.Off)
+    public val ctrlModifier: StateFlow<KeyModifierState> = _ctrlModifier.asStateFlow()
+
+    /**
+     * Issue #1091: cycle the sticky `Ctrl` modifier on each tap of the `Ctrl`
+     * key — `Off -> OneShot -> Locked -> Off`. A single tap arms it for the
+     * next key; a second consecutive tap (the "double tap") locks it on; a
+     * third tap releases it. Matches the `docs/input-methods.md` key-bar
+     * modifier spec.
+     */
+    public fun onCtrlModifierTap() {
+        _ctrlModifier.value = when (_ctrlModifier.value) {
+            KeyModifierState.Off -> KeyModifierState.OneShot
+            KeyModifierState.OneShot -> KeyModifierState.Locked
+            KeyModifierState.Locked -> KeyModifierState.Off
+        }
+    }
+
     public fun onKeyBarKey(paneId: String, label: String) {
-        // Issue #784: every hotkey is now a DIRECT button (the lone `Ctrl`
-        // modifier + its armed-chord FSM were removed — the maintainer's "lone
-        // Ctrl does nothing useful" complaint). The label is mapped straight to
-        // its control byte (`send-keys -H` overlay) or tmux named key below.
+        // Issue #1091: the lone-`Ctrl` modifier is BACK (it was removed in #784)
+        // — but now as a real sticky modifier that composes with the panel's
+        // LETTERS section so the maintainer can send `Ctrl+<any key>` (the
+        // `nano`-trapped report). Direct one-tap control buttons (incl. the
+        // newly-filled `^X`/`^O`/`^K`/…) stay too; both routes go through the
+        // same `send-keys -H` overlay below — no new transport.
         DiagnosticEvents.record(
             "action",
             "shortcut_sent",
@@ -15458,6 +15485,31 @@ public class TmuxSessionViewModel @Inject constructor(
             "paneId" to paneId,
             "key" to label,
         )
+
+        // Issue #1091: tapping the `Ctrl` modifier only cycles the sticky state
+        // (no byte is sent — it decorates the NEXT key), like the key-bar spec.
+        if (label == TmuxHotkeyCtrlModifierLabel) {
+            onCtrlModifierTap()
+            return
+        }
+
+        // Issue #1091: a single composable char (the LETTERS section, a–z and
+        // the caret-range symbols). With `Ctrl` armed it is sent as its control
+        // byte (`Ctrl+<letter>`); with `Ctrl` off it is typed literally. A
+        // OneShot modifier auto-releases after the key; Locked persists.
+        val composable = singleControlComposableChar(label)
+        if (composable != null) {
+            val armed = _ctrlModifier.value
+            if (armed != KeyModifierState.Off) {
+                controlByteForChar(composable)?.let { sendControlInputToPane(paneId, it) }
+                if (armed == KeyModifierState.OneShot) {
+                    _ctrlModifier.value = KeyModifierState.Off
+                }
+            } else {
+                writeInputToPane(paneId, composable.toString().toByteArray(Charsets.UTF_8))
+            }
+            return
+        }
 
         val named = when (label) {
             "Esc" -> "Escape"
@@ -15536,6 +15588,37 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             "^X", "Ctrl-X" -> {
                 sendControlInputToPane(paneId, CtrlXByte)
+                null
+            }
+            // Issue #1091: the control keys nano (and many TUIs) need that were
+            // missing — `^G` `^J` `^K` `^T` `^U` `^W` `^\`. Direct one-tap
+            // buttons routed through the same `send-keys -H` overlay path.
+            "^G", "Ctrl-G" -> {
+                sendControlInputToPane(paneId, CtrlGByte)
+                null
+            }
+            "^J", "Ctrl-J" -> {
+                sendControlInputToPane(paneId, CtrlJByte)
+                null
+            }
+            "^K", "Ctrl-K" -> {
+                sendControlInputToPane(paneId, CtrlKByte)
+                null
+            }
+            "^T", "Ctrl-T" -> {
+                sendControlInputToPane(paneId, CtrlTByte)
+                null
+            }
+            "^U", "Ctrl-U" -> {
+                sendControlInputToPane(paneId, CtrlUByte)
+                null
+            }
+            "^W", "Ctrl-W" -> {
+                sendControlInputToPane(paneId, CtrlWByte)
+                null
+            }
+            "^\\", "Ctrl-\\" -> {
+                sendControlInputToPane(paneId, CtrlBackslashByte)
                 null
             }
             // Issue #784: clean arrow glyphs (← ↑ ↓ →) replace the old
@@ -17487,6 +17570,48 @@ internal const val CtrlRByte: Int = 0x12
 internal const val CtrlZByte: Int = 0x1A
 internal const val CtrlOByte: Int = 0x0F
 internal const val CtrlXByte: Int = 0x18
+// Issue #1091: the control keys nano (and many TUIs) need that were missing
+// from the hotkey set — `^G` Help, `^J` Justify/newline, `^K` Cut, `^T`
+// Execute, `^U` cut-to-start, `^W` Where-Is, `^\` Replace. Each is
+// `(uppercase letter - 0x40)`; `^\` is 0x1C.
+internal const val CtrlGByte: Int = 0x07
+internal const val CtrlJByte: Int = 0x0A
+internal const val CtrlKByte: Int = 0x0B
+internal const val CtrlTByte: Int = 0x14
+internal const val CtrlUByte: Int = 0x15
+internal const val CtrlWByte: Int = 0x17
+internal const val CtrlBackslashByte: Int = 0x1C
+
+/**
+ * Issue #1091: control byte for a single printable [c] composed with the
+ * sticky `Ctrl` modifier. Letters map to `0x01..0x1A` (`Ctrl+A`..`Ctrl+Z`);
+ * the caret-range symbols map to `0x1B..0x1F` and `Ctrl+@`/`Ctrl+Space` to
+ * `0x00`. Returns null for a char that has no control encoding. Mirrors the
+ * canonical xterm/VT control-char table so the byte the terminal receives is
+ * exactly what a hardware `Ctrl` chord would produce.
+ */
+internal fun controlByteForChar(c: Char): Int? {
+    val upper = c.uppercaseChar()
+    return when (upper) {
+        in 'A'..'Z' -> upper.code - 0x40
+        '@', ' ' -> 0x00
+        '[' -> 0x1B
+        '\\' -> 0x1C
+        ']' -> 0x1D
+        '^' -> 0x1E
+        '_' -> 0x1F
+        else -> null
+    }
+}
+
+/**
+ * Issue #1091: the single-character key label (the panel's LETTERS section)
+ * that the sticky `Ctrl` modifier composes with, or null when [label] is not a
+ * single control-composable char (e.g. multi-char `Esc`/`^X`, or an arrow
+ * glyph).
+ */
+internal fun singleControlComposableChar(label: String): Char? =
+    label.singleOrNull()?.takeIf { controlByteForChar(it) != null }
 
 /**
  * Issue #215: ceiling on the synchronous `detach-client` round-trip the

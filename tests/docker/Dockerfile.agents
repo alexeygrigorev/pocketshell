@@ -5,7 +5,11 @@
 # credentials. Use it for local emulator + Docker smoke tests only.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
+# Issue #1091: `nano` is the maintainer's real dogfood TUI (he was trapped in
+# GNU nano, unable to save/exit from PocketShell). The connected nano save/exit
+# journey (`TmuxKeyBarCtrlComboE2eTest`) opens a real nano buffer and drives
+# `^O`/`^X` from the hotkeys panel, so the fixture must ship a real `nano`.
+RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git nano \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \

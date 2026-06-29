@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -87,6 +90,16 @@ val HotkeyLabelTruncatedKey: SemanticsPropertyKey<Boolean> =
     SemanticsPropertyKey("HotkeyLabelTruncated")
 var SemanticsPropertyReceiver.hotkeyLabelTruncated: Boolean by HotkeyLabelTruncatedKey
 
+/**
+ * Issue #1091: test-readable flag, `true` on a `KeyKind.Modifier` slot that is
+ * currently armed (one-shot OR locked) — i.e. rendering the active accent
+ * treatment. A connected test reads it off the `Ctrl` key node to assert the
+ * sticky modifier's active state is visible. Render-only; no behaviour.
+ */
+val HotkeyModifierActiveKey: SemanticsPropertyKey<Boolean> =
+    SemanticsPropertyKey("HotkeyModifierActive")
+var SemanticsPropertyReceiver.hotkeyModifierActive: Boolean by HotkeyModifierActiveKey
+
 @Composable
 fun TerminalHotkeysPanel(
     sections: List<HotkeySection>,
@@ -94,11 +107,21 @@ fun TerminalHotkeysPanel(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    // Issue #1091: the sticky `Ctrl` modifier state. A `KeyKind.Modifier` slot
+    // renders the active (accent) treatment when this is not `Off`, mirroring
+    // the [KeyBar] modifier visual. The single shared state is enough because
+    // the panel has exactly one modifier (`Ctrl`).
+    modifierState: KeyModifierState = KeyModifierState.Off,
 ) {
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
+            // Issue #1091: the key set grew (filled CTRL COMBOS + the a–z
+            // LETTERS grid for the sticky Ctrl), so scroll the panel body — on a
+            // short device the modal sheet would otherwise clip the lower
+            // sections (ARROWS / LETTERS) and leave keys unreachable.
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp)
             .padding(bottom = 8.dp)
             .semantics { contentDescription = "Terminal hotkeys" },
@@ -117,6 +140,7 @@ fun TerminalHotkeysPanel(
                 section = section,
                 onKey = onKey,
                 enabled = enabled,
+                modifierState = modifierState,
             )
         }
     }
@@ -127,6 +151,7 @@ private fun HotkeySectionGrid(
     section: HotkeySection,
     onKey: (KeyBinding) -> Unit,
     enabled: Boolean,
+    modifierState: KeyModifierState,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
@@ -145,6 +170,10 @@ private fun HotkeySectionGrid(
                     HotkeySlot(
                         binding = binding,
                         enabled = enabled,
+                        // Issue #1091: a modifier slot (the sticky `Ctrl`)
+                        // renders active when armed; non-modifier keys never do.
+                        isActive = binding.kind == KeyKind.Modifier &&
+                            modifierState != KeyModifierState.Off,
                         onTap = { onKey(binding) },
                         modifier = Modifier.weight(1f),
                     )
@@ -164,14 +193,24 @@ private fun HotkeySectionGrid(
 private fun HotkeySlot(
     binding: KeyBinding,
     enabled: Boolean,
+    isActive: Boolean,
     onTap: () -> Unit,
     modifier: Modifier,
 ) {
+    // Issue #1091: an armed sticky modifier (`Ctrl`) renders the accent
+    // treatment — accent foreground, accent-soft fill, accent-dim border —
+    // exactly like the [KeyBar] active modifier, so the active state is
+    // visible.
     val textColor: Color = when {
         !enabled -> PocketShellColors.TextMuted
+        isActive -> PocketShellColors.Accent
         binding.kind == KeyKind.Arrow -> PocketShellColors.TextSecondary
         else -> PocketShellColors.Text
     }
+    val backgroundColor: Color =
+        if (isActive) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev
+    val borderColor: Color =
+        if (isActive) PocketShellColors.AccentDim else PocketShellColors.Border
     // Tracks whether this key's label was truncated (glyph clipped) at the slot's
     // measured width — exposed via [hotkeyLabelTruncated] for the #755 regression
     // guard. Render-only.
@@ -179,17 +218,23 @@ private fun HotkeySlot(
     Box(
         modifier = modifier
             .height(44.dp)
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .background(backgroundColor, RoundedCornerShape(8.dp))
             .border(
-                border = BorderStroke(1.dp, PocketShellColors.Border),
+                border = BorderStroke(1.dp, borderColor),
                 shape = RoundedCornerShape(8.dp),
             )
             .let { if (enabled) it.clickable(role = Role.Button, onClick = onTap) else it }
             // Merge the label Text into this clickable node so a test can match
             // a key by "label text + click action" (disambiguating the panel key
             // from identically-labelled terminal content). Also publish the
-            // truncation flag so the #755 guard can read it off this node.
-            .semantics(mergeDescendants = true) { hotkeyLabelTruncated = labelTruncated }
+            // truncation flag so the #755 guard can read it off this node, and
+            // the modifier-active flag (#1091) for the sticky-Ctrl accent guard.
+            .semantics(mergeDescendants = true) {
+                hotkeyLabelTruncated = labelTruncated
+                if (binding.kind == KeyKind.Modifier) {
+                    hotkeyModifierActive = isActive
+                }
+            }
             .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {

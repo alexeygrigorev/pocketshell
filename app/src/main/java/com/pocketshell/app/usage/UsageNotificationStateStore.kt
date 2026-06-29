@@ -1,7 +1,16 @@
 package com.pocketshell.app.usage
 
 import android.content.Context
+import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
 import com.pocketshell.core.usage.UsageThresholdState
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 
 /**
  * Durable record of which usage warning crossings have already been
@@ -84,12 +93,62 @@ public data class UsageNotificationKey(
  * [android.content.SharedPreferences] file. Deliberately separate from
  * user-facing settings (`app_settings`) so it never appears in the Settings
  * UI or backup/restore of user preferences.
+ *
+ * ## Off-main construction (issue #1087, freeze cause F6 class sweep)
+ *
+ * This store is built during `App.onCreate` Hilt injection (the `@Singleton`
+ * `UsageNotifier` graph, via `UsageScheduler`) — on the Main thread, before
+ * the first frame. `getSharedPreferences(...)` does a synchronous first-touch
+ * disk read, so building it eagerly in the constructor blocked Main during
+ * cold launch (the identical class StrictMode flagged for
+ * `LastSessionStore.<init>`; built before `StrictModeInstaller` arms so it is
+ * not in the log but is the same Main-thread launch cost). The build is moved
+ * off-main onto [ioDispatcher] (eager [async]); the getter warms-or-awaits.
+ * Reads run off-main from the usage scheduler IO loop, so the cache is warm
+ * before any read. Hard-cut (D22): no synchronous on-Main fallback.
  */
-public class SharedPreferencesUsageNotificationStateStore(
+public class SharedPreferencesUsageNotificationStateStore @JvmOverloads constructor(
     context: Context,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : UsageNotificationStateStore {
-    private val prefs =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val appContext: Context = context.applicationContext
+
+    @Volatile
+    private var cachedPrefs: SharedPreferences? = null
+
+    @Volatile
+    private var prefsBuildThreadName: String? = null
+
+    private val warmUpScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+    private val prefsDeferred: Deferred<SharedPreferences> = warmUpScope.async {
+        prefsBuildThreadName = currentPhysicalThreadName()
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .also { cachedPrefs = it }
+    }
+
+    private val prefs: SharedPreferences
+        get() = cachedPrefs ?: runBlocking { prefsDeferred.await() }
+
+    /**
+     * Test-only: block until the off-main build completes and return the name
+     * of the thread it ran on (#1087). Proves the prefs-file build did NOT run
+     * on the constructing/Main thread.
+     */
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String {
+        runBlocking { prefsDeferred.await() }
+        return prefsBuildThreadName
+            ?: error("prefs build thread was not recorded")
+    }
+
+    // The build runs inside a coroutine, whose framework decorates the thread
+    // name with a " @coroutine#N" suffix. Strip it so the recorded value is the
+    // PHYSICAL thread name — otherwise an on-Main build (e.g. the un-fixed base)
+    // would still differ from the captured constructing name by the suffix alone,
+    // giving a false off-main pass (#1087 G6: keep the assertion load-bearing).
+    private fun currentPhysicalThreadName(): String =
+        Thread.currentThread().name.substringBefore(" @coroutine")
 
     override fun notifiedKeys(): Set<UsageNotificationKey> =
         prefs.getStringSet(KEY_NOTIFIED, emptySet())

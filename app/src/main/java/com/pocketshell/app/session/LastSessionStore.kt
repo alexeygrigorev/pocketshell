@@ -3,8 +3,16 @@ package com.pocketshell.app.session
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.nav.AppDestination
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -39,14 +47,81 @@ import javax.inject.Singleton
  *
  * Singleton scope so the activity and any future consumer share one
  * instance over the same prefs file.
+ *
+ * ## Off-main construction (issue #1087, freeze cause F6)
+ *
+ * `getSharedPreferences(...)` does a synchronous disk read the first time a
+ * prefs file is touched in a process. Building it eagerly in the constructor
+ * ran that read **on the Main thread** — StrictMode captured a 69–117ms
+ * `DiskReadViolation` in `LastSessionStore.<init>` during cold-launch Hilt
+ * injection (`MainActivity.onCreate` → `injectMainActivity2`). It was the next
+ * dominant cold-launch stall after the F1 keystore (#1085) and F5
+ * `SystemSurfaceStateStore` (#1086) blocks were fixed.
+ *
+ * The fix mirrors F5's [com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore]:
+ * the constructor never reads the prefs file on the calling thread. It only
+ * *kicks off* the build on [ioDispatcher] (an eager [async]) and returns
+ * immediately, so `<init>` never blocks the constructing (Main) thread. The
+ * first read warms-or-awaits that background result; on a fresh cold launch
+ * [read] is never called (only on the process-death resume path), so the
+ * background build is virtually always warm before any read. Hard-cut (D22):
+ * there is no synchronous on-Main fallback.
  */
 @Singleton
-class LastSessionStore @Inject constructor(
-    @ApplicationContext context: Context,
+class LastSessionStore @VisibleForTesting internal constructor(
+    context: Context,
+    ioDispatcher: CoroutineDispatcher,
 ) {
 
-    private val prefs: SharedPreferences = context.applicationContext
-        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    @Inject
+    constructor(@ApplicationContext context: Context) : this(context, Dispatchers.IO)
+
+    private val appContext: Context = context.applicationContext
+
+    // Once the background build completes, the result is cached here so reads
+    // never re-enter runBlocking. @Volatile: written on [ioDispatcher], read
+    // from any consumer thread.
+    @Volatile
+    private var cachedPrefs: SharedPreferences? = null
+
+    // Test seam (#1087): records the name of the thread the prefs-file build
+    // actually ran on, so the regression test can hard-assert it is NOT the
+    // constructing/Main thread. Written on [ioDispatcher].
+    @Volatile
+    private var prefsBuildThreadName: String? = null
+
+    // Eager async: the build STARTS at construction but on a background thread.
+    // `async` (DEFAULT start) dispatches immediately and returns without
+    // blocking the caller.
+    private val warmUpScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+    private val prefsDeferred: Deferred<SharedPreferences> = warmUpScope.async {
+        prefsBuildThreadName = currentPhysicalThreadName()
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .also { cachedPrefs = it }
+    }
+
+    private val prefs: SharedPreferences
+        get() = cachedPrefs ?: runBlocking { prefsDeferred.await() }
+
+    /**
+     * Test-only: block until the off-main build completes and return the name
+     * of the thread it ran on. Lets the regression test prove the prefs-file
+     * construction did NOT happen on the constructing/Main thread (#1087).
+     */
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String {
+        runBlocking { prefsDeferred.await() }
+        return prefsBuildThreadName
+            ?: error("prefs build thread was not recorded")
+    }
+
+    // The build runs inside a coroutine, whose framework decorates the thread
+    // name with a " @coroutine#N" suffix. Strip it so the recorded value is the
+    // PHYSICAL thread name — otherwise an on-Main build (e.g. the un-fixed base)
+    // would still differ from the captured constructing name by the suffix alone,
+    // giving a false off-main pass (#1087 G6: keep the assertion load-bearing).
+    private fun currentPhysicalThreadName(): String =
+        Thread.currentThread().name.substringBefore(" @coroutine")
 
     /**
      * Issue #834: identity of the most recently killed session, remembered in

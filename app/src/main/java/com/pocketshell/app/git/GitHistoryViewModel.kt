@@ -2,6 +2,7 @@ package com.pocketshell.app.git
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.AppTeardownScope
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -12,10 +13,10 @@ import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -143,6 +144,38 @@ class GitHistoryViewModel @Inject constructor(
     private var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private var bestEffortProbeTimeoutMs: Long = BEST_EFFORT_PROBE_TIMEOUT_MS
     private var createIssueTimeoutMs: Long = CREATE_ISSUE_TIMEOUT_MS
+
+    /**
+     * Issue #1085 (F2): the application-scoped coroutine the warm-lease
+     * refcount-- is handed to so [onCleared] never parks the Main thread on a
+     * wedged transport close. Defaults to the process singleton
+     * [AppTeardownScope.scope]; a unit test pins it via
+     * [setTeardownScopeForTest] to observe the off-Main hand-off
+     * deterministically.
+     */
+    private var teardownScope: CoroutineScope = AppTeardownScope.scope
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setTeardownScopeForTest(scope: CoroutineScope) {
+        teardownScope = scope
+    }
+
+    /**
+     * Test seam: drive the protected [onCleared] lifecycle event (the
+     * nav-scoped back/navigate-away teardown) without booting an Android
+     * lifecycle owner. Mirrors [com.pocketshell.app.tmux.TmuxSessionViewModel]'s
+     * `clearForTest`.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearForTest() {
+        onCleared()
+    }
+
+    /** Test seam (#1085 F2): seed the held warm lease the teardown releases. */
+    @androidx.annotation.VisibleForTesting
+    internal fun setLeaseForTest(lease: SshLease?) {
+        this.lease = lease
+    }
 
     /**
      * Bind host credentials + the project directory and load it. Idempotent for
@@ -352,17 +385,24 @@ class GitHistoryViewModel @Inject constructor(
     override fun onCleared() {
         loadJob?.cancel()
         createJob?.cancel()
-        // Issue #699: refcount-- the warm transport SYNCHRONOUSLY before the VM
-        // dies. A viewModelScope.launch here would race the framework's
-        // post-onCleared scope cancellation and could leak the refcount, so we
-        // release on a bounded IO hop — mirroring TmuxSessionViewModel's
-        // teardown. Releasing only decrements the pool refcount; the warm
+        // Issue #1085 (F2): refcount-- the warm transport OFF the Main thread.
+        // This screen's VM is `hiltViewModel()` nav-scoped, so `onCleared` fires
+        // on an ordinary foreground back/navigate-away ON the Main thread. The
+        // previous `runBlocking(Dispatchers.IO){ withTimeoutOrNull(2000){
+        // release() } }` parked Main for up to the full ceiling on a half-open
+        // transport (post WIFI↔cellular handoff) — a multi-second UI freeze
+        // backing out of git history. We instead hand the release to the
+        // application-scoped [teardownScope] (it OUTLIVES this VM and is never
+        // cancelled, so the refcount is still decremented to completion — no
+        // race with the framework's post-onCleared scope cancellation that the
+        // #699 comment worried about, because this scope is NOT viewModelScope,
+        // and no leak). Releasing only decrements the pool refcount; the warm
         // transport itself stays pooled (idle-TTL) for the next surface.
         val toRelease = lease
         lease = null
         if (toRelease != null) {
-            runCatching {
-                runBlocking(Dispatchers.IO + NonCancellable) {
+            teardownScope.launch {
+                runCatching {
                     withTimeoutOrNull(LEASE_RELEASE_TIMEOUT_MS) { toRelease.release() }
                 }
             }

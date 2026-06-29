@@ -12,14 +12,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Issue #710 regression: the VM-clear park path
- * ([TmuxSessionViewModel.closeCachedRuntimesBlocking]) calls
- * [CachedTmuxRuntime.closeCachedRuntime] inside `runBlocking` ON THE MAIN
- * THREAD. A pane producer/input/agent job wedged in a non-cooperative `-CC`
- * socket read never honours cancellation, so an unbounded
- * `cancelAndJoin()` (or `NonCancellable` `lease.release()`) would freeze the
- * main thread indefinitely — activity never DESTROYED, real-device freeze on
- * background-mid-rapid-switch.
+ * Issue #710 regression: the VM-clear path
+ * ([TmuxSessionViewModel.closeCachedRuntimesBounded], handed off the Main
+ * thread to the application-scoped teardown scope per #1085 F2) calls
+ * [CachedTmuxRuntime.closeCachedRuntime]. A pane producer/input/agent job
+ * wedged in a non-cooperative `-CC` socket read never honours cancellation, so
+ * an unbounded `cancelAndJoin()` (or `NonCancellable` `lease.release()`) would
+ * hang the teardown indefinitely — the lease/runtime never released, freezing
+ * background-mid-rapid-switch. This test pins the per-step bound inside
+ * [CachedTmuxRuntime.closeCachedRuntime] itself (independent of where it runs).
  *
  * These tests deliberately wedge each job slot (producer / input / agent) in a
  * non-cancellable infinite suspension and assert `closeCachedRuntime` returns

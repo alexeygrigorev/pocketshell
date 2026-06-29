@@ -11,19 +11,31 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.Continuation
 import kotlin.math.max
+import kotlin.system.measureTimeMillis
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecurringJobsViewModelTest {
@@ -39,6 +51,10 @@ class RecurringJobsViewModelTest {
     val mainDispatcherRule = MainDispatcherRule(StandardTestDispatcher(scheduler))
 
     private val remoteSource = PocketshellJobsRemoteSource(RecurringJobsParser())
+
+    // Issue #1085 (F2): the off-Main hand-off must let onCleared return within a
+    // small budget; on base the wedged release parks the calling thread ~1.8s.
+    private val NAV_TEARDOWN_PARK_BUDGET_MS = 300L
 
     @Test
     fun loadConnectsAndFetchesJobsForSession() = runTest(scheduler) {
@@ -305,6 +321,101 @@ class RecurringJobsViewModelTest {
     }
 
     /**
+     * Issue #1085 (F2) reproduce-first. This screen's VM is `hiltViewModel()`
+     * nav-scoped, so `onCleared` fires on an ordinary foreground back/
+     * navigate-away ON the Main thread. On a half-open transport (post
+     * WIFI↔cellular handoff) `lease.release()` does not return fast — it rides
+     * its full ceiling — so releasing it synchronously parks the Main thread for
+     * multiple seconds (the maintainer's "keeps freezing" backing out of a
+     * screen).
+     *
+     * RED on base: `onCleared` ran
+     * `runBlocking(Dispatchers.IO){ withTimeoutOrNull(2000){ release() } }`, so
+     * `clearForTest()` parks the CALLING (Main) thread for the whole wedge
+     * (~1.8s) — the elapsed assertion fails.
+     *
+     * GREEN with the fix: the release is handed to the application-scoped
+     * [teardownScope], so `onCleared` returns immediately (elapsed well under
+     * the budget) AND the release still runs to COMPLETION off-Main (the latch
+     * fires) — no leak, no Main park.
+     */
+    @Test
+    fun onClearedReleasesWarmLeaseOffMainAndNeverParksTheCallingThread() = runTest(scheduler) {
+        val released = CountDownLatch(1)
+        // A wedge that EXCEEDS the 2s release ceiling so the bound is provably
+        // defeated on base: a non-suspending blocking park (mirroring a wedged
+        // half-open socket close) a coroutine timeout cannot interrupt.
+        val wedgeMs = 1_800L
+        val session = FakeSshSession(
+            pathAware("pocketshell jobs list --session 'codex'") to listOutput(id = 1, sessionName = "codex"),
+        )
+        val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val viewModel = RecurringJobsViewModel(
+            remoteSource = remoteSource,
+            connector = WedgedLeaseConnector(session, wedgeMs) { released.countDown() },
+        )
+        viewModel.setTeardownScopeForTest(teardownScope)
+        try {
+            viewModel.load(
+                hostId = 1L,
+                hostName = "Lab",
+                hostname = "lab.local",
+                port = 22,
+                username = "alexey",
+                keyPath = "/tmp/key",
+                passphrase = null,
+                sessionName = "codex",
+            )
+            advanceUntilIdle()
+            // The warm lease is now held — the next teardown must release it.
+
+            val elapsedMs = measureTimeMillis { viewModel.clearForTest() }
+
+            assertTrue(
+                "onCleared parked the calling (Main) thread for ${elapsedMs}ms releasing a " +
+                    "wedged lease — the #1085 F2 ANR. The release must be handed to the " +
+                    "application-scoped teardown scope so onCleared returns immediately.",
+                elapsedMs < NAV_TEARDOWN_PARK_BUDGET_MS,
+            )
+            assertTrue(
+                "the warm-lease refcount-- must still run to COMPLETION off the Main thread " +
+                    "(no leak) — the app-scoped release never fired.",
+                released.await(8, TimeUnit.SECONDS),
+            )
+        } finally {
+            // Issue #1085 (F2) test isolation: JOIN the launched teardown
+            // coroutine to FULL completion before the test ends, then cancel.
+            // The latch fires mid-coroutine (right after the wedge's
+            // `Thread.sleep`), so awaiting it alone can let the real-IO
+            // coroutine finish unwinding after `runTest`/`resetMain`. Joining
+            // the scope's children makes tear-down fully quiescent so nothing
+            // touches Main concurrently with the next class's `setMain`.
+            runBlocking {
+                withTimeoutOrNull(8_000) {
+                    teardownScope.coroutineContext.job.children.forEach { it.join() }
+                }
+            }
+            teardownScope.cancel()
+        }
+    }
+
+    /**
+     * A connector whose lease release WEDGES — its [SshLease.release] blocks the
+     * calling thread for [wedgeMs] (a non-suspending park, like a half-open
+     * socket close that a coroutine timeout cannot interrupt).
+     */
+    private class WedgedLeaseConnector(
+        private val session: SshSession,
+        private val wedgeMs: Long,
+        private val onReleased: () -> Unit,
+    ) : RecurringJobsViewModel.RecurringJobsSshConnector {
+        override suspend fun acquire(target: RecurringJobsViewModel.Target): Result<SshLease> =
+            Result.success(
+                wedgedLeaseForTest(target.toLeaseTarget().leaseKey, session, wedgeMs, onReleased),
+            )
+    }
+
+    /**
      * Build a VM whose connector borrows from a REAL [SshLeaseManager] wrapping
      * [connector]. This exercises the actual #699 warm-lease path: acquire →
      * reuse → release, so `connector.connectCount` proves the screen rides ONE
@@ -455,4 +566,27 @@ class RecurringJobsViewModelTest {
     // real PATH-robust invocation (issue #484).
     private fun pathAware(command: String): String =
         PocketshellJobsRemoteSource.pathAwareCommand(command)
+}
+
+/**
+ * Issue #1085 (F2): build an [SshLease] (internal constructor) whose
+ * `releaseAction` blocks the calling thread for [wedgeMs] then signals
+ * [onReleased]. Mirrors the reflection-built `fakeLease` already used in this
+ * suite; the blocking `Thread.sleep` reproduces a wedged transport close whose
+ * bounded ceiling is defeated because a coroutine cancel cannot unpark a parked
+ * thread. Top-level so the static nested [WedgedLeaseConnector] can call it.
+ */
+private fun wedgedLeaseForTest(
+    key: SshLeaseKey,
+    session: SshSession,
+    wedgeMs: Long,
+    onReleased: () -> Unit,
+): SshLease {
+    val releaseAction = { _: SshLeaseKey, _: Long, _: Continuation<Unit> ->
+        Thread.sleep(wedgeMs)
+        onReleased()
+        Unit
+    }
+    val constructor = SshLease::class.java.declaredConstructors.single()
+    return constructor.newInstance(key, session, false, 0L, releaseAction) as SshLease
 }

@@ -4307,6 +4307,170 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun issue1078HandoffProbesAndRedialsWhenSocketDeadButPassivelyProvenAlive() = runTest(scheduler) {
+        // Issue #1078 reproduce-first (RED on base): the headline residual cellular
+        // stall. A REAL validated WIFI→CELLULAR handoff arrives while the transport is
+        // only PASSIVELY proven alive — the keepalive's last-inbound-byte age is still
+        // under the ~90s budget (forceTransportProvenAliveForTest=true → the reducer
+        // returns SuppressNetworkTransportProvenAlive) — but the old socket is GENUINELY
+        // DEAD post-handoff (an active probe fails, forceLivenessProbeDeadForTest=true).
+        //
+        // BASE BEHAVIOUR (the bug): the handoff suppress arm rode through on the passive
+        // timestamp ALONE with no active probe, so the session showed Live-but-FROZEN for
+        // up to ~90s until the keepalive budget finally tripped — no redial was ever
+        // scheduled. This test asserts a redial DOES fire, so it FAILS red on base.
+        //
+        // FIXED BEHAVIOUR (#1078, mirroring the #1042 restore arm): the suppress arm now
+        // issues ONE bounded active probe; it does not answer (dead socket), so it redials
+        // promptly via the SAME dead-link handoff authority (scheduleNetworkReconnect)
+        // within the probe budget instead of waiting out the ~90s keepalive.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+        assertTrue(
+            "precondition: a healthy live session before the handoff",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        // Passively proven alive (recent inbound byte) but the active probe is DEAD:
+        // exactly the dead-socket-after-handoff state the keepalive timestamp masks.
+        vm.forceTransportProvenAliveForTest = true
+        vm.forceLivenessProbeDeadForTest = true
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "wifi-cellular-handoff-dead-socket-recent-inbound",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "a handoff whose bounded probe does NOT answer must redial promptly (not freeze " +
+                "Live for ~90s) — #1078",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertEquals(
+            "exactly one fresh-lease redial after the dead-socket handoff probe fails",
+            1,
+            connector.connectCount,
+        )
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+
+        vm.forceTransportProvenAliveForTest = null
+        vm.forceLivenessProbeDeadForTest = false
+    }
+
+    @Test
+    fun issue1078HandoffRidesThroughWhenProbeAnswersOnAliveSocket() = runTest(scheduler) {
+        // Issue #1078 class-coverage (D32 G2): the alive-socket handoff case. Same
+        // WIFI→CELLULAR validated handoff while passively proven alive
+        // (forceTransportProvenAliveForTest=true), but here the bounded active probe
+        // ANSWERS (forceLivenessProbeDeadForTest=false → the FakeTmuxClient refresh-client
+        // round-trips). The genuine ride-through win (#981/#974/#1058) MUST be preserved:
+        // NO spurious redial, the session stays Connected, and the ride-through is
+        // attributed to the probe (probeConfirmed=true) so the pass is not vacuous.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+
+        vm.forceTransportProvenAliveForTest = true
+        vm.forceLivenessProbeDeadForTest = false
+
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+                networkChange(
+                    previous = TerminalNetworkSnapshot.Validated("wifi"),
+                    current = TerminalNetworkSnapshot.Validated("cell"),
+                    previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                    reason = "wifi-cellular-handoff-alive-socket",
+                ),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "a handoff whose bounded probe ANSWERS must NOT redial (rides through) — #1078",
+                0,
+                connector.connectCount,
+            )
+            assertNull(
+                "a probe-confirmed handoff ride-through must not schedule a network-reconnect redial",
+                vm.latestRestoreIntentSnapshot(),
+            )
+            assertTrue(
+                "the ride-through keeps the session Connected (no Reconnecting overlay)",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertTrue(
+                "no redial diagnostic may fire on the probe-confirmed handoff ride-through; events=" +
+                    diagnostics.events.map { it.name },
+                diagnostics.eventsNamed("network_reconnect_start").isEmpty() &&
+                    diagnostics.eventsNamed("reconnect_start").isEmpty(),
+            )
+            val rideThrough = diagnostics.eventsNamed("network_reconnect_skip").filter {
+                it.fields["cause"] == "transport_proven_alive"
+            }
+            assertTrue(
+                "expected a transport_proven_alive network_reconnect_skip (proves the ride-through " +
+                    "arm fired, not a vacuous pass); events=${diagnostics.events.map { it.name }}",
+                rideThrough.isNotEmpty(),
+            )
+            assertEquals(
+                "the ride-through must be attributed to the bounded ACTIVE probe answering, not " +
+                    "the passive keepalive timestamp alone (distinguishes #1078 from a passive suppress)",
+                true,
+                rideThrough.single().fields["probeConfirmed"],
+            )
+        } finally {
+            diagnostics.close()
+            vm.forceTransportProvenAliveForTest = null
+        }
+    }
+
+    @Test
     fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()

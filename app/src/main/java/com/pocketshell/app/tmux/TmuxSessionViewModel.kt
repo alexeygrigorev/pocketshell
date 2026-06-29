@@ -9,6 +9,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.qualifiers.ApplicationContext
+import com.pocketshell.app.AppTeardownScope
 import com.pocketshell.app.assistant.AppAssistantActions
 import com.pocketshell.app.assistant.AssistantActions
 import com.pocketshell.app.assistant.AssistantInstallId
@@ -372,6 +373,31 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setSessionCardsDispatcherForTest(dispatcher: CoroutineDispatcher) {
         sessionCardsDispatcher = dispatcher
         sessionCardsRemoteSource.setExecDispatcherForTest(dispatcher)
+    }
+
+    /**
+     * Issue #1085 (F2): the application-scoped coroutine the SLOW
+     * connection-teardown IO ([closeCurrentConnection]'s tmux `detach-client`
+     * round-trip, the cached-runtime closes, and the warm-lease refcount-- /
+     * raw-socket close) is handed to so `onCleared()` returns IMMEDIATELY
+     * instead of parking the Main thread. The previous synchronous
+     * `runBlocking(Dispatchers.IO){ withTimeoutOrNull(...){ … } }` blocks
+     * DEFEATED their own coroutine timeouts: the underlying close is a
+     * non-suspending `AutoCloseable.close()` doing a nested `runBlocking` socket
+     * close, and a coroutine cancel cannot interrupt a thread parked in nested
+     * `runBlocking` — so on a wedged socket the real bound was the SUM of the
+     * per-resource ceilings (shell + session + N cached runtimes), a
+     * multi-second / ANR-class Main park. [AppTeardownScope] OUTLIVES this VM
+     * and is never cancelled, so the teardown still runs to COMPLETION off-Main
+     * (no leak). NOT a constructor parameter, for the same Hilt-graph reason as
+     * [reconcileDispatcher]; a unit test pins it via [setTeardownScopeForTest]
+     * so the off-Main hand-off is directly observable.
+     */
+    private var teardownScope: CoroutineScope = AppTeardownScope.scope
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setTeardownScopeForTest(scope: CoroutineScope) {
+        teardownScope = scope
     }
 
     /**
@@ -5522,21 +5548,22 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private fun closeCachedRuntimesBlocking(runtimes: List<CachedTmuxRuntime>) {
+    private suspend fun closeCachedRuntimesBounded(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
-        // Issue #710: this runs on the MAIN thread (onCleared park-on-clear).
-        // [closeCachedRuntime] already bounds its own suspending steps at
-        // SYNC_DETACH_TIMEOUT_MS, but we add a belt-and-suspenders outer ceiling
-        // so the main thread is GUARANTEED to return even if a future teardown
-        // step regresses to unbounded. The outer budget scales with the runtime
-        // count (each runtime gets its detach budget) so the normal one/two
-        // runtime park stays fast.
+        // Issue #1085 (F2): this is invoked from [deferConnectionTeardownOffMain]
+        // on the application-scoped [teardownScope], NOT on the Main thread — the
+        // previous `closeCachedRuntimesBlocking` ran `runBlocking(Dispatchers.IO)`
+        // directly from `onCleared` (Main), and because each cached runtime's
+        // close does a non-suspending nested-`runBlocking` socket close that a
+        // coroutine timeout cannot interrupt, the real Main park was the SUM of
+        // the N per-runtime ceilings (a multi-second / ANR-class freeze on a
+        // wedged transport). [closeCachedRuntime] still bounds its own suspending
+        // steps at SYNC_DETACH_TIMEOUT_MS; the outer ceiling here is a
+        // belt-and-suspenders guard that scales with the runtime count.
         runCatching {
-            runBlocking(Dispatchers.IO) {
-                withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS * runtimes.size) {
-                    runtimes.forEach { runtime ->
-                        runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
-                    }
+            withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS * runtimes.size) {
+                runtimes.forEach { runtime ->
+                    runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
                 }
             }
         }
@@ -8752,7 +8779,16 @@ public class TmuxSessionViewModel @Inject constructor(
             sessionName = sessionName,
             startDirectory = null,
         )
-        closeCurrentConnection()
+        // Issue #1085 (F2) test isolation: tear the OLD connection down
+        // SYNCHRONOUSLY for this test seam. `closeCurrentConnection`'s
+        // production caller (`onCleared`) defers the slow detach/close off the
+        // Main thread (the F2 fix), but callers of this synchronous seam assert
+        // the replaced client is closed the instant the seam returns (e.g.
+        // `replacingClientClosesOldClientAndUpdatesRegistry` checks
+        // `oldClient.closed`). `deferTeardown = false` runs the same teardown
+        // body inline so the seam keeps its synchronous contract — independent
+        // of whichever teardown scope a test injected.
+        closeCurrentConnection(deferTeardown = false)
         // Issue #178: tests for the same-host fast-switch path need a
         // way to inject a live `SshSession` into the VM so a follow-up
         // `connect()` to the same host re-uses it instead of going
@@ -15656,7 +15692,16 @@ public class TmuxSessionViewModel @Inject constructor(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-viewmodel-cleared-park-runtime " + targetLogFields(target),
         )
-        closeCachedRuntimesBlocking(deactivateCurrentRuntimeToCache())
+        // Issue #1085 (F2): close the evicted cached runtimes OFF the Main
+        // thread. This park path also runs from `onCleared` (Main); closing the
+        // runtimes synchronously parked Main on a wedged socket. The live
+        // runtime stays parked in the cache; only the evicted ones are closed.
+        deferConnectionTeardownOffMain(
+            clientToDetach = null,
+            runtimesToClose = deactivateCurrentRuntimeToCache(),
+            leaseToRelease = null,
+            sessionToClose = null,
+        )
         return true
     }
 
@@ -15671,18 +15716,88 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private fun releaseCurrentLeaseOrCloseRawSessionBlocking() {
-        val lease = leaseRef
-        if (lease != null) {
+    /**
+     * Issue #1085 (F2): hand the SLOW connection-teardown IO to the
+     * application-scoped [teardownScope] so the calling `onCleared()` returns
+     * IMMEDIATELY instead of parking the Main thread.
+     *
+     * The work — the tmux `detach-client` round-trip + local client close, the
+     * cached-runtime closes, and the warm-lease refcount-- ([SshLease.release])
+     * or raw-[SshSession] close — is exactly what [closeCurrentConnection] used
+     * to run synchronously via three `runBlocking(Dispatchers.IO)` blocks on
+     * Main. Each step keeps its prior bounded ceiling
+     * ([SYNC_DETACH_TIMEOUT_MS]); the close SEMANTICS are unchanged (same
+     * detach, same per-runtime close, same lease release, same ordering) — only
+     * the THREAD moves off Main.
+     *
+     * Correctness: every reference is captured + nulled on Main by the caller
+     * BEFORE the hand-off, so there is no double-release and the VM's fields
+     * never observe a half-torn-down connection. [teardownScope] outlives this
+     * VM and is never cancelled, so the teardown runs to COMPLETION (refcount
+     * decremented, sockets closed) even though the VM is already gone — no leak.
+     * Each step is `runCatching`-wrapped so a wedged close never escapes.
+     */
+    private fun deferConnectionTeardownOffMain(
+        clientToDetach: TmuxClient?,
+        runtimesToClose: List<CachedTmuxRuntime>,
+        leaseToRelease: SshLease?,
+        sessionToClose: SshSession?,
+    ) {
+        if (clientToDetach == null &&
+            runtimesToClose.isEmpty() &&
+            leaseToRelease == null &&
+            sessionToClose == null
+        ) {
+            return
+        }
+        teardownScope.launch {
+            runConnectionTeardown(
+                clientToDetach = clientToDetach,
+                runtimesToClose = runtimesToClose,
+                leaseToRelease = leaseToRelease,
+                sessionToClose = sessionToClose,
+            )
+        }
+    }
+
+    /**
+     * The actual SLOW connection-teardown body (#1085 F2): the tmux
+     * `detach-client` round-trip + local client close, the evicted cached-runtime
+     * closes, and the warm-lease refcount-- ([SshLease.release]) or raw-session
+     * close. Each step keeps its bounded ceiling ([SYNC_DETACH_TIMEOUT_MS]) and
+     * is `runCatching`-wrapped so a wedged close never escapes.
+     *
+     * Production runs this off the Main thread via [deferConnectionTeardownOffMain]
+     * ([teardownScope]); the synchronous `replaceClientForTest` test seam runs it
+     * inline via `runBlocking` so the replaced client is closed before the seam
+     * returns. The body is identical either way — only the THREAD differs.
+     */
+    private suspend fun runConnectionTeardown(
+        clientToDetach: TmuxClient?,
+        runtimesToClose: List<CachedTmuxRuntime>,
+        leaseToRelease: SshLease?,
+        sessionToClose: SshSession?,
+    ) {
+        if (clientToDetach != null) {
+            // Issue #215: notify tmux server-side before the local close so
+            // the `-CC` control client does not linger as an orphan. Bounded
+            // so a wedged socket cannot stall the teardown.
             runCatching {
-                runBlocking(Dispatchers.IO) {
-                    withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
-                        lease.release()
-                    }
+                withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
+                    clientToDetach.detachCleanly(timeoutMs = SYNC_DETACH_TIMEOUT_MS)
                 }
             }
-        } else {
-            runCatching { sessionRef?.close() }
+            // [detachCleanly] already invokes [close]; this is a no-op when
+            // it ran and the real teardown when the detach hop failed.
+            runCatching { clientToDetach.close() }
+        }
+        closeCachedRuntimesBounded(runtimesToClose)
+        if (leaseToRelease != null) {
+            runCatching {
+                withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) { leaseToRelease.release() }
+            }
+        } else if (sessionToClose != null) {
+            runCatching { sessionToClose.close() }
         }
     }
 
@@ -15868,7 +15983,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * [SYNC_DETACH_TIMEOUT_MS] so a wedged socket cannot stall the
      * activity teardown beyond a fraction of a second.
      */
-    private fun closeCurrentConnection() {
+    private fun closeCurrentConnection(deferTeardown: Boolean = true) {
         val closingHostId = activeTarget?.hostId ?: registeredHostId
         // Issue #257: cancel any in-flight background detach from a prior
         // fast-switch. This path runs from [onCleared] (and the sync test
@@ -15938,37 +16053,58 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows.clear()
         _panes.value = emptyList()
         rebuildUnifiedPanes()
-        // Issue #215: run `detach-client` synchronously over an IO
-        // worker before the local close. The `runBlocking` hop matches
-        // [RealSshSession.close]'s pattern for non-suspending lifecycle
-        // teardown that needs a brief network round-trip. The timeout
-        // ceiling keeps the activity-destroy / onCleared path bounded
-        // — losing the wire mid-detach falls through to the immediate
-        // [TmuxClient.close] below.
+        // Issue #1085 (F2): the SLOW teardown IO — the tmux `detach-client`
+        // round-trip + local client close, the evicted cached-runtime closes,
+        // and the warm-lease refcount-- / raw-session close — used to run here
+        // on the Main thread via three `runBlocking(Dispatchers.IO)` blocks.
+        // Each block's coroutine timeout was DEFEATED by the underlying
+        // non-suspending nested-`runBlocking` socket close (a coroutine cancel
+        // cannot interrupt a thread parked in nested `runBlocking`), so on a
+        // wedged transport the real Main park was the SUM of the per-resource
+        // ceilings — a multi-second / ANR-class freeze finishing a session. We
+        // capture the references, null the VM fields on Main (no double-release,
+        // no half-torn-down state observed), and hand the actual closes to the
+        // application-scoped [teardownScope] so `onCleared` returns immediately
+        // while the teardown still runs to completion off-Main.
         val toDetach = clientRef
         if (toDetach != null) {
             connectionTmuxPort.setClient(null)
-            runCatching {
-                runBlocking(Dispatchers.IO) {
-                    withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
-                        toDetach.detachCleanly(timeoutMs = SYNC_DETACH_TIMEOUT_MS)
-                    }
-                }
-            }
         }
-        // [detachCleanly] already invokes [close]; the call below is a
-        // belt-and-suspenders no-op when detachCleanly ran successfully
-        // and the real teardown path when the runBlocking hop above
-        // failed or was a no-op (clientRef was null).
-        runCatching { clientRef?.close() }
         clientRef = null
         unregisterCurrentClient()
-        closingHostId?.let { hostId ->
-            closeCachedRuntimesBlocking(runtimeCache.removeHost(hostId))
-        }
-        releaseCurrentLeaseOrCloseRawSessionBlocking()
+        val runtimesToClose = closingHostId?.let { hostId ->
+            runtimeCache.removeHost(hostId)
+        } ?: emptyList()
+        val leaseToRelease = leaseRef
+        val sessionToClose = sessionRef
         sessionRef = null
         leaseRef = null
+        if (deferTeardown) {
+            // Production `onCleared` path: hand the slow detach/close to the
+            // off-Main [teardownScope] so `onCleared` returns immediately
+            // (#1085 F2). Byte-identical to the pre-test-isolation behavior.
+            deferConnectionTeardownOffMain(
+                clientToDetach = toDetach,
+                runtimesToClose = runtimesToClose,
+                leaseToRelease = leaseToRelease,
+                sessionToClose = sessionToClose,
+            )
+        } else {
+            // Synchronous `replaceClientForTest` test seam: run the SAME
+            // teardown body inline so the replaced client is closed before the
+            // seam returns. Each step is internally bounded
+            // ([SYNC_DETACH_TIMEOUT_MS]) so a wedged fake cannot hang it, and it
+            // is scope-independent (does not depend on a test-injected teardown
+            // dispatcher being advanced).
+            runBlocking {
+                runConnectionTeardown(
+                    clientToDetach = toDetach,
+                    runtimesToClose = runtimesToClose,
+                    leaseToRelease = leaseToRelease,
+                    sessionToClose = sessionToClose,
+                )
+            }
+        }
         activeTarget = null
         connectingTarget = null
         // Issue #145: a sync teardown (onCleared / test-replacement seam)

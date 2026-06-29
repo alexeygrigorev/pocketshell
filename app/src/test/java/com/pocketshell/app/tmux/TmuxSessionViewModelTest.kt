@@ -4172,6 +4172,140 @@ class TmuxSessionViewModelTest {
         }
     }
 
+    // ---- Issue #1080: Doze/app-standby wake must NOT ride through a dead socket ----
+    //
+    // Android deep Doze suspends the network so the keepalive cannot keep the NAT
+    // mapping alive; the socket is silently dead on wake. The KEYSTONE fix is that
+    // the transport-liveness oracle (RealSshSession.isTransportProvenAliveWithin-
+    // KeepAliveWindow) now uses the wall-elapsed boot clock that COUNTS deep sleep,
+    // so after a real Doze gap it correctly reports STALE (proven at the core-ssh
+    // layer by RealSshSessionDozeClockTest). These VM tests pin the DOWNSTREAM
+    // consequence: when the oracle reports stale on a post-Doze restore the
+    // #1042/#1078 restore path must redial (issue ONE bounded probe, then a fresh
+    // lease), NOT ride through the dead socket; and when the oracle is still alive
+    // (a short background, not deep sleep) the restore must still ride through.
+
+    @Test
+    fun issue1080PostDozeWakeStaleTransportRedialsInsteadOfRidingThrough() = runTest(scheduler) {
+        // Post-deep-Doze wake: the NAT mapping died during sleep, and because the
+        // oracle now counts deep sleep (the #1080 boot-clock fix) it correctly
+        // reports STALE — model that with transportProvenAlive=false (oracle aged
+        // out) AND a DEAD bounded probe (the dead socket cannot answer). The restore
+        // path MUST fall through to a fresh-lease redial, NOT ride through. Without
+        // the #1080 clock fix the real on-device oracle would have falsely reported
+        // ALIVE here (frozen monotonic clock under-counting the sleep) and the
+        // restore would have ridden through the dead socket — the bug this guards.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        // The live session whose keepalive aged out across the Doze gap (oracle stale).
+        val session = FakeSshSession().apply { transportProvenAlive = false }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        runCurrent()
+        // The dead post-Doze socket cannot answer the bounded restore probe either.
+        vm.forceLivenessProbeDeadForTest = true
+        assertFalse(
+            "precondition: a post-Doze stale transport must NOT report proven-alive",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        // The Doze interval: network drops while backgrounded, then restores on wake.
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        runCurrent()
+        assertTrue(
+            "the loss leaves the session in the loss-suspended Reconnecting state",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+        advanceUntilIdle()
+
+        assertEquals(
+            "a post-Doze restore over a STALE/dead transport (oracle aged out + probe dead) " +
+                "MUST redial — it must NOT ride through the dead socket (#1080)",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertEquals("exactly one fresh-lease redial on the post-Doze restore", 1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+
+        vm.forceLivenessProbeDeadForTest = false
+    }
+
+    @Test
+    fun issue1080ShortBackgroundWakeAliveTransportStillRidesThrough() = runTest(scheduler) {
+        // Class-coverage (G2): the #1080 fix must NOT turn every background wake into
+        // a reconnect. A short background (screen-off, app-switch — NOT deep sleep)
+        // leaves the keepalive proving the link alive; the oracle still reports ALIVE
+        // and the restore must RIDE THROUGH with zero redials, exactly as #1042.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val session = FakeSshSession().apply { transportProvenAlive = true }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        runCurrent()
+        assertTrue(
+            "precondition: a short-background link is still proven-alive (no deep sleep)",
+            vm.isTransportKeepAliveProvenAliveRecentlyForTest(),
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        runCurrent()
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+        advanceUntilIdle()
+
+        assertEquals(
+            "a wake over a PROVEN-ALIVE transport must ride through with no redial (#1080 must " +
+                "not over-reconnect a healthy short-background link)",
+            0,
+            connector.connectCount,
+        )
+        assertNull(
+            "a ride-through wake must not schedule a network-reconnect redial",
+            vm.latestRestoreIntentSnapshot(),
+        )
+        assertTrue(
+            "the ride-through clears the loss-hold band back to Connected",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
     @Test
     fun networkReconnectAndPassiveDisconnectAreCoalescedIntoOneAttempt() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)

@@ -1,6 +1,7 @@
 package com.pocketshell.app
 
 import android.app.Application
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -156,7 +157,15 @@ class App : Application() {
     private val terminalNetworkScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private val terminalNetworkLifecycleGate = TerminalNetworkLifecycleGate()
+    private val terminalNetworkLifecycleGate = TerminalNetworkLifecycleGate(
+        // Issue #1080 — wall-elapsed boot clock (counts deep sleep). The
+        // background-elapsed / post-resume-suppression decisions here are the
+        // App-level sibling of the transport-liveness staleness clock; on
+        // System.nanoTime they froze across a Doze gap and mis-evaluated the
+        // grace/suppression windows. Production injects the boot clock; the unit
+        // tests keep the System.nanoTime default (android.jar stub).
+        nowMillis = { SystemClock.elapsedRealtime() },
+    )
 
     /**
      * Issue #450: scope that runs the bounded grace-window timer. Uses
@@ -253,6 +262,17 @@ class App : Application() {
                     hasLiveTerminalRuntime = runtimeDiagnostics.hasLiveTerminalRuntime,
                 ).diagnosticFields()
         },
+        // Issue #1080 — wall-elapsed boot clock so the within-grace vs
+        // beyond-grace decision (`resumedWithinGrace`, `backgroundDeadlineAtMs`,
+        // background elapsed) counts time spent in deep sleep. On System.nanoTime
+        // (CLOCK_MONOTONIC, frozen in deep Doze) a Doze gap that began within the
+        // ~60s grace window made the frozen clock under-count elapsed time and
+        // `resumedWithinGrace` could wrongly evaluate true — routing the resume
+        // into the within-grace reseed-only fast path that does ZERO liveness
+        // check over a now-dead socket. The boot clock makes the window math
+        // reflect real elapsed time so the beyond-grace arm (which verifies
+        // liveness) runs. Unit tests keep the System.nanoTime default.
+        nowMillis = { SystemClock.elapsedRealtime() },
     )
 
     private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
@@ -655,6 +675,9 @@ internal fun shouldDispatchPendingTerminalNetworkChange(
 }
 
 internal class TerminalNetworkLifecycleGate(
+    // Issue #1080 — production injects `SystemClock.elapsedRealtime()` (counts
+    // deep sleep). This System.nanoTime default is the pure-JVM unit-test
+    // fallback only (the android.jar stub throws on SystemClock).
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     private var processForeground: Boolean = false
@@ -998,6 +1021,11 @@ internal class BackgroundGraceController(
     private var graceMillis: Long,
     private val onGraceElapsed: suspend () -> Unit,
     private val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
+    // Issue #1080 — production injects `SystemClock.elapsedRealtime()` (counts
+    // deep sleep) so the within-grace/beyond-grace window math reflects real
+    // elapsed time across a Doze gap. This System.nanoTime default is the
+    // pure-JVM unit-test fallback only (the android.jar stub throws on
+    // SystemClock); the deterministic tests inject their own virtual clock.
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val foregroundDiagnosticFields: (resumedWithinGrace: Boolean) -> List<Pair<String, Any?>> = {
         emptyList()

@@ -143,6 +143,9 @@ class BareNetworkLossRestoreReconnectE2eTest {
         runCatching {
             compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         }
+        // Issue #1098 (item 5): re-enable real network callbacks for any sibling
+        // test sharing this singleton observer in the same instrumentation process.
+        runCatching { terminalNetworkObserver().ignoreRealNetworkCallbacksForTest = false }
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
@@ -162,6 +165,12 @@ class BareNetworkLossRestoreReconnectE2eTest {
         diagnostics!!.clear()
 
         val observer = terminalNetworkObserver()
+        // Issue #1098 (item 5): isolate the synthetic loss/restore sequence from the
+        // AVD's own real ConnectivityManager callbacks, which feed the SAME detector
+        // and would otherwise consume the loss window mid-sequence (corrupting the
+        // same-identity restore). Production always processes real callbacks; this
+        // only quiets them for the deterministic injection.
+        observer.ignoreRealNetworkCallbacksForTest = true
 
         // Seed a baseline validated identity so the detector's `current` is a known
         // pure-WIFI network before the loss (so the restore below is a same-identity
@@ -197,11 +206,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
         // redial ladder starts (`network_reconnect_start` / `network_restore_reconnect_start`
         // must be absent while we are still in the loss window).
         watchNoRedialDiagnostics("during the loss window", WATCH_NO_CHURN_MS)
-        assertTrue(
-            "the VM must record a network_loss_hold for the bare loss (proves the hold " +
-                "arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
-            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
-        )
+        awaitNetworkLossHold("after the bare loss")
         captureViewport("issue997-02-loss-held")
 
         diagnostics!!.clear()
@@ -309,6 +314,10 @@ class BareNetworkLossRestoreReconnectE2eTest {
 
         val vm = currentViewModel()
         val observer = terminalNetworkObserver()
+        // Issue #1098 (item 5): see [bareLossHoldsTheLeaseThenRestoreDrivesAFastReconnect]
+        // — quiet the AVD's real ConnectivityManager callbacks so the synthetic
+        // loss/restore sequence runs uncontended through the shared detector.
+        observer.ignoreRealNetworkCallbacksForTest = true
 
         // Baseline validated WIFI identity (proven-alive pinned so the baseline
         // transition never tears the session before the load-bearing chain).
@@ -331,11 +340,12 @@ class BareNetworkLossRestoreReconnectE2eTest {
             TerminalNetworkChangeKind.NetworkLost,
             lost!!.kind,
         )
-        assertTrue(
-            "the VM must record a network_loss_hold for the bare loss (proves the hold " +
-                "arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
-            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
-        )
+        // Issue #1098 (item 5): the App fans the loss out to the VM hook on the
+        // terminal-network scope ASYNCHRONOUSLY, so wait (bounded) for the hold to be
+        // recorded rather than asserting synchronously right after the emit (the
+        // round-2 async-fanout flake). A hard-failing bounded wait still proves the
+        // hold actually fired — it does not mask a real failure to hold.
+        awaitNetworkLossHold("after the bare loss")
 
         // SURVIVE THE LONG IDLE OUTAGE: no churn across the whole idle window.
         watchNoRedialDiagnostics("across the long idle outage", LONG_IDLE_OUTAGE_MS)
@@ -525,6 +535,27 @@ class BareNetworkLossRestoreReconnectE2eTest {
         }
     }
 
+    /**
+     * Issue #1098 (item 5): the bare loss is fanned out to the VM hook on the
+     * App's terminal-network scope asynchronously (`terminalNetworkScope.launch`).
+     * Wait (bounded, hard-failing) for the `network_loss_hold` diagnostic to be
+     * recorded instead of asserting synchronously right after the emit. The wait
+     * does not mask a real failure: if the hold never fires, the bounded
+     * `waitUntil` times out and the assertion below fails.
+     */
+    private fun awaitNetworkLossHold(label: String) {
+        runCatching {
+            compose.waitUntil(timeoutMillis = LOSS_HOLD_TIMEOUT_MS) {
+                diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty()
+            }
+        }
+        assertTrue(
+            "the VM must record a network_loss_hold for the bare loss $label (proves the " +
+                "hold arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
+        )
+    }
+
     private fun assertNoRedialDiagnostics(label: String) {
         val events = diagnostics!!.events
         val forbidden = events.filter { event ->
@@ -693,6 +724,10 @@ class BareNetworkLossRestoreReconnectE2eTest {
         const val READY_MARKER: String = "ISSUE997-LOSS-READY"
 
         const val WATCH_NO_CHURN_MS: Long = 1_500L
+
+        // Issue #1098 (item 5): bounded wait for the async network_loss_hold fanout.
+        val LOSS_HOLD_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 20_000L else 10_000L
 
         // Issue #1065 (R5): the modelled long idle outage held across the loss window.
         // Bounded so the connected journey stays affordable; long enough to be a

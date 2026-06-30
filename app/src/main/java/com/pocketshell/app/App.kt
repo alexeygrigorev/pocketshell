@@ -768,23 +768,41 @@ internal class TerminalNetworkLifecycleGate(
     ): TerminalNetworkDecision {
         val suppression = postResumeNetworkSuppression
         if (suppression != null) {
-            if (nowMillis() <= suppression.untilMillis && hasLiveTerminalRuntime) {
-                return TerminalNetworkDecision.Suppress(
-                    change,
-                    gateDiagnostics = TerminalNetworkGateDiagnostics(
-                        decision = "suppress",
-                        reason = "post_resume_within_grace_live_runtime",
-                        processForeground = processForeground,
-                        foregroundResumePending = foregroundResumePending,
-                        resumedWithinGrace = true,
-                        hasLiveTerminalRuntime = true,
-                        backgroundCycleId = suppression.backgroundCycleId,
-                        pendingNetworkChange = true,
-                        pendingNetworkClassification = change.networkClassification(),
-                    ),
-                )
+            val withinSuppressionWindow =
+                nowMillis() <= suppression.untilMillis && hasLiveTerminalRuntime
+            if (withinSuppressionWindow) {
+                // Issue #1098 (item 5): the post-resume attribution window exists
+                // ONLY to drop a STALE *validated-identity-change* callback that
+                // Android queued during the just-ended background interval (the
+                // #548 handoff path — see [postResumeNetworkSuppressionUntilMillis]).
+                // A bare availability LOSS / RESTORE (`onLost` / airplane-mode
+                // round-trip — the orthogonal #997 signal) is a CURRENT, meaningful
+                // event, not a stale handoff. Swallowing it here left the lease
+                // un-held during the loss and the restore-driven fast reconnect
+                // never fired, so a real network blip never recovered the terminal.
+                // Only ValidatedIdentityChange is suppressed in this window;
+                // loss/restore fall through to the dispatch path below. The window
+                // stays armed so a later stale validated-identity callback is still
+                // suppressed.
+                if (change.kind == TerminalNetworkChangeKind.ValidatedIdentityChange) {
+                    return TerminalNetworkDecision.Suppress(
+                        change,
+                        gateDiagnostics = TerminalNetworkGateDiagnostics(
+                            decision = "suppress",
+                            reason = "post_resume_within_grace_live_runtime",
+                            processForeground = processForeground,
+                            foregroundResumePending = foregroundResumePending,
+                            resumedWithinGrace = true,
+                            hasLiveTerminalRuntime = true,
+                            backgroundCycleId = suppression.backgroundCycleId,
+                            pendingNetworkChange = true,
+                            pendingNetworkClassification = change.networkClassification(),
+                        ),
+                    )
+                }
+            } else {
+                postResumeNetworkSuppression = null
             }
-            postResumeNetworkSuppression = null
         }
 
         return if (processForeground && !foregroundResumePending) {

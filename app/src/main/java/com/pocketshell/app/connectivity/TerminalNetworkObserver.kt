@@ -53,6 +53,27 @@ class TerminalNetworkObserver @Inject constructor(
     @Volatile
     private var closed: Boolean = false
 
+    /**
+     * Issue #1098 (item 5) test seam. The synthetic loss/restore proofs
+     * ([emitSyntheticSnapshotForTest]) drive a NoValidatedNetwork → Validated
+     * sequence through the SAME shared [detector] the real platform callbacks
+     * feed. On a live emulator the AVD's own `ConnectivityManager` keeps firing
+     * real `onAvailable` / `onCapabilitiesChanged` callbacks for its validated
+     * Wi-Fi, and one of those interleaving mid-sequence would consume the
+     * synthetic loss window (a real validated callback while `lost==true` is
+     * treated as the RESTORE), corrupting the test's same-identity restore
+     * (`detector.update` then returns null → `assertNotNull(restored)` fails).
+     *
+     * When set, the real platform [ConnectivityManager.NetworkCallback]
+     * callbacks no-op so a synthetic sequence runs uncontended. The synthetic
+     * emit path ([emitSyntheticSnapshotForTest]) bypasses this guard. ALWAYS
+     * false in production — real callbacks are always processed there; this only
+     * isolates the deterministic connected proofs.
+     */
+    @Volatile
+    @androidx.annotation.VisibleForTesting
+    var ignoreRealNetworkCallbacksForTest: Boolean = false
+
     init {
         val manager = cm
         if (manager == null) {
@@ -60,10 +81,12 @@ class TerminalNetworkObserver @Inject constructor(
         } else {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    if (ignoreRealNetworkCallbacksForTest) return
                     refresh("default-network-available")
                 }
 
                 override fun onLost(network: Network) {
+                    if (ignoreRealNetworkCallbacksForTest) return
                     refresh("default-network-lost")
                 }
 
@@ -71,6 +94,7 @@ class TerminalNetworkObserver @Inject constructor(
                     network: Network,
                     networkCapabilities: NetworkCapabilities,
                 ) {
+                    if (ignoreRealNetworkCallbacksForTest) return
                     updateFromSnapshot(
                         snapshotFrom(network, networkCapabilities),
                         "default-network-capabilities",
@@ -78,6 +102,7 @@ class TerminalNetworkObserver @Inject constructor(
                 }
 
                 override fun onUnavailable() {
+                    if (ignoreRealNetworkCallbacksForTest) return
                     updateFromSnapshot(
                         TerminalNetworkSnapshot.NoValidatedNetwork,
                         "default-network-unavailable",

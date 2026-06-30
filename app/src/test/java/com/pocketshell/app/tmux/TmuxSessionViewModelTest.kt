@@ -5086,6 +5086,83 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun autoReconnectExhaustionAgainstUnreachableHostSurfacesDisconnectedFromBand() =
+        runTest(scheduler) {
+            // Issue #1098 item 3: when the host is GENUINELY unrecoverable, the bounded
+            // auto-reconnect ladder must EXHAUST and surface a CLEAR "Disconnected from
+            // <user>@<host>:<port>. Tap Reconnect to retry." Failed band — never leave a
+            // frozen-but-live screen, and never the jargon-y, self-contradictory
+            // "Transport EOF …; reconnecting. Auto reconnect failed after N attempts."
+            //
+            // RED on base: the exhaustion message reads "Transport EOF from
+            // alex@alpha.example:22; reconnecting. Auto reconnect failed after 2
+            // attempts." so the assertEquals below fails. GREEN with the fix: the unified
+            // #145 "Disconnected from …" wording.
+            //
+            // This is the per-push (Unit job) sibling of the connected end-to-end
+            // BackgroundResumeSocketDeathE2eTest (which arms `forceUnrecoverableHostForTest`
+            // on the real `agents:2222` path). Here a FailingLeaseConnector fails every
+            // fresh dial (a retryable connection-refused), so the ladder runs every rung
+            // and exhausts.
+            TMUX_CONNECT_ATTEMPTS.set(0)
+            val registry = ActiveTmuxClients()
+            val connector = FailingLeaseConnector(
+                SshException(
+                    "SSH connect to alex@alpha.example:22 failed: ConnectException: Connection refused",
+                    ConnectException("Connection refused"),
+                ),
+            )
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            )
+            // graceMs=0 so the silent-reattach grace loop returns immediately and the
+            // structured EOF enters the bounded auto-reconnect ladder; two rungs so the
+            // ladder genuinely exhausts both before surfacing the band.
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+            vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+            val deadClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = deadClient,
+            )
+
+            deadClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "eof",
+                    intent = "unknown",
+                ),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "a genuinely unreachable host must exhaust every reconnect rung",
+                2,
+                connector.connectCount,
+            )
+            val status = vm.connectionStatus.value
+            assertTrue(
+                "expected Failed (Disconnected band) after the ladder exhausts, got $status",
+                status is TmuxSessionViewModel.ConnectionStatus.Failed,
+            )
+            assertEquals(
+                "Disconnected from alex@alpha.example:22. Tap Reconnect to retry.",
+                (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            )
+            assertTrue(
+                "the honest disconnect band must keep the manual Reconnect affordance",
+                vm.canReconnect.value,
+            )
+        }
+
+    @Test
     fun explicitReconnectAfterEofReportsNonRetryableAuthFailureOnce() = runTest(scheduler) {
         // Issue #440: a non-retryable failure (auth rejection) must NOT burn
         // the whole backoff schedule when a passive EOF has already surfaced

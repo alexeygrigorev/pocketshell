@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.BootstrapTool
@@ -40,7 +41,10 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -85,6 +89,12 @@ class HostListViewModelTest {
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey = 0
 
+    // Issue #1110: every ViewModel built by [newViewModel] is tracked so
+    // [tearDown] can cancel AND JOIN its `viewModelScope` before the in-memory
+    // DB is closed — draining any in-flight off-main (Dispatchers.IO/Default) DB
+    // query so it cannot re-touch the `:memory:` database after close.
+    private val createdViewModels = mutableListOf<HostListViewModel>()
+
     private class BrokenPackageContext(base: Context) : ContextWrapper(base) {
         override fun getPackageManager(): PackageManager {
             throw IllegalStateException("package version unavailable")
@@ -122,6 +132,27 @@ class HostListViewModelTest {
 
     @After
     fun tearDown() {
+        // Issue #1110: the release `:app:testReleaseUnitTest` Unit job flaked with
+        //   IllegalStateException: attempt to re-open an already-closed object:
+        //   SQLiteDatabase: :memory:
+        // thrown on a real `DefaultDispatcher-worker` (Dispatchers.IO/Default). The
+        // ViewModels here launch DB-touching coroutines on `viewModelScope` (the
+        // `init {}` update-check + cached-app-update-warning observe, and the
+        // bootstrap / reprobe probes), and some hop to a real off-main worker.
+        // `viewModelStore.clear()` CANCELS those scopes but does NOT wait for an
+        // in-flight off-main DB query to unwind — so a coroutine cancelled here
+        // could still re-query the `:memory:` DB after `db.close()` below and throw
+        // (a leak from one test surfaces on whichever test is running). Cancel AND
+        // JOIN each ViewModel's scope first so all off-main DB work is guaranteed
+        // finished before the DB is closed (the de-flake convention's deterministic
+        // settle, not a blind sleep). A generous wall-clock bound keeps a genuinely
+        // stuck scope from hanging the suite while still draining the common case.
+        runBlocking {
+            createdViewModels.forEach { vm ->
+                val job = vm.viewModelScope.coroutineContext[Job] ?: return@forEach
+                withTimeoutOrNull(10_000L) { job.cancelAndJoin() }
+            }
+        }
         viewModelStore.clear()
         db.close()
     }
@@ -149,7 +180,11 @@ class HostListViewModelTest {
             settingsRepository = settingsRepository,
             sessionOpener = sessionOpener,
             updateNotifier = updateNotifier,
-        ).also { viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it) }
+        ).also {
+            viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it)
+            // Issue #1110: track for the cancel+join DB-drain in [tearDown].
+            createdViewModels += it
+        }
 
     /**
      * Records every [ReleaseInfo] the ViewModel asks to notify about so a

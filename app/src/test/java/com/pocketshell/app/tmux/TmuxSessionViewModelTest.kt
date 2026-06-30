@@ -263,18 +263,57 @@ class TmuxSessionViewModelTest {
             createdViewModels += it
         }
 
-    private suspend fun TestScope.awaitCondition(predicate: () -> Boolean) {
-        val observed = withTimeoutOrNull(1.seconds) {
-            while (!predicate()) {
-                runCurrent()
-                delay(10)
-            }
-            true
+    /**
+     * Issue #1110: wall-clock-bounded settle pump (the de-flake convention's
+     * Shape B — docs/testing.md "the one de-flake convention", #1048/#1102).
+     *
+     * The previous body bounded the wait in VIRTUAL time
+     * (`withTimeoutOrNull(1.seconds) { runCurrent(); delay(10) }`): under the
+     * `runTest` virtual clock those ~100 `delay(10)` iterations elapse in ~0
+     * wall-clock time, so work the predicate awaits that hops to a REAL
+     * dispatcher gets NO wall-clock scheduling time. The cache-restore re-seed
+     * the `cacheRestore*` tests assert on is produced by
+     * `restoreCachedRuntime -> refreshCurrentSessionRecordedKind`, whose
+     * recorded-kind read runs inside `withContext(Dispatchers.IO)` (a real
+     * off-Main thread — correct for production). Under CI CPU contention that
+     * real read had not landed before the virtual budget exhausted, so the
+     * load-bearing assertion flaked and reddened the required `Unit tests`
+     * check on unrelated PRs/`main`.
+     *
+     * Crucially this pump only `runCurrent()`s — it NEVER advances the virtual
+     * clock (`advanceUntilIdle`/`advanceTimeBy`). The work the predicate awaits
+     * resumes off a real dispatcher and re-dispatches its continuation back onto
+     * the virtual Main at the CURRENT virtual time, so `runCurrent()` drains it
+     * without moving the clock. Advancing the clock would prematurely fire
+     * scheduled `delay`-based timers — e.g. the conversation load watchdog that
+     * flips a freshly-seeded row `Loading -> Failed` (the #793 timer), which is
+     * exactly what an `advanceUntilIdle()` pump surfaced here. So each tick:
+     * drain ready Main continuations (`runCurrent()`), check the predicate, then
+     * yield real wall-clock time (`Thread.sleep(1)`) so the off-Main thread can
+     * make progress before the next drain — to a GENEROUS wall-clock deadline.
+     * It returns the instant the predicate holds (no slowdown on a healthy run)
+     * and HARD-FAILS on the pump's exit condition if it never does — the
+     * load-bearing assertion stays the predicate, never weakened. Same proven
+     * real-wall-clock-drain shape as [waitForSentCommandCount].
+     */
+    private fun TestScope.awaitCondition(predicate: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + AWAIT_CONDITION_TIMEOUT_MS
+        while (true) {
+            runCurrent()
+            if (predicate()) return
+            if (System.currentTimeMillis() >= deadline) break
+            Thread.sleep(1L)
         }
-        assertEquals(true, observed)
+        runCurrent()
+        assertTrue(
+            "awaitCondition timed out after ${AWAIT_CONDITION_TIMEOUT_MS}ms wall-clock before the " +
+                "predicate held — the work it awaits (e.g. the real-Dispatchers.IO recorded-kind " +
+                "read driving the cache-restore re-seed) never drained (issue #1110)",
+            predicate(),
+        )
     }
 
-    private suspend fun TestScope.awaitCardsState(
+    private fun TestScope.awaitCardsState(
         vm: TmuxSessionViewModel,
         predicate: (TmuxSessionViewModel.SessionCardsUiState) -> Boolean,
     ) {
@@ -11906,6 +11945,16 @@ class TmuxSessionViewModelTest {
             registry = registry,
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        // Issue #1110: the send-triggered reconnect REPLACES the disconnected
+        // client, and the displaced client's runtime is torn down on the off-Main
+        // teardown scope ([deferConnectionTeardownOffMain]). The default scope is a
+        // real `Dispatchers.IO` ([defaultTeardownScope]); that real worker races the
+        // virtual-clock reconnect/send the test drives with `advanceUntilIdle()`,
+        // so the load-bearing reconnect+send assertions flaked under CI contention
+        // (the `:11824` lambda-line failure). Pin the teardown to the SHARED
+        // virtual-clock scheduler (the established #1085 pattern below) so the close
+        // drains deterministically under `advanceUntilIdle()` with no real-IO race.
+        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -17402,6 +17451,15 @@ class TmuxSessionViewModelTest {
         // box (observed >5s under 15+ load) WITHOUT slowing a passing run. A
         // genuinely stuck feed still times out and fails the assertion below.
         const val SLOW_FEED_DRAIN_TIMEOUT_MS = 30_000L
+
+        // Issue #1110: generous wall-clock ceiling for [awaitCondition]'s settle
+        // pump. The recorded-kind / cache-restore re-seed it waits on lands in
+        // well under a second even on a contended box, so this only adds headroom
+        // for a genuine stall; kept comfortably under `runTest`'s 60s default so a
+        // genuinely-stuck predicate fails the pump's own HARD assertion with a
+        // clear message rather than an opaque outer `runTest` timeout (a method
+        // may call [awaitCondition] twice, so 2x must still fit the 60s budget).
+        const val AWAIT_CONDITION_TIMEOUT_MS = 20_000L
 
         // Issue #1085 (F2): the off-Main hand-off must let onCleared return
         // within a small budget; on base closing the 3 wedged runtimes parks the

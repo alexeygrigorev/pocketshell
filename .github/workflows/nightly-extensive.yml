@@ -116,10 +116,30 @@ jobs:
   # Only runs when the guard says so.
   # ---------------------------------------------------------------------------
   extensive:
-    name: Extensive emulator + Docker journey/E2E + network-fault + bootstrap
+    name: "Extensive journey/E2E + network-fault + bootstrap (shard ${{ matrix.shard }})"
     needs: guard
     if: needs.guard.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    # SHARD (issue #835 follow-up): the full connected suite is ~680 tests and
+    # could NOT finish serially on ONE swiftshader AVD inside this ceiling
+    # (a triage run reached only 544/683 at the 150-min timeout, so phases 2 & 3
+    # never ran and the release gate kept reporting phantom failures). Fan the
+    # job out across a matrix of runners — each its OWN cold-booted emulator +
+    # Docker fixtures — so each leg runs only its round-robin 1/N slice of phase
+    # 1 (the suite reads POCKETSHELL_NIGHTLY_SHARD_INDEX/_TOTAL and hands them to
+    # AndroidJUnitRunner numShards/shardIndex). Each leg now finishes well inside
+    # the 150-min cap. `fail-fast: false` so one shard's failure does not cancel
+    # the others (we want every shard's verdict).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      # Set by the matrix; the suite partitions the phase-1 selection round-robin
+      # by (shardIndex % numShards). Keep _TOTAL in sync with matrix.shard length.
+      # Phases 2 (network-fault) & 3 (bootstrap) run ONCE, on shard 0 only.
+      POCKETSHELL_NIGHTLY_SHARD_INDEX: ${{ matrix.shard }}
+      POCKETSHELL_NIGHTLY_SHARD_TOTAL: 3
     timeout-minutes: 150
     # Long and historically flaky; keep it non-blocking so a single flaky
     # emulator boot does not poison the nightly signal. Failures still show in
@@ -171,11 +191,24 @@ jobs:
       # (2231), and bootstrap-uv-upgrade (2236, reused by the appUpdateRequired
       # scenario). HostBootstrapScenarioSuiteTest connects to these by host port
       # (10.0.2.2:2230/2231/2236), so they must be up before the emulator runs.
-      - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy + bootstrap)
+      #
+      # It ALSO brings up the deterministic `agents-old-cli` (2238, issue #849)
+      # and `agents-daemon` (2239, issue #839) fixtures. The phase-1 connected
+      # suite includes FolderListOldCliHydrateDockerTest +
+      # FolderListBootstrapSkipTreeLoadsDockerTest (2238) and
+      # FolderListDurableTreeDaemonDockerTest (2239) — those tests target the
+      # fixtures by host port and FAIL hard ("SSH fixture on 10.0.2.2:223x was
+      # not ready") if the port is unforwarded, which is exactly the phantom
+      # failure this workflow used to produce by NOT starting them. They can land
+      # on ANY shard (round-robin), so every shard starts them. This mirrors how
+      # the per-push emulator-journey job (.github/workflows/tests.yml) and the
+      # release gate (scripts/pre-release-confidence-gate.sh) wire them.
+      - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy + bootstrap + old-cli + daemon)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
             agents flaky-agent tmux network-fault-proxy packet-loss-proxy \
-            bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade
+            bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade \
+            agents-old-cli agents-daemon
 
       - name: Wait for fixture containers to report healthy
         run: |
@@ -193,6 +226,15 @@ jobs:
           cat /tmp/bootstrap-uv-install-health.log
           wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-uv-upgrade /tmp/bootstrap-uv-upgrade-health.log 60
           cat /tmp/bootstrap-uv-upgrade-health.log
+          # Old-CLI (2238, #849) + daemon (2239, #839) fixtures: the phase-1
+          # FolderList*DockerTest journeys target these by host port and fail
+          # hard when the port is unforwarded, so wait on them before handing off
+          # to the emulator (this is the fix for the "SSH fixture on
+          # 10.0.2.2:223x was not ready after ~35 attempts" phantom failures).
+          wait_for_container_healthy tests/docker/docker-compose.yml agents-old-cli /tmp/agents-old-cli-health.log 60
+          cat /tmp/agents-old-cli-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml agents-daemon /tmp/agents-daemon-health.log 60
+          cat /tmp/agents-daemon-health.log
 
       # toxiproxy / packet-loss-proxy do not expose a Docker healthcheck, so
       # poll their listening ports directly before handing off to the emulator.
@@ -230,10 +272,54 @@ jobs:
             testuser@127.0.0.1 \
             'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
 
+      # Confirm the 2238 fixture really IS an old CLI (rejects `tree` with a
+      # non-zero exit) while staying live (tmux works), so the regression tests
+      # exercise the real CLI-mismatch path and never pass vacuously against a
+      # fixture that silently accepted the new subcommand (mirrors tests.yml #849).
+      - name: Verify agents-old-cli is a CLI mismatch (issue #849)
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2238 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=3 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'pocketshell tree get </dev/null; rc=$?; if [ "$rc" -eq 0 ]; then echo "old-cli fixture unexpectedly accepted tree get (rc=0)" >&2; exit 1; fi; tmux -V >/dev/null && echo "old-cli mismatch confirmed: tree get rc=$rc, host still live"'
+
+      # Confirm the 2239 fixture really IS the REAL daemon: `pocketshell tree`
+      # round-trips a persist (upsert then get over a fresh exec returns the
+      # collapsed node). A broken fixture fails the job loudly here instead of
+      # letting the durable-tree journey pass vacuously (mirrors tests.yml #839).
+      - name: Verify agents-daemon real `pocketshell tree` persists (issue #839)
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2239 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=3 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'set -e;
+             printf "%s" "{\"host\":\"ci\",\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
+             got="$(printf "%s" "{\"host\":\"ci\"}" | pocketshell tree get)";
+             echo "$got" | grep -q "\"session\": \"s\"" || { echo "agents-daemon tree did NOT persist: $got" >&2; exit 1; };
+             echo "$got" | grep -q "\"collapsed\": true" || { echo "agents-daemon tree dropped the collapse: $got" >&2; exit 1; };
+             echo "agents-daemon real-tree persist confirmed: $got"'
+
       - name: Run extensive connected journey/E2E + network-fault + bootstrap scenarios
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          # API 35 (Android 15): the full connected suite includes two API-35
+          # evidence tests (SessionForegroundServiceLiveHoldJourneyE2eTest +
+          # SessionConnectionServiceE2eTest) that HARD-assert
+          # Build.VERSION.SDK_INT == 35 ("API 35 evidence must run on Android
+          # 15"). Running the API-34 image made them report phantom failures
+          # ("expected:<35> but was:<34>"). No test in the suite hard-requires
+          # API 34 (the others use `>=` comparisons), so pin API 35 here to match
+          # what these tests require. (Per-push / release-gate jobs run their
+          # narrower allowlists on API 34 separately.)
+          api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7
@@ -255,7 +341,11 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-ready > artifacts/docker/bootstrap-ready.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-install > artifacts/docker/bootstrap-uv-install.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-upgrade > artifacts/docker/bootstrap-uv-upgrade.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-daemon > artifacts/docker/agents-daemon.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-agents-daemon > artifacts/docker/agents-daemon-inspect.json 2>/dev/null || true
 
       - name: Publish extensive suite summary
         if: always()
@@ -274,7 +364,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-extensive-android-test-reports
+          # Per-shard name: upload-artifact@v7 errors on a duplicate artifact
+          # name across matrix legs, so each shard uploads its own.
+          name: nightly-extensive-android-test-reports-shard-${{ matrix.shard }}
           path: |
             **/build/reports/androidTests/
             **/build/outputs/androidTest-results/
@@ -286,7 +378,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-extensive-docker-logs
+          name: nightly-extensive-docker-logs-shard-${{ matrix.shard }}
           path: artifacts/docker/
           if-no-files-found: ignore
 

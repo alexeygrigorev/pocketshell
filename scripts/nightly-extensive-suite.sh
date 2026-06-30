@@ -140,69 +140,131 @@ join_by() {
 NETWORK_FAULT_CLASS_ARG="$(join_by , "${NETWORK_FAULT_CLASSES[@]}")"
 JOURNEY_NOTCLASS_ARG="$(join_by , "${JOURNEY_EXCLUDED_CLASSES[@]}")"
 
+# ---------------------------------------------------------------------------
+# Sharding (issue #835 follow-up): the full connected journey/E2E suite is
+# ~680 tests. Run serially on ONE swiftshader AVD it cannot finish inside the
+# 150-min job ceiling (the #470 enumeration stall worsens the more the single
+# AVD is churned, so 544/683 at the timeout). The nightly workflow now fans
+# this job out across a matrix of runners — each its OWN cold-booted emulator +
+# Docker fixtures — and sets POCKETSHELL_NIGHTLY_SHARD_INDEX / _TOTAL. We hand
+# those to AndroidJUnitRunner's built-in numShards/shardIndex so each leg runs
+# only its round-robin 1/N slice of phase 1, comfortably inside the ceiling.
+#
+# When the shard env is unset (a single-runner / local run) the suite behaves
+# exactly as before: one leg runs the whole phase-1 suite plus phases 2 & 3.
+SHARD_INDEX="${POCKETSHELL_NIGHTLY_SHARD_INDEX:-}"
+SHARD_TOTAL="${POCKETSHELL_NIGHTLY_SHARD_TOTAL:-}"
+JOURNEY_SHARD_ARGS=()
+SHARDING="no"
+if [[ -n "$SHARD_TOTAL" && "$SHARD_TOTAL" -gt 1 ]]; then
+  SHARDING="yes"
+  JOURNEY_SHARD_ARGS=(
+    "-Pandroid.testInstrumentationRunnerArguments.numShards=$SHARD_TOTAL"
+    "-Pandroid.testInstrumentationRunnerArguments.shardIndex=${SHARD_INDEX:-0}"
+  )
+fi
+
+# Phases 2 (network-fault proofs) and 3 (bootstrap scenarios) are NOT sharded:
+# they are a small fixed set and run only ONCE (on shard 0, or on every run
+# when sharding is disabled). Running them on every shard would needlessly
+# triple the slow toxiproxy soak proofs and bootstrap journeys, and would
+# require the toxiproxy + bootstrap fixtures on every leg.
+RUN_AUX_PHASES="yes"
+if [[ "$SHARDING" == "yes" && "${SHARD_INDEX:-0}" -ne 0 ]]; then
+  RUN_AUX_PHASES="no"
+fi
+
 echo "=========================================================="
 echo "Nightly Extensive Tests — phase 1: journey/E2E (pocketshellCi=true)"
 echo "Excluded classes: $JOURNEY_NOTCLASS_ARG"
+if [[ "$SHARDING" == "yes" ]]; then
+  echo "Sharding: shard ${SHARD_INDEX:-0} of $SHARD_TOTAL (numShards/shardIndex)"
+else
+  echo "Sharding: disabled (single runner runs the full phase-1 suite)"
+fi
 echo "=========================================================="
 
 "$GRADLEW" :app:connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
   -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
+  "${JOURNEY_SHARD_ARGS[@]}" \
   --stacktrace
 JOURNEY_EXIT=$?
 echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 
-echo "=========================================================="
-echo "Nightly Extensive Tests — phase 2: network-fault proofs (un-gated)"
-echo "Included classes: $NETWORK_FAULT_CLASS_ARG"
-echo "  (pocketshellNetworkFaultProofs=true, pocketshellCi NOT set)"
-echo "=========================================================="
+# Default the aux phases to SKIPPED; only the shard that owns them flips these.
+NETWORK_FAULT_EXIT=0
+BOOTSTRAP_EXIT=0
+nf_status="SKIP"
+bootstrap_status="SKIP"
 
-# NOTE: pocketshellCi is intentionally NOT passed here so that
-# `TerminalTestTimeouts.isRunningOnCi()` is false and the
-# `assumeFalse(isRunningOnCi())` guard in NetworkFaultProofBase passes.
-"$GRADLEW" :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
-  -Pandroid.testInstrumentationRunnerArguments.class="$NETWORK_FAULT_CLASS_ARG" \
-  --stacktrace
-NETWORK_FAULT_EXIT=$?
-echo "phase 2 (network-fault proofs) exit code: $NETWORK_FAULT_EXIT"
+if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phase 2: network-fault proofs (un-gated)"
+  echo "Included classes: $NETWORK_FAULT_CLASS_ARG"
+  echo "  (pocketshellNetworkFaultProofs=true, pocketshellCi NOT set)"
+  echo "=========================================================="
 
-echo "=========================================================="
-echo "Nightly Extensive Tests — phase 3: bootstrap setup scenarios (opt-in)"
-echo "Selected methods: $BOOTSTRAP_CLASS_ARG"
-echo "  (pocketshellBootstrapScenarios=true, pocketshellCi NOT set)"
-echo "=========================================================="
+  # NOTE: pocketshellCi is intentionally NOT passed here so that
+  # `TerminalTestTimeouts.isRunningOnCi()` is false and the
+  # `assumeFalse(isRunningOnCi())` guard in NetworkFaultProofBase passes.
+  "$GRADLEW" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
+    -Pandroid.testInstrumentationRunnerArguments.class="$NETWORK_FAULT_CLASS_ARG" \
+    --stacktrace
+  NETWORK_FAULT_EXIT=$?
+  echo "phase 2 (network-fault proofs) exit code: $NETWORK_FAULT_EXIT"
 
-# pocketshellCi is intentionally NOT passed: the bootstrap scenarios drive the
-# real host-list tap path against the bootstrap Docker fixtures and use their
-# own per-scenario timeouts, matching how the release gate / phone-walkthrough
-# run them.
-"$GRADLEW" :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
-  -Pandroid.testInstrumentationRunnerArguments.class="$BOOTSTRAP_CLASS_ARG" \
-  --stacktrace
-BOOTSTRAP_EXIT=$?
-echo "phase 3 (bootstrap setup scenarios) exit code: $BOOTSTRAP_EXIT"
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phase 3: bootstrap setup scenarios (opt-in)"
+  echo "Selected methods: $BOOTSTRAP_CLASS_ARG"
+  echo "  (pocketshellBootstrapScenarios=true, pocketshellCi NOT set)"
+  echo "=========================================================="
+
+  # pocketshellCi is intentionally NOT passed: the bootstrap scenarios drive the
+  # real host-list tap path against the bootstrap Docker fixtures and use their
+  # own per-scenario timeouts, matching how the release gate / phone-walkthrough
+  # run them.
+  "$GRADLEW" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
+    -Pandroid.testInstrumentationRunnerArguments.class="$BOOTSTRAP_CLASS_ARG" \
+    --stacktrace
+  BOOTSTRAP_EXIT=$?
+  echo "phase 3 (bootstrap setup scenarios) exit code: $BOOTSTRAP_EXIT"
+
+  nf_status="PASS"
+  [[ "$NETWORK_FAULT_EXIT" -ne 0 ]] && nf_status="FAIL"
+  bootstrap_status="PASS"
+  [[ "$BOOTSTRAP_EXIT" -ne 0 ]] && bootstrap_status="FAIL"
+else
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phases 2 & 3 SKIPPED on shard ${SHARD_INDEX:-0}"
+  echo "  (network-fault proofs + bootstrap scenarios run once, on shard 0)"
+  echo "=========================================================="
+fi
 
 journey_status="PASS"
 [[ "$JOURNEY_EXIT" -ne 0 ]] && journey_status="FAIL"
-nf_status="PASS"
-[[ "$NETWORK_FAULT_EXIT" -ne 0 ]] && nf_status="FAIL"
-bootstrap_status="PASS"
-[[ "$BOOTSTRAP_EXIT" -ne 0 ]] && bootstrap_status="FAIL"
 
 overall_status="PASS"
 if [[ "$JOURNEY_EXIT" -ne 0 || "$NETWORK_FAULT_EXIT" -ne 0 || "$BOOTSTRAP_EXIT" -ne 0 ]]; then
   overall_status="FAIL"
 fi
 
+if [[ "$SHARDING" == "yes" ]]; then
+  shard_label="shard ${SHARD_INDEX:-0} of $SHARD_TOTAL (round-robin numShards/shardIndex)"
+else
+  shard_label="single runner (no sharding)"
+fi
+
 {
   echo "# Nightly Extensive — suite summary"
   echo
+  echo "Phase-1 selection: $shard_label"
+  echo
   echo "| Phase | Selection | Args | Exit | Result |"
   echo "| --- | --- | --- | --- | --- |"
-  echo "| Journey / E2E | full connected suite minus network-fault + opt-in classes | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** |"
+  echo "| Journey / E2E | full connected suite minus network-fault + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** |"
   echo "| Network-fault proofs | ${#NETWORK_FAULT_CLASSES[@]} NetworkFaultProofBase classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** |"
   echo "| Bootstrap setup scenarios | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** |"
   echo

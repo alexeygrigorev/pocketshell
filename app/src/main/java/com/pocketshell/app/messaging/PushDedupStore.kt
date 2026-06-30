@@ -2,6 +2,8 @@ package com.pocketshell.app.messaging
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.prefs.DeferredPrefs
 
 /**
  * Persistent "already notified for this reset" guard (issue #690, #619
@@ -13,13 +15,29 @@ import android.content.SharedPreferences
  * does not produce a second notification. The set is bounded so a long-running
  * install doesn't grow it without limit; the oldest keys age out first.
  */
-public class PushDedupStore(
-    private val prefs: SharedPreferences,
+public class PushDedupStore internal constructor(
+    private val deferredPrefs: DeferredPrefs,
     private val maxKeys: Int = DEFAULT_MAX_KEYS,
 ) {
-    public constructor(context: Context) : this(
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+    /** Direct-injection / test seam: wrap an already-built prefs. */
+    public constructor(prefs: SharedPreferences, maxKeys: Int = DEFAULT_MAX_KEYS) : this(
+        DeferredPrefs(opener = { prefs }),
+        maxKeys,
     )
+
+    // Issue #1125: open the prefs file off the Main thread (the FCM-token
+    // registrar graph builds this on Main at usage-panel injection; the
+    // messaging service builds it on its FCM callback thread).
+    public constructor(context: Context, maxKeys: Int = DEFAULT_MAX_KEYS) : this(
+        DeferredPrefs(context, PREFS_NAME),
+        maxKeys,
+    )
+
+    private val prefs: SharedPreferences get() = deferredPrefs.get()
+
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     /**
      * Record [resetKey] as notified. Returns true if it was NOT previously

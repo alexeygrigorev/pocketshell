@@ -2,7 +2,9 @@ package com.pocketshell.app.messaging
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.app.prefs.DeferredPrefs
 
 /**
  * Owns the device's FCM token and the path that delivers it to the host (issue
@@ -29,12 +31,22 @@ import com.pocketshell.app.pocketshell.PocketshellCommand
  * pocketshell config dir) is a later server slice; THIS class defines the
  * client contract it must honour.
  */
-public class FcmTokenRegistrar(
-    private val prefs: SharedPreferences,
+public class FcmTokenRegistrar internal constructor(
+    private val deferredPrefs: DeferredPrefs,
 ) {
-    public constructor(context: Context) : this(
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
-    )
+    /** Direct-injection / test seam: wrap an already-built prefs. */
+    public constructor(prefs: SharedPreferences) : this(DeferredPrefs(opener = { prefs }))
+
+    // Issue #1125: open the prefs file off the Main thread (the push-token
+    // registrar is built on Main when the usage-panel Hilt graph injects it;
+    // the messaging service builds it on its FCM callback thread).
+    public constructor(context: Context) : this(DeferredPrefs(context, PREFS_NAME))
+
+    private val prefs: SharedPreferences get() = deferredPrefs.get()
+
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     /** Cache the freshest device token (called from FCM's `onNewToken`). */
     public fun onTokenRefreshed(token: String) {

@@ -2,6 +2,8 @@ package com.pocketshell.app.fileviewer
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.prefs.DeferredPrefs
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -33,8 +35,14 @@ class FileViewerPrefsStore @Inject constructor(
     @ApplicationContext context: Context,
 ) {
 
-    private val prefs: SharedPreferences = context.applicationContext
-        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    // Issue #1125: open the prefs file off the Main thread (it is opened at
+    // file-viewer-open Hilt injection on Main otherwise).
+    private val deferredPrefs = DeferredPrefs(context, PREFS_NAME)
+    private val prefs: SharedPreferences get() = deferredPrefs.get()
+
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     /** True when long lines should wrap (default off → horizontal scroll). */
     fun isWordWrap(): Boolean =

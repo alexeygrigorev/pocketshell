@@ -2,6 +2,8 @@ package com.pocketshell.app.composer
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.prefs.DeferredPrefs
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.UUID
 import javax.inject.Inject
@@ -627,8 +629,15 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
     @ApplicationContext context: Context,
 ) : OutboundQueueStore {
 
-    private val prefs: SharedPreferences = context.applicationContext
-        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    // Issue #1125: open the prefs file off the Main thread (it is opened at
+    // first-composer-open Hilt injection on Main otherwise — touched on every
+    // session open via the always-present composer, #809).
+    private val deferredPrefs = DeferredPrefs(context, PREFS_NAME)
+    private val prefs: SharedPreferences get() = deferredPrefs.get()
+
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     private val lock = Any()
 

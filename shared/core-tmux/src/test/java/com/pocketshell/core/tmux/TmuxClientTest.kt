@@ -538,6 +538,40 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `forceFullRepaint puts -t target before the C-l key operand (issue 1104)`() = runBlocking {
+        // Issue #1104: `send-keys` requires options BEFORE the key operand.
+        // The pre-fix `send-keys C-l -t <pane>` form made tmux treat `-t` and
+        // the pane id as LITERAL keystrokes (and ignore the target), so a stray
+        // `-t%0` was typed into the active pane on every attach/reseed repaint,
+        // garbling the user's command (`printf` -> `-t%0printf`). The only
+        // correct order is flags-before-operand: `send-keys -t <pane> C-l`.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            // Eat the spawn line so the assertion sees only the repaint command.
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val response = scope.async { client.forceFullRepaint("%0") }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals("send-keys -t %0 C-l\n", shell.stdinAsString())
+
+            // Complete the pending command so the coroutine doesn't leak.
+            shell.feed("%begin 1700000000 5 0\n%end 1700000000 5 0\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { response.await() }
+            Unit
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendCommand correlates response between begin and end`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

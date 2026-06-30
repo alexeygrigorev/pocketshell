@@ -419,4 +419,93 @@ class TmuxClientIntegrationTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun `forceFullRepaint does not type the -t target option into the pane (issue 1104)`() = runBlocking {
+        // Issue #1104: `send-keys C-l -t <pane>` (key BEFORE the `-t` option)
+        // makes tmux's argument parser treat `-t` and the pane id as literal
+        // keystrokes — and ignore the target — so a stray `-t<pane>` is typed
+        // into the active pane. On every attach/reseed this prefixed the user's
+        // next command, e.g. `printf ...` arrived at the shell as `-t%0printf
+        // ...` (`sh: -t%0printf: not found`). The fix sends `send-keys -t <pane>
+        // C-l` (flags before operand). This drives the REAL tmux server and
+        // asserts the leaked target token never reaches the pane.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = "it-${System.nanoTime()}",
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+
+                    val paneIdResp = withTimeout(10_000) {
+                        it.sendCommand("display-message -p \"#{pane_id}\"")
+                    }
+                    assertFalse(
+                        "display-message must succeed; got ${paneIdResp.output}",
+                        paneIdResp.isError,
+                    )
+                    val paneId = paneIdResp.output.firstOrNull()?.trim().orEmpty()
+                    assertTrue(
+                        "display-message returned no pane id; got ${paneIdResp.output}",
+                        paneId.startsWith("%"),
+                    )
+
+                    // Drive the repaint primitive the attach/reseed path runs.
+                    val repaintResp = withTimeout(10_000) { it.forceFullRepaint(paneId) }
+                    assertFalse(
+                        "forceFullRepaint must not error; got ${repaintResp.output}",
+                        repaintResp.isError,
+                    )
+                    // Give tmux/the shell a beat to render any (leaked) keystrokes.
+                    delay(500)
+
+                    // Capture the authoritative pane content from the real server.
+                    // With the bug the input line shows the leaked `-t<pane>`
+                    // token; with the fix only Ctrl-L (a redraw) was delivered.
+                    val capResp = withTimeout(10_000) {
+                        it.sendCommand("capture-pane -p -t $paneId")
+                    }
+                    assertFalse(
+                        "capture-pane must succeed; got ${capResp.output}",
+                        capResp.isError,
+                    )
+                    val captured = capResp.output.joinToString("\n")
+                    assertFalse(
+                        "send-keys `-t` target option leaked into pane $paneId as " +
+                            "literal keystrokes; pane content:\n$captured",
+                        captured.contains("-t$paneId") || captured.contains("-t $paneId"),
+                    )
+
+                    // Also prove input still arrives intact AFTER a repaint: type
+                    // a marker command and confirm the shell sees exactly it (no
+                    // `-t<pane>` prefix corrupting the token).
+                    val marker = "PS1104OK${System.nanoTime()}"
+                    withTimeout(10_000) {
+                        it.sendCommand("send-keys -l -t $paneId -- 'echo $marker'")
+                    }
+                    delay(300)
+                    val afterTypeResp = withTimeout(10_000) {
+                        it.sendCommand("capture-pane -p -t $paneId")
+                    }
+                    val afterType = afterTypeResp.output.joinToString("\n")
+                    assertTrue(
+                        "expected the typed command `echo $marker` intact on the " +
+                            "input line; pane content:\n$afterType",
+                        afterType.contains("echo $marker"),
+                    )
+                    assertFalse(
+                        "typed command was corrupted by a leaked `-t$paneId` prefix; " +
+                            "pane content:\n$afterType",
+                        afterType.contains("-t${paneId}echo") || afterType.contains("-t$paneId echo"),
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
 }

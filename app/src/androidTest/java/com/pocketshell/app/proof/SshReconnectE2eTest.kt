@@ -643,6 +643,21 @@ class SshReconnectE2eTest {
                 terminalCols = terminalGridSize().columns,
             )
         }
+        // Issue #1104: the `containsWrapTolerant` substring match above passes
+        // even when the command echo is corrupted, because the command still
+        // appears as a substring. Before the fix, the attach/reseed repaint
+        // (`forceFullRepaint`) ran `send-keys C-l -t <pane>` with the key before
+        // the `-t` option, so tmux typed the literal target token (e.g. `-t%0`)
+        // into the pane ahead of the command: `printf ...` reached the shell as
+        // `-t%0printf ...`. Hard-assert that leaked target token is absent so a
+        // regression of this class FAILS the E2E (not just the focused tests).
+        val echoTranscript = visibleTerminalText()
+        assertFalse(
+            "issue #1104: a `send-keys -t <pane>` target token leaked into the " +
+                "terminal as literal keystrokes, corrupting `$label` input. " +
+                "Visible terminal:\n${echoTranscript.printableForFailure()}",
+            echoTranscript.contains("-t%"),
+        )
         val enterCommitted = terminalInputConnection().commitText("\n", 1)
         assertTrue("expected terminal input connection to submit $label", enterCommitted)
     }

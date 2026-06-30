@@ -119,10 +119,13 @@ class RepoBrowserSessionPickerTest {
         assertEquals(SessionType.Agent, agentChoice.type)
         assertEquals(AgentCli.Codex, agentChoice.agent)
         assertEquals(repoPath, agentChoice.startDirectory)
-        // The agent CLI is launched in the new pane — same command the
-        // folder Agent flow produces.
+        // The agent CLI is launched in the new pane through the SAME
+        // `pocketshell agent <kind> --dir '<dir>'` wrapper the folder Agent
+        // flow now produces (AgentLaunchVersionCheck.AGENT_COMMAND_PREFIX /
+        // SessionTypePickerSheet.buildAgentCommand) — not the pre-wrapper raw
+        // CLI line.
         assertEquals(
-            "codex --dangerously-bypass-approvals-and-sandbox",
+            "pocketshell agent codex --dir '$repoPath'",
             agentChoice.startCommand(),
         )
 

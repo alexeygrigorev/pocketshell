@@ -1,8 +1,11 @@
 package com.pocketshell.app.composer
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.prefs.DeferredPrefs
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -26,7 +29,15 @@ import javax.inject.Singleton
 class OutboundAttachmentSidecarStore @Inject constructor(
     @ApplicationContext private val appContext: Context,
 ) {
-    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    // Issue #1125: open the prefs file off the Main thread (it is opened at
+    // Hilt injection on Main otherwise; the actual reads/writes already run on
+    // Dispatchers.IO inside the suspend methods below).
+    private val deferredPrefs = DeferredPrefs(appContext, PREFS_NAME)
+    private val prefs: SharedPreferences get() = deferredPrefs.get()
+
+    @VisibleForTesting
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     internal var idGenerator: () -> String = { UUID.randomUUID().toString() }
     internal var clock: () -> Long = { System.currentTimeMillis() }

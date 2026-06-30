@@ -285,7 +285,14 @@ public interface TmuxClient : AutoCloseable {
      * implementation routes through [sendCommand] for [TmuxClient] doubles.
      */
     public suspend fun forceFullRepaint(paneId: String): CommandResponse =
-        sendCommand("send-keys C-l -t $paneId")
+        // Issue #1104: the `-t <pane>` target option MUST precede the `C-l` key
+        // operand. tmux's `send-keys` argument parser stops treating tokens as
+        // options once the first operand (the key) appears, so the old
+        // `send-keys C-l -t $paneId` form made tmux send `C-l`, then the LITERAL
+        // keystrokes `-t` and `$paneId` into the *active* pane (the target was
+        // also ignored) — typing e.g. `-t%0` straight into the shell ahead of
+        // the user's command. Flags-before-operand is the only correct order.
+        sendCommand("send-keys -t $paneId C-l")
 
     /**
      * Issue #927: milliseconds since the control-mode reader last parsed ANY
@@ -1612,8 +1619,13 @@ internal class RealTmuxClient(
         // reply during an output storm fails open locally instead of being
         // mistaken for a fatal transport drop — this MUST NOT take the FatalClose
         // structural-command path (#979 owns that timeout behaviour).
+        //
+        // Issue #1104: `-t <pane>` MUST come before the `C-l` key operand. With
+        // the key first, tmux's send-keys parser treats `-t` and `$paneId` as
+        // literal keystrokes (and ignores the target), typing e.g. `-t%0` into
+        // the active pane ahead of the user's command. Flags-before-operand.
         sendCommandInternal(
-            "send-keys C-l -t $paneId",
+            "send-keys -t $paneId C-l",
             timeoutMode = CommandTimeoutMode.FailOpenDrain,
         )
 

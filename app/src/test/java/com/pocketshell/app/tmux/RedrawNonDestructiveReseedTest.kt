@@ -226,10 +226,14 @@ class RedrawNonDestructiveReseedTest {
         // FIX part 1: Redraw FORCED a repaint before it captured.
         val sentDuringRedraw = client.sentCommands.drop(sentBefore)
         val forceRepaintIndex = sentDuringRedraw.indexOfFirst {
-            it.startsWith("send-keys C-l -t %1")
+            // Issue #1104: flags BEFORE the key operand — `send-keys -t %1 C-l`.
+            // The old `send-keys C-l -t %1` ordering made tmux treat `-t` as a
+            // literal key and never targeted the pane, so this must pin the
+            // correct order (it FAILS if the key-before-`-t` bug returns).
+            it == "send-keys -t %1 C-l"
         }
         assertTrue(
-            "Redraw must send `send-keys C-l -t %1` to FORCE the app to repaint " +
+            "Redraw must send `send-keys -t %1 C-l` to FORCE the app to repaint " +
                 "(sent during redraw: $sentDuringRedraw)",
             forceRepaintIndex >= 0,
         )
@@ -317,8 +321,11 @@ class RedrawNonDestructiveReseedTest {
 
         val sentDuring = client.sentCommands.drop(sentBefore)
         assertTrue(
-            "the attach/return reseed must FORCE a repaint too (sent: $sentDuring)",
-            sentDuring.any { it.startsWith("send-keys C-l -t %1") },
+            // Issue #1104: correct arg order — flags (`-t %1`) BEFORE the `C-l`
+            // key operand; pins it so the key-before-`-t` bug can't silently return.
+            "the attach/return reseed must FORCE a repaint too with `send-keys -t %1 C-l` " +
+                "(sent: $sentDuring)",
+            sentDuring.any { it == "send-keys -t %1 C-l" },
         )
         val renderedAfter = pane.terminalState.renderedNonBlankCharCount()
         assertTrue(

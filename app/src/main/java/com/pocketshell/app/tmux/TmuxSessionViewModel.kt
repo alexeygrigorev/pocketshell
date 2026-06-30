@@ -1114,7 +1114,20 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun isTransportKeepAliveProvenAliveRecently(): Boolean {
         // Test seam: a connected/unit proof can pin the keepalive "alive" state
         // (a live-but-slow link) without driving the real 90s ride-through window.
+        // An EXPLICIT pin always wins (the #964 slow-but-live phase deliberately
+        // sets it true WHILE the `-CC` dead-seam is armed).
         forceTransportProvenAliveForTest?.let { return it }
+        // Issue #866 / #822: the synthetic SILENT-drop seam ([forceLivenessProbeDeadForTest])
+        // models a genuine half-open link death — the dominant real #822 where BOTH the
+        // tmux `-CC` channel AND the SSH transport keepalive die together. Without this,
+        // arming only the `-CC` dead-seam on a healthy `agents:2222` fixture left the REAL
+        // keepalive "proven alive", so the #982/#984 deferral suppressed the drop forever
+        // and the connection-lost indicator never surfaced (the #822 detection contract
+        // regressed to a no-op on the deterministic fixture). When the `-CC` dead-seam is
+        // armed and no EXPLICIT keepalive verdict is pinned, the transport is NOT proven
+        // alive either — a silent drop is a WHOLE-link death. Production-neutral: the seam
+        // is test-only (always false in production), so this never changes real behaviour.
+        if (forceLivenessProbeDeadForTest) return false
         val session = sessionRef ?: return false
         return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
             .getOrDefault(false)
@@ -7943,9 +7956,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
                 disconnectedJob = null
-                runCatching { staleClient.close() }
+                // Issue #866: re-point the current-client port (and clientRef) at the
+                // replacement BEFORE closing the stale client. [CurrentClientTmuxPort.
+                // disconnectedClients] flatMapLatest-follows the current client, and the
+                // passive-drop classifier gates on `clientRef === client`. Closing the
+                // stale client while it is STILL the current one re-enters the driver's
+                // control-channel-drop path (classified as a current-client drop), which
+                // cancels this very in-flight grace loop and relaunches it — the cancel
+                // storm that wedged the silent reattach ("tries fresh transport once then
+                // spins"). Swapping first makes the stale close a no-op for the driver.
                 clientRef = replacement
                 connectionTmuxPort.setClient(replacement)
+                runCatching { staleClient.close() }
                 bindClientObservers(replacement)
                 replacement.connect()
                 activeAttachMilestone = AttachMilestone(
@@ -8126,6 +8148,19 @@ public class TmuxSessionViewModel @Inject constructor(
         return try {
             val ready = withTimeoutOrNull(timeoutMs) {
                 val leaseTarget = target.toSshLeaseTarget()
+                // Issue #866: DETACH the current-client port from the stale client
+                // BEFORE we tear its transport down. `disconnect(leaseKey)` kills the
+                // stale `-CC` channel's underlying SSH session, so its reader EOFs and
+                // `disconnected` flips true. [CurrentClientTmuxPort.disconnectedClients]
+                // flatMapLatest-follows the current client, so unless we re-point it
+                // first that EOF re-enters the driver's control-channel-drop path
+                // (classified as a current-client drop because `clientRef` is still the
+                // stale client), which cancels THIS in-flight grace loop and relaunches
+                // it — the cancel storm that wedged the silent reattach ("tries a fresh
+                // transport once then spins"). Detaching to null makes the port emit
+                // nothing for the stale teardown; the success path re-points it at the
+                // replacement below.
+                connectionTmuxPort.setClient(null)
                 withContext(NonCancellable) {
                     runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
                 }
@@ -8145,11 +8180,16 @@ public class TmuxSessionViewModel @Inject constructor(
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
                 disconnectedJob = null
-                runCatching { staleClient?.close() }
+                // Issue #866: re-point the current-client port (and clientRef) at the
+                // replacement BEFORE closing the stale client (see the warm-reattach
+                // sibling above). Closing it while it is still the current client
+                // re-enters the driver's control-channel-drop path and cancels this
+                // in-flight grace loop (the cancel storm). Swap first, then close.
                 leaseRef = lease
                 sessionRef = session
                 clientRef = newClient
                 connectionTmuxPort.setClient(newClient)
+                runCatching { staleClient?.close() }
                 bindClientObservers(newClient)
                 newClient.connect()
                 activeAttachMilestone = AttachMilestone(

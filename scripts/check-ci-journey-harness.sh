@@ -79,7 +79,6 @@ REQUIRED_PER_PUSH_ANDROID_TEST_CLASSES=(
 KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"
   "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
-  "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"
   "com.pocketshell.app.costs.CostsScreenE2eTest"
   "com.pocketshell.app.crash.ShareAllReportsDockerTest"
   "com.pocketshell.app.env.EnvScreenE2eTest"

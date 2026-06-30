@@ -233,8 +233,12 @@ class PromptComposerSendDismissE2eTest {
         val visible = mutableStateOf(true)
         val attachPath = "~/.pocketshell/attachments/host-1/20260611-report.png"
         var sendSucceeds = false
+        // Record every SendRequest the host receives so the resend assertion can
+        // prove the attachment still travels (it must NOT be silently dropped).
+        val received = java.util.concurrent.CopyOnWriteArrayList<PromptComposerViewModel.SendRequest>()
         collectorScope.launch {
             vm.sendRequests.collect { request ->
+                received += request
                 if (sendSucceeds) visible.value = false else vm.restoreFailedSend(request)
             }
         }
@@ -268,8 +272,10 @@ class PromptComposerSendDismissE2eTest {
         assertEquals(1, vm.uiState.value.attachments.size)
         WalkthroughScreenshotArtifacts.capture("issue-694-01-attach-then-type")
 
-        // Send while degraded: it fails. The restored draft keeps the
-        // attachment path so it is not silently dropped.
+        // Send while degraded: it fails. Issue #872/#971: the failed send
+        // restores the CLEAN typed draft AND re-shows the attachment as a TILE —
+        // the path lives in the attachment list, NOT folded into the draft text.
+        // The attachment must NEVER be silently dropped (#694/#1108).
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
             .assertIsEnabled()
             .performClick()
@@ -277,12 +283,14 @@ class PromptComposerSendDismissE2eTest {
             vm.uiState.value.error?.contains("Not sent") == true
         }
         compose.waitForIdle()
-        val restored = vm.uiState.value.draft
+        // The clean typed text comes back in the draft …
+        assertEquals("what is wrong here", vm.uiState.value.draft)
+        // … and the attachment survives as a TILE so the resend still carries it.
         assertTrue(
-            "restored draft must keep the attachment path for resend (#694)",
-            restored.contains("20260611-report.png"),
+            "failed send must keep the attachment tile for resend (#694/#1108)",
+            vm.uiState.value.attachments.any { it.remotePath.contains("20260611-report.png") },
         )
-        assertTrue(restored.contains("what is wrong here"))
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         WalkthroughScreenshotArtifacts.capture("issue-694-02-not-sent-keeps-attachment")
 
@@ -296,6 +304,14 @@ class PromptComposerSendDismissE2eTest {
             compose.onAllNodesWithTag(COMPOSER_DRAFT_TAG).fetchSemanticsNodes().isEmpty()
         }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertDoesNotExist()
+        // Load-bearing: the resend STILL carries the attachment — no silent drop.
+        compose.waitUntil(timeoutMillis = 5_000) { received.size >= 2 }
+        val resend = received.last()
+        assertTrue(
+            "resend must still carry the attachment path (#694/#1108)",
+            resend.text.contains("20260611-report.png") &&
+                resend.attachments.any { it.remotePath.contains("20260611-report.png") },
+        )
         WalkthroughScreenshotArtifacts.capture("issue-694-03-resend-after-reconnect")
     }
 }

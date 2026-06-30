@@ -382,6 +382,22 @@ class RedrawNonDestructiveReseedTest {
         val client = FakeTmuxClient().withRichInitialFrame("work", "%1")
         val vm = connectVmWithRichFrame(client)
 
+        // Issue #866: the link stays down for this characterization — the dropped
+        // client cannot reattach. Arm the clean-outage seam so the passive-disconnect
+        // grace loop FAILS its reattach cleanly (it returns before re-pointing the
+        // current-client port) and bounds itself via retry+grace, instead of trying
+        // to reattach. This is required because `connectVmWithRichFrame` installs a
+        // single-instance factory (`setTmuxClientFactoryForTest { _, _, _ -> client }`)
+        // that hands the SAME — now disconnected — client back as the reattach
+        // "replacement"; a real reattach always builds a genuinely fresh client whose
+        // `disconnected` is false, so re-pointing the port at it is a no-op edge. With
+        // the same-instance factory, re-pointing the port re-subscribes the still-true
+        // `disconnected` oracle and re-fires the drop, relaunching the grace loop
+        // forever. The clean-outage seam keeps the client DISCONNECTED (the exact state
+        // under test) without that unrealistic same-instance reattach churn, so the
+        // Redraw-on-a-disconnected-client feedback assertion below is unchanged.
+        vm.forceCleanOutageForTest = true
+
         val feedback = mutableListOf<String>()
         val collectorJob = launch(StandardTestDispatcher(testScheduler)) {
             vm.redrawFeedback.collect { feedback.add(it) }

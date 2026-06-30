@@ -311,7 +311,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # API 35 (Android 15): the full connected suite includes two API-35
-          # evidence tests (SessionForegroundServiceLiveHoldJourneyE2eTest +
+          # evidence tests (BoundedGraceSessionHoldJourneyE2eTest +
           # SessionConnectionServiceE2eTest) that HARD-assert
           # Build.VERSION.SDK_INT == 35 ("API 35 evidence must run on Android
           # 15"). Running the API-34 image made them report phantom failures

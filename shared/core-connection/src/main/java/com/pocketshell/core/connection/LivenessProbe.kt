@@ -368,8 +368,11 @@ class LivenessProbe(
          * three coupled 60s windows it would otherwise race when it IS the acting
          * detector:
          *   - lease idle TTL (`SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS = 60_000`),
-         *   - passive disconnect grace (`PASSIVE_DISCONNECT_GRACE_MS = 60_000`),
-         *   - controller grace (`ConnectionController.DEFAULT_GRACE_MS = 60_000`).
+         *   - passive disconnect grace (`PASSIVE_DISCONNECT_GRACE_MS = 60_000`).
+         * (The controller grace `ConnectionController.DEFAULT_GRACE_MS` was raised to
+         * 5 min in #1123 — the bounded-grace D21 update — so it is no longer one of the
+         * 60 s windows the probe races; the probe still sits well below the two
+         * transport-liveness 60 s windows above.)
          *
          * 48s is **under the D3-mandated hard ceiling of < 55s** with a ~12s margin
          * below the 60s floor. The `< 50_000` ceiling is enforced by

@@ -3,7 +3,6 @@ package com.pocketshell.app.sessions.service
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -45,10 +44,12 @@ import org.junit.runner.RunWith
  *
  * This registers a live entry in the production [ActiveTmuxClients] singleton,
  * so [SessionServiceController] starts the real foreground service exactly as a
- * live session does. The client is an in-process [TmuxClient] double; the JVM
- * regression pins the destructive post-grace Stop branch, while this on-device
- * test proves the Android surface: notification/channel, partial wakelock, Stop
- * release, and lifecycle teardown signal.
+ * live session does. The client is an in-process [TmuxClient] double; this
+ * on-device test proves the Android surface: notification/channel, partial
+ * wakelock, and — issue #1123 (bounded-grace D21 update) — that once the grace
+ * window ELAPSES the bounded hold tears down automatically (the teardown hook
+ * fires, the notification clears, the wakelock releases) with NO indefinite hold
+ * and NO manual Stop required.
  */
 @RunWith(AndroidJUnit4::class)
 class SessionConnectionServiceE2eTest {
@@ -80,7 +81,7 @@ class SessionConnectionServiceE2eTest {
     }
 
     @Test
-    fun liveSessionServicePostsWakeLockAndNotification_thenStopAfterGraceTearsDown() {
+    fun liveSessionServicePostsWakeLockAndNotification_thenGraceElapsedTearsDown() {
         assertEquals(
             "API 35 evidence must run on Android 15",
             35,
@@ -137,24 +138,16 @@ class SessionConnectionServiceE2eTest {
         )
         waitForWakeLockHeld()
 
+        // Bounded-grace D21 update (#1123): background past the (short) grace window.
+        // The teardown must run AUTOMATICALLY at grace-elapsed — NO manual Stop, NO
+        // indefinite preserve. The fan-out fires the lifecycle `onBackground` hook
+        // (which here marks the fake client disconnected); the controller then stops the
+        // bounded service, clearing the notification + releasing the wakelock.
         scenario!!.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
-        Thread.sleep(SHORT_GRACE_MS + 500L)
-        assertEquals(
-            "session hold must suppress the normal grace teardown until Stop",
-            1L,
-            backgroundTeardown.count,
-        )
-        assertFalse("client is still live before notification Stop", fakeClient.disconnected.value)
-
-        context.startService(
-            Intent(context, SessionConnectionService::class.java).apply {
-                action = SessionConnectionService.ACTION_STOP
-            },
-        )
 
         assertTrue(
-            "notification Stop after grace must fan out the destructive background teardown",
-            backgroundTeardown.await(5, TimeUnit.SECONDS),
+            "grace elapsing must fan out the destructive background teardown (no indefinite hold)",
+            backgroundTeardown.await(10, TimeUnit.SECONDS),
         )
         waitForSessionNotificationGone()
         waitForWakeLockReleased()

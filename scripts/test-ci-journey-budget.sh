@@ -654,12 +654,13 @@ pass "(neg) clean run: no false timeout (summary has no timeout marker; rc=$rc2)
 
 # (neg-2) ACCEPTANCE CRITERION 2 (#835 REOPENED): with a budget that fits, EVERY
 # selected load-bearing class reaches a verdict — none is silently cut short.
-# Assert the historically cut-short classes (BackgroundGrace, LiveHold) and a
-# share/composer/folder tail representative are present in the run AND that NO
-# class is bucketed as a budget timeout (no "cut short / not run" section).
+# Assert the historically cut-short classes (BackgroundGrace,
+# BoundedGraceSessionHold) and a share/composer/folder tail representative are
+# present in the run AND that NO class is bucketed as a budget timeout (no "cut
+# short / not run" section).
 for cut_short_class in \
   com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest \
-  com.pocketshell.app.proof.SessionForegroundServiceLiveHoldJourneyE2eTest; do
+  com.pocketshell.app.proof.BoundedGraceSessionHoldJourneyE2eTest; do
   grep -q "$cut_short_class" "$summary2" \
     || { cat "$summary2"; fail "(neg-2) $cut_short_class missing from a healthy full run — selection drifted"; }
 done

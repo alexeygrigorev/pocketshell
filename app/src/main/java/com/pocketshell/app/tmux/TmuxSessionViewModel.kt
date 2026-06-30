@@ -3208,7 +3208,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingReattach: PendingReattach? = null
     private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var backgroundDetachJob: Job? = null
-    private var postGraceHeldForegroundProbeJob: Job? = null
     private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
     // Issue #1098 (item 4 / #635): true while the SINGLE-GRACE-OWNER within-grace
@@ -3616,7 +3615,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // — EPIC #687 Slice 0 / #1047 — re-reading the live payloads per the #685 trap:
         // the controller edge is the trigger, the connection-core dispatcher the gate).
         // The inline foreground event arm is no longer consulted (Slice 2a).
-        if (launchPostGraceHeldForegroundProbeIfNeeded()) return
+        // Issue #1123 (bounded-grace D21 update): the #1021 "post-grace HELD foreground
+        // probe" is removed — the indefinite session-hold that could leave a live `-CC`
+        // client past grace with no pendingReattach no longer exists. Beyond grace the
+        // teardown always ran, so there is always a pendingReattach/pausedAutoReconnect
+        // to replay through the normal foreground arm below.
         connectionManager.observeForeground()
         dispatchPostGraceForegroundArmIfPending()
         // The controller's single grace predicate decided reattach-vs-reconnect:
@@ -3640,132 +3643,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun dispatchPostGraceForegroundArmIfPending() {
         if (pendingReattach == null && pausedAutoReconnect == null) return
         onControllerForegrounded()
-    }
-
-    /**
-     * Issue #1021 follow-up: when the foreground service preserved a live terminal past
-     * the App grace deadline, foreground arrives as "post-grace" but there is no
-     * [pendingReattach] to replay because no teardown ran. That must not no-op: probe the
-     * held control channel, reseed if it is alive, or silently re-open the same session if
-     * the held channel went stale while backgrounded.
-     */
-    private fun launchPostGraceHeldForegroundProbeIfNeeded(): Boolean {
-        if (pendingReattach != null || pausedAutoReconnect != null) return false
-        if (postGraceHeldForegroundProbeJob?.isActive == true) return true
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return false
-        val target = activeTarget ?: return false
-        val client = clientRef ?: return false
-        val session = sessionRef ?: return false
-        if (client.disconnected.value) {
-            Log.w(
-                ISSUE_235_LIFECYCLE_TAG,
-                "tmux-post-grace-held-foreground-disconnected-schedule-reconnect " +
-                    "generation=$connectGeneration " + targetLogFields(target),
-            )
-            DiagnosticEvents.record(
-                "connection",
-                "foreground_reattach",
-                "source" to "app_lifecycle",
-                "outcome" to "post_grace_hold_disconnected_reconnect",
-                "cause" to "session_foreground_service",
-                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
-                "generation" to connectGeneration,
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "clientHash" to System.identityHashCode(client),
-            )
-            unregisterCurrentClient()
-            scheduleAutoReconnect(
-                target = target,
-                reason = "Session connection was lost while PocketShell was backgrounded.",
-                trigger = TmuxConnectTrigger.LifecycleReattach,
-                diagnosticFields = arrayOf(
-                    "source" to "post_grace_session_hold",
-                    "clientDisconnected" to true,
-                ),
-            )
-            return true
-        }
-
-        Log.i(
-            ISSUE_235_LIFECYCLE_TAG,
-            "tmux-post-grace-held-foreground-probe generation=$connectGeneration " +
-                targetLogFields(target),
-        )
-        val job = launchContainedTeardown {
-            val verdict = probeRuntimeControlChannel(client, session)
-            val currentTarget = activeTarget
-            if (
-                clientRef !== client ||
-                currentTarget == null ||
-                !sameSessionIdentity(currentTarget, target)
-            ) {
-                return@launchContainedTeardown
-            }
-            ReconnectCauseTrail.record(
-                stage = "foreground_reattach",
-                outcome = "post_grace_hold_probe",
-                cause = "session_foreground_service",
-                trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
-                "hostId" to target.hostId,
-                "generation" to connectGeneration,
-                "probeVerdict" to verdict.name,
-                "clientHash" to System.identityHashCode(client),
-            )
-            DiagnosticEvents.record(
-                "connection",
-                "foreground_reattach",
-                "source" to "app_lifecycle",
-                "outcome" to "post_grace_hold_probe",
-                "cause" to "session_foreground_service",
-                "trigger" to TmuxConnectTrigger.LifecycleReattach.logValue,
-                "generation" to connectGeneration,
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "probeVerdict" to verdict.name,
-            )
-            if (verdict == RuntimeHealthVerdict.HEALTHY) {
-                connectionManager.observeForegroundReattachLive()
-                projectStatusFromController()
-                reseedActivePaneForReattach(
-                    RuntimeRefreshGuard(
-                        generation = connectGeneration,
-                        target = target,
-                        client = client,
-                    ),
-                )
-                return@launchContainedTeardown
-            }
-
-            val recovered = silentlyReconnectTransportAfterPassiveDisconnect(
-                staleClient = client,
-                target = target,
-                timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
-            )
-            if (!recovered) {
-                scheduleAutoReconnect(
-                    target = target,
-                    reason = "Reattaching to ${target.user}@${target.host}:${target.port}.",
-                    trigger = TmuxConnectTrigger.AutoReconnect,
-                    diagnosticFields = arrayOf(
-                        "originationCause" to "post_grace_session_hold_probe_${verdict.name.lowercase()}",
-                    ),
-                )
-            }
-        }
-        postGraceHeldForegroundProbeJob = job
-        job.invokeOnCompletion {
-            if (postGraceHeldForegroundProbeJob == job) {
-                postGraceHeldForegroundProbeJob = null
-            }
-        }
-        return true
     }
 
     /**

@@ -38,6 +38,51 @@ class SessionConnectionServiceTest {
     }
 
     @Test
+    fun `backgrounded notification shows a live count-down to disconnect`() {
+        val deadline = System.currentTimeMillis() + 5 * 60_000L
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = deadline,
+            ),
+        )
+
+        // The SYSTEM renders MM:SS via a count-down chronometer anchored on `when` — the
+        // app posts once, no per-second update.
+        assertTrue(
+            "backgrounded hold notification must be a count-down chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertTrue(
+            "the chronometer must count DOWN to the disconnect deadline",
+            notification.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN),
+        )
+        assertEquals(
+            "the count-down anchor (when) must be the grace disconnect deadline",
+            deadline,
+            notification.`when`,
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "body must read as a count-down to disconnect: '$body'",
+            body.contains("disconnecting in"),
+        )
+    }
+
+    @Test
+    fun `foreground notification has no count-down chronometer`() {
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(liveSessionCount = 1, primaryHostName = "alpha"),
+        )
+
+        assertFalse(
+            "with no disconnect deadline the notification must not show a chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+    }
+
+    @Test
     fun `notification collapses multiple hosts`() {
         val notification = buildServiceNotification(
             SessionConnectionSnapshot(liveSessionCount = 3, primaryHostName = "alpha"),

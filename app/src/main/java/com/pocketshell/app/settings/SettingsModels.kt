@@ -354,13 +354,25 @@ data class AppSettings(
             DefaultAgentSessionView.Conversation
 
         const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L
-        const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = 60_000L
+        const val BACKGROUND_GRACE_1_MINUTE_MS: Long = 60_000L
         const val BACKGROUND_GRACE_5_MINUTES_MS: Long = 5 * 60_000L
         const val BACKGROUND_GRACE_10_MINUTES_MS: Long = 10 * 60_000L
 
+        /**
+         * Issue #1123 (sanctioned D21 update): the background grace window defaults to
+         * **5 minutes**, raised from the original 60 s. The maintainer is fine with a
+         * bounded background hold ("I'm okay if I need to reconnect after 5 minutes but
+         * not after 60 seconds") — within this window a return is seamless (the
+         * connection is held, no reconnect band); once it elapses the app fully tears
+         * down (detach `-CC` cleanly, stop the foreground service + wake-lock, release
+         * the SSH lease) so NOTHING runs in the background beyond the grace window. The
+         * #977/#1021 INDEFINITE foreground-service hold is removed.
+         */
+        const val DEFAULT_BACKGROUND_GRACE_MILLIS: Long = BACKGROUND_GRACE_5_MINUTES_MS
+
         val BACKGROUND_GRACE_OPTIONS: List<BackgroundGraceOption> = listOf(
             BackgroundGraceOption(BACKGROUND_GRACE_30_SECONDS_MS, "30 sec"),
-            BackgroundGraceOption(DEFAULT_BACKGROUND_GRACE_MILLIS, "1 min"),
+            BackgroundGraceOption(BACKGROUND_GRACE_1_MINUTE_MS, "1 min"),
             BackgroundGraceOption(BACKGROUND_GRACE_5_MINUTES_MS, "5 min"),
             BackgroundGraceOption(BACKGROUND_GRACE_10_MINUTES_MS, "10 min"),
         )

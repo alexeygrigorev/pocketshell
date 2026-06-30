@@ -5656,107 +5656,15 @@ class TmuxSessionViewModelTest {
         }
     }
 
-    @Test
-    fun postGraceForegroundWithoutPendingReattachProbesAndReseedsHeldRuntime() = runTest(scheduler) {
-        val diagnostics = installRecordingDiagnosticSink()
-        try {
-            val vm = newVm()
-            val client = FakeTmuxClient().withSinglePane("work", "%1")
-            val session = FakeSshSession()
-            vm.replaceClientForTest(
-                hostId = 1L,
-                hostName = "alpha",
-                host = "alpha.example",
-                port = 22,
-                user = "alex",
-                keyPath = "/keys/a",
-                sessionName = "work",
-                client = client,
-                session = session,
-            )
-            client.emittedEvents.emit(
-                ControlEvent.WindowAdd(sessionId = "work", windowId = "@0", name = "work"),
-            )
-            advanceUntilIdle()
-
-            client.capturePaneResponses.addLast(
-                CommandResponse(number = 4L, output = listOf("post-grace held reseed"), isError = false),
-            )
-            val probeCountBefore =
-                client.sentCommands.count { it == "display-message -p '#{session_name}'" }
-            val captureCountBefore =
-                client.sentCommands.count { it == seedCaptureCommand("%1") }
-
-            vm.onAppForegrounded(resumedWithinGrace = false)
-            assertTrue(
-                "service-held post-grace foreground must not flash a reconnect state while probing",
-                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
-            )
-            advanceUntilIdle()
-
-            assertFalse(
-                "service-held post-grace foreground has no detached runtime to replay",
-                vm.hasPendingReattachForTest(),
-            )
-            assertTrue(
-                "post-grace foreground with a held runtime must probe the control channel",
-                client.sentCommands.count { it == "display-message -p '#{session_name}'" } > probeCountBefore,
-            )
-            assertTrue(
-                "a healthy held runtime must be reseeded instead of no-oping",
-                client.sentCommands.count { it == seedCaptureCommand("%1") } > captureCountBefore,
-            )
-            assertTrue(
-                "the post-grace hold probe must emit a foreground diagnostic",
-                diagnostics.eventsNamed("foreground_reattach").any {
-                    it.fields["outcome"] == "post_grace_hold_probe" &&
-                        it.fields["probeVerdict"] == RuntimeHealthVerdict.HEALTHY.name
-                },
-            )
-        } finally {
-            diagnostics.close()
-        }
-    }
-
-    @Test
-    fun postGraceForegroundWithoutPendingReattachReconnectsDisconnectedHeldRuntime() = runTest(scheduler) {
-        val diagnostics = installRecordingDiagnosticSink()
-        try {
-            val vm = newVm()
-            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
-            val client = FakeTmuxClient().withSinglePane("work", "%1")
-            val session = FakeSshSession()
-            vm.replaceClientForTest(
-                hostId = 1L,
-                hostName = "alpha",
-                host = "alpha.example",
-                port = 22,
-                user = "alex",
-                keyPath = "/keys/a",
-                sessionName = "work",
-                client = client,
-                session = session,
-            )
-            client.markDisconnectedForTest(
-                TmuxDisconnectEvent(
-                    reason = TmuxDisconnectReason.ReaderEof,
-                    source = "test",
-                    intent = "held_post_grace",
-                ),
-            )
-
-            vm.onAppForegrounded(resumedWithinGrace = false)
-            runCurrent()
-
-            assertTrue(
-                "post-grace foreground with a disconnected held client must schedule reconnect, got " +
-                    "${vm.connectionStatus.value}",
-                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
-            )
-        } finally {
-            diagnostics.close()
-        }
-    }
+    // Issue #1123 (bounded-grace D21 update): the two
+    // `postGraceForegroundWithoutPendingReattach…HeldRuntime` tests were removed with the
+    // `launchPostGraceHeldForegroundProbeIfNeeded` path they covered. That path only
+    // existed for the #1021 INDEFINITE foreground-service hold, where a foreground could
+    // arrive post-grace with a still-live `-CC` client and NO pendingReattach. Under the
+    // bounded grace the teardown ALWAYS runs at grace-elapsed (detach + pendingReattach
+    // set), so that state can no longer occur. The "disconnected client on foreground ->
+    // reconnect" behaviour is covered by the passive-disconnect tests and the
+    // BackgroundGraceReconnect journey.
 
     @Test
     fun shortAppSwitchPassiveDisconnectResumesAutoReconnectOnScreenStart() = runTest(scheduler) {

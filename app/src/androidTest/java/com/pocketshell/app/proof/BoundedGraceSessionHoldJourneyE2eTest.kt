@@ -3,7 +3,6 @@ package com.pocketshell.app.proof
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.SystemClock
@@ -25,7 +24,6 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.sessions.service.SessionConnectionService
 import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
@@ -53,17 +51,47 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issues #977 / #928: real SSH/tmux journey for the #1021 foreground-service hold.
+ * Issue #1123 (item 7 of #1098) — the BOUNDED-GRACE session-hold journey.
  *
- * The service-only envelope test proves notification + wakelock with a fake
- * client. This proof attaches MainActivity to the Docker `agents` tmux session
- * over the production path, backgrounds beyond a shortened grace window, and
- * asserts the foreground service preserves the actual `-CC` client: no teardown,
- * no fresh tmux connect, no reconnect surface, and the seeded marker remains
- * visible after foregrounding.
+ * This is the rewrite of the retired `SessionForegroundServiceLiveHoldJourneyE2eTest`
+ * (#977/#1021). The maintainer-approved decision (a sanctioned D21 update) replaces the
+ * **indefinite** #1021 foreground-service hold ("hold the `-CC` control client alive
+ * while ≥1 client is connected, forever") with a **bounded grace window** (default 5
+ * minutes): within the grace window the connection is held — a return is seamless, no
+ * visible reconnect — but once the grace window elapses the app fully tears down
+ * (detach the `-CC` control client cleanly, stop the foreground service + wake-lock,
+ * release the SSH lease). Nothing runs in the background beyond the grace window; the
+ * tmux session persists server-side, and a return after grace does a normal reconnect.
+ *
+ * The old test asserted the inverse — that the `-CC` client was PRESERVED past grace and
+ * the foreground "must not open a fresh tmux control attach", forever. Under the bounded
+ * grace those past-grace assertions INVERT.
+ *
+ * This proof attaches MainActivity to the Docker `agents` tmux session over the
+ * production path and exercises BOTH halves of the bounded-grace contract with a SHORT
+ * injected grace (so the test never waits 5 real minutes):
+ *
+ *  PHASE 1 — within grace: background and return inside the (short) grace window. The
+ *    foreground-service hold notification stays posted, and the return is SEAMLESS: no
+ *    reconnect / "Attaching…" / "Reconnecting" band.
+ *  PHASE 2 — beyond grace: background past the (short) grace window. The normal terminal
+ *    teardown runs (`terminal_background_teardown`), the foreground-service hold
+ *    notification CLEARS (the bounded service stopped — no wake-lock past grace), the
+ *    server-side `tmux list-clients` count drops to 0 (no orphan `-CC` client, #215), and
+ *    the tmux SESSION persists (`tmux list-sessions`).
+ *  PHASE 3 — return after grace: a normal reconnect re-attaches a fresh `-CC` client,
+ *    the seeded content re-renders, the app is Connected, and no error band lingers.
+ *
+ * Authoritative artifacts (process.md "Terminal Artifact Review"):
+ *  - `issue1123-01-attached-viewport.png` + `-visible-terminal.txt`
+ *  - `issue1123-02-within-grace-viewport.png` — seamless within-grace return.
+ *  - `issue1123-03-after-grace-clients.txt` — `tmux list-clients` proving 0 orphan.
+ *  - `issue1123-03-after-grace-sessions.txt` — `tmux list-sessions` proving persistence.
+ *  - `issue1123-04-foreground-reattached-viewport.png` + `-visible-terminal.txt`
+ *  - `timings.txt` / `summary.txt`.
  */
 @RunWith(AndroidJUnit4::class)
-class SessionForegroundServiceLiveHoldJourneyE2eTest {
+class BoundedGraceSessionHoldJourneyE2eTest {
 
     val compose = createAndroidComposeRule<MainActivity>()
 
@@ -103,7 +131,7 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
     }
 
     @Test
-    fun foregroundServiceHoldsLiveTmuxSessionPastGrace_thenStopTearsDown() = runBlocking<Unit> {
+    fun withinGraceHoldsSeamlessly_thenBeyondGraceTearsDownAndReattaches() = runBlocking<Unit> {
         assertEquals("API 35 evidence must run on Android 15", 35, android.os.Build.VERSION.SDK_INT)
 
         val attachStart = SystemClock.elapsedRealtime()
@@ -113,63 +141,97 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         waitForClientCountAtLeast(1, "initial attach")
         waitForSessionNotification("initial attach")
         recordTiming("attach_ms", SystemClock.elapsedRealtime() - attachStart)
-        captureViewport("issue977-01-attached")
+        captureViewport("issue1123-01-attached")
 
-        val tmuxConnectAfterAttach = TMUX_CONNECT_ATTEMPTS.get()
+        // =================================================================
+        // PHASE 1 — within grace: held, seamless return (no reconnect band).
+        // =================================================================
         diagnostics!!.clear()
-
-        val backgroundStart = SystemClock.elapsedRealtime()
+        BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
+        val withinStart = SystemClock.elapsedRealtime()
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
-        waitForDiagnostic("background_grace_start", "service-hold background")
-        waitForDiagnostic("background_grace_elapsed", "service-hold grace elapsed")
-        waitForDiagnostic("background_grace_session_hold", "service-hold preservation") {
-            it.fields["teardown"] == false &&
-                (it.fields["liveSessionCount"] as? Number)?.toLong()?.let { count -> count >= 1 } == true
-        }
-        recordTiming("background_to_service_hold_ms", SystemClock.elapsedRealtime() - backgroundStart)
-
-        assertTrue(
-            "service hold must not run normal terminal teardown while backgrounded; events=${diagnostics!!.events}",
-            diagnostics!!.eventsNamed("terminal_background_teardown").isEmpty(),
-        )
-        assertSessionNotificationOngoing("background hold")
-        waitForClientCountAtLeast(1, "background past grace with service hold")
-
-        val foregroundStart = SystemClock.elapsedRealtime()
+        waitForDiagnostic("background_grace_start", "within-grace background")
+        waitForClientCountAtLeast(1, "inside grace before foreground")
+        assertSessionNotificationOngoing("within-grace hold")
+        // Issue #1123: while backgrounded within grace the notification shows a LIVE
+        // count-down to disconnect (system chronometer anchored on the grace deadline).
+        assertSessionNotificationCountingDown("within-grace hold")
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
-        waitForDiagnostic("background_grace_foreground", "service-hold foreground") {
+        waitForDiagnostic("background_grace_foreground", "within-grace foreground") {
+            it.fields["withinGrace"] == true
+        }
+        recordTiming("within_grace_cycle_ms", SystemClock.elapsedRealtime() - withinStart)
+        waitForConnected("within-grace foreground")
+        assertNoVisibleReconnect("within-grace foreground")
+        watchNoVisibleReconnect("within-grace settle", WATCH_NO_RECONNECT_MS)
+        waitForVisibleTerminal("within-grace marker") { it.contains(READY_MARKER) }
+        waitForClientCountAtLeast(1, "within-grace after foreground")
+        assertSessionNotificationOngoing("within-grace after foreground")
+        captureViewport("issue1123-02-within-grace")
+
+        val tmuxConnectBeforeBeyondGrace = TMUX_CONNECT_ATTEMPTS.get()
+
+        // =================================================================
+        // PHASE 2 — beyond grace: full teardown, service stops, -CC detached,
+        // session persists.
+        // =================================================================
+        diagnostics!!.clear()
+        BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
+        val beyondStart = SystemClock.elapsedRealtime()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        waitForDiagnostic("background_grace_start", "beyond-grace background")
+        waitForDiagnostic("background_grace_elapsed", "beyond-grace elapsed") {
+            it.fields["deadlineElapsed"] == true
+        }
+        // The bounded grace must run the NORMAL terminal teardown past grace — NOT
+        // preserve the connection (the old #1021 indefinite-hold behavior).
+        waitForDiagnostic("terminal_background_teardown", "beyond-grace clean detach")
+        recordTiming("beyond_grace_to_teardown_ms", SystemClock.elapsedRealtime() - beyondStart)
+
+        // The `-CC` control client is detached server-side: zero orphan clients (#215).
+        waitForClientCountAtMost(0, "beyond grace detaches -CC client")
+        val afterGraceClients = listClientsRaw()
+        writeText("issue1123-03-after-grace-clients.txt", afterGraceClients)
+        assertEquals(
+            "beyond grace must detach the app's -CC control client (no orphan, #215); " +
+                "list-clients=`$afterGraceClients`",
+            0,
+            afterGraceClients.lines().count { it.isNotBlank() },
+        )
+
+        // The tmux SESSION persists (detach the control client, do NOT kill the session).
+        val afterGraceSessions = listSessionsRaw()
+        writeText("issue1123-03-after-grace-sessions.txt", afterGraceSessions)
+        assertTrue(
+            "the tmux session must persist server-side after the -CC detach; " +
+                "list-sessions=`$afterGraceSessions`",
+            afterGraceSessions.lines().any { it.startsWith("$SESSION_NAME:") },
+        )
+
+        // The bounded foreground service stopped: no wake-lock / hold notification past
+        // grace (battery posture = nothing in the background beyond grace).
+        waitForSessionNotificationGone()
+
+        // =================================================================
+        // PHASE 3 — return after grace: a normal reconnect re-attaches.
+        // =================================================================
+        diagnostics!!.clear()
+        val reconnectStart = SystemClock.elapsedRealtime()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        waitForDiagnostic("background_grace_foreground", "post-grace foreground") {
             it.fields["withinGrace"] == false
         }
-        waitForConnected("service-hold foreground")
-        assertNoVisibleReconnect("service-hold foreground")
-        watchNoVisibleReconnect("service-hold settle", WATCH_NO_RECONNECT_MS)
-        waitForVisibleTerminal("service-hold foreground marker") { it.contains(READY_MARKER) }
-        waitForClientCountAtLeast(1, "foreground after service hold")
-        assertEquals(
-            "service-held foreground must not open a fresh tmux control attach",
-            tmuxConnectAfterAttach,
-            TMUX_CONNECT_ATTEMPTS.get(),
+        waitForConnected("post-grace reattach")
+        waitForVisibleTerminal("post-grace marker") { it.contains(READY_MARKER) }
+        waitForClientCountAtLeast(1, "post-grace reattach")
+        watchNoLingeringReconnectBand("post-grace settle", WATCH_NO_RECONNECT_MS)
+        recordTiming("post_grace_reattach_ms", SystemClock.elapsedRealtime() - reconnectStart)
+        assertTrue(
+            "post-grace return must open a fresh tmux control attach (a real reconnect); " +
+                "before=$tmuxConnectBeforeBeyondGrace after=${TMUX_CONNECT_ATTEMPTS.get()}",
+            TMUX_CONNECT_ATTEMPTS.get() > tmuxConnectBeforeBeyondGrace,
         )
-        recordTiming("foreground_after_service_hold_ms", SystemClock.elapsedRealtime() - foregroundStart)
-        captureViewport("issue977-02-foreground-held")
-
-        diagnostics!!.clear()
-        val stopBackgroundStart = SystemClock.elapsedRealtime()
-        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
-        waitForDiagnostic("background_grace_session_hold", "second service-hold preservation")
-        context.startService(
-            Intent(context, SessionConnectionService::class.java).apply {
-                action = SessionConnectionService.ACTION_STOP
-            },
-        )
-        waitForDiagnostic("background_grace_session_hold_stop", "notification Stop after elapsed grace")
-        waitForDiagnostic("terminal_background_teardown", "notification Stop teardown")
-        waitForClientCountAtMost(0, "notification Stop after elapsed grace")
-        waitForSessionNotificationGone()
-        recordTiming(
-            "stop_after_elapsed_grace_to_teardown_ms",
-            SystemClock.elapsedRealtime() - stopBackgroundStart,
-        )
+        captureViewport("issue1123-04-foreground-reattached")
         writeSummary()
     }
 
@@ -177,7 +239,7 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         notificationManager.cancelAll()
         clearLastSessionPrefs()
         clearBackgroundGraceSetting()
-        BackgroundGraceTestOverride.setForTest(SHORT_GRACE_MS)
+        BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
         fixtureKey = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(fixtureKey))
         seedTmuxSession(fixtureKey)
@@ -303,6 +365,7 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         return text
     }
 
+    /** Full no-reconnect assertion — for the within-grace seamless return (no band at all). */
     private fun assertNoVisibleReconnect(label: String) {
         assertEquals(
             "expected no Connecting overlay for $label",
@@ -358,6 +421,139 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         }
     }
 
+    /**
+     * A LINGERING disconnect/reconnect band — the scary surface the post-grace reconnect
+     * must not leave behind once it settles. A transient `Connecting`/`Attaching`
+     * indicator DURING the post-grace reconnect is acceptable (the maintainer OK'd a
+     * visible reconnect after grace); this only rejects a band that LINGERS after the app
+     * has returned to Connected.
+     */
+    private fun assertNoLingeringReconnectBand(label: String) {
+        assertEquals(
+            "expected no disconnect error band for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        assertEquals(
+            "expected no Tap Reconnect button for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        assertEquals(
+            "expected no Reconnecting/Disconnected pill for $label",
+            0,
+            compose.onAllNodesWithTag(TMUX_CONNECTION_STATUS_PILL_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size,
+        )
+        listOf("Reconnecting", "Disconnected", "Tap Reconnect").forEach { text ->
+            assertEquals(
+                "expected no visible '$text' text for $label",
+                0,
+                compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .size,
+            )
+        }
+    }
+
+    private fun watchNoLingeringReconnectBand(label: String, durationMs: Long) {
+        val deadline = SystemClock.elapsedRealtime() + durationMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            assertNoLingeringReconnectBand(label)
+            SystemClock.sleep(100)
+        }
+    }
+
+    private fun waitForSessionNotification(label: String) {
+        val posted = pollForSessionNotification(timeoutMs = NOTIFICATION_TIMEOUT_MS)
+        assertNotNull("session foreground notification must be posted for $label", posted)
+        assertSessionNotificationOngoing(label)
+    }
+
+    private fun assertSessionNotificationOngoing(label: String) {
+        val posted = sessionNotification()
+        assertNotNull("session foreground notification must remain posted for $label", posted)
+        val notification = posted!!.notification
+        assertEquals("pocketshell_session_status_v1", notification.channelId)
+        assertTrue(
+            "session notification must be ongoing for $label",
+            notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
+        )
+    }
+
+    /**
+     * Issue #1123: while backgrounded within grace the hold notification must be a LIVE
+     * count-down to disconnect — a system count-down chronometer (`EXTRA_SHOW_CHRONOMETER`
+     * + `EXTRA_CHRONOMETER_COUNT_DOWN`) anchored on a future `when` deadline, with body
+     * text reading "disconnecting in". The system renders MM:SS; the app posts once.
+     */
+    private fun assertSessionNotificationCountingDown(label: String) {
+        val deadline = SystemClock.elapsedRealtime() + NOTIFICATION_TIMEOUT_MS
+        var posted = sessionNotification()
+        while (
+            SystemClock.elapsedRealtime() < deadline &&
+            posted?.notification?.extras?.getBoolean(android.app.Notification.EXTRA_CHRONOMETER_COUNT_DOWN) != true
+        ) {
+            SystemClock.sleep(100)
+            posted = sessionNotification()
+        }
+        assertNotNull("session notification must be posted for $label", posted)
+        val notification = posted!!.notification
+        assertTrue(
+            "backgrounded hold notification must be a count-down chronometer for $label",
+            notification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertTrue(
+            "the chronometer must count DOWN to the disconnect deadline for $label",
+            notification.extras.getBoolean(android.app.Notification.EXTRA_CHRONOMETER_COUNT_DOWN),
+        )
+        assertTrue(
+            "the count-down anchor (when=${notification.`when`}) must be a future disconnect " +
+                "deadline for $label",
+            notification.`when` > System.currentTimeMillis(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "count-down notification body must read 'disconnecting in' for $label; got '$body'",
+            body.contains("disconnecting in"),
+        )
+    }
+
+    private fun waitForSessionNotificationGone() {
+        val deadline = SystemClock.elapsedRealtime() + NOTIFICATION_TIMEOUT_MS
+        while (sessionNotification() != null && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(100)
+        }
+        assertEquals(
+            "the bounded session foreground notification must clear once the grace window " +
+                "elapses (no wake-lock / hold beyond grace)",
+            null,
+            sessionNotification(),
+        )
+    }
+
+    private fun pollForSessionNotification(timeoutMs: Long): android.service.notification.StatusBarNotification? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var posted = sessionNotification()
+        while (posted == null && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(100)
+            posted = sessionNotification()
+        }
+        return posted
+    }
+
+    private fun sessionNotification() =
+        notificationManager.activeNotifications.firstOrNull {
+            it.notification.extras
+                .getCharSequence("android.title")
+                ?.toString() == "Session connected"
+        }
+
     private fun waitForDiagnostic(
         name: String,
         label: String,
@@ -365,9 +561,8 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         predicate: (RecordedDiagnosticEvent) -> Boolean = { true },
     ): RecordedDiagnosticEvent {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var matches = emptyList<RecordedDiagnosticEvent>()
         while (SystemClock.elapsedRealtime() < deadline) {
-            matches = diagnostics!!.eventsNamed(name).filter(predicate)
+            val matches = diagnostics!!.eventsNamed(name).filter(predicate)
             if (matches.isNotEmpty()) return matches.last()
             SystemClock.sleep(50)
         }
@@ -416,59 +611,19 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         return result.getOrNull()?.stdout.orEmpty()
     }
 
-    private fun waitForSessionNotification(label: String) {
-        val posted = pollForSessionNotification(timeoutMs = NOTIFICATION_TIMEOUT_MS)
-        assertNotNull("session foreground notification must be posted for $label", posted)
-        assertSessionNotificationOngoing(label)
-    }
-
-    private fun assertSessionNotificationOngoing(label: String) {
-        val posted = sessionNotification()
-        assertNotNull("session foreground notification must remain posted for $label", posted)
-        val notification = posted!!.notification
-        assertEquals("pocketshell_session_status_v1", notification.channelId)
-        assertTrue(
-            "session notification must be ongoing for $label",
-            notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
-        )
-        assertTrue(
-            "session notification must be non-clearable for $label",
-            notification.flags and Notification.FLAG_NO_CLEAR != 0,
-        )
-        assertTrue(
-            "session notification must include Stop for $label",
-            notification.actions?.any { it.title?.toString() == "Stop" } == true,
-        )
-    }
-
-    private fun waitForSessionNotificationGone() {
-        val deadline = SystemClock.elapsedRealtime() + NOTIFICATION_TIMEOUT_MS
-        while (sessionNotification() != null && SystemClock.elapsedRealtime() < deadline) {
-            SystemClock.sleep(100)
+    private suspend fun listSessionsRaw(): String {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(fixtureKey),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec("tmux list-sessions 2>/dev/null || true") }
         }
-        assertEquals(
-            "session foreground notification must clear after Stop",
-            null,
-            sessionNotification(),
-        )
+        return result.getOrNull()?.stdout.orEmpty()
     }
-
-    private fun pollForSessionNotification(timeoutMs: Long): android.service.notification.StatusBarNotification? {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var posted = sessionNotification()
-        while (posted == null && SystemClock.elapsedRealtime() < deadline) {
-            SystemClock.sleep(100)
-            posted = sessionNotification()
-        }
-        return posted
-    }
-
-    private fun sessionNotification() =
-        notificationManager.activeNotifications.firstOrNull {
-            it.notification.extras
-                .getCharSequence("android.title")
-                ?.toString() == "Session connected"
-        }
 
     private fun readFixtureKey(): String =
         instrumentation.context
@@ -493,12 +648,12 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
             val storedKey = SshKeyStorage.persistKey(
                 context = context,
                 sshKeyDao = db.sshKeyDao(),
-                name = "issue977-session-service-key-${System.currentTimeMillis()}",
+                name = "issue1123-bounded-grace-key-${System.currentTimeMillis()}",
                 content = key,
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Issue977 Session Service",
+                    name = "Issue1123 Bounded Grace",
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -532,7 +687,7 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         val result = execRemoteSetupUntilReady(
             key = SshKey.Pem(key),
             command = script,
-            description = "issue977 session foreground service tmux seed",
+            description = "issue1123 bounded-grace tmux seed",
         )
         assertTrue(
             "expected tmux seeding to succeed; exit=${result.exitCode} stderr='${result.stderr}'",
@@ -581,14 +736,14 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
                 "failed to write bitmap to ${file.absolutePath}"
             }
         }
-        println("ISSUE977_VIEWPORT ${file.absolutePath}")
+        println("ISSUE1123_VIEWPORT ${file.absolutePath}")
         return file
     }
 
     private fun writeText(name: String, text: String): File {
         val file = artifactFile(name)
         file.writeText(text)
-        println("ISSUE977_TEXT ${file.absolutePath}")
+        println("ISSUE1123_TEXT ${file.absolutePath}")
         return file
     }
 
@@ -596,11 +751,13 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
         writeText(
             "summary.txt",
             buildString {
-                appendLine("test=SessionForegroundServiceLiveHoldJourneyE2eTest")
-                appendLine("issues=#977,#928")
+                appendLine("test=BoundedGraceSessionHoldJourneyE2eTest")
+                appendLine("issues=#1123,#1098")
+                appendLine("behavior=bounded_grace_then_full_teardown")
                 appendLine("session=$SESSION_NAME")
                 appendLine("marker=$READY_MARKER")
-                appendLine("grace_override_ms=$SHORT_GRACE_MS")
+                appendLine("within_grace_override_ms=$WITHIN_GRACE_MS")
+                appendLine("beyond_grace_override_ms=$POST_GRACE_MS")
                 timings.forEach { appendLine(it) }
                 appendLine("tmux_connect_attempts=${TMUX_CONNECT_ATTEMPTS.get()}")
             },
@@ -618,7 +775,7 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
     private fun recordTiming(name: String, value: Long) {
         val line = "$name=$value"
         timings += line
-        println("ISSUE977_TIMING $line")
+        println("ISSUE1123_TIMING $line")
     }
 
     private fun View.findTerminalView(): TerminalView? {
@@ -636,10 +793,15 @@ class SessionForegroundServiceLiveHoldJourneyE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
-        const val DEVICE_DIR_NAME: String = "issue977-session-foreground-service-live-hold"
-        const val SESSION_NAME: String = "issue977-session-service-hold"
-        const val READY_MARKER: String = "ISSUE977-SESSION-SERVICE-HOLD-READY"
-        const val SHORT_GRACE_MS: Long = 500L
+        const val DEVICE_DIR_NAME: String = "issue1123-bounded-grace-session-hold"
+        const val SESSION_NAME: String = "issue1123-bounded-grace"
+        const val READY_MARKER: String = "ISSUE1123-BOUNDED-GRACE-READY"
+
+        // Within-grace window the test returns INSIDE; beyond-grace window the test lets
+        // ELAPSE. Injected via BackgroundGraceTestOverride so the test never waits the
+        // real 5-minute default.
+        const val WITHIN_GRACE_MS: Long = 3_000L
+        const val POST_GRACE_MS: Long = 500L
         const val WATCH_NO_RECONNECT_MS: Long = 1_200L
         const val NOTIFICATION_TIMEOUT_MS: Long = 10_000L
 

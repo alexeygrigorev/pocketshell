@@ -34,7 +34,10 @@ import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.projects.folderRowTestTag
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.usage.usageBannerTagFor
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
@@ -413,6 +416,21 @@ class EmulatorDockerSshSmokeTest {
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             waitForSessionConnectUiToSettle()
             waitForTerminalSessionAttached()
+            // Issue #78 (release blocker): the host-detail session list opens an
+            // EXISTING foreign tmux session (`claude-main`) that PocketShell has
+            // not classified yet. Per the #818/#878 design the app defaults a
+            // presumed-agent / not-yet-classified session to the CONVERSATION
+            // surface ("Loading conversation…") while detection runs — so the
+            // Terminal this shell+tmux journey exercises is the non-default,
+            // background tab. The terminal INPUT/transcript path works on either
+            // tab (the TerminalView is mounted), but the on-screen capture must
+            // show the TERMINAL, not the conversation placeholder. Select the
+            // Terminal tab now so the whole visible journey — and the final
+            // `issue78-existing-tmux-output.png` capture — is the real terminal
+            // surface. This also keeps a genuine black-screen guard: if the
+            // terminal itself failed to paint on its own tab, the foreground-pixel
+            // assertion in [captureTerminalScreenshot] still fails.
+            selectTerminalTabForVisibleCapture()
             val terminalReadyMs = waitForTerminalUsableByMarker(
                 command = "printf \"${shellReadyMarker}\\n\"",
                 marker = shellReadyMarker,
@@ -687,6 +705,47 @@ class EmulatorDockerSshSmokeTest {
                 "connecting to $DEFAULT_USER@$DEFAULT_HOST:$DEFAULT_PORT",
                 substring = false,
             ).fetchSemanticsNodes().isEmpty()
+        }
+    }
+
+    /**
+     * Issue #78: ensure the visible session surface is the TERMINAL pager, not
+     * the #818 Conversation default ("Loading conversation…") that a presumed-
+     * agent / not-yet-classified existing session lands on. When the consolidated
+     * tab pill is present (the multi-tab agent/presumed-agent case) its Terminal
+     * segment ([TMUX_TERMINAL_TAB_TAG]) is tapped; for a shell-only single-tab
+     * pane the pill is intentionally absent and the terminal is already the only
+     * surface (nothing to tap). Either way this asserts the Conversation surfaces
+     * (the detecting placeholder and the transcript pane) are GONE before the
+     * journey proceeds, so the terminal output screenshot is captured against the
+     * real terminal rather than the conversation placeholder.
+     */
+    private fun selectTerminalTabForVisibleCapture() {
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            val onTerminalSurface =
+                !hasTag(TMUX_CONVERSATION_DETECTING_TAG) && !hasTag(TMUX_CONVERSATION_PANE_TAG)
+            if (onTerminalSurface) return
+            // Tap the Terminal segment of the consolidated tab pill if it is
+            // shown (presumed-agent / detected-agent panes render it). A single-
+            // tab shell pane has no pill, so the surface is already the terminal.
+            if (hasTag(TMUX_TERMINAL_TAB_TAG)) {
+                compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true).performClick()
+            }
+            SystemClock.sleep(250)
+        }
+        waitUntilWithDiagnostics(
+            label = "Terminal surface visible (no Conversation placeholder/pane) for the existing-tmux journey",
+            timeoutMillis = 5_000,
+            tagProbes = listOf(
+                TMUX_SESSION_SCREEN_TAG,
+                TMUX_TERMINAL_TAB_TAG,
+                TMUX_CONVERSATION_DETECTING_TAG,
+                TMUX_CONVERSATION_PANE_TAG,
+            ),
+        ) {
+            !hasTag(TMUX_CONVERSATION_DETECTING_TAG) && !hasTag(TMUX_CONVERSATION_PANE_TAG)
         }
     }
 

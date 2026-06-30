@@ -1,14 +1,18 @@
 package com.pocketshell.app.diagnostics
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Clock
@@ -17,25 +21,63 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * ## Off-main store build + sequence seed (issue #1124, cold-launch freeze)
+ *
+ * [DiagnosticRecorder] is an `@Inject @Singleton` field on `App`, constructed
+ * during `App.onCreate` Hilt injection — on the **Main thread**, before
+ * `StrictModeInstaller` arms (so it is invisible to the freeze gate). The old
+ * `<init>` computed `AtomicLong(store.lastSequence())`, and
+ * [DiagnosticLogStore.lastSequence] does a **full synchronous `readLines()`** of
+ * the unbounded, ever-growing diagnostics JSONL. That blocked Main at every cold
+ * launch and got *worse with usage* as the file accumulated events — the highest-
+ * impact launch freeze found in the #1085 hunt.
+ *
+ * The store build + `lastSequence()` seed is moved off-main onto the recorder's
+ * `Dispatchers.IO` scope (eager [async], mirroring the #1087
+ * `UpdateCheckStore` pattern). The [AtomicLong] sequence is seeded when that
+ * warm-up completes. Sequence numbers are assigned in the channel-consumer
+ * coroutine (which `await`s the seed before processing any command), so no event
+ * can be numbered before the seed lands — the recorder's monotonic-sequence
+ * contract is preserved. Hard-cut (D22): no synchronous on-Main fallback.
+ */
 @Singleton
 class DiagnosticRecorder @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsRepository: SettingsRepository,
 ) : DiagnosticEventSink {
-    private val store = DiagnosticLogStore(
-        logFile = File(context.filesDir, "diagnostics/pocketshell-diagnostics.jsonl"),
-        exportDirectory = File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR),
-    )
     private val clock: Clock = Clock.systemUTC()
-    private val sequence = AtomicLong(store.lastSequence())
+    private val sequence = AtomicLong(0L)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val commands = Channel<RecorderCommand>(capacity = RECORDER_BUFFER_CAPACITY)
 
+    @Volatile
+    private var lastSequenceReadThreadName: String? = null
+
+    /**
+     * The store build + the expensive `lastSequence()` JSONL read, deferred off
+     * the constructing (Main) thread (#1124). Seeds [sequence] when it completes.
+     * Every store consumer (the channel loop, [exportSnapshot], [readEvents])
+     * awaits this, so the warm-up runs exactly once on IO.
+     */
+    private val storeDeferred: Deferred<DiagnosticLogStore> = scope.async {
+        val store = DiagnosticLogStore(
+            logFile = File(context.filesDir, "diagnostics/pocketshell-diagnostics.jsonl"),
+            exportDirectory = File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR),
+        )
+        lastSequenceReadThreadName = currentPhysicalThreadName()
+        sequence.set(store.lastSequence())
+        store
+    }
+
     init {
         scope.launch {
+            // Await the off-main seed BEFORE processing any command, so every
+            // sequence assigned below starts from the persisted high-water mark.
+            val store = storeDeferred.await()
             for (command in commands) {
                 when (command) {
-                    is RecorderCommand.Line -> store.appendLine(command.line)
+                    is RecorderCommand.Line -> store.appendLine(encode(command.pending))
                     is RecorderCommand.Flush -> command.done.complete(Unit)
                     is RecorderCommand.Clear -> {
                         store.clear()
@@ -46,7 +88,9 @@ class DiagnosticRecorder @Inject constructor(
                         store.clear()
                         sequence.set(0L)
                         if (settingsRepository.settings.value.diagnosticsRecordingEnabled) {
-                            store.appendLine(eventLine(command.category, command.event, command.fields))
+                            store.appendLine(
+                                encode(pendingEvent(command.category, command.event, command.fields)),
+                            )
                         }
                         command.done.complete(Unit)
                     }
@@ -57,18 +101,16 @@ class DiagnosticRecorder @Inject constructor(
 
     override fun record(category: String, event: String, fields: Map<String, Any?>) {
         if (!settingsRepository.settings.value.diagnosticsRecordingEnabled) return
-        val line = eventLine(category, event, fields)
-        if (commands.trySend(RecorderCommand.Line(line)).isFailure) {
-            val overflow = DiagnosticsEvent(
-                sequence = sequence.incrementAndGet(),
-                wallClockTime = Instant.now(clock),
-                monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+        val pending = pendingEvent(category, event, fields)
+        if (commands.trySend(RecorderCommand.Line(pending)).isFailure) {
+            val overflow = PendingEvent(
                 category = "diagnostics",
                 name = "recorder_overflow",
+                wallClockTime = Instant.now(clock),
+                monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+                metadata = emptyMap(),
             )
-            commands.trySend(
-                RecorderCommand.Line(DiagnosticEventJson.encode(overflow)),
-            )
+            commands.trySend(RecorderCommand.Line(overflow))
         }
     }
 
@@ -87,14 +129,14 @@ class DiagnosticRecorder @Inject constructor(
     suspend fun exportSnapshot(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): File? {
         flush()
         return withContext(Dispatchers.IO) {
-            store.exportSnapshot(deviceLabel(), appVersion(), filter)
+            storeDeferred.await().exportSnapshot(deviceLabel(), appVersion(), filter)
         }
     }
 
     suspend fun readEvents(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): List<DiagnosticsEvent> {
         flush()
         return withContext(Dispatchers.IO) {
-            store.readEvents(filter)
+            storeDeferred.await().readEvents(filter)
         }
     }
 
@@ -120,21 +162,56 @@ class DiagnosticRecorder @Inject constructor(
         return events.joinToString(separator = "\n") { DiagnosticEventJson.encode(it) }
     }
 
+    /**
+     * Test-only (#1124): block until the off-main store build + `lastSequence()`
+     * read completes and return the name of the thread it ran on. Proves the
+     * unbounded JSONL read did NOT run on the constructing/Main thread.
+     */
+    @VisibleForTesting
+    internal fun awaitLastSequenceReadThreadNameForTest(): String {
+        runBlocking { storeDeferred.await() }
+        return lastSequenceReadThreadName
+            ?: error("lastSequence read thread was not recorded")
+    }
+
     private suspend fun flush() {
         val done = CompletableDeferred<Unit>()
         commands.send(RecorderCommand.Flush(done))
         done.await()
     }
 
-    private fun eventLine(category: String, event: String, fields: Map<String, Any?>): String =
+    // The seed runs inside a coroutine, whose framework decorates the thread name
+    // with a " @coroutine#N" suffix. Strip it so the recorded value is the
+    // PHYSICAL thread name — otherwise an on-Main build (the un-fixed base) would
+    // still differ from the captured constructing name by the suffix alone,
+    // giving a false off-main pass (#1087 G6: keep the assertion load-bearing).
+    private fun currentPhysicalThreadName(): String =
+        Thread.currentThread().name.substringBefore(" @coroutine")
+
+    /**
+     * Builds the event payload at record time (cheap, caller-thread safe). The
+     * monotonic [sequence] is deliberately NOT assigned here — it is assigned in
+     * the channel consumer ([encode]) after the off-main seed completes, so an
+     * event recorded before warm-up still gets a correct, monotonic sequence.
+     */
+    private fun pendingEvent(category: String, event: String, fields: Map<String, Any?>): PendingEvent =
+        PendingEvent(
+            category = category,
+            name = event,
+            wallClockTime = Instant.now(clock),
+            monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
+            metadata = DiagnosticRedactor.redact(fields),
+        )
+
+    private fun encode(pending: PendingEvent): String =
         DiagnosticEventJson.encode(
             DiagnosticsEvent(
                 sequence = sequence.incrementAndGet(),
-                wallClockTime = Instant.now(clock),
-                monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
-                category = category,
-                name = event,
-                metadata = DiagnosticRedactor.redact(fields),
+                wallClockTime = pending.wallClockTime,
+                monotonicTimestampNanos = pending.monotonicTimestampNanos,
+                category = pending.category,
+                name = pending.name,
+                metadata = pending.metadata,
             ),
         )
 
@@ -157,8 +234,16 @@ class DiagnosticRecorder @Inject constructor(
             "$name ($code)"
         }.getOrDefault("unknown")
 
+    private class PendingEvent(
+        val category: String,
+        val name: String,
+        val wallClockTime: Instant,
+        val monotonicTimestampNanos: Long,
+        val metadata: Map<String, Any?>,
+    )
+
     private sealed interface RecorderCommand {
-        data class Line(val line: String) : RecorderCommand
+        data class Line(val pending: PendingEvent) : RecorderCommand
         data class Flush(val done: CompletableDeferred<Unit>) : RecorderCommand
         data class Clear(val done: CompletableDeferred<Unit>) : RecorderCommand
         data class ClearAndRecord(

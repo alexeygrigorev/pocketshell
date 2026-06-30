@@ -2,11 +2,20 @@ package com.pocketshell.app.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CountDownLatch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -34,19 +43,125 @@ import javax.inject.Singleton
  * settings observation and the [SettingsViewModel], so writes in the
  * settings screen are immediately visible at the composable root without
  * any cross-scope plumbing.
+ *
+ * ## Off-main construction + splash preload (issue #1088)
+ *
+ * This `@Singleton` is built during `App.onCreate` Hilt field injection — on
+ * the **Main** thread, before the first frame. The old constructor opened the
+ * `app_settings` prefs file (`getSharedPreferences(...)` does a synchronous
+ * first-touch disk read) AND read ~15 keys (`readSnapshot()`) eagerly, so it
+ * blocked Main during cold launch — the same launch-path freeze class as the
+ * #1087 batch off-main fixes (`UpdateCheckStore`, `LastSessionStore`, …).
+ *
+ * It was deferred from #1087 because [settings] is consumed at FIRST
+ * COMPOSITION (the theme / per-pane config), so a naive async seed would
+ * flash a default→persisted UI config (theme/settings pop). The fix:
+ *
+ * - The prefs open + [readSnapshot] run OFF Main, on [Dispatchers.IO], as an
+ *   eager [async] kicked off from the constructor. Because construction itself
+ *   happens during `App.onCreate`, that async IS the splash/startup-window
+ *   PRELOAD — it warms while the activity inflates, before `setContent`. A
+ *   [StartupTiming] mark fires when it completes for cold-launch observability.
+ * - [settings] is created LAZILY (a getter over the lazy [_settings]); its
+ *   initial value is the warm snapshot. The very first value the composition
+ *   observes is therefore the persisted snapshot — never a default — so there
+ *   is no flash. The first read blocks only on the await, which by first
+ *   composition is already complete (warmed during the splash window), so it
+ *   does not block launch.
+ *
+ * Hard-cut (D22): there is no synchronous on-Main read path. Reads/writes route
+ * through [prefs], which warms-or-awaits the off-main build.
  */
 @Singleton
-class SettingsRepository @Inject constructor(
-    @ApplicationContext context: Context,
+class SettingsRepository @VisibleForTesting internal constructor(
+    context: Context,
+    /**
+     * Test-only gate (#1088). When non-null, the off-main warm-up [async]
+     * blocks on this latch BEFORE it builds the snapshot, so a test can hold
+     * the snapshot build provably in-flight at the moment `settings.value` is
+     * first read — the deterministic TIMING1 seam that proves the no-default-
+     * flash property (a racy seed-default-then-update would expose the default
+     * here, the blocking-await shipped path returns the persisted snapshot).
+     * `null` in production (the [Inject] constructor), so this is a pure
+     * no-op on the real launch path.
+     */
+    private val warmUpGate: CountDownLatch?,
 ) {
 
-    private val prefs: SharedPreferences = context.applicationContext
-        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    @Inject
+    constructor(@ApplicationContext context: Context) : this(context, warmUpGate = null)
 
-    private val _settings: MutableStateFlow<AppSettings> = MutableStateFlow(readSnapshot())
+    private val appContext: Context = context.applicationContext
 
-    /** Hot, always-current snapshot of [AppSettings]. */
-    val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+    @Volatile
+    private var cachedPrefs: SharedPreferences? = null
+
+    @Volatile
+    private var snapshotBuildThreadName: String? = null
+
+    private val warmUpScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Eager off-main preload of the prefs file + persisted snapshot. Kicked off
+     * from the constructor (i.e. during `App.onCreate` injection) so it warms
+     * during the splash/startup window and is ready by first composition.
+     */
+    private val snapshotDeferred: Deferred<AppSettings> = warmUpScope.async {
+        // Test-only: hold the build in-flight until the gate opens. No-op in
+        // production (gate == null). Placed BEFORE the snapshot is built so the
+        // deferred cannot complete — and `_settings`' blocking-await cannot
+        // return — while a test is reading the first value.
+        warmUpGate?.await()
+        snapshotBuildThreadName = currentPhysicalThreadName()
+        val prefs = appContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .also { cachedPrefs = it }
+        val snapshot = readSnapshot(prefs)
+        StartupTiming.markOnce("settings-snapshot-preloaded")
+        snapshot
+    }
+
+    private val prefs: SharedPreferences
+        get() = cachedPrefs ?: runBlocking {
+            snapshotDeferred.await()
+            cachedPrefs ?: error("settings prefs not cached after off-main build")
+        }
+
+    private val _settings: MutableStateFlow<AppSettings> by lazy {
+        MutableStateFlow(runBlocking { snapshotDeferred.await() })
+    }
+
+    /**
+     * Hot, always-current snapshot of [AppSettings]. A getter (not an eager
+     * `val`) so the backing [_settings] — and its blocking await on the warm
+     * snapshot — is initialised at first read (first composition), NOT at
+     * construction/injection. By first composition the preload is warm, so the
+     * initial value is the persisted snapshot (no default flash) and the read
+     * does not block launch.
+     */
+    val settings: StateFlow<AppSettings>
+        get() = _settings.asStateFlow()
+
+    /**
+     * Test-only: block until the off-main preload completes and return the name
+     * of the PHYSICAL thread it ran on (#1088). Proves the prefs open +
+     * snapshot read did NOT run on the constructing (Main) thread.
+     */
+    @VisibleForTesting
+    internal fun awaitSnapshotBuildThreadNameForTest(): String {
+        runBlocking { snapshotDeferred.await() }
+        return snapshotBuildThreadName
+            ?: error("settings snapshot build thread was not recorded")
+    }
+
+    // The build runs inside a coroutine, whose framework decorates the thread
+    // name with a " @coroutine#N" suffix. Strip it so the recorded value is the
+    // PHYSICAL thread name — otherwise an on-Main build (e.g. the un-fixed base)
+    // would still differ from the captured constructing name by the suffix
+    // alone, giving a false off-main pass (#1088 G6: keep the assertion
+    // load-bearing).
+    private fun currentPhysicalThreadName(): String =
+        Thread.currentThread().name.substringBefore(" @coroutine")
 
     fun setTerminalFontSizeSp(sizeSp: Float) {
         val clamped = sizeSp.coerceIn(
@@ -219,7 +334,7 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(diagnosticsRecordingEnabled = enabled)
     }
 
-    private fun readSnapshot(): AppSettings {
+    private fun readSnapshot(prefs: SharedPreferences): AppSettings {
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
         val conversationFont = prefs.safeFloat(

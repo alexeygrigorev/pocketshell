@@ -976,6 +976,27 @@ JOURNEY_CLASSES=(
   # NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
   # assertions — process.md F3 / D31). It lives under com.pocketshell.app.proof.
   "$FQCN_PREFIX.CleanOutageReattachResilienceE2eTest"
+  # Issue #1098 (item 3): the genuinely-UNRECOVERABLE-host counterpart of the clean
+  # outage above. When the host is truly gone (sshd dead / port blackholed / a cut
+  # that stays cut past the reconnect ladder's bound), the bounded ladder must
+  # EXHAUST and surface a CLEAR disconnect band (TMUX_SESSION_ERROR_TAG
+  # FailedConnectionRow + "Tap to reconnect", message "Disconnected from …") instead
+  # of leaving the maintainer's reported frozen-but-live screen — WITHOUT re-alarming
+  # the items-1+2 recoverable ride-through. A kill-the-worker-only fixture cannot
+  # reach the failing state (the sshd LISTENER stays up so the fresh-transport re-dial
+  # recovers — the round-3 finding), so this journey ARMS the genuinely-unrecoverable
+  # seam (TmuxSessionViewModel.forceUnrecoverableHostForTest) which fails BOTH the
+  # silent-reattach grace loop AND the auto-reconnect ladder's fresh dial, then does
+  # the real pause->kill-app-sshd-worker->resume sequence (#173 real SSHException) so
+  # the drop genuinely exhausts. It asserts the USER-VISIBLE contract: no crash on
+  # resume, the disconnect band surfaces on genuine exhaustion, and once the seam is
+  # disarmed (host reachable again) tapping Reconnect heals the SAME session — proving
+  # the band is the honest recoverable error, not a permanent dead end (no false-alarm
+  # regression). It drives ONLY the deterministic agents:2222 fixture
+  # (DEFAULT_HOST/PORT/USER -> 10.0.2.2:2222) tests.yml already brings up, and does
+  # NOT self-skip on CI (no assumeFalse(isRunningOnCi()) on the load-bearing
+  # assertions — process.md F3 / D31). It lives under com.pocketshell.app.proof.
+  "$FQCN_PREFIX.BackgroundResumeSocketDeathE2eTest"
   # Issue #895 (switch-while-black freeze): the R1 trigger — a transport drop that
   # lands while the VM is in the Switching (Attaching) window was SWALLOWED by the
   # old `inlineConnectionStatus as? Connected ?: return` gate, leaving the user

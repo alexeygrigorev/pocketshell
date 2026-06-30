@@ -1189,6 +1189,29 @@ public class TmuxSessionViewModel @Inject constructor(
     internal var forceCleanOutageForTest: Boolean = false
 
     /**
+     * Issue #1098 (item 3) test seam (#780 synthetic-injection model): when set, the
+     * host is GENUINELY UNRECOVERABLE — every bounded reattach/reconnect attempt fails
+     * for the whole window, modelling a host that is truly gone (sshd dead / port
+     * blackholed / a network cut that stays cut past the reconnect ladder's bound). It
+     * makes BOTH the silent-reattach grace-loop primitives ([silentlyReattachAfterPassiveDisconnect]
+     * / [silentlyReconnectTransportAfterPassiveDisconnect]) AND the auto-reconnect ladder's
+     * fresh-dial ([runConnect] on a reconnect trigger) fail-fast, so the bounded ladder
+     * genuinely EXHAUSTS and the controller reaches the honest [ConnectionState.Unreachable]
+     * → the visible "Disconnected from …" band.
+     *
+     * Unlike [forceCleanOutageForTest] (a RECOVERABLE outage that clears so the SAME
+     * session auto-recovers silently — the items-1+2 calm ride-through), this seam stays
+     * armed: it reproduces the maintainer's "frozen-but-live screen on a DEAD host"
+     * symptom that a kill-the-worker-only fixture cannot, because there the sshd LISTENER
+     * stays up so the fresh-transport re-dial recovers (the round-3 finding). The cold
+     * OPEN (a non-reconnect trigger) is left alone so the test's initial attach still
+     * succeeds. Production never sets it (default false). `@Volatile` so the grace-loop /
+     * reconnect coroutines see the flip from the instrumentation thread.
+     */
+    @Volatile
+    internal var forceUnrecoverableHostForTest: Boolean = false
+
+    /**
      * Issue #959 test seam (#780 synthetic-injection model): when set, the
      * background teardown ([closeCurrentConnectionAndJoin]) closes the live `-CC`
      * client but PRESERVES the pane runtime — `paneRows`, their `TerminalSurfaceState`s,
@@ -5939,6 +5962,18 @@ public class TmuxSessionViewModel @Inject constructor(
         lastConnectFailureCause = null
         lastSuppressedDropDiagnostic = null
         try {
+            // Issue #1098 item 3 test seam: a GENUINELY-unrecoverable host fails every
+            // fresh-dial of the auto-reconnect ladder (a reconnect trigger), so the
+            // bounded ladder exhausts and the honest "Disconnected from …" band
+            // surfaces — modelling sshd dead / port blackholed / a network cut that
+            // stays cut. The cold OPEN (a non-reconnect trigger) is left alone so the
+            // test's initial attach still succeeds. Production never arms it; the throw
+            // routes through the same `catch` a real connection-refused does.
+            if (forceUnrecoverableHostForTest && trigger.isReconnectTrigger) {
+                throw IOException(
+                    "synthetic unrecoverable host: connection refused (issue #1098 item 3 test seam)",
+                )
+            }
             val lease = acquireLeaseForTmux(target, attempt, trigger, startedAtMs)
                 ?: return
             val session = lease.session
@@ -7987,7 +8022,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // EPIC #792 #833 test seam: while a synthetic clean outage is armed, every
         // reattach fails as if the link were down — so the grace loop must keep
         // re-dialling until the outage clears (see [forceCleanOutageForTest]).
-        if (forceCleanOutageForTest) return false
+        // Issue #1098 item 3: a GENUINELY-unrecoverable host fails this primitive for
+        // the whole window so the ladder exhausts instead of recovering.
+        if (forceCleanOutageForTest || forceUnrecoverableHostForTest) return false
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         val startedAtMs = SystemClock.elapsedRealtime()
         val replacement = createTmuxClient(
@@ -8185,7 +8222,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // rest of the grace window. The resilient loop must keep RE-DIALLING a fresh
         // transport until the outage clears (see [forceCleanOutageForTest]).
         // Production never arms it.
-        if (forceCleanOutageForTest) {
+        // Issue #1098 item 3: a GENUINELY-unrecoverable host fails the fresh-transport
+        // re-dial too, so the bounded ladder exhausts to the honest Unreachable band.
+        if (forceCleanOutageForTest || forceUnrecoverableHostForTest) {
             sessionRef = null
             leaseRef = null
             return false
@@ -8772,9 +8811,17 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             connectingTarget = target
             refreshReconnectAvailability()
+            // Issue #1098 item 3 / #145: once the bounded auto-reconnect ladder
+            // genuinely EXHAUSTS against an unreachable host, surface the CLEAR,
+            // unified "Disconnected from <user>@<host>:<port>. Tap Reconnect to retry."
+            // band — never the jargon-y, self-contradictory "Transport EOF …;
+            // reconnecting. Auto reconnect failed after N attempts." The cause is
+            // captured in the diagnostics below; the user sees a calm, honest,
+            // tappable disconnect state instead of a frozen-but-live screen.
             setConnectionState(
                 ConnectionState.Unreachable(
-                    "$reason Auto reconnect failed after ${delays.size} attempts.",
+                    "Disconnected from ${target.user}@${target.host}:${target.port}. " +
+                        "Tap Reconnect to retry.",
                 ),
             )
             recordAutoReconnectDecision(

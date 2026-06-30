@@ -103,7 +103,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.projects.FolderListSessionResumeDockerTest"
   "com.pocketshell.app.projects.FolderListTreeStopSessionDockerTest"
   "com.pocketshell.app.projects.WatchedFoldersE2eTest"
-  "com.pocketshell.app.proof.BackgroundResumeSocketDeathE2eTest"
   "com.pocketshell.app.proof.CodexOverflowNoReconnectE2eTest"
   "com.pocketshell.app.proof.CodexRedrawOverflowReconnectE2eTest"
   "com.pocketshell.app.proof.CodexWindowStartupControlSequenceE2eTest"

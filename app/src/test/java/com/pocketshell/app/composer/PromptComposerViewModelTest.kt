@@ -3109,12 +3109,30 @@ class PromptComposerViewModelTest {
      * clock alone never observes the settled outcome. Each tick must also yield
      * to the real IO threads so the store work can make progress before the next
      * scheduler advance.
+     *
+     * Issue #1102: the previous bound was a fixed tick count (`maxTicks`), which
+     * flaked the required `Unit tests` check under CI CPU contention. There is no
+     * production seam to pin the store's `Dispatchers.IO` work onto the test
+     * scheduler (Shape A is unavailable without touching production), so this is
+     * the de-flake convention's Shape B — a wall-clock-bounded pump
+     * (docs/testing.md "the one de-flake convention", #1048). When the real IO
+     * thread is starved, a fixed number of single yields can return before the
+     * store work has drained; this loops to a generous real-time deadline and
+     * gives the real IO threads actual wall-clock scheduling time each tick, so
+     * the predicate is observed once the work has genuinely settled rather than
+     * after an arbitrary tick budget. Callers HARD-FAIL on the boolean result
+     * ([settleUntil] / [waitForSidecarsCleared] / [waitForSendCount]); the
+     * pump's exit condition is the load-bearing assertion, never the loop body.
      */
     private suspend fun kotlinx.coroutines.test.TestScope.advanceSchedulerUntil(
         predicate: suspend () -> Boolean,
-        maxTicks: Int = 1_000,
+        // Generous, but kept safely under `runTest`'s 60s default global
+        // wall-clock timeout so the pump's own HARD-FAIL fires first with a
+        // clear message rather than runTest aborting the whole test.
+        timeoutMs: Long = 40_000L,
     ): Boolean {
-        repeat(maxTicks) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
             advanceUntilIdle()
             if (predicate()) return true
             runCurrent()
@@ -3123,14 +3141,22 @@ class PromptComposerViewModelTest {
             runCurrent()
             if (predicate()) return true
             yieldToRealDispatchers()
+            if (predicate()) return true
+            if (System.currentTimeMillis() >= deadline) {
+                advanceUntilIdle()
+                return predicate()
+            }
         }
-        advanceUntilIdle()
-        return predicate()
     }
 
     private suspend fun yieldToRealDispatchers() {
         withContext(Dispatchers.IO) {
-            yield()
+            // A real (non-virtual) pause so a CI-starved IO thread actually gets
+            // wall-clock scheduling time to drain the store's file work before
+            // the next scheduler advance. A bare `yield()` can return before the
+            // store's IO coroutine is even scheduled under load, which is the
+            // #1102 flake; this is bounded by the caller's wall-clock deadline.
+            Thread.sleep(1L)
         }
     }
 
@@ -3580,11 +3606,19 @@ class PromptComposerViewModelTest {
         // Reproduces the no-live-session reconnect path for an already queued
         // attachment row. The flush must not hard-fail the row or surface a
         // separate composer banner; it waits in the queue for the next reconnect.
-        var uploadClaims = 0
+        // Issue #1102: with NO live uploader, the flush takes the
+        // `uploader == null` branch of `uploadSidecarsForOutboundItem`, which
+        // calls `requeueForRetry(id)` + `clearStrandedSendInFlight()` and returns
+        // WITHOUT ever calling `markUploading`. The previous predicate keyed off
+        // `markUploading` (never invoked here), so it was unsatisfiable and only
+        // "passed" because the old `settleUntil` silently swallowed the timeout.
+        // Key the settle off the action this path actually performs — the requeue
+        // — so the wait genuinely blocks until the flush has completed.
+        var requeueCount = 0
         val queue = object : InMemoryOutboundQueueStore() {
-            override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? {
-                uploadClaims++
-                return super.markUploading(id, lastAttemptAtMs)
+            override fun requeueForRetry(id: String): OutboundItem? {
+                requeueCount++
+                return super.requeueForRetry(id)
             }
         }
         val sidecars = newSidecarStore()
@@ -3609,7 +3643,7 @@ class PromptComposerViewModelTest {
         vm.onComposerTargetChanged("1/session-a")
 
         assertEquals(item.id, vm.retryNextOutboundItem())
-        settleUntil { uploadClaims == 1 && !vm.uiState.value.sendInFlight }
+        settleUntil { requeueCount == 1 && !vm.uiState.value.sendInFlight }
 
         assertTrue(sent.isEmpty())
         assertNull(vm.uiState.value.error)
@@ -6300,13 +6334,20 @@ class PromptComposerViewModelTest {
 
     /**
      * The sidecar dispatch resumes on the test Main dispatcher after any store
-     * work completes. Drive the `runTest` scheduler in bounded virtual-time ticks
-     * until [predicate] holds.
+     * work completes. Drive the `runTest` scheduler in wall-clock-bounded ticks
+     * until [predicate] holds, and HARD-FAIL if it never does within the bound
+     * (issue #1102). The pump's exit condition is the load-bearing assertion —
+     * a timed-out pump must fail loudly here, never silently return and let a
+     * downstream assertion flake.
      */
     private suspend fun kotlinx.coroutines.test.TestScope.settleUntil(
         predicate: () -> Boolean,
     ) {
-        advanceSchedulerUntil(predicate = { predicate() })
+        assertTrue(
+            "settleUntil timed out before the predicate held — the sidecar-backed " +
+                "dispatch did not drain within the wall-clock bound (issue #1102)",
+            advanceSchedulerUntil(predicate = { predicate() }),
+        )
     }
 
     /**

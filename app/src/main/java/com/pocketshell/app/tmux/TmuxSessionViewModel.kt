@@ -1636,8 +1636,20 @@ public class TmuxSessionViewModel @Inject constructor(
      * reconnect" band ([FailedConnectionRow]) replace the scary error text.
      */
     private fun projectStatusFromController(inlineState: ConnectionState) {
+        val projected = connectionStatusForController(connectionManager.state, inlineState)
         _connectionStatus.value =
-            connectionStatusForController(connectionManager.state, inlineState)
+            if (withinGraceSilentHealInFlight && projected is ConnectionStatus.Reconnecting) {
+                // Issue #1098 (item 4 / #635): the within-grace SILENT heal re-opens the
+                // dropped `-CC` (controller `Reattaching`/`Reconnecting`), but a brief
+                // background→foreground ride-through must read the CALM `Connected` — never
+                // a Reconnecting bar / Connecting overlay. Hold `Connected` (the same
+                // host/port/user payload) for the bounded heal; the heal job's completion
+                // handler clears the flag, after which the live `Live` re-projects naturally
+                // (success) or the normal calm-Reconnecting ladder shows (genuine failure).
+                ConnectionStatus.Connected(projected.host, projected.port, projected.user)
+            } else {
+                projected
+            }
     }
 
     /**
@@ -3176,6 +3188,18 @@ public class TmuxSessionViewModel @Inject constructor(
     private var postGraceHeldForegroundProbeJob: Job? = null
     private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
+    // Issue #1098 (item 4 / #635): true while the SINGLE-GRACE-OWNER within-grace
+    // SILENT heal of a dropped `-CC` socket is in flight. The heal MUST re-open the
+    // transport (controller `Live -> Reattaching -> Live`), but the user must see the
+    // CALM `Connected` ride-through with NO reconnect surface at all — no top
+    // Reconnecting bar, no "Attaching…" overlay, no disconnect band. While set, the
+    // displayed-status projection ([projectStatusFromController]) holds `Connected`
+    // and the [RevealStateMachine] holds the live frame (see
+    // [RevealStateMachine.setSilentHealInFlight]). Set + cleared together for the
+    // bounded duration of [launchForegroundHealWithinGrace]'s heal job only, so an
+    // unexpected (non-grace) foreground drop keeps its normal calm-Reconnecting band.
+    private var withinGraceSilentHealInFlight: Boolean = false
+
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
     // SYNCHRONOUSLY by [detachForBackground] at background time, stashed for the
     // DRIVER-fired teardown ([launchBackgroundDetachTeardown]) to consume. The
@@ -4072,10 +4096,19 @@ public class TmuxSessionViewModel @Inject constructor(
         // ride-through, not a reconnect. Promote the controller back toward Live so the
         // header indicator never shows Reconnecting/Disconnected during the heal.
         connectionManager.observeForegroundReattachLive()
+        // Issue #1098 (item 4 / #635): the within-grace silent heal MUST re-open the
+        // dropped `-CC` transport, which walks the controller `Live -> Reattaching ->
+        // Live`. Without this the [RevealStateMachine] would project that Reattaching as
+        // [RevealState.Seeding] → the screen paints the full-surface "Attaching…" loading
+        // overlay over the live frame (the spurious overlay #635/item-4 reproduces). Hold
+        // the reveal at its current (live) frame for the bounded duration of the heal so
+        // the ride-through stays INVISIBLE; cleared in the job's completion handler below.
+        withinGraceSilentHealInFlight = true
+        revealStateMachine.setSilentHealInFlight(true)
         projectStatusFromController()
         // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
         // over a fresh lease; a teardown-race throw must not crash the process.
-        launchContainedTeardown {
+        val healJob = launchContainedTeardown {
             // Re-open a fresh `-CC` control client over a freshly-acquired lease and
             // reseed — SILENTLY (the primitive never raises the Connecting overlay or a
             // band; on success it sets [ConnectionStatus.Live] and reseeds every visible
@@ -4104,6 +4137,21 @@ public class TmuxSessionViewModel @Inject constructor(
                     ),
                 )
             }
+        }
+        // Issue #1098 (item 4): release the silent-heal reveal hold once the heal
+        // completes. On success the transport re-promoted the controller to Live, so the
+        // reveal is already a live frame; on failure the calm auto-reconnect ladder takes
+        // over and the next Reconnecting projection may show the normal loading surface.
+        // Cleared in the completion handler (success, failure, OR a teardown-race cancel)
+        // so the hold can never get stuck on, which would freeze the "Attaching…" overlay
+        // suppression across an unrelated later attach.
+        healJob.invokeOnCompletion {
+            withinGraceSilentHealInFlight = false
+            revealStateMachine.setSilentHealInFlight(false)
+            // Re-project so a genuine heal FAILURE (the calm auto-reconnect ladder is now
+            // running) surfaces its normal Reconnecting band the instant the hold lifts,
+            // and a SUCCESS settles on the live `Connected` it already reached.
+            projectStatusFromController()
         }
     }
 

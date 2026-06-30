@@ -149,7 +149,6 @@ class SessionConnectionService : Service() {
         observeJob = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         hasStartedForeground = false
-        controller.onForegroundServiceStopped()
         releaseWakeLock()
         stopSelf()
     }
@@ -167,11 +166,9 @@ class SessionConnectionService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
             hasStartedForeground = true
-            controller.onForegroundServicePromoted()
             true
         }.getOrElse {
             Log.w(TAG, "session foreground service promotion failed", it)
-            controller.onForegroundServiceStartFailed()
             false
         }
     }
@@ -213,18 +210,31 @@ class SessionConnectionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val detail = contentTextOverride ?: buildString {
-            append("Keeping ")
+        val hostLabel = buildString {
             if (snapshot.primaryHostName.isNotEmpty()) {
                 append(snapshot.primaryHostName)
                 if (snapshot.liveSessionCount > 1) append(" + ${snapshot.liveSessionCount - 1} more")
             } else {
                 append("session")
             }
-            append(" connected in the background")
         }
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        // Issue #1123: while backgrounded within the grace window the notification shows a
+        // LIVE count-down to disconnect. The SYSTEM renders the MM:SS via a count-down
+        // chronometer anchored on the wall-clock deadline (`when`) — the app posts the
+        // notification ONCE and never schedules a per-second update / wakeup. A
+        // contentTextOverride (the initial "Connecting session") never counts down.
+        val countdownDeadline =
+            if (contentTextOverride == null) snapshot.disconnectAtWallClockMillis else null
+
+        val detail = contentTextOverride
+            ?: if (countdownDeadline != null) {
+                "Holding $hostLabel — disconnecting in"
+            } else {
+                "Keeping $hostLabel connected in the background"
+            }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Session connected")
             .setContentText(detail)
             .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
@@ -243,7 +253,18 @@ class SessionConnectionService : Service() {
                 "Stop",
                 stopPendingIntent,
             )
-            .build()
+
+        if (countdownDeadline != null) {
+            builder
+                .setWhen(countdownDeadline)
+                .setShowWhen(true)
+                .setUsesChronometer(true)
+                .setChronometerCountDown(true)
+        } else {
+            builder.setShowWhen(false)
+        }
+
+        val notification = builder.build()
 
         notification.flags = notification.flags or
             Notification.FLAG_ONGOING_EVENT or

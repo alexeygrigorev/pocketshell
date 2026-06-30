@@ -182,15 +182,16 @@ JOURNEY_CLASSES=(
   # fails. The whole class FQCN runs every method, so the #959 method is gated
   # here at PR time with no extra entry. agents:2222, no toxiproxy.
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"
-  # PROMOTED (#977/#928 follow-up to #1021): real SSH/tmux foreground-service
-  # hold journey. The service envelope test already proves notification +
-  # wakelock with a fake client; this proof attaches MainActivity to a live
-  # Docker `agents` tmux session, backgrounds beyond a shortened grace window
-  # with the session foreground-service hold active, foregrounds without a fresh
-  # tmux control attach / reconnect surface / black pane, then exercises the
-  # notification Stop path after elapsed grace and asserts teardown. Uses only
-  # the deterministic agents fixture and passed focused API-35 proof locally.
-  "$FQCN_PREFIX.SessionForegroundServiceLiveHoldJourneyE2eTest"
+  # REWRITTEN (#1123, bounded-grace D21 update — supersedes the #977/#1021
+  # indefinite-hold journey): the BOUNDED-grace session-hold journey. Attaches
+  # MainActivity to a live Docker `agents` tmux session and proves both halves of
+  # the bounded grace contract with a short injected grace: WITHIN grace the hold
+  # is seamless (notification held, return with no reconnect band); BEYOND grace
+  # the app fully tears down — `-CC` detached (0 orphan clients, #215), the tmux
+  # session persists, the foreground-service hold notification clears (no wake-lock
+  # past grace) — and a return after grace cleanly reconnects. Deterministic agents
+  # fixture; passed focused API-35 proof locally.
+  "$FQCN_PREFIX.BoundedGraceSessionHoldJourneyE2eTest"
   # PROMOTED (#727, epic #657 Wave 1 / S1): the share-auth journey pair. The
   # maintainer's recurring share-auth breakages had nightly-only / advisory E2E
   # coverage, so a share-auth regression was NOT caught at PR time. Both classes

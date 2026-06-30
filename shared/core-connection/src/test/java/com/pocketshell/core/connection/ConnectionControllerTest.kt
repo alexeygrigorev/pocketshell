@@ -74,7 +74,7 @@ class ConnectionControllerTest {
     // --- Within-grace foreground = NO reconnect (#685 Bug-A) --------------
 
     @Test
-    fun `background then foreground within 60s reattaches with no reconnect`() {
+    fun `background then foreground within grace reattaches with no reconnect`() {
         val clock = FakeClock()
         val transport = FakeTransportPort()
         val controller = controller(clock, transport).bringLive(transport)
@@ -82,8 +82,9 @@ class ConnectionControllerTest {
         controller.submit(ConnectionEvent.Background)
         assertTrue(controller.state.value is ConnectionState.Backgrounded)
 
-        // 59.999s later, lease still warm -> within grace.
-        clock.advanceBy(59_999L)
+        // #1123: grace is now 5 min. 4 min later (well past the OLD 60 s boundary but
+        // within the new window), lease still warm -> within grace, no reconnect.
+        clock.advanceBy(ConnectionController.DEFAULT_GRACE_MS - 60_000L)
         controller.submit(ConnectionEvent.Foreground)
 
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
@@ -110,14 +111,14 @@ class ConnectionControllerTest {
     // --- Beyond-grace foreground = silent Reconnecting -> Live (#685 Bug-B)
 
     @Test
-    fun `background then foreground beyond 60s reconnects silently then goes Live`() {
+    fun `background then foreground beyond grace reconnects silently then goes Live`() {
         val clock = FakeClock()
         val transport = FakeTransportPort()
         val controller = controller(clock, transport).bringLive(transport)
 
         controller.submit(ConnectionEvent.Background)
-        // 60.001s later -> beyond grace even though lease warm.
-        clock.advanceBy(60_001L)
+        // #1123: grace is now 5 min. Just past it -> beyond grace even though lease warm.
+        clock.advanceBy(ConnectionController.DEFAULT_GRACE_MS + 1L)
         controller.submit(ConnectionEvent.Foreground)
 
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
@@ -350,7 +351,7 @@ class ConnectionControllerTest {
         val controller = controller(clock, transport).bringLive(transport, targetId = a)
 
         controller.submit(ConnectionEvent.Background)
-        clock.advanceBy(60_001L)
+        clock.advanceBy(ConnectionController.DEFAULT_GRACE_MS + 1L) // #1123: beyond the 5-min grace
         controller.submit(ConnectionEvent.Foreground) // Reconnecting
         assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
 

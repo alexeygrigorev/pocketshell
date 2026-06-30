@@ -182,19 +182,21 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
-    fun `session foreground-service hold suppresses destructive teardown after grace elapses`() = runTest {
+    fun `issue 1123 - grace expiry always runs the full teardown even with a live session`() = runTest {
+        // Bounded-grace D21 update (#1123): the old #1021 indefinite session-hold
+        // "preserve past grace" is gone. The grace-elapsed action ALWAYS runs the full
+        // teardown — the controller no longer has any session-hold suppression branch.
+        // (The foreground service is now stopped as a SIDE EFFECT of that teardown
+        // unregistering the live client, in App.onGraceElapsed / SessionServiceController,
+        // not by suppressing the controller's elapsed action.)
         val events = mutableListOf<String>()
-        var sessionHoldActive = true
         val controller = BackgroundGraceController(
             scope = backgroundScope,
             graceMillis = graceMillis,
             onGraceElapsed = {
-                if (sessionHoldActive) {
-                    events += "session:preserve"
-                } else {
-                    events += "tmux:background"
-                    events += "ssh:stop"
-                }
+                events += "tmux:background"
+                events += "runtime-cache:clear"
+                events += "ssh:stop"
             },
             onForeground = { resumedWithinGrace ->
                 events += "foreground:$resumedWithinGrace"
@@ -207,15 +209,15 @@ class BackgroundGraceControllerTest {
         runCurrent()
 
         assertEquals(
-            "when the session FGS is holding a live client, grace expiry must not detach tmux or stop SSH",
-            listOf("session:preserve"),
+            "grace expiry must run the full teardown unconditionally (no indefinite hold)",
+            listOf("tmux:background", "runtime-cache:clear", "ssh:stop"),
             events,
         )
 
+        // A second background cycle runs the same full teardown again — once per cycle.
         controller.onForeground()
         runCurrent()
         events.clear()
-        sessionHoldActive = false
 
         controller.onBackground()
         runCurrent()
@@ -223,109 +225,8 @@ class BackgroundGraceControllerTest {
         runCurrent()
 
         assertEquals(
-            "without a session hold, the old destructive teardown path must remain intact",
-            listOf("tmux:background", "ssh:stop"),
-            events,
-        )
-    }
-
-    @Test
-    fun `notification stop after held grace elapsed runs the destructive teardown path`() = runTest {
-        val events = mutableListOf<String>()
-        var sessionHoldActive = true
-        val controller = BackgroundGraceController(
-            scope = backgroundScope,
-            graceMillis = graceMillis,
-            onGraceElapsed = {
-                if (sessionHoldActive) {
-                    events += "session:preserve"
-                } else {
-                    events += "tmux:background"
-                    events += "runtime-cache:clear"
-                    events += "ssh:stop"
-                }
-            },
-            onForeground = { resumedWithinGrace ->
-                events += "foreground:$resumedWithinGrace"
-            },
-        )
-
-        controller.onBackground()
-        runCurrent()
-        advanceTimeBy(graceMillis + 1)
-        runCurrent()
-
-        assertEquals(
-            "the foreground service hold preserves the live connection at grace expiry",
-            listOf("session:preserve"),
-            events,
-        )
-
-        sessionHoldActive = false
-        controller.onSessionHoldStoppedByNotification()
-        runCurrent()
-
-        assertEquals(
-            "notification Stop after grace has elapsed must run the same destructive teardown " +
-                "that would have run without the hold",
-            listOf(
-                "session:preserve",
-                "tmux:background",
-                "runtime-cache:clear",
-                "ssh:stop",
-            ),
-            events,
-        )
-
-        controller.onSessionHoldStoppedByNotification()
-        runCurrent()
-
-        assertEquals(
-            "repeated Stop delivery must not duplicate the teardown fanout",
-            listOf(
-                "session:preserve",
-                "tmux:background",
-                "runtime-cache:clear",
-                "ssh:stop",
-            ),
-            events,
-        )
-    }
-
-    @Test
-    fun `natural session hold end after held grace elapsed runs the destructive teardown path`() = runTest {
-        val events = mutableListOf<String>()
-        var sessionHoldActive = true
-        val controller = BackgroundGraceController(
-            scope = backgroundScope,
-            graceMillis = graceMillis,
-            onGraceElapsed = {
-                if (sessionHoldActive) {
-                    events += "session:preserve"
-                } else {
-                    events += "tmux:background"
-                    events += "runtime-cache:clear"
-                    events += "ssh:stop"
-                }
-            },
-            onForeground = { resumedWithinGrace ->
-                events += "foreground:$resumedWithinGrace"
-            },
-        )
-
-        controller.onBackground()
-        runCurrent()
-        advanceTimeBy(graceMillis + 1)
-        runCurrent()
-
-        assertEquals(listOf("session:preserve"), events)
-
-        sessionHoldActive = false
-        controller.onSessionHoldStopped(source = "session_service", trigger = "hold_ended")
-        runCurrent()
-
-        assertEquals(
-            listOf("session:preserve", "tmux:background", "runtime-cache:clear", "ssh:stop"),
+            "every backgrounded-past-grace cycle tears down; nothing is preserved",
+            listOf("tmux:background", "runtime-cache:clear", "ssh:stop"),
             events,
         )
     }

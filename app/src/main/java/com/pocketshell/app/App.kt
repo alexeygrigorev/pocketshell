@@ -195,37 +195,20 @@ class App : Application() {
         scope = graceLifecycleScope,
         graceMillis = BACKGROUND_GRACE_MILLIS,
         onGraceElapsed = {
-            if (sessionServiceController.isHoldingSessionConnection()) {
-                val snapshot = sessionServiceController.currentSnapshot()
-                Log.i(
-                    APP_LIFECYCLE_TAG,
-                    "background grace elapsed with session hold; preserving terminal connection " +
-                        "liveSessions=${snapshot.liveSessionCount}",
-                )
-                DiagnosticEvents.record(
-                    "app",
-                    "background_grace_session_hold",
-                    "teardown" to false,
-                    "liveSessionCount" to snapshot.liveSessionCount,
-                    "primaryHostName" to snapshot.primaryHostName,
-                    "source" to "session_foreground_service",
-                    "trigger" to "grace_timeout",
-                )
-                ReconnectCauseTrail.record(
-                    stage = "background_grace",
-                    outcome = "elapsed_preserved",
-                    cause = "session_foreground_service",
-                    trigger = "grace_timeout",
-                    "liveSessionCount" to snapshot.liveSessionCount,
-                )
-            } else {
-                dispatchTmuxBackground()
-                tmuxRuntimeCache.clear().forEach { cached ->
-                    runCatching { cached.closeCachedRuntime() }
-                        .onFailure { Log.w(APP_LIFECYCLE_TAG, "tmux cached runtime close failed", it) }
-                }
-                sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_STOP)
+            // Issue #1123 (bounded-grace D21 update): once the grace window elapses the
+            // app FULLY tears down — detach the `-CC` control client cleanly (no orphan,
+            // #215), close cached runtimes, and release the SSH lease. The #977/#1021
+            // INDEFINITE foreground-service hold (which previously PRESERVED the live
+            // connection past grace) is removed: nothing runs in the background beyond
+            // the grace window. The tmux session persists server-side; a return after
+            // grace does a normal reconnect. The bounded foreground service stops as the
+            // teardown unregisters the last live client (see [SessionServiceController]).
+            dispatchTmuxBackground()
+            tmuxRuntimeCache.clear().forEach { cached ->
+                runCatching { cached.closeCachedRuntime() }
+                    .onFailure { Log.w(APP_LIFECYCLE_TAG, "tmux cached runtime close failed", it) }
             }
+            sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_STOP)
         },
         onForeground = { resumedWithinGrace ->
             // Always reverse the SSH lease "stopped" gate so reacquire
@@ -290,6 +273,12 @@ class App : Application() {
                 )
                 backgroundGraceController.setGraceMillis(terminalGraceMillis)
                 backgroundGraceController.onBackground()
+                // Issue #1123: stamp the wall-clock disconnect deadline so the bounded
+                // session-hold notification renders a live count-down to teardown. Posted
+                // ONCE; the system chronometer does the per-second rendering (no wakeups).
+                sessionServiceController.onBackgroundGraceStarted(
+                    System.currentTimeMillis() + terminalGraceMillis.coerceAtLeast(0L),
+                )
             }
             Lifecycle.Event.ON_START -> {
                 terminalNetworkLifecycleGate.onForegroundResumeStarted()
@@ -300,6 +289,10 @@ class App : Application() {
                     "trigger" to "on_start",
                 )
                 backgroundGraceController.onForeground()
+                // Issue #1123: returned within grace — clear the disconnect count-down so
+                // the notification reverts to its steady "connected" state. (Beyond grace
+                // the teardown stops the service entirely.)
+                sessionServiceController.onForegroundResumed()
             }
             else -> Unit
         }
@@ -357,28 +350,15 @@ class App : Application() {
         forwardingResumeScheduler.observeProcessLifecycle()
         StartupTiming.mark("forwarding-resume-lifecycle-observed")
 
-        // Issue #977: foreground-service hold for live SSH/tmux sessions.
-        // This starts while a live tmux client is attached and stops when
-        // the last one disconnects/unregisters, so the grace timer can
-        // preserve a user-visible terminal while the OS sees an explicit
-        // foreground service + wakelock.
+        // Issue #977 + #1123: BOUNDED foreground-service hold for live SSH/tmux
+        // sessions. The service runs while a live tmux client is attached so the OS
+        // sees an explicit foreground service + wakelock that keeps the connection
+        // alive through Doze during the (now 5-min, #1123) background grace window. The
+        // hold is BOUNDED, not indefinite: once the grace window elapses the terminal
+        // teardown unregisters the live client, which stops this service (no wake-lock
+        // or hold beyond grace). The old indefinite-hold "preserve past grace" + the
+        // notification-Stop-after-grace teardown plumbing are removed (#1123).
         sessionServiceController.observeActiveSessions()
-        graceLifecycleScope.launch {
-            sessionServiceController.notificationStopRequests().collect {
-                backgroundGraceController.onSessionHoldStopped(
-                    source = "session_notification",
-                    trigger = "stop_action",
-                )
-            }
-        }
-        graceLifecycleScope.launch {
-            sessionServiceController.sessionHoldEndedRequests().collect {
-                backgroundGraceController.onSessionHoldStopped(
-                    source = "session_service",
-                    trigger = "hold_ended",
-                )
-            }
-        }
         StartupTiming.mark("session-service-lifecycle-observed")
 
         // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
@@ -1056,14 +1036,13 @@ internal class BackgroundGraceController(
     private var backgroundDeadlineAtMs: Long = 0L
     private var backgroundGraceMillisForCycle: Long = graceMillis.coerceAtLeast(0L)
     private var backgrounded: Boolean = false
-    private var holdStopTeardownDispatched: Boolean = false
 
     /**
      * True once the grace-elapsed action has been dispatched for the current
-     * background cycle. The action may preserve the connection (for example,
-     * while a session foreground-service hold is active), so this tracks
-     * elapsed/deadline handling rather than a guaranteed destructive teardown.
-     * Reset on the next [onBackground].
+     * background cycle. Issue #1123: the grace-elapsed action now ALWAYS runs the
+     * full teardown (the old indefinite session-hold "preserve past grace" is gone),
+     * so this is a one-shot guard against a duplicate dispatch within a cycle. Reset
+     * on the next [onBackground].
      */
     private var teardownFired: Boolean = false
 
@@ -1089,7 +1068,6 @@ internal class BackgroundGraceController(
         backgroundDeadlineAtMs = backgroundStartedAtMs + backgroundGraceMillisForCycle
         backgrounded = true
         teardownFired = false
-        holdStopTeardownDispatched = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$backgroundGraceMillisForCycle")
         DiagnosticEvents.record(
             "app",
@@ -1141,45 +1119,6 @@ internal class BackgroundGraceController(
             }
             recordForeground(resumedWithinGrace = resumedWithinGrace, elapsedMs = elapsedMs)
             onForeground(resumedWithinGrace)
-        }
-    }
-
-    fun onSessionHoldStoppedByNotification() {
-        onSessionHoldStopped(source = "session_notification", trigger = "stop_action")
-    }
-
-    fun onSessionHoldStopped(source: String, trigger: String) {
-        if (!backgrounded || !teardownFired || graceJob?.isActive == true) return
-        if (holdStopTeardownDispatched) return
-        holdStopTeardownDispatched = true
-        val elapsedMs = (nowMillis() - backgroundStartedAtMs).coerceAtLeast(0L)
-        Log.i(
-            GRACE_LIFECYCLE_TAG,
-            "grace-window-session-hold-stop-after-elapsed teardown elapsedMs=$elapsedMs",
-        )
-        DiagnosticEvents.record(
-            "app",
-            "background_grace_session_hold_stop",
-            "teardownRequested" to true,
-            "elapsedMs" to elapsedMs,
-            "millis" to backgroundGraceMillisForCycle,
-            "deadlineMs" to backgroundDeadlineAtMs,
-            "backgroundCycleId" to backgroundCycleId,
-            "source" to source,
-            "trigger" to trigger,
-        )
-        ReconnectCauseTrail.record(
-            stage = "background_grace",
-            outcome = "session_hold_stop_teardown",
-            cause = source,
-            trigger = trigger,
-            "elapsedMs" to elapsedMs,
-            "graceMs" to backgroundGraceMillisForCycle,
-            "deadlineMs" to backgroundDeadlineAtMs,
-            "backgroundCycleId" to backgroundCycleId,
-        )
-        scope.launch {
-            onGraceElapsed()
         }
     }
 

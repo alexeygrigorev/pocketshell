@@ -295,8 +295,13 @@ class ConnectionController(
         }
 
     companion object {
-        /** Single lease-anchored grace window (= sshj keepalive 15s x 4). */
-        const val DEFAULT_GRACE_MS: Long = 60_000L
+        /**
+         * Single lease-anchored grace window. Issue #1123 (sanctioned D21 update):
+         * raised 60 s -> 5 min so a background return is seamless for up to five
+         * minutes; beyond it the connection fully tears down (no indefinite hold).
+         * Mirrors `AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS`.
+         */
+        const val DEFAULT_GRACE_MS: Long = 5 * 60_000L
 
         /** Silent reconnect attempts before the only honest error ([Unreachable]). */
         const val DEFAULT_MAX_RECONNECT_ATTEMPTS: Int = 4

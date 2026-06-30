@@ -318,6 +318,17 @@ JOURNEY_CLASSES=(
   # collector parks on a test-controlled CompletableDeferred), so it does not
   # race a wall-clock timeout. It carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"
+  # ADDED (#1108): the composer send/dismiss + ATTACHMENT-on-failed-send journey.
+  # The maintainer hit a "resend loses the file" report (#694 regression): on a
+  # degraded-connection "Not sent" the composer must keep the attachment as a
+  # TILE (the #872/#971 model — the path lives in the tile, NOT folded into the
+  # draft text) so the reconnect-then-resend STILL carries the file. It uses NO
+  # Docker fixture (pure Compose-rule UI test driving the real
+  # PromptComposerViewModel send wiring) and does NOT self-skip on CI, so per the
+  # "load-bearing journeys run at PR time" principle (#638/#691) it runs per-push
+  # and the silent-drop regression cannot return. It lives under
+  # com.pocketshell.app.composer, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"
   # ADDED (#848 audit / #900): the foreground outbound queue surface was covered
   # by a connected androidTest but was not in any per-push gate. This pins the
   # visible queued/failed/in-flight composer rows, collapsed count, delete, and

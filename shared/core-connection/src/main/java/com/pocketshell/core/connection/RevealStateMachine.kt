@@ -58,6 +58,34 @@ class RevealStateMachine {
     private var agentName: String? = null
 
     /**
+     * Issue #1098 (item 4 / #635 within-grace ride-through): while the VM is running
+     * the SINGLE-GRACE-OWNER within-grace SILENT heal of a `-CC` socket that dropped
+     * during a brief background, the transport is torn down and re-opened, so the
+     * controller necessarily walks `Live -> Reattaching -> Live`. That is an INVISIBLE
+     * ride-through — the user already has the prior frame on screen and the heal
+     * re-seeds it — so the [ConnectionState.Reattaching]/[ConnectionState.Reconnecting]
+     * projection must NOT drop the reveal to [RevealState.Seeding] (which the screen
+     * renders as the full-surface "Attaching…" loading overlay, hiding the live frame —
+     * the exact #635/item-4 spurious overlay). While this flag is set, a Reattaching/
+     * Reconnecting projection KEEPS the current reveal (a held [RevealState.Live] frame
+     * stays live) instead of resetting to Seeding. The VM sets it for the bounded
+     * duration of the within-grace heal only; every OTHER control-drop heal (an
+     * unexpected foreground drop) keeps the prior calm-loading behaviour
+     * ([ConnectionState.Reattaching] -> [RevealState.Seeding]).
+     */
+    private var silentHealInFlight = false
+
+    /**
+     * Issue #1098 (item 4): mark/unmark a within-grace SILENT heal as in flight. While
+     * in flight, a [ConnectionState.Reattaching]/[ConnectionState.Reconnecting]
+     * projection holds the current reveal (no "Attaching…" overlay) — see
+     * [silentHealInFlight].
+     */
+    fun setSilentHealInFlight(value: Boolean) {
+        silentHealInFlight = value
+    }
+
+    /**
      * Navigation arrived at a (possibly new) target. ALWAYS supersedes whatever is
      * showing: the state is replaced *synchronously* with [RevealState.Navigating]
      * carrying the target name, so the view can never observe an
@@ -118,9 +146,20 @@ class RevealStateMachine {
 
             is ConnectionState.Connecting,
             is ConnectionState.Attaching,
+            -> RevealState.Seeding(target, targetName)
+
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
-            -> RevealState.Seeding(target, targetName)
+            ->
+                // Issue #1098 (item 4): a within-grace SILENT heal rides through the
+                // transport re-open WITHOUT an "Attaching…" overlay — hold the current
+                // (live) frame. Every other reattach/reconnect keeps the calm-loading
+                // Seeding surface.
+                if (silentHealInFlight) {
+                    _state.value
+                } else {
+                    RevealState.Seeding(target, targetName)
+                }
 
             is ConnectionState.Live ->
                 if (panes.isNotEmpty()) {

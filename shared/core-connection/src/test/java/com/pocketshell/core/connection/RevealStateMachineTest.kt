@@ -200,6 +200,60 @@ class RevealStateMachineTest {
         assertEquals("session-A", live.targetName)
     }
 
+    // --- within-grace silent heal rides through WITHOUT an "Attaching…" overlay (#1098 item 4) ---
+
+    @Test
+    fun `within-grace silent heal holds the live frame across Reattaching - no Attaching overlay`() {
+        val m = RevealStateMachine()
+        m.bringLive(a, "session-A")
+        val liveBefore = m.state.value as RevealState.Live
+
+        // The VM marks the within-grace SILENT heal in flight BEFORE the transport
+        // teardown moves the controller off Live (the #635/item-4 ride-through).
+        m.setSilentHealInFlight(true)
+
+        // The silent heal necessarily walks Live -> Reattaching -> (Reconnecting) while it
+        // re-opens the dropped `-CC`. With the heal in flight these MUST NOT drop the reveal
+        // to Seeding (which the screen renders as the full-surface "Attaching…" overlay).
+        m.onConnectionState(ConnectionState.Reattaching(host, a))
+        assertEquals(
+            "within-grace Reattaching must hold the live frame, not show the Attaching overlay",
+            liveBefore,
+            m.state.value,
+        )
+        m.onConnectionState(ConnectionState.Reconnecting(host, a, attempt = 1))
+        assertEquals(
+            "within-grace Reconnecting must hold the live frame, not show the Attaching overlay",
+            liveBefore,
+            m.state.value,
+        )
+
+        // Heal succeeds: the transport re-promotes Live and the reseed lands; reveal is Live.
+        m.onConnectionState(ConnectionState.Live(host, a))
+        m.setSilentHealInFlight(false)
+        assertTrue(m.state.value is RevealState.Live)
+    }
+
+    @Test
+    fun `clearing the silent-heal hold restores the normal Reattaching to Seeding mapping`() {
+        val m = RevealStateMachine()
+        m.bringLive(a, "session-A")
+
+        // Default (no within-grace heal): a control drop shows the calm loading surface —
+        // the existing #685 behavior must be untouched when the hold is not set.
+        m.onConnectionState(ConnectionState.Reattaching(host, a))
+        assertEquals(RevealState.Seeding(a, "session-A"), m.state.value)
+
+        // And after a within-grace heal completes and the hold is cleared, a LATER
+        // unexpected reattach again shows the calm loading surface (the hold cannot get
+        // stuck on).
+        m.onConnectionState(ConnectionState.Live(host, a))
+        m.setSilentHealInFlight(true)
+        m.setSilentHealInFlight(false)
+        m.onConnectionState(ConnectionState.Reattaching(host, a))
+        assertEquals(RevealState.Seeding(a, "session-A"), m.state.value)
+    }
+
     @Test
     fun `exhausted reconnect surfaces honest non-retrying Error`() {
         val m = RevealStateMachine()

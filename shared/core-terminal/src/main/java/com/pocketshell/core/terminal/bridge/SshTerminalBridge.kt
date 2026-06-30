@@ -761,6 +761,25 @@ public class SshTerminalBridge(
         // Issue #803: drop any scheduled main-looper drain turn so a torn-down
         // session leaves no posted runnable behind.
         drainScheduler.cancel()
+        // Release a producer that is BLOCKED inside [feedChunks] ->
+        // writeProcessToTerminalQueue (ByteQueue.write) on a FULL process->terminal
+        // queue BEFORE we take [feedLock] below. Such a producer holds [feedLock]
+        // (locked at the top of [feedChunks]) and is parked in ByteQueue.write's
+        // `wait()` for the main-looper drain we JUST cancelled — so the queue can
+        // no longer make room, and without this the `synchronized(feedLock)` below
+        // would block the caller FOREVER. That is the v0.4.19 release-gate hang:
+        // the :shared:core-terminal connected suite wedged the whole 3h ceiling at
+        // ~9/45 when CodexOutputBurstImeMainThreadProofTest's teardown called
+        // stop() while its %output-burst producer was still blocked on a full
+        // queue. On-device this is worse than a hung test: stop() also runs on the
+        // MAIN thread (detachCompletedExternalProducer uses Dispatchers.Main.immediate
+        // when a producer flow completes), so the same race ANRs the app. Closing
+        // the output queue flips ByteQueue.mOpen=false + notify(), so the blocked
+        // write returns `false`; the producer then unwinds out of [feedChunks]
+        // (`if (!written) return`) and releases [feedLock]. No-op / safe when no
+        // producer is blocked — teardown discards any unparsed tail either way
+        // (drainScheduler.cancel() above already stopped draining it).
+        SessionReflection.closeProcessToTerminalQueue(session)
         // Issue #866: drop any in-flight seed tail so the torn-down session leaves
         // no pending pump work. The pump turn itself guards on stopped.get() and
         // returns early; clearing the FIFO frees the retained byte arrays.
@@ -1167,6 +1186,21 @@ private object SessionReflection {
 
     fun closeTerminalToProcessQueue(session: TerminalSession) {
         val queue = mTerminalToProcessIOQueueField.get(session)
+        byteQueueCloseMethod.invoke(queue)
+    }
+
+    /**
+     * Close the session's "incoming from PTY" (process->terminal) queue. Flips
+     * `ByteQueue.mOpen=false` + `notify()`, which wakes a producer thread BLOCKED
+     * in `ByteQueue.write` on a full queue: its blocked write returns `false`
+     * (the closed-before contract) so the producer can unwind out of
+     * [SshTerminalBridge.feedChunks] and release [SshTerminalBridge.feedLock].
+     * Called by [SshTerminalBridge.stop] so a torn-down bridge can never deadlock
+     * the caller (or ANR the main thread) waiting on [feedLock] held by a producer
+     * stranded on a no-longer-draining full queue.
+     */
+    fun closeProcessToTerminalQueue(session: TerminalSession) {
+        val queue = mProcessToTerminalIOQueueField.get(session)
         byteQueueCloseMethod.invoke(queue)
     }
 

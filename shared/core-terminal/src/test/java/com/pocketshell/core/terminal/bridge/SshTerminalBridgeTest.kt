@@ -80,6 +80,88 @@ class SshTerminalBridgeTest {
         }
     }
 
+    /**
+     * Regression for the v0.4.19 release-gate HANG: the :shared:core-terminal
+     * connected suite wedged the 3h ceiling at ~9/45 because
+     * `CodexOutputBurstImeMainThreadProofTest.shellPaneStillRunsAffordanceScanners`'s
+     * teardown ([TerminalSurfaceState.detachExternalProducer] -> [SshTerminalBridge.stop])
+     * deadlocked: its `%output`-burst producer coroutine was BLOCKED inside
+     * `feedChunks` -> writeProcessToTerminalQueue (ByteQueue.write) on a FULL
+     * process->terminal queue, holding `feedLock`; `stop()` first cancelled the
+     * only main-looper drain turn (so the queue could never make room) and THEN
+     * tried to take `feedLock` -> it waited on the blocked producer forever, and
+     * the producer waited on a drain that would never run. A thread dump from the
+     * wedged emulator process confirmed exactly this: the Instr test thread blocked
+     * in `SshTerminalBridge.stop` "waiting to lock <feedLock> held by" the producer
+     * worker, which was parked in `ByteQueue.write` on the full queue, while the
+     * MAIN thread sat idle in `nativePollOnce` (no drain pending).
+     *
+     * This reproduces it WITHOUT an emulator: under the PAUSED Robolectric looper
+     * the posted drain never runs unless we pump it, so a >64 KB feed on a worker
+     * thread blocks in `ByteQueue.write` holding `feedLock` — the identical
+     * precondition. We then call `stop()` on its own thread and require it to
+     * COMPLETE (it must unblock the producer by closing the output queue) rather
+     * than hang. On the pre-fix `stop()` the stop thread stays blocked on
+     * `feedLock` forever -> `join(5s)` leaves it alive -> RED. With the fix
+     * (`stop()` closes the process->terminal queue before taking `feedLock`) the
+     * blocked write returns `false`, the producer releases `feedLock`, and `stop()`
+     * returns promptly -> GREEN. The outer `@Test(timeout)` is a backstop only; the
+     * load-bearing signal is the `stopThread.isAlive` assertion, which fails fast.
+     */
+    @Test(timeout = 30_000)
+    fun stopUnblocksProducerBlockedOnFullQueueInsteadOfDeadlocking() {
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 1_000,
+        )
+        val payload = largePayload()
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "SshTerminalBridgeBlockedProducer").apply { isDaemon = true }
+        }
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Deliberately DO NOT pump the PAUSED main looper: the queue fills and
+            // the producer blocks in ByteQueue.write holding `feedLock` — the exact
+            // deadlock precondition observed on the wedged emulator.
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the stop() deadlock; it completed early",
+                feed.isDone,
+            )
+
+            // stop() must NOT deadlock on `feedLock`: it has to release the blocked
+            // producer first (by closing the output queue). Run it off the test
+            // thread and bound the wait so a deadlock FAILS FAST instead of hanging.
+            val stopThread = Thread({ bridge.stop() }, "SshTerminalBridgeStop").apply {
+                isDaemon = true
+                start()
+            }
+            stopThread.join(5_000)
+            assertFalse(
+                "stop() DEADLOCKED: it waited on feedLock held by a producer blocked on a " +
+                    "full, no-longer-draining process->terminal queue (the v0.4.19 release-gate " +
+                    "hang). stop() must close the output queue to release the producer before " +
+                    "taking feedLock.",
+                stopThread.isAlive,
+            )
+
+            // And the producer must actually have been released (its blocked write
+            // returned false on close), so no wedged producer leaks past teardown.
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked producer must unwind once stop() closes the output queue",
+                feed.isDone,
+            )
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
     @Test(timeout = 5_000)
     fun feedBytesOnMainLooperDrainsLargePayloadWithoutDeadlockOrLoss() {
         assertEquals(Looper.getMainLooper(), Looper.myLooper())

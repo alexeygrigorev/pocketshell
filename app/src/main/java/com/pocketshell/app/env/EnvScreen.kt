@@ -308,7 +308,7 @@ private fun EnvKeyList(
         if (keys.isEmpty()) {
             item { EnvEmptyState(onAddKey = onAddKey) }
         } else {
-            items(keys, key = { "${it.file}:${it.key}" }) { row ->
+            items(keys, key = { envRowItemKey(it) }) { row ->
                 EnvKeyCard(row = row, onReveal = onReveal, onHide = onHide, onEdit = onEdit)
             }
         }
@@ -773,6 +773,16 @@ const val ENV_COPY_SHEET_TAG: String = "env:copy-sheet"
 const val ENV_COPY_CONFIRM_TAG: String = "env:copy-confirm"
 const val ENV_COPY_SOURCE_ERROR_TAG: String = "env:copy-source-error"
 const val ENV_COPY_SOURCE_EMPTY_TAG: String = "env:copy-source-empty"
+
+/**
+ * The LazyColumn item key for an env row. Must be unique across the whole
+ * list or Compose hard-crashes ("Key '…' was already used"). We key on the
+ * row's pre-disambiguated [EnvKeyUiRow.id] (stable identity, not the mutable
+ * `file:key` string) so two rows sharing the same (file, key) — a repeated
+ * key in a real `.env`, or the old + edited entry during an in-place edit —
+ * never collide.
+ */
+fun envRowItemKey(row: EnvKeyUiRow): String = row.id
 
 fun envKeyRowTestTag(key: String): String = "env:key:$key"
 fun envKeyMenuTestTag(key: String): String = "env:menu:$key"

@@ -96,7 +96,7 @@ class FolderListViewModelClientCacheTest {
     // ---- GREEN: cold start WITH a populated cache renders the held tree -------
 
     @Test
-    fun coldStartWithCacheRendersHeldTreeAfterOffMainRead() = runTest {
+    fun coldStartWithCacheRendersHeldTreeInstantlyNoLoadingFlash() = runTest {
         val cache = newCache()
         // The PREVIOUS app session left a settled tree in the client cache.
         writeNodes(
@@ -109,22 +109,121 @@ class FolderListViewModelClientCacheTest {
 
         bind(vm)
 
-        // Issue #965 (ANR off-Main): the per-host cache file read + JSON parse now
-        // run OFF the Main thread (they were a StrictMode-flagged Main-thread
-        // `disk_read` inside bind() before — a dominant contributor to the
-        // 71-project folder ANR). So the cold start shows the brief Loading on
-        // Main, then paints the cached held tree the instant the OFF-Main read
-        // completes. After draining the (virtual-time) dispatcher the held shape
-        // is rendered, carrying the cached sessions in order — not the empty
-        // 'Other folders' rebuild.
+        // Issue #1109 (regression of the #867 instant-render promise): with a
+        // populated client cache the cold connect paints the held tree
+        // SYNCHRONOUSLY inside bind() — the FIRST state read (before any coroutine
+        // runs / before runCurrent) is already Ready, so the screen never composes
+        // the empty Loading frame. #965 had moved the read + projection OFF Main,
+        // which made the cold connect always flash Loading first; this is the
+        // load-bearing fast-gate proof that the flash is gone. RED on #965's
+        // off-Main code (this is Loading until runCurrent), GREEN with the
+        // synchronous seed.
+        val first = vm.state.value
+        assertTrue(
+            "cold connect must render the cached tree INSTANTLY (Ready, not the " +
+                "Loading rebuild flash) — got $first",
+            first is FolderListUiState.Ready,
+        )
+        assertEquals(
+            "the cached sessions paint in order on the FIRST frame",
+            listOf("alpha", "beta"),
+            (first as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+        )
+
+        // The silent reconcile then keeps the instantly-rendered tree authoritative
+        // against the live probe (advisory cache) — still the same sessions here.
+        runCurrent()
+        val reconciled = vm.state.value
+        assertTrue(reconciled is FolderListUiState.Ready)
+        assertEquals(
+            listOf("alpha", "beta"),
+            (reconciled as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+        )
+    }
+
+    // ---- Issue #1109: the parse is DECOUPLED from the synchronous hydrate --------
+
+    /**
+     * Issue #1109 (the #965-regression guard): [TreeClientCache.peek] — the lookup
+     * the SYNCHRONOUS cold-connect seed uses inside `bind` — is a pure IN-MEMORY
+     * read that does NO file read + JSON parse. A FRESH cache instance (the cold
+     * app-restart case: the file is on disk but memory is cold) MISSES on `peek`
+     * until [TreeClientCache.warmAll] has parsed the file OFF Main; only then does
+     * `peek` hit. This is what lets `bind` paint synchronously without the
+     * Main-thread `disk_read` that produced the #965 ANR — proven directly at the
+     * cache seam, independent of the VM.
+     */
+    @Test
+    fun peekIsInMemoryOnly_missesUntilWarmedThenHitsFromDisk() {
+        val writer = newCache()
+        writer.write(
+            HOST.name,
+            TreeClientCache.CachedTree(
+                nodes = listOf(node("alpha", 0, folderPath("alpha"))),
+            ),
+        )
+
+        // A fresh instance = a new process: the snapshot is on DISK but its parsed
+        // in-memory map is cold. `peek` does NOT read the file, so it misses.
+        val reader = newCache()
+        assertEquals(
+            "peek must be in-memory only — a fresh (un-warmed) instance has no Main-" +
+                "thread read, so it MISSES the on-disk snapshot",
+            null,
+            reader.peek(HOST.name),
+        )
+
+        // The OFF-Main warm parses the file into memory; now (and only now) peek hits.
+        reader.warmAll()
+        val warmed = reader.peek(HOST.name)
+        assertTrue("warmAll must parse the on-disk snapshot into memory", warmed != null)
+        assertEquals(
+            listOf("alpha"),
+            warmed!!.nodes.map { it.session },
+        )
+    }
+
+    /**
+     * Issue #1109 cold-MISS fallback: when the in-memory snapshot was NOT warmed
+     * before `bind` (a brand-new cache instance, file on disk, cold memory), the
+     * synchronous seed MISSES, so the first frame is the brief Loading and the cache
+     * is read OFF Main — NOT on the Main thread inside `bind`. After the off-Main
+     * read drains, the held tree paints. This pins the graceful fallback the
+     * reviewer required (the seed never blocks Main on a miss).
+     */
+    @Test
+    fun coldStartCacheMiss_readsOffMainThenPaintsHeldTree() = runTest {
+        // Write via one instance (disk + that instance's memory), then bind a VM with
+        // a DIFFERENT, cold-memory instance — the file is on disk but un-warmed.
+        newCache().write(
+            HOST.name,
+            TreeClientCache.CachedTree(
+                nodes = listOf(node("gamma", 0, folderPath("gamma"))),
+            ),
+        )
+        val coldCache = newCache()
+        val gateway = StubGateway(listOf(sessionRow("gamma")))
+        val vm = newViewModel(gateway, coldCache)
+
+        bind(vm)
+        // SYNCHRONOUSLY after bind (before any coroutine runs): the cold-memory
+        // instance misses the in-memory peek, so the seed does NOT read the file on
+        // Main — the first frame is the brief Loading.
+        assertTrue(
+            "a cold-memory cache miss must fall back to Loading (no Main-thread " +
+                "file read in bind) — got ${vm.state.value}",
+            vm.state.value is FolderListUiState.Loading,
+        )
+
+        // The OFF-Main warm + read then paint the held tree.
         runCurrent()
         val ready = vm.state.value
         assertTrue(
-            "with a populated client cache the off-Main read paints the held tree",
+            "the off-Main read paints the held tree — got $ready",
             ready is FolderListUiState.Ready,
         )
         assertEquals(
-            listOf("alpha", "beta"),
+            listOf("gamma"),
             (ready as FolderListUiState.Ready).flatSessions.map { it.sessionName },
         )
     }
@@ -323,18 +422,15 @@ class FolderListViewModelClientCacheTest {
         val gateway = StubGateway(rows = null)
         val vm = newViewModel(gateway, cache, watchedRoots = listOf(watchedRoot("git", gitRoot)))
 
-        val states = collectStates(vm)
         bind(vm)
-        runCurrent()
 
-        // Issue #965 (ANR off-Main): the cache read is OFF Main, so bind first
-        // emits the brief Loading then the seeded Ready once the read completes.
-        // The FIRST Ready (the cache-seeded instant render) shows the GROUPED
-        // tree — the "git" watched root with its project subfolders and the two
-        // sessions bucketed UNDER it, NOT a flat list dumped into "Other folders"
-        // with "0 projects".
-        val ready = states.filterIsInstance<FolderListUiState.Ready>().firstOrNull()
-            ?: error("cold start must paint Ready from the off-Main cache read, got $states")
+        // Issue #1109: the cache seed is SYNCHRONOUS, so the FIRST state read
+        // (before any coroutine runs) is already the cache-seeded Ready — the
+        // GROUPED tree, no Loading flash. The "git" watched root paints with its
+        // project subfolders and the two sessions bucketed UNDER it, NOT a flat
+        // list dumped into "Other folders" with "0 projects".
+        val ready = vm.state.value as? FolderListUiState.Ready
+            ?: error("cold start must paint the cached grouped tree INSTANTLY, got ${vm.state.value}")
         val gitTreeRoot = ready.treeRoots.firstOrNull { it.path == gitRoot }
             ?: error(
                 "the cached 'git' watched root must paint instantly with its grouping; " +

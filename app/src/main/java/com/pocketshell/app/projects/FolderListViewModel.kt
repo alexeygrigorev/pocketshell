@@ -749,13 +749,17 @@ class FolderListViewModel internal constructor(
     private var hydrateTreeJob: Job? = null
 
     /**
-     * Issue #965: the OFF-Main client-cache seed coroutine for this open (the
-     * read + JSON parse + advisory hydrate). The cold-start reconcile path awaits
-     * it so the instant cache paint lands BEFORE the freshening reconcile — the
-     * stale-while-revalidate ordering (#867) the synchronous-on-Main seed used to
-     * give implicitly, now preserved explicitly across the dispatcher hop.
+     * Issue #1109: the OFF-Main client-cache read coroutine for the cold-MISS
+     * fallback only (the in-memory snapshot was not warmed in time, so [bind]'s
+     * synchronous [peek][TreeClientCache.peek] missed). It reads + parses the file
+     * OFF Main, then hydrates the held tree + emits the advisory paint — the #965
+     * off-Main behaviour, used only on a miss. The cold-start reconcile path awaits
+     * it so the advisory paint lands BEFORE the freshening reconcile (the #867
+     * stale-while-revalidate ordering). `null`/already-completed on the common
+     * warm-hit path (the seed already painted synchronously inside `bind`).
      */
     private var clientCacheSeedJob: Job? = null
+
     @androidx.annotation.VisibleForTesting
     internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
     @androidx.annotation.VisibleForTesting
@@ -958,6 +962,18 @@ class FolderListViewModel internal constructor(
                 if (started) maybeReconcileOnResume()
             }
         }
+        // Issue #1109: pre-warm the per-host PARSED client-cache snapshots into
+        // memory OFF Main, so by the time the user navigates in and [bind] runs its
+        // SYNCHRONOUS seed, [TreeClientCache.peek] hits without a Main-thread file
+        // read + JSON parse (the #965 ANR cause). This runs at VM construction — one
+        // composition + LaunchedEffect ahead of `bind` — so the warm normally wins
+        // the race and the cold connect paints instantly; if it loses, `bind` falls
+        // back to the brief Loading + the off-Main read (never a Main-thread read).
+        treeClientCache?.let { cache ->
+            viewModelScope.launch(ioDispatcher) {
+                runCatching { cache.warmAll() }
+            }
+        }
         if (attachLifecycle) attachProcessLifecycle()
     }
 
@@ -1158,15 +1174,27 @@ class FolderListViewModel internal constructor(
         // diff, no rebuild), and [HostTreeModel.hydrate] skips clobbering an
         // already-populated tree — so a stale cache entry can never survive past
         // the first refresh (#679 stale-type guard, D22).
-        // Issue #965 (ANR off-Main): show the brief Loading IMMEDIATELY on Main,
-        // then read + JSON-parse the per-host client cache OFF Main and hydrate
-        // the held tree. The previous code did the file read + full `JSONObject`
-        // parse SYNCHRONOUSLY on Main inside bind() (a StrictMode disk_read on the
-        // Main thread) — at 71 projects / 12 sessions that parse, stacked with the
-        // projection + first composition, crossed the ANR bar. The cache is still
-        // ADVISORY: the silent reconcile below overwrites the seeded placeholders.
-        _state.value = loadingState()
-        hydrateFromClientCache(params)
+        // Issue #1109 (regression of the #867 instant-render promise) + #965 (ANR
+        // off-Main): hydrate the per-host CLIENT cache + emit Ready SYNCHRONOUSLY on
+        // the calling (Main) thread so the FIRST painted frame on a cold connect is
+        // already the cached tree — NO visible Loading rebuild flash. #965 had moved
+        // the cache read OFF Main, which (with the StateFlow starting at `Loading()`)
+        // meant the screen always composed the empty Loading frame first and only
+        // flipped to Ready a couple of async hops later — the exact flash the
+        // maintainer re-reported. The fix DECOUPLES the parse from the hydrate: the
+        // expensive file read + JSON parse run OFF Main (warmed into [TreeClientCache]'s
+        // in-memory snapshot by the init pre-warm + each reconcile's `write`), so the
+        // synchronous seed below reads the ALREADY-PARSED snapshot via [peek] with NO
+        // Main-thread `disk_read` (the #965 ANR cause stays gone — see
+        // [FolderListScaleAnrStrictModeDockerTest]). On a genuine cold MISS (the
+        // snapshot was not warmed in time) the seed returns false and we fall back to
+        // the brief Loading + an OFF-Main read, never a Main-thread file read. The
+        // cache stays ADVISORY: the silent reconcile overwrites the seeded
+        // placeholders in place.
+        if (!hydrateFromClientCache(params)) {
+            _state.value = loadingState()
+            warmFromClientCacheOffMain(params)
+        }
         // The maintained in-memory tree is held across opens of the SAME host
         // (so a re-open renders instantly), the daemon registry (#837) makes the
         // presentation state durable host-side, and this client cache makes the
@@ -1812,10 +1840,12 @@ class FolderListViewModel internal constructor(
     private fun hydrateTreeOnColdStart(params: BoundParams) {
         val source = treeRemoteSource
         if (source == null) {
-            // No durable source (unit tests / never-installed daemon): await the
-            // OFF-Main client-cache seed (#965) so its advisory instant paint
-            // lands BEFORE the freshening reconcile (the #867 stale-while-
-            // revalidate ordering), then reconcile.
+            // No durable source (unit tests / never-installed daemon): on the common
+            // warm-HIT path the synchronous client-cache seed (#1109) already painted
+            // the advisory instant tree within bind(), so [clientCacheSeedJob] is null
+            // and this falls straight through. On a cold MISS it awaits the OFF-Main
+            // seed (#965) so its advisory paint lands BEFORE the freshening reconcile
+            // (the #867 stale-while-revalidate ordering), then reconciles.
             viewModelScope.launch {
                 clientCacheSeedJob?.join()
                 if (bound != params) return@launch
@@ -1825,8 +1855,9 @@ class FolderListViewModel internal constructor(
         }
         hydrateTreeJob?.cancel()
         hydrateTreeJob = viewModelScope.launch {
-            // Issue #965: await the OFF-Main client-cache seed so its advisory
-            // paint precedes the durable hydrate + freshening reconcile.
+            // On a cold MISS await the OFF-Main client-cache seed so its advisory
+            // paint precedes the durable hydrate + freshening reconcile (#965/#867);
+            // null/already-complete on the synchronous warm-hit path (#1109).
             clientCacheSeedJob?.join()
             if (bound != params) return@launch
             // Foreground-gated, mirroring the reconcile path (D21-clean).
@@ -1887,21 +1918,60 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Issue #867 (stale-while-revalidate) + #965 (ANR off-Main): seed the held
-     * tree from the per-host CLIENT cache so a cold start paints the last-known
-     * tree quickly.
+     * Issue #867 (stale-while-revalidate) + #1109 (instant-render restore) + #965
+     * (ANR off-Main): seed the held tree from the per-host CLIENT cache and emit
+     * Ready SYNCHRONOUSLY on the calling (Main) thread, so a cold connect's FIRST
+     * painted frame is already the last-known tree — NO Loading flash. Returns
+     * `true` when a WARMED snapshot seeded a non-empty tree (the caller then skips
+     * the Loading emit) and `false` on a cold MISS (the snapshot was not warmed in
+     * time / no cache yet) — the caller then shows the brief Loading and reads OFF
+     * Main via [warmFromClientCacheOffMain].
      *
-     * The expensive part — the file read + full `JSONObject` parse — runs OFF
-     * Main on [ioDispatcher]. The previous implementation read + parsed the cache
-     * SYNCHRONOUSLY on the Main thread inside `bind()` (a StrictMode-flagged
-     * `disk_read` on Main); at 71 projects / 12 sessions that parse, stacked with
-     * the projection and the first composition, was a dominant contributor to the
-     * folder-list ANR. The cheap structural hydrate of the parsed result happens
-     * back on Main (consistent with every other tree mutation) and `emitReady`
-     * then runs the projection off-Main. If the host changed while the read was
-     * in flight, the stale result is dropped.
+     * ## How it is synchronous WITHOUT a Main-thread `disk_read` (the #965 fix held)
+     *
+     * The expensive part — the file read + full `JSONObject` parse — is DECOUPLED
+     * from the hydrate. It runs OFF Main (the init pre-warm [TreeClientCache.warmAll]
+     * + each reconcile's [persistClientCache] write) into [TreeClientCache]'s
+     * in-memory PARSED snapshot. This method reads that already-parsed snapshot via
+     * [TreeClientCache.peek] — a pure in-memory lookup, NO disk I/O — and hydrates +
+     * projects it inline. So Main does ZERO file reads here (the StrictMode tripwire
+     * in [FolderListScaleAnrStrictModeDockerTest] stays green at 71/12 scale), yet
+     * the seed is fully synchronous (the instant render in
+     * [FolderListClientCacheInstantRenderDockerTest] stays green). The one-time inline
+     * `buildFolderTree` projection is bounded and the row VIRTUALIZATION restored by
+     * #965 keeps the first composition cheap; the REPEATED reconcile-driven emits
+     * still run the projection off Main (see [emitReady]).
+     *
+     * The cache stays ADVISORY: [HostTreeModel.hydrate]/[hydrateStructure]
+     * self-guard against clobbering an already-populated (fresher, authoritative)
+     * tree, and the silent reconcile overwrites the seeded placeholders + the
+     * structural maps wholesale, so a stale cache entry can never survive the
+     * first refresh (#679 stale-type guard, D22).
      */
-    private fun hydrateFromClientCache(params: BoundParams) {
+    private fun hydrateFromClientCache(params: BoundParams): Boolean {
+        val cache = treeClientCache ?: return false
+        // SYNCHRONOUS, NO disk I/O on Main: the in-memory parsed snapshot only.
+        val cached = cache.peek(params.hostName) ?: return false
+        if (cached.isEmpty) return false
+        if (!applyCachedTree(cached)) return false
+        // Render the seeded order / placement / collapse + grouping INLINE — the
+        // held shape on the FIRST frame, no empty-rebuild flash. The confirmed
+        // kinds + the authoritative session set arrive with the first reconcile
+        // and update in place.
+        emitReady(synchronous = true)
+        return true
+    }
+
+    /**
+     * Issue #1109 cold-MISS fallback (the #965 off-Main path): the in-memory snapshot
+     * was not warmed before [bind] ran, so read + parse the per-host cache file OFF
+     * Main on [ioDispatcher], then hydrate the held tree + emit the advisory paint.
+     * Used ONLY on a [hydrateFromClientCache] miss — never on Main. The cold-start
+     * reconcile path joins [clientCacheSeedJob] so this advisory paint precedes the
+     * freshening reconcile (the #867 stale-while-revalidate ordering). A stale read
+     * (host changed mid-flight) is dropped.
+     */
+    private fun warmFromClientCacheOffMain(params: BoundParams) {
         val cache = treeClientCache ?: return
         clientCacheSeedJob?.cancel()
         clientCacheSeedJob = viewModelScope.launch {
@@ -1909,47 +1979,47 @@ class FolderListViewModel internal constructor(
                 runCatching { cache.read(params.hostName) }
                     .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
             }
-            // Drop a stale read if the host changed while we were reading the file.
             if (bound != params) return@launch
             if (cached.isEmpty) return@launch
-            // A reconcile/hydrate may have populated the tree while the read was in
-            // flight — [HostTreeModel.hydrate]/[hydrateStructure] self-guard against
-            // clobbering an already-populated (fresher, authoritative) tree, so the
-            // seed below is a no-op in that case and `emitReady` simply re-paints
-            // the held shape.
-            // Issue #867 (REOPEN): seed the watched-root overlay + the structural
-            // maps the grouping needs BEFORE the per-session hydrate's emit, so
-            // the cold-start frame shows the SETTLED tree — sessions bucketed
-            // under their watched root, the project subfolders + counts visible —
-            // not "0 projects" with everything dumped into "Other folders". The
-            // authoritative Room `project_roots` Flow overwrites the seeded
-            // watched folders the moment it emits (advisory), and the first
-            // reconcile overwrites the structural maps wholesale.
-            if (cached.watchedFolders.isNotEmpty()) {
-                tree.setWatchedFolders(cached.watchedFolders)
-            }
-            // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
-            // then the structure — so [HostTreeModel.hydrateStructure]'s
-            // sticky-bucket seed sees the sessions and can place them under their
-            // root by id.
-            tree.hydrate(cached.nodes.map { it.toHydratedNode() })
-            tree.hydrateStructure(
-                resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
-                scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
-                historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
-            )
-            if (!tree.hasSnapshot) return@launch
-            // Render the seeded order / placement / collapse + grouping — the held
-            // shape, no empty-rebuild grouping. The confirmed kinds arrive with
-            // the first reconcile and update in place. AWAIT the (off-Main)
-            // projection so the advisory paint is on screen BEFORE this seed job
-            // completes — the cold-start reconcile path joins this job, so this is
-            // what guarantees the instant cache paint precedes the freshening
-            // reconcile (the #867 stale-while-revalidate ordering, preserved
-            // across the #965 dispatcher hop).
+            if (!applyCachedTree(cached)) return@launch
+            // AWAIT the (off-Main) projection so the advisory paint is on screen
+            // BEFORE this seed job completes — the cold-start reconcile path joins
+            // this job, so this is what preserves the #867 ordering across the hop.
             emitReady()
             emitJob?.join()
         }
+    }
+
+    /**
+     * Hydrate the held tree from a (warmed or freshly-read) [TreeClientCache.CachedTree]
+     * — the watched-root overlay + the structural maps + the per-session nodes.
+     * Shared by the synchronous seed ([hydrateFromClientCache]) and the off-Main
+     * cold-miss fallback ([warmFromClientCacheOffMain]). Pure in-memory tree
+     * mutation (no I/O), so it is safe on either thread. Returns whether the tree now
+     * has a renderable snapshot.
+     */
+    private fun applyCachedTree(cached: TreeClientCache.CachedTree): Boolean {
+        // Issue #867 (REOPEN): seed the watched-root overlay + the structural maps
+        // the grouping needs BEFORE the per-session hydrate's emit, so the
+        // cold-start frame shows the SETTLED tree — sessions bucketed under their
+        // watched root, the project subfolders + counts visible — not "0 projects"
+        // with everything dumped into "Other folders". The authoritative Room
+        // `project_roots` Flow overwrites the seeded watched folders the moment it
+        // emits (advisory), and the first reconcile overwrites the structural maps
+        // wholesale.
+        if (cached.watchedFolders.isNotEmpty()) {
+            tree.setWatchedFolders(cached.watchedFolders)
+        }
+        // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
+        // then the structure — so [HostTreeModel.hydrateStructure]'s sticky-bucket
+        // seed sees the sessions and can place them under their root by id.
+        tree.hydrate(cached.nodes.map { it.toHydratedNode() })
+        tree.hydrateStructure(
+            resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
+            scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
+            historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
+        )
+        return tree.hasSnapshot
     }
 
     /**
@@ -2677,7 +2747,7 @@ class FolderListViewModel internal constructor(
      * the legacy rebuild used — but order, expansion, and node identity are now
      * intrinsic to the held tree (no per-emit re-derivation, no flash).
      */
-    private fun emitReady() {
+    private fun emitReady(synchronous: Boolean = false) {
         if (bound == null) return
         if (!tree.hasSnapshot) return
         // Issue #965 (ANR off-Main): take a CHEAP immutable snapshot of the held
@@ -2690,6 +2760,18 @@ class FolderListViewModel internal constructor(
         val snapshot = tree.snapshotForProjection()
         val generation = ++emitGeneration
         val refreshing = sessionRefreshInFlight
+        if (synchronous) {
+            // Issue #1109: the cold-start client-cache seed projects + emits Ready
+            // INLINE on the calling (Main) thread so the FIRST painted frame is the
+            // cached tree (no Loading flash). One-time per connect and bounded by
+            // the cached tree size; with the folder-list row virtualization (#965)
+            // in place this cannot reintroduce the ANR. The repeated reconcile-
+            // driven emits below still run the projection OFF Main.
+            val result = HostTreeModel.buildProjection(snapshot)
+            if (generation != emitGeneration || bound == null) return
+            applyReadyProjection(result, refreshing)
+            return
+        }
         emitJob = viewModelScope.launch {
             val result = withContext(treeDispatcher) {
                 HostTreeModel.buildProjection(snapshot)
@@ -2697,18 +2779,31 @@ class FolderListViewModel internal constructor(
             // A newer emit superseded this one (or the host changed) — drop it so
             // an out-of-order older projection can't clobber fresher state.
             if (generation != emitGeneration || bound == null) return@launch
-            tree.applyProjection(result)
-            val projection = result.projection
-            _state.value = FolderListUiState.Ready(
-                folders = projection.folders,
-                treeRoots = projection.treeRoots,
-                flatSessions = projection.flatSessions,
-                expandedProjectPaths = projection.expandedProjectPaths,
-                isRefreshing = refreshing,
-                isCreatingSession = createSessionInFlight,
-                portForwarding = forwardingSummary(),
-            )
+            applyReadyProjection(result, refreshing)
         }
+    }
+
+    /**
+     * Apply a freshly-built [HostTreeModel.ProjectionResult] to the held tree and
+     * publish the [FolderListUiState.Ready] state. Shared by the synchronous
+     * cold-start seed ([hydrateFromClientCache]) and the off-Main reconcile-driven
+     * emit ([emitReady]). Must run on Main (it writes [_state]).
+     */
+    private fun applyReadyProjection(
+        result: HostTreeModel.ProjectionResult,
+        refreshing: Boolean,
+    ) {
+        tree.applyProjection(result)
+        val projection = result.projection
+        _state.value = FolderListUiState.Ready(
+            folders = projection.folders,
+            treeRoots = projection.treeRoots,
+            flatSessions = projection.flatSessions,
+            expandedProjectPaths = projection.expandedProjectPaths,
+            isRefreshing = refreshing,
+            isCreatingSession = createSessionInFlight,
+            portForwarding = forwardingSummary(),
+        )
     }
 
     private fun setCreateSessionInFlight(inFlight: Boolean) {

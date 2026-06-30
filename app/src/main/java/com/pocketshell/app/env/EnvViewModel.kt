@@ -15,6 +15,14 @@ import javax.inject.Inject
  * user has explicitly tapped "Reveal") alongside the masked default.
  */
 data class EnvKeyUiRow(
+    /**
+     * Stable, list-unique identity used as the LazyColumn item key. Derived
+     * from `file:key` but disambiguated by occurrence so two rows that share
+     * the same (file, key) — a real `.env` may legitimately repeat a key, and
+     * an in-place edit transiently surfaces the old + edited entry — never
+     * collide on the LazyColumn key (Compose hard-crashes on duplicate keys).
+     */
+    val id: String,
     val key: String,
     val file: String,
     val hasValue: Boolean,
@@ -145,7 +153,7 @@ class EnvViewModel @Inject constructor(
             when (val result = gateway.listKeys(host, p.keyPath, p.passphrase, p.directory)) {
                 is EnvListResult.Keys -> {
                     _state.value = _state.value.copy(
-                        list = EnvListState.Ready(result.keys.map { it.toUiRow() }),
+                        list = EnvListState.Ready(result.keys.toUiRows()),
                     )
                 }
                 EnvListResult.ToolUnavailable -> {
@@ -436,7 +444,26 @@ class EnvViewModel @Inject constructor(
         /** POSIX-ish shell identifier check, matching the CLI's `_is_valid_key`. */
         fun isValidKey(key: String): Boolean = KEY_PATTERN.matches(key)
 
-        private fun EnvKeyRow.toUiRow(): EnvKeyUiRow =
-            EnvKeyUiRow(key = key, file = file, hasValue = hasValue)
+        /**
+         * Map gateway rows to UI rows, assigning each a list-unique [id]. The
+         * first occurrence of a `file:key` tuple keeps the bare `file:key` id
+         * (stable across refreshes for the common no-duplicate case); any
+         * further occurrence is suffixed `#1`, `#2`, … so the LazyColumn item
+         * key is always unique even when the same (file, key) appears twice.
+         */
+        fun List<EnvKeyRow>.toUiRows(): List<EnvKeyUiRow> {
+            val occurrences = HashMap<String, Int>()
+            return map { row ->
+                val base = "${row.file}:${row.key}"
+                val seen = occurrences.getOrDefault(base, 0)
+                occurrences[base] = seen + 1
+                EnvKeyUiRow(
+                    id = if (seen == 0) base else "$base#$seen",
+                    key = row.key,
+                    file = row.file,
+                    hasValue = row.hasValue,
+                )
+            }
+        }
     }
 }

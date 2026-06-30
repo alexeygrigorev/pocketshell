@@ -202,6 +202,56 @@ class EnvViewModelTest {
     }
 
     @Test
+    fun duplicateFileKeyRowsGetUniqueLazyColumnItemKeys() = runTest {
+        // Reproduce-first (crash regression from #1093): editing a key's value
+        // in place transiently surfaces the old + edited entry for the SAME
+        // (file, key), and a real .env may literally repeat a key. The env
+        // LazyColumn keyed each item on "file:key", so two such rows collided
+        // and Compose hard-crashed with
+        //   IllegalArgumentException: Key '.env:API_KEY' was already used.
+        // The load-bearing invariant: the item key the screen actually uses
+        // (envRowItemKey) must be unique across the whole list.
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(
+                listOf(
+                    EnvKeyRow("API_KEY", ".env", true),
+                    EnvKeyRow("API_KEY", ".env", true),
+                    EnvKeyRow("API_KEY", ".envrc", true),
+                ),
+            ),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        val rows = (vm.state.value.list as EnvListState.Ready).keys
+        // All three rows survive (the duplicate is NOT silently dropped) …
+        assertEquals(3, rows.size)
+        // … and the keys the LazyColumn uses are all distinct (no crash).
+        val itemKeys = rows.map { envRowItemKey(it) }
+        assertEquals(
+            "LazyColumn item keys must be unique to avoid the duplicate-key crash",
+            itemKeys.size,
+            itemKeys.toSet().size,
+        )
+    }
+
+    @Test
+    fun singleKeyKeepsBareFileKeyItemKey() = runTest {
+        // The common no-duplicate case keeps the stable bare "file:key" id so
+        // per-row state (reveal toggle, animations) survives a refresh.
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(listOf(EnvKeyRow("API_KEY", ".env", true))),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        val row = (vm.state.value.list as EnvListState.Ready).keys.single()
+        assertEquals(".env:API_KEY", envRowItemKey(row))
+    }
+
+    @Test
     fun copyKeysCallsGatewayAndRefreshes() = runTest {
         val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
         val vm = EnvViewModel(gateway, FakeHostDao(host))

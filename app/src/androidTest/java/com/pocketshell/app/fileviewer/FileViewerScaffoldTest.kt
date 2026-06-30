@@ -1,7 +1,10 @@
 package com.pocketshell.app.fileviewer
 
-import android.content.ClipboardManager
+import android.content.ClipData
+import android.content.RecordingClipboardManager
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -10,6 +13,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.test.ClipboardOverrideContext
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -347,31 +351,35 @@ class FileViewerScaffoldTest {
 
     @Test
     fun copyAllPutsTextOnTheClipboard() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // Production "Copy all" calls `copyTextToClipboard(context, content)`
+        // with `context = LocalContext.current`; route that lookup through a
+        // recording subclass so the write is observable deterministically.
+        // Reading the real system clipboard back returns `null` on the
+        // un-focused AOSP API 35 AVD window (API 29+ foreground-focus policy)
+        // — a test-only artifact; production copy is unchanged.
+        val recording = RecordingClipboardManager()
         compose.setContent {
-            PocketShellTheme {
-                FileViewerScaffold(
-                    hostName = "agents",
-                    state = FileViewerUiState.TextContent(
-                        displayPath = "/tmp/copyme.txt",
-                        content = "clipboard payload 559",
-                        sizeBytes = 21,
-                    ),
-                    onBack = {},
-                    onRetry = {},
-                )
+            val base = LocalContext.current
+            CompositionLocalProvider(
+                LocalContext provides ClipboardOverrideContext(base, recording),
+            ) {
+                PocketShellTheme {
+                    FileViewerScaffold(
+                        hostName = "agents",
+                        state = FileViewerUiState.TextContent(
+                            displayPath = "/tmp/copyme.txt",
+                            content = "clipboard payload 559",
+                            sizeBytes = 21,
+                        ),
+                        onBack = {},
+                        onRetry = {},
+                    )
+                }
             }
         }
         compose.onNodeWithTag(FILE_VIEWER_COPY_ALL_TAG).performClick()
         compose.waitForIdle()
-        // Read the primary clip back from the app context's clipboard.
-        var clipText: String? = null
-        instrumentation.runOnMainSync {
-            val cm = instrumentation.targetContext
-                .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipText = cm.primaryClip?.getItemAt(0)?.text?.toString()
-        }
-        assertEquals("clipboard payload 559", clipText)
+        assertEquals("clipboard payload 559", recording.lastText)
     }
 
     @Test
@@ -521,7 +529,13 @@ class FileViewerScaffoldTest {
                 )
             }
         }
-        compose.assertNodeFullyWithinRoot(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG)
+        // The saved-path confirmation renders inside a Material3
+        // [ModalBottomSheet], which composes into its OWN platform window/root.
+        // `assertNodeFullyWithinRoot` reads a single `onRoot()` and so throws
+        // "found 2 nodes that satisfy (isRoot)" once the sheet window is up;
+        // for sheet-internal controls we use `assertIsDisplayed()` instead
+        // (same precedent as GitHistoryScaffoldTest's create-issue sheet).
+        compose.onNodeWithTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG).assertIsDisplayed()
         compose.onNodeWithText(savedPath).assertIsDisplayed()
         // The path Text is inside a merged clickable row; click via the unmerged
         // tree so the tagged node is addressable.
@@ -723,14 +737,25 @@ class FileViewerScaffoldTest {
             }
         }
         compose.waitForIdle()
-        compose.assertNodeFullyWithinRoot(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG)
+        // The review-saved sheet is a Material3 [ModalBottomSheet] in its own
+        // platform window/root, so `assertNodeFullyWithinRoot` (single
+        // `onRoot()`) throws "found 2 nodes that satisfy (isRoot)". Assert the
+        // sheet-internal controls with `assertIsDisplayed()` (GitHistoryScaffold
+        // create-issue-sheet precedent).
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG).assertIsDisplayed()
         compose.onNodeWithText(savedPath).assertIsDisplayed()
-        compose.assertNodeFullyWithinRoot(FILE_VIEWER_REVIEW_ATTACH_TAG)
+        compose.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).assertIsDisplayed()
     }
 
     @Test
     fun tappingSavedPathCopiesItToClipboard() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // Tapping the saved-path row fires `onCopyReviewPath(path)` (the screen
+        // wires it to the production `copyTextToClipboard`). Record the copy
+        // through a recording subclass so the write is observable
+        // deterministically — reading the real system clipboard back returns
+        // `null` on the un-focused AOSP API 35 AVD window (API 29+ focus
+        // policy), a test-only artifact.
+        val recording = RecordingClipboardManager()
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
@@ -745,9 +770,7 @@ class FileViewerScaffoldTest {
                     onBack = {},
                     onRetry = {},
                     onCopyReviewPath = { path ->
-                        val cm = instrumentation.targetContext
-                            .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(android.content.ClipData.newPlainText("review path", path))
+                        recording.setPrimaryClip(ClipData.newPlainText("review path", path))
                     },
                 )
             }
@@ -758,13 +781,7 @@ class FileViewerScaffoldTest {
         compose.onNodeWithTag(FILE_VIEWER_REVIEW_SAVED_PATH_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitForIdle()
-        var clipText: String? = null
-        instrumentation.runOnMainSync {
-            val cm = instrumentation.targetContext
-                .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipText = cm.primaryClip?.getItemAt(0)?.text?.toString()
-        }
-        assertEquals(savedPath, clipText)
+        assertEquals(savedPath, recording.lastText)
     }
 
     @Test

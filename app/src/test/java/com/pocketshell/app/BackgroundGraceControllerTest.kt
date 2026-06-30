@@ -1,6 +1,7 @@
 package com.pocketshell.app
 
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -1030,6 +1031,70 @@ class BackgroundGraceControllerTest {
         assertEquals("post_resume_within_grace_live_runtime", secondSuppress.gateDiagnostics.reason)
         assertEquals(1L, secondSuppress.gateDiagnostics.backgroundCycleId)
         assertEquals("late post-resume callbacks must not fan out to terminal reconnect", emptyList<String>(), events)
+    }
+
+    @Test
+    fun `bare network loss and restore are not swallowed by post resume suppression window`() {
+        // Issue #1098 (item 5): the post-resume attribution window legitimately
+        // drops a STALE validated-identity-change callback queued during the just-
+        // ended background interval — but it was ALSO swallowing a CURRENT bare
+        // NetworkLost / NetworkRestored (the orthogonal #997 signal), so the
+        // network_loss_hold arm never fired and a real network blip never recovered
+        // the terminal. The fix exempts loss/restore from this window while keeping
+        // it armed for stale validated handoffs.
+        var now = 10_000L
+        val gate = TerminalNetworkLifecycleGate(nowMillis = { now })
+        gate.onBackground()
+        gate.onForegroundResumeStarted()
+        gate.onForegroundResumeFinished(resumedWithinGrace = true, hasLiveTerminalRuntime = true)
+
+        now += 1_000L // still inside the attribution window
+
+        val loss = TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.NoValidatedNetwork,
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "bare-network-loss",
+            sequence = 1L,
+            kind = TerminalNetworkChangeKind.NetworkLost,
+        )
+        assertTrue(
+            "a bare NetworkLost must NOT be swallowed by the post-resume suppression window",
+            gate.onNetworkChange(loss, hasLiveTerminalRuntime = true) is TerminalNetworkDecision.Dispatch,
+        )
+
+        val restore = TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+            current = TerminalNetworkSnapshot.Validated("wifi"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "network-restored",
+            sequence = 2L,
+            kind = TerminalNetworkChangeKind.NetworkRestored,
+        )
+        assertTrue(
+            "a NetworkRestored must NOT be swallowed by the post-resume suppression window",
+            gate.onNetworkChange(restore, hasLiveTerminalRuntime = true) is TerminalNetworkDecision.Dispatch,
+        )
+
+        // The window is still armed: a STALE validated-identity handoff in the same
+        // window is still suppressed (the legitimate purpose is preserved).
+        val staleHandoff = TerminalNetworkChange(
+            previous = TerminalNetworkSnapshot.Validated("wifi"),
+            current = TerminalNetworkSnapshot.Validated("cell"),
+            previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+            reason = "stale-validated-handoff",
+            sequence = 3L,
+            kind = TerminalNetworkChangeKind.ValidatedIdentityChange,
+        )
+        val suppress = gate.onNetworkChange(staleHandoff, hasLiveTerminalRuntime = true)
+        assertTrue(
+            "a stale validated-identity handoff inside the still-armed window must be suppressed",
+            suppress is TerminalNetworkDecision.Suppress,
+        )
+        assertEquals(
+            "post_resume_within_grace_live_runtime",
+            (suppress as TerminalNetworkDecision.Suppress).gateDiagnostics.reason,
+        )
     }
 
     @Test

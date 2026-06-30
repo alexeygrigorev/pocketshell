@@ -2,16 +2,21 @@ package com.pocketshell.core.portfwd
 
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -107,6 +112,24 @@ public class AutoForwarder(
     // for the TTL eviction logic.
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val localPortAvailability: LocalPortAvailability = DefaultLocalPortAvailability,
+    /**
+     * Dispatcher the terminal [stop] teardown closes forwards on. [stop] is
+     * reached on the Android Main thread (the port-forward panel's
+     * auto-forward toggle-off and the foreground service's `ACTION_STOP`
+     * both call it synchronously up the chain), and each forward's
+     * `close()` drives an SSH `direct-tcpip` channel-teardown packet that
+     * can block on a wedged socket — closing them on the caller's thread
+     * froze the UI (the #1085 freeze-hunt F-E finding). Defaults to
+     * [Dispatchers.IO] so the close runs off the caller's thread;
+     * injectable so tests can pin it.
+     */
+    private val teardownDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * Per-forward bound on the [stop] teardown close (see [teardownDispatcher]).
+     * A single wedged socket can't pin the teardown worker past this; the
+     * close is run interruptibly so the timeout interrupts the blocked call.
+     */
+    private val closeTimeoutMs: Long = CLOSE_TIMEOUT_MS_DEFAULT,
 ) {
 
     // We use a StateFlow so the UI can render the current set of tunnels
@@ -185,7 +208,35 @@ public class AutoForwarder(
                 captured
             }
         }
-        tunnelsToClose.forEach { runCatching { it.close() } }
+        closeForwardsOffCallerThread(tunnelsToClose)
+    }
+
+    /**
+     * Close every captured forward OFF the caller's thread (see
+     * [teardownDispatcher]). [stop] runs on the Android Main thread, and a
+     * forward's `close()` drives an SSH channel-teardown packet that can
+     * block on a wedged socket — closing them inline froze the UI thread
+     * (the #1085 freeze-hunt F-E finding). The teardown still happens; it
+     * just no longer rides the caller's thread. Each close is bounded +
+     * interruptible so one stuck socket can't pin the teardown worker
+     * either (the others still close). Fire-and-forget on a detached scope:
+     * [stop] is terminal + single-shot, so this batch launches exactly once.
+     */
+    private fun closeForwardsOffCallerThread(tunnelsToClose: List<SshPortForward>) {
+        if (tunnelsToClose.isEmpty()) return
+        CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
+            tunnelsToClose.forEach { tunnel ->
+                // One child coroutine per forward so a wedged close can't
+                // delay closing its siblings.
+                launch {
+                    runCatching {
+                        withTimeoutOrNull(closeTimeoutMs) {
+                            runInterruptible { tunnel.close() }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -518,5 +569,12 @@ public class AutoForwarder(
             )
         }
         tunnelsState.value = snapshot
+    }
+
+    private companion object {
+        // Per-forward teardown-close bound (see [teardownDispatcher]). Long
+        // enough that a healthy channel close always completes inside it,
+        // short enough that a wedged socket can't pin the teardown worker.
+        private const val CLOSE_TIMEOUT_MS_DEFAULT = 5_000L
     }
 }

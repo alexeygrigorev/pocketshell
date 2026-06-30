@@ -3,8 +3,11 @@ package com.pocketshell.core.portfwd
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -15,6 +18,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -101,6 +105,19 @@ public class AutoForwarderSupervisor(
      * tighten it for deterministic test runtime.
      */
     private val sessionHealthPollMs: Long = 1_000L,
+    /**
+     * Dispatcher the terminal [stop] teardown closes the live SSH session
+     * on. [stop] is reached on the Android Main thread (the port-forward
+     * panel's auto-forward toggle-off and the foreground service's
+     * `ACTION_STOP` both call it synchronously via
+     * `ForwardingController.stopForwarding`/`stopAllForwarding` →
+     * `ActiveHost.stopOwnedSupervisor`), and `SshSession.close()` drives an
+     * `SSH_MSG_DISCONNECT` socket write that blocks the caller until the
+     * disconnect finishes — on a wedged socket that froze the UI (the #1085
+     * freeze-hunt F-E finding). Defaults to [Dispatchers.IO] so the session
+     * close runs off the caller's thread; injectable so tests can pin it.
+     */
+    private val teardownDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     /** Connection-level events emitted to the caller (service / UI). */
     public sealed class Event {
@@ -234,12 +251,32 @@ public class AutoForwarderSupervisor(
         supervisorJob?.cancel()
         supervisorJob = null
         supervisorScope = null
-        currentForwarder?.stop()
+        // AutoForwarder.stop() already closes its forwards off the caller's
+        // thread (it offloads to its own teardownDispatcher), so this call
+        // returns promptly.
+        val forwarder = currentForwarder
         currentForwarder = null
-        runCatching { currentSession?.close() }
+        forwarder?.stop()
+        val session = currentSession
         currentSession = null
         connectionState.value = ConnectionState.Idle
         tunnelsState.value = emptyList()
+        // Close the live SSH session OFF the caller's thread. stop() is
+        // reached on the Android Main thread, and RealSshSession.close()
+        // blocks the caller until the SSH_MSG_DISCONNECT socket write
+        // finishes — on a wedged socket that froze the UI (the #1085
+        // freeze-hunt F-E finding). The disconnect still happens; it just no
+        // longer rides the caller's thread. Bounded + interruptible so a
+        // wedged socket can't pin the teardown worker either.
+        if (session != null) {
+            CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
+                runCatching {
+                    withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
+                        runInterruptible { session.close() }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -477,5 +514,12 @@ public class AutoForwarderSupervisor(
         val current = tunnelsState.value
         if (current.isEmpty()) return
         tunnelsState.value = current.map { it.copy(status = TunnelInfo.Status.STOPPED) }
+    }
+
+    private companion object {
+        // Bound on the terminal [stop] session-close (see [teardownDispatcher]).
+        // Long enough for a healthy disconnect, short enough that a wedged
+        // socket can't pin the teardown worker.
+        private const val SESSION_CLOSE_TIMEOUT_MS = 5_000L
     }
 }

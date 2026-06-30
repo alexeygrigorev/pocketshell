@@ -214,13 +214,67 @@ class AutoForwarderTest {
 
         forwarder.stop()
 
+        // stop() now closes forwards OFF the caller thread (on the teardown
+        // dispatcher) so a wedged SSH socket can't freeze the UI — see
+        // `stop() does not block the caller when a forward's close hangs`.
+        // The teardown still happens; we just await it rather than asserting
+        // it ran inline.
         assertTrue(
             "all forwards should have been closed by stop()",
-            session.openForwards.values.all { !it.isActive },
+            waitUntilReal(2_000L) { session.openForwards.values.all { !it.isActive } },
         )
         assertEquals(0, forwarder.flowOfTunnels().first().size)
         job.cancel()
         runCurrent()
+    }
+
+    @Test
+    fun `stop() does not block the caller when a forwards close hangs`() {
+        // #1085 freeze-hunt F-E: stop() is reached on the Android Main thread
+        // (panel auto-forward toggle-off / foreground-service ACTION_STOP),
+        // and a forward's close() drives an SSH channel-teardown packet that
+        // can block on a wedged socket. Before the fix stop() closed forwards
+        // inline on the caller's thread, so a hung close froze the caller.
+        // This test holds a forward's close() open and asserts stop() returns
+        // promptly anyway, while still confirming the close is dispatched
+        // (teardown not dropped). RED on base (stop() blocks until the latch
+        // releases), GREEN with the off-thread teardown.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        val closeEntered = CountDownLatch(1)
+        val closeRelease = CountDownLatch(1)
+        session.blockForwardClose(closeEntered, closeRelease)
+
+        val executor = Executors.newSingleThreadExecutor()
+        val dispatcher = executor.asCoroutineDispatcher()
+        val loopScope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + dispatcher)
+        // Default teardownDispatcher = Dispatchers.IO, so the hung close runs
+        // off the caller thread — exactly the production wiring.
+        val forwarder = AutoForwarder(session, smallConfig())
+        try {
+            forwarder.start(loopScope)
+            assertTrue(
+                "a forward should have been opened by the first scan",
+                waitUntilReal(2_000L) { session.openForwards.values.any { it.isActive } },
+            )
+
+            val stopThread = Thread { forwarder.stop() }
+            stopThread.start()
+            stopThread.join(2_000L)
+            assertFalse(
+                "stop() must return without blocking on the hung forward close",
+                stopThread.isAlive,
+            )
+            assertTrue(
+                "the forward's close() must still be invoked (teardown not dropped)",
+                closeEntered.await(2, TimeUnit.SECONDS),
+            )
+        } finally {
+            closeRelease.countDown()
+            loopScope.cancel()
+            dispatcher.close()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -715,6 +769,7 @@ class AutoForwarderTest {
         private val failForever = AtomicBoolean(false)
         private val nextChannelId = AtomicInteger(0)
         @Volatile private var blockedOpen: Pair<CountDownLatch, CountDownLatch>? = null
+        @Volatile private var blockedClose: Pair<CountDownLatch, CountDownLatch>? = null
 
         fun setListening(ssOutput: String) {
             output = ssOutput
@@ -722,6 +777,16 @@ class AutoForwarderTest {
 
         fun blockNextOpen(entered: CountDownLatch, release: CountDownLatch) {
             blockedOpen = entered to release
+        }
+
+        /**
+         * Make every forward produced by [openLocalPortForward] block inside
+         * its `close()` — it counts down [entered] and waits on [release].
+         * Lets a test hold an SSH-channel teardown open while asserting the
+         * caller of `stop()` is not blocked (#1085 F-E).
+         */
+        fun blockForwardClose(entered: CountDownLatch, release: CountDownLatch) {
+            blockedClose = entered to release
         }
 
         /** Make the next [n] openLocalPortForward calls throw. */
@@ -766,7 +831,13 @@ class AutoForwarderTest {
             if (failuresRemaining.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
                 throw RuntimeException("fake open failure (countdown)")
             }
-            val f = FakeForward(remoteHost, remotePort, localPort, nextChannelId.incrementAndGet())
+            val f = FakeForward(
+                remoteHost,
+                remotePort,
+                localPort,
+                nextChannelId.incrementAndGet(),
+                closeBlock = blockedClose,
+            )
             openForwards[remotePort] = f
             completedOpenAttempts.incrementAndGet()
             return f
@@ -787,6 +858,7 @@ class AutoForwarderTest {
         override val remotePort: Int,
         override val localPort: Int,
         @Suppress("unused") val channelId: Int,
+        private val closeBlock: Pair<CountDownLatch, CountDownLatch>? = null,
     ) : SshPortForward {
         val bytesForwardedAtomic = AtomicLong(0)
         val bytesReceivedAtomic = AtomicLong(0)
@@ -794,6 +866,20 @@ class AutoForwarderTest {
         override val isActive: Boolean get() = open
         override val bytesForwarded: Long get() = bytesForwardedAtomic.get()
         override val bytesReceived: Long get() = bytesReceivedAtomic.get()
-        override fun close() { open = false }
+        override fun close() {
+            // Model a wedged SSH channel teardown: signal we entered close,
+            // then block until released (or interrupted by the bounded
+            // teardown timeout). Mirrors RealSshPortForward.close() funnelling
+            // its channel-close packet through a transport that can stall.
+            closeBlock?.let { (entered, release) ->
+                entered.countDown()
+                try {
+                    release.await(10, TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+            open = false
+        }
     }
 }

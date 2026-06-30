@@ -4,17 +4,25 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -346,7 +354,14 @@ class AutoForwarderSupervisorTest {
         supervisor.stop()
         supervisor.stop() // idempotent
 
-        assertTrue("stop() must close the live session", !session.isConnected)
+        // stop() now closes the live SSH session OFF the caller thread (on
+        // the teardown dispatcher) so a wedged disconnect socket can't freeze
+        // the UI — see `stop() does not block the caller when the session
+        // close hangs`. The disconnect still happens; we await it.
+        assertTrue(
+            "stop() must close the live session",
+            waitUntilReal(2_000L) { !session.isConnected },
+        )
         assertEquals(emptyList<TunnelInfo>(), supervisor.flowOfTunnels().first())
         assertEquals(
             AutoForwarderSupervisor.ConnectionState.Idle,
@@ -354,6 +369,74 @@ class AutoForwarderSupervisorTest {
         )
         job.cancel()
         runCurrent()
+    }
+
+    @Test
+    fun `stop() does not block the caller when the session close hangs`() {
+        // #1085 freeze-hunt F-E: supervisor.stop() is reached on the Android
+        // Main thread (panel auto-forward toggle-off / foreground-service
+        // ACTION_STOP → ForwardingController → ActiveHost.stopOwnedSupervisor
+        // → supervisor.stop()), and RealSshSession.close() blocks the caller
+        // until the SSH_MSG_DISCONNECT socket write finishes — on a wedged
+        // socket that froze the UI. Before the fix stop() closed the session
+        // inline. This holds the session's close() open and asserts stop()
+        // returns promptly anyway, while still confirming the disconnect is
+        // dispatched (teardown not dropped). RED on base (stop() blocks until
+        // the latch releases), GREEN with the off-thread teardown.
+        val factory = SequentialSessionFactory().apply {
+            addSession { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }
+        }
+        val closeEntered = CountDownLatch(1)
+        val closeRelease = CountDownLatch(1)
+        factory.blockClose(closeEntered, closeRelease)
+
+        val executor = Executors.newSingleThreadExecutor()
+        val dispatcher = executor.asCoroutineDispatcher()
+        val loopScope = CoroutineScope(SupervisorJob() + dispatcher)
+        // Default teardownDispatcher = Dispatchers.IO, so the hung session
+        // close runs off the caller thread — exactly the production wiring.
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            sessionHealthPollMs = 100L,
+        )
+        try {
+            supervisor.start(loopScope)
+            assertTrue(
+                "supervisor should reach Connected with a live session",
+                waitUntilReal(2_000L) {
+                    factory.last?.isConnected == true &&
+                        supervisor.flowOfConnectionState().value ==
+                        AutoForwarderSupervisor.ConnectionState.Connected
+                },
+            )
+
+            val stopThread = Thread { supervisor.stop() }
+            stopThread.start()
+            stopThread.join(2_000L)
+            assertFalse(
+                "stop() must return without blocking on the hung session close",
+                stopThread.isAlive,
+            )
+            assertTrue(
+                "the session's close() must still be invoked (teardown not dropped)",
+                closeEntered.await(2, TimeUnit.SECONDS),
+            )
+        } finally {
+            closeRelease.countDown()
+            loopScope.cancel()
+            dispatcher.close()
+            executor.shutdownNow()
+        }
+    }
+
+    private fun waitUntilReal(timeoutMs: Long, predicate: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (predicate()) return true
+            Thread.sleep(10)
+        }
+        return predicate()
     }
 
     @Test
@@ -607,9 +690,20 @@ class AutoForwarderSupervisorTest {
         private val attempts = AtomicInteger(0)
 
         @Volatile var last: FakeSession? = null
+        @Volatile private var closeBlock: Pair<CountDownLatch, CountDownLatch>? = null
 
         fun addSession(init: FakeSession.() -> Unit) {
             queue += Lambda.Session(init)
+        }
+
+        /**
+         * Make every session this factory hands out block inside its
+         * `close()` — it counts down [entered] and waits on [release]. Lets a
+         * test hold an SSH disconnect open while asserting the caller of
+         * `stop()` is not blocked (#1085 F-E).
+         */
+        fun blockClose(entered: CountDownLatch, release: CountDownLatch) {
+            closeBlock = entered to release
         }
 
         fun failNext(n: Int) {
@@ -624,6 +718,7 @@ class AutoForwarderSupervisorTest {
                 is Lambda.Failure -> throw RuntimeException("scripted factory failure")
                 is Lambda.Session -> {
                     val s = FakeSession().apply(entry.init)
+                    s.closeBlock = closeBlock
                     last = s
                     s
                 }
@@ -651,6 +746,10 @@ class AutoForwarderSupervisorTest {
         @Volatile private var output: String = ""
         @Volatile private var connected: Boolean = true
         val openForwards: MutableList<FakeForward> = mutableListOf()
+
+        // When set, close() signals [first] then blocks on [second] —
+        // models a wedged SSH_MSG_DISCONNECT socket write (#1085 F-E).
+        @Volatile var closeBlock: Pair<CountDownLatch, CountDownLatch>? = null
 
         fun setListening(ssOutput: String) {
             output = ssOutput
@@ -694,6 +793,14 @@ class AutoForwarderSupervisorTest {
             remotePath: String,
         ): String = error("uploadStream not used by supervisor tests")
         override fun close() {
+            closeBlock?.let { (entered, release) ->
+                entered.countDown()
+                try {
+                    release.await(10, TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
             connected = false
             openForwards.forEach { it.close() }
         }

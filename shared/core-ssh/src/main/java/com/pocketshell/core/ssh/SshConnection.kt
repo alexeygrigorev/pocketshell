@@ -42,6 +42,26 @@ public object SshConnection {
 
     private const val CANCEL_DISCONNECT_TIMEOUT_MS: Long = 2_000L
 
+    /**
+     * Wall-elapsed boot clock for the transport-liveness oracle (#1080 Doze fix):
+     * `SystemClock.elapsedRealtimeNanos()` (`CLOCK_BOOTTIME`) COUNTS deep sleep, so a
+     * socket that died during Doze reads STALE on wake and the existing machinery
+     * redials instead of riding through a dead transport. This is the single
+     * production clock injected at [RealSshConnector.toSession].
+     *
+     * On-device this is ALWAYS the real boot clock — the `runCatching` only catches
+     * the android.jar STUB's `RuntimeException("Stub!")` that `SystemClock` throws in
+     * the forked-JVM integration suite (`core-portfwd:integrationTest` /
+     * `core-ssh` failure tests link the stub, not Robolectric/the emulator). There it
+     * falls back to `System.nanoTime()` so `connect()`/`toSession()` does not die
+     * before any real work runs (#1111). #1080 hard-coded the bare `SystemClock` call
+     * at the construction site, which threw "Stub!" and reddened the Docker integration
+     * job on every push.
+     */
+    internal val bootElapsedNanos: () -> Long = {
+        runCatching { SystemClock.elapsedRealtimeNanos() }.getOrElse { System.nanoTime() }
+    }
+
     private val cancellationCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -316,7 +336,7 @@ public object SshConnection {
         fun disconnect(client: C)
     }
 
-    private object RealSshConnector : SshConnector<SSHClient> {
+    internal object RealSshConnector : SshConnector<SSHClient> {
         override fun createClient(): SSHClient = SSHClient(createSshConfig())
 
         override fun applyKnownHostsPolicy(client: SSHClient, policy: KnownHostsPolicy) {
@@ -377,9 +397,11 @@ public object SshConnection {
             // (CLOCK_MONOTONIC) freezes in deep Doze, so after a Doze gap a dead
             // socket looked "alive within the keepalive window" and the restore /
             // handoff ride-through sailed through it instead of redialing. This is
-            // the single production construction site; the unit tests keep the
-            // System.nanoTime default (the android.jar stub can't run SystemClock).
-            RealSshSession(client, nowNanos = { SystemClock.elapsedRealtimeNanos() })
+            // the single production construction site. Issue #1111 — the clock is the
+            // JVM-stub-safe [bootElapsedNanos] (real boot clock on-device; falls back
+            // to System.nanoTime only when the android.jar stub throws "Stub!" in the
+            // forked-JVM integration suite) so `toSession()` never dies pre-work there.
+            RealSshSession(client, nowNanos = bootElapsedNanos)
 
         override fun disconnect(client: SSHClient) {
             client.disconnect()

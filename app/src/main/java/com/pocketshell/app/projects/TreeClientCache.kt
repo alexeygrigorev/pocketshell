@@ -6,7 +6,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Issue #867: the per-host CLIENT-SIDE cold cache of the last-rendered project
@@ -68,7 +70,25 @@ import javax.inject.Inject
  * sanitised host name. Synchronous, tiny reads/writes on a background
  * dispatcher; any IO failure degrades to "no cache" (the screen falls back to
  * the brief Loading exactly as before) and is never surfaced to the user.
+ *
+ * ## Issue #1109 — an in-memory PARSED snapshot so the seed never reads disk on Main
+ *
+ * The cold-connect instant render needs the cached tree SYNCHRONOUSLY inside
+ * [FolderListViewModel.bind] (the first painted frame must already be Ready, or the
+ * empty rebuild flashes). But the file read + full `JSONObject` parse is exactly the
+ * Main-thread `disk_read` that produced the #965 folder-list ANR at scale (71
+ * projects / 12 sessions). The two are reconciled by DECOUPLING the parse from the
+ * hydrate: every persisted snapshot is also held PARSED in an in-memory map, keyed
+ * by the same sanitised host. [peek] reads that map SYNCHRONOUSLY with NO disk I/O —
+ * so `bind` hydrates instantly and Main never reads the file. The map is populated
+ * OFF Main by [warmAll] (the cold-start pre-warm) and synchronously by [write]
+ * (which already holds the parsed tree, so the just-rendered snapshot is hot for the
+ * rest of the process). A genuine cold MISS (the entry was not warmed in time) is
+ * the caller's signal to fall back to the brief Loading and read OFF Main via [read]
+ * — never a Main-thread file read. This is why the type is `@Singleton`: one
+ * process-wide parsed map shared across every [FolderListViewModel] instance.
  */
+@Singleton
 public class TreeClientCache @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
@@ -76,6 +96,15 @@ public class TreeClientCache @Inject constructor(
     private val cacheDir: File by lazy {
         File(context.filesDir, CACHE_DIR_NAME).apply { mkdirs() }
     }
+
+    /**
+     * Issue #1109: the in-memory PARSED snapshot per host (keyed by the sanitised
+     * host name, the same key the file uses). [peek] returns from here SYNCHRONOUSLY
+     * with no disk I/O; [write] keeps it hot; [warmAll]/[read] populate it OFF Main.
+     * Concurrent because the off-Main warm/read and the on-Main `peek` touch it from
+     * different threads.
+     */
+    private val parsed = ConcurrentHashMap<String, CachedTree>()
 
     /**
      * The full advisory presentation snapshot persisted for one host: the
@@ -93,19 +122,52 @@ public class TreeClientCache @Inject constructor(
     }
 
     /**
-     * Read the cached snapshot for [host] (the cold-start instant-seed read).
-     * Returns an empty [CachedTree] when there is no cache yet, or on any
-     * IO/parse failure — both collapse to "no instant seed", and the caller
-     * shows the brief Loading until the first reconcile, exactly as before the
-     * cache.
+     * Issue #1109: the SYNCHRONOUS, NO-DISK-I/O peek used by the cold-connect
+     * instant seed ([FolderListViewModel.hydrateFromClientCache]). Returns the
+     * in-memory parsed snapshot for [host] if it has been warmed (by [warmAll] or a
+     * prior [write]/[read]), or `null` if it has not — the caller's signal to fall
+     * back to the brief Loading and read OFF Main via [read]. Safe to call on the
+     * Main thread: it only touches the in-memory map.
+     */
+    public fun peek(host: String): CachedTree? = parsed[sanitise(host)]
+
+    /**
+     * Read the cached snapshot for [host] (the OFF-Main cold-miss / warm read).
+     * Returns the in-memory snapshot if already warmed, otherwise reads + parses the
+     * file and caches it, or an empty [CachedTree] when there is no cache yet / on
+     * any IO/parse failure. This DOES touch disk on a miss, so it must run off the
+     * Main thread; the Main-thread seed uses [peek] instead (issue #1109 / #965).
      */
     public fun read(host: String): CachedTree {
+        val key = sanitise(host)
+        parsed[key]?.let { return it }
         val file = fileFor(host)
         if (!file.exists()) return EMPTY
         return try {
-            parse(file.readText(), hostId = host)
+            val tree = parse(file.readText(), hostId = host)
+            // Cache the parse, but never clobber a snapshot a concurrent [write]
+            // already landed (the write is the authoritative just-rendered tree).
+            if (!tree.isEmpty) parsed.putIfAbsent(key, tree)
+            parsed[key] ?: tree
         } catch (_: Throwable) {
             EMPTY
+        }
+    }
+
+    /**
+     * Issue #1109: warm the in-memory parsed snapshot from every persisted host file
+     * so the FIRST cold connect's [peek] hits without a Main-thread read. Best-effort
+     * and OFF Main (a few small JSON files); a missing/corrupt file just stays a cold
+     * miss. Never clobbers an entry a [write] already landed (`putIfAbsent`).
+     */
+    public fun warmAll() {
+        val files = runCatching { cacheDir.listFiles() }.getOrNull() ?: return
+        for (file in files) {
+            if (!file.isFile || !file.name.endsWith(".json")) continue
+            val key = file.name.removeSuffix(".json")
+            if (parsed.containsKey(key)) continue
+            val tree = runCatching { parse(file.readText(), hostId = key) }.getOrNull() ?: continue
+            if (!tree.isEmpty) parsed.putIfAbsent(key, tree)
         }
     }
 
@@ -117,6 +179,15 @@ public class TreeClientCache @Inject constructor(
      * memory; the next write re-persists).
      */
     public fun write(host: String, tree: CachedTree) {
+        val key = sanitise(host)
+        // Issue #1109: keep the in-memory parsed snapshot hot with the just-rendered
+        // tree so the NEXT cold connect of this host in the same process [peek]s it
+        // synchronously (no Main-thread re-read). An empty tree evicts the entry.
+        if (tree.isEmpty) {
+            parsed.remove(key)
+        } else {
+            parsed[key] = tree
+        }
         val file = fileFor(host)
         try {
             if (tree.isEmpty) {
@@ -125,7 +196,8 @@ public class TreeClientCache @Inject constructor(
             }
             file.writeText(serialise(tree))
         } catch (_: Throwable) {
-            // Best-effort cache; a failed write is a no-op.
+            // Best-effort cache; a failed write is a no-op (the in-memory snapshot
+            // above is still correct; the next write re-persists).
         }
     }
 

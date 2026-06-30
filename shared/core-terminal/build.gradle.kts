@@ -33,6 +33,19 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // Gate hardening (v0.4.19 release-gate hang): AndroidJUnitRunner applies
+        // `timeout_msec` as a PER-TEST timeout, so a single wedged connected test
+        // FAILS FAST instead of consuming the whole stage budget. The v0.4.19
+        // pre-release confidence gate stage [12] (this module's
+        // connectedDebugAndroidTest) wedged the entire 3h ceiling THREE times when
+        // one test deadlocked at ~9/45 — none of the heavy proof tests here carry
+        // their own @Test(timeout), so there was no backstop. 180 s is far above
+        // the slowest legitimate test in this suite (the #796 keyboard-up burst is
+        // a 6 s burst + settle; ~tens of seconds worst case on a contended
+        // swiftshader emulator) yet turns a future hang into a ~3 min failure
+        // instead of a 3 h gate wedge.
+        testInstrumentationRunnerArguments["timeout_msec"] = "180000"
+
         // Issue #9: a stub `libtermux.so` ships in the AAR so the vendored
         // `com.termux.terminal.JNI` static initializer (`System.loadLibrary`)
         // does not throw `UnsatisfiedLinkError`. Limit the ABIs to the

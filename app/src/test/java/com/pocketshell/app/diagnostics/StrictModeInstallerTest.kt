@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -112,6 +113,33 @@ class StrictModeInstallerTest {
             "installIfDebuggable must install on a debuggable build",
             StrictModeInstaller.installIfDebuggable(app),
         )
+    }
+
+    @Test
+    fun installIfDebuggableActuallyActivatesNewThreadPolicy() {
+        // Issue #1089: arming must actually swap the Main-thread policy for a NEW
+        // one (not a no-op) so a disk read during the App-init injection window is
+        // observed. App.onCreate calls this as its first statement, before
+        // super.onCreate()'s Hilt injection — see AppStrictModeArmOrderTest for
+        // the install-order guard; this proves the call has a real effect.
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        app.applicationInfo.flags = app.applicationInfo.flags or ApplicationInfo.FLAG_DEBUGGABLE
+        val before = android.os.StrictMode.getThreadPolicy()
+        try {
+            assertTrue(
+                "installIfDebuggable must install on a debuggable build",
+                StrictModeInstaller.installIfDebuggable(app),
+            )
+            val after = android.os.StrictMode.getThreadPolicy()
+            assertNotSame(
+                "installIfDebuggable must arm a NEW Main-thread thread policy so " +
+                    "injection-time disk IO is detected — not leave the default LAX policy",
+                before,
+                after,
+            )
+        } finally {
+            android.os.StrictMode.setThreadPolicy(before)
+        }
     }
 
     @Test

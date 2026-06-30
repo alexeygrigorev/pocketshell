@@ -299,6 +299,25 @@ class App : Application() {
     }
 
     override fun onCreate() {
+        // Issue #1089 (#933 / #928 D9 / P1): arm the process-wide Main-thread
+        // StrictMode tripwire as the VERY FIRST statement — BEFORE
+        // super.onCreate() runs Hilt field injection. Hilt injects the App-level
+        // singletons (settingsRepository / usageScheduler / diagnosticRecorder /
+        // …) inside super.onCreate(); arming the policy AFTER super.onCreate()
+        // (where it used to sit, ~17 lines too late) left every injection-time
+        // main-thread disk read INVISIBLE to StrictMode and undercounted the
+        // cold-launch freeze measurement — the exact detection gap that hid the
+        // #1124 (DiagnosticRecorder) and #1088 (SettingsRepository) launch
+        // freezes. Arming before injection routes those disk reads / writes /
+        // mutex waits (the #926/#928-D1 freeze class `detectNetwork()` misses)
+        // into DiagnosticEvents as a `strictmode.violation` for the load-bearing
+        // journeys to HARD-assert. DEBUG/TEST-scoped (no-op on the signed
+        // release APK — the app is debuggable here, the framework has already run
+        // attachBaseContext so applicationInfo is available) and penaltyLog only
+        // — NEVER penaltyDeath (legitimate rare startup reads exist; the journey
+        // is the gate, not a process kill).
+        StrictModeInstaller.installIfDebuggable(this)
+        StartupTiming.mark("strict-mode-installed")
         StartupTiming.mark("app-on-create-start")
         super.onCreate()
         DiagnosticEvents.install(diagnosticRecorder)
@@ -308,17 +327,6 @@ class App : Application() {
         DiagnosticEvents.record("app", "created")
         CrashReporter.install(this)
         StartupTiming.mark("app-crash-reporter-installed")
-        // Issue #933 (#928 D9 / P1): install the process-wide Main-thread
-        // StrictMode tripwire so a main-thread disk read / write / mutex wait
-        // (the #926/#928-D1 freeze class — `runBlocking { … }` Room reads that
-        // `detectNetwork()` misses) is routed into DiagnosticEvents as a
-        // `strictmode.violation` for the load-bearing journeys to HARD-assert.
-        // DEBUG/TEST-scoped (no-op on the signed release APK) and NEVER
-        // penaltyDeath — the journey is the gate, not a process kill. Installed
-        // right after the crash reporter and before the rest of onCreate so the
-        // startup hot window is itself observed.
-        StrictModeInstaller.installIfDebuggable(this)
-        StartupTiming.mark("strict-mode-installed")
         // No-background-work hook-up (issue #161 / D21). Attach the
         // ProcessLifecycleOwner observer before starting the loop so
         // the loop's `processStarted.first { it }` gate sees the

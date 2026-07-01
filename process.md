@@ -355,6 +355,16 @@ Minimum pre-push gate:
 - The implementer runs focused tests for every touched module and reports the
   exact commands. A slice is not ready for review while the modules it touched
   are still failing locally.
+- **A `core-ssh` / connection-core close/session/transport contract change MUST
+  run the Docker `:shared:core-ssh:integrationTest` suite locally before merge —
+  NOT just `:shared:core-ssh:testDebugUnitTest`.** The integration suite (real
+  SSH fixture) runs only in the batched-on-`main` Docker job, not the per-PR
+  required checks, so a contract change that passes Unit can still be red there
+  and only surfaces after merge. The v0.4.20 async-`close()` change (#1144)
+  shipped green on Unit but red on `integrationTest` (#1149) — three tests
+  asserted synchronous post-`close()` state that the new async contract broke.
+  Reviewer briefs for connection-core contract changes must call out running the
+  integration suite.
 - A verifier/reviewer agent independently inspects the diff and reruns the
   relevant local checks from the implementer's worktree before the orchestrator
   integrates it. Treat this verifier as a required local gatekeeper before any

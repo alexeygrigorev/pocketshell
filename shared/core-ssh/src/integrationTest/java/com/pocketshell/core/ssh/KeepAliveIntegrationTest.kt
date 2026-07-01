@@ -205,6 +205,19 @@ class KeepAliveIntegrationTest {
             // A genuinely dead transport: once closed, the guard reports DEAD so the
             // probe regains authority (no infinite deferral).
             session.close()
+            // Issue #1149 / #1135 / #1139: close() is NON-BLOCKING on the caller —
+            // it launches the bounded transport teardown off the calling thread and
+            // returns immediately (the #1139 freeze fix). The liveness guard first
+            // checks isConnected, which only flips false once that async teardown
+            // drains the dispatcher; a keepalive succeeded moments ago so the
+            // activity watermark is still fresh, meaning the guard reports ALIVE in
+            // the intermediate window. Join the teardown via awaitClosed() OFF the
+            // caller thread before reading the post-teardown state. No production
+            // caller reads this guard on a session it just close()'d without
+            // awaiting (redials acquire a FRESH session), so this is a
+            // test-contract migration mirroring RealSshSessionTeardownOrderingTest,
+            // not a regression.
+            session.awaitClosed()
             assertFalse(
                 "on a closed/dead transport the liveness guard must report DEAD so the " +
                     "probe is free to declare the drop (#964 — deferral is not an " +

@@ -291,11 +291,13 @@ class PartialBlackPaneHealTest {
         advanceUntilIdle()
         neutralizeSubmitAckGate(vm, client)
 
-        // A normal multi-line agent response: many live rows -> neither blank nor
-        // partial-black -> the post-send heal must correctly no-op.
+        // A normal multi-line agent response: a DENSE viewport (well over half the 40 rows
+        // live) -> neither blank, nor partial-black, nor sparse-half-black
+        // ([TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] false) -> the post-send
+        // heal must correctly no-op and never pay for a `capture-pane` diff (#1153).
         val fullFrame = buildString {
             append(CLEAR_ONLY)
-            repeat(20) { append("agent response line $it with real content\r\n") }
+            repeat(32) { append("agent response line $it with real content\r\n") }
         }
         pane.terminalState.appendRemoteOutput(fullFrame.toByteArray(Charsets.US_ASCII))
         advanceUntilIdle()
@@ -428,6 +430,190 @@ class PartialBlackPaneHealTest {
         )
     }
 
+    // -------------------------------------------------------------------------
+    // (8) Issue #1153: a composer Send WITH AN ATTACHMENT is ALWAYS multi-line (it
+    //     appends an "Attached files:" block), so it takes the bracketed-paste +
+    //     submit branch and the alt-screen agent clear+redraws its WHOLE viewport.
+    //     The overpaint leaves the pane HALF-black: >3 live lines (input box + a few
+    //     conversation lines + status) over a large black upper band. This is NEITHER
+    //     fully blank NOR the ≤3-line partial-black, so the pre-#1153 send heal's
+    //     LOCAL-ONLY `blank || partialBlank` gate SKIPPED it (RED). With the fix the
+    //     heal judges the pane against tmux's authoritative capture and restores the
+    //     full frame (GREEN). AGENT pane, with-attachment payload.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun sendWithAttachmentHealsHalfBlackAgentPane() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%8", title = "codex")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%8" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        neutralizeSubmitAckGate(vm, client)
+
+        // The send's overpaint leaves the pane HALF-black (>3 live lines, large black band).
+        overpaintAltScreenHalfBlack(pane)
+        assertFalse(
+            "precondition: a half-black pane is NOT fully blank",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertFalse(
+            "precondition (#1153 RED gap): the half-black pane has MORE than 3 live lines so it " +
+                "is NOT the ≤3-line partial-black the pre-#1153 send heal covered — its LOCAL-ONLY " +
+                "`blank || partialBlank` gate would SKIP it",
+            pane.terminalState.visibleScreenIsPartiallyBlank(),
+        )
+        assertFalse(
+            "precondition (#1153 RED gap): the #966 divergence oracle ALSO misses the half-black " +
+                "band (its surviving content exceeds the 25% ceiling of the full frame)",
+            pane.terminalState.visibleScreenDivergesFromCapture(HALF_BLACK_FULL_FRAME.joinToString("\n")),
+        )
+
+        // Queue the FULL frame tmux's grid returns on the post-send HEAL capture.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = HALF_BLACK_FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // THE REAL SEND PATH with a WITH-ATTACHMENT (multi-line) payload.
+        val result = vm.sendAgentPayloadToPaneResult("%8", WITH_ATTACHMENT_PAYLOAD, AgentKind.Codex)
+        advanceUntilIdle()
+
+        assertTrue("the send itself must succeed", result.isSuccess)
+        assertTrue(
+            "REGRESSION (#1153): a with-attachment send whose overpaint left the active pane " +
+                "HALF-black (>3 live lines) must trigger the post-send HEAL. On base the " +
+                "LOCAL-ONLY blank/partial-black gate skipped it and the pane stayed too black.",
+            client.healCaptureCount() > healCapturesBefore,
+        )
+        assertTrue(
+            "the heal restored tmux's authoritative FULL frame",
+            renderedTranscriptFor(pane).contains(HALF_BLACK_MARKER + " full"),
+        )
+        assertFalse(
+            "after the heal the pane is no longer sparse/half-black",
+            pane.terminalState.visibleScreenLooksSparseForSendHeal(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // (9) Issue #1153 class coverage: a MULTI-LINE TEXT-ONLY send (no attachment)
+    //     hits the SAME bracketed-paste + submit branch, so it must heal the same
+    //     half-black overpaint. AGENT pane, multi-line text-only payload.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun multilineTextOnlySendHealsHalfBlackAgentPane() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%9", title = "codex")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%9" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        neutralizeSubmitAckGate(vm, client)
+
+        overpaintAltScreenHalfBlack(pane)
+        assertFalse(pane.terminalState.visibleScreenIsPartiallyBlank())
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = HALF_BLACK_FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%9",
+            "first line of the prompt\nsecond line of the prompt",
+            AgentKind.Codex,
+        )
+        advanceUntilIdle()
+
+        assertTrue(result.isSuccess)
+        assertTrue(
+            "REGRESSION (#1153, multi-line text-only): a multi-line text send that half-blacks " +
+                "the pane must heal too (same bracketed-paste + submit branch as with-attachment)",
+            client.healCaptureCount() > healCapturesBefore,
+        )
+        assertFalse(pane.terminalState.visibleScreenLooksSparseForSendHeal())
+    }
+
+    // -------------------------------------------------------------------------
+    // (10) Issue #1153 class coverage: the SHELL `RawBytes` send path
+    //      ([TmuxSessionViewModel.writeInputToPaneResult]) had NO send-overpaint heal
+    //      at all. A MULTI-LINE paste into a full-screen shell TUI can half-black the
+    //      pane the same way. On base: no heal → RED. With the fix the shell path
+    //      schedules the same heal for a multi-line payload → GREEN. SHELL pane.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun multilineShellPasteHealsHalfBlackShellPane() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%10")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%10" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        overpaintAltScreenHalfBlack(pane)
+        assertFalse(pane.terminalState.visibleScreenIsPartiallyBlank())
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = HALF_BLACK_FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // THE REAL SHELL SEND PATH: a multi-line raw paste.
+        val result = vm.writeInputToPaneResult(
+            "%10",
+            "vim command line one\nvim command line two\n".toByteArray(Charsets.UTF_8),
+        )
+        advanceUntilIdle()
+
+        assertTrue(result.isSuccess)
+        assertTrue(
+            "REGRESSION (#1153, shell pane): the shell RawBytes path had NO send-overpaint heal; " +
+                "a multi-line paste that half-blacks the pane must now trigger the heal too",
+            client.healCaptureCount() > healCapturesBefore,
+        )
+        assertFalse(pane.terminalState.visibleScreenLooksSparseForSendHeal())
+    }
+
+    // -------------------------------------------------------------------------
+    // (11) Issue #1153 OVER-HEAL GUARD (shell): a SINGLE-keystroke shell write (no
+    //      line break) must NOT schedule any heal — per-keystroke input never
+    //      overpaints the whole viewport, so it must pay nothing even on a
+    //      (coincidentally) half-black pane.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun singleKeystrokeShellWriteDoesNotHeal() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%11")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%11" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        overpaintAltScreenHalfBlack(pane)
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = HALF_BLACK_FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // A single keystroke (no line break) — the common shell-typing case.
+        val result = vm.writeInputToPaneResult("%11", "x".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        assertTrue(result.isSuccess)
+        org.junit.Assert.assertEquals(
+            "OVER-HEAL GUARD (#1153): a single-keystroke shell write (no line break) must NOT " +
+                "schedule any post-send heal capture",
+            healCapturesBefore,
+            client.healCaptureCount(),
+        )
+    }
+
     // ------------------------------------------------------------------ Harness
 
     private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
@@ -504,6 +690,29 @@ class PartialBlackPaneHealTest {
     private fun overpaintAltScreenPartialBlack(pane: TmuxPaneState) {
         val esc = ""
         val frame = "$esc[?1049h$esc[2J$esc[H$esc[24;1H Working 7  esc to interrupt streaming the reply"
+        pane.terminalState.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
+    }
+
+    /**
+     * Issue #1153: drive the pane onto the ALTERNATE screen and paint ~12 content lines to the
+     * LOWER rows (cursor-addressed), leaving the upper ~2/3 of the 40-row viewport BLACK — the
+     * maintainer's "partly redrew but still too black" send-overpaint state. Deliberately MORE
+     * than 3 live lines so it is NOT the ≤3-line [visibleScreenIsPartiallyBlank] the pre-#1153
+     * heal covered, yet its live share of the visible rows (~12/40) is well below a fully-painted
+     * frame — the exact half-black band the widened heal must catch.
+     */
+    private fun overpaintAltScreenHalfBlack(pane: TmuxPaneState) {
+        val esc = ""
+        // Hard `\r\n` lines (NOT cursor-addressed): contiguous cursor-positioned short lines are
+        // joined into ONE logical line by `getSelectedText`, which would read as a single live
+        // line. 12 live lines over a 40-row viewport = ~0.3 live fraction, below the half-black
+        // ceiling, yet > 3 lines so it is NOT the ≤3-line partial-black.
+        val frame = buildString {
+            append("$esc[?1049h$esc[2J$esc[H")
+            for (row in 0 until 12) {
+                append("$HALF_BLACK_MARKER conversation/status line $row filler content here padding\r\n")
+            }
+        }
         pane.terminalState.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
     }
 
@@ -617,7 +826,12 @@ class PartialBlackPaneHealTest {
      */
     private fun recoveredFrameLines(): List<String> = buildList {
         add(RECOVERED_FRAME)
-        repeat(12) { add("recovered context row $it") }
+        // Issue #1153: a DENSE recovered frame (well over half the 40-row viewport) so that
+        // after the heal the restored pane reads NON-sparse
+        // ([TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] false) and the bounded
+        // send-heal poll stops paying for further `capture-pane` diffs — mirroring production,
+        // where tmux's authoritative frame fills the viewport.
+        repeat(27) { add("recovered context row $it") }
     }
 
     private companion object {
@@ -631,6 +845,21 @@ class PartialBlackPaneHealTest {
         // sparse part) and the input/status line. Its non-blank content is small enough that
         // the surviving status line is > 25% of it (so the #966 divergence oracle MISSES it),
         // yet > 3 non-blank lines so the healed pane is no longer partial-black.
+        // Issue #1153: a with-attachment composer payload — the draft text plus the
+        // "Attached files:" block the composer appends, which makes EVERY with-attachment
+        // send multi-line (so it takes the bracketed-paste + submit branch).
+        const val WITH_ATTACHMENT_PAYLOAD: String =
+            "please review this\n\nAttached files:\n- /home/alex/report.txt"
+
+        // Issue #1153: the HALF-BLACK send-overpaint frame + the full frame tmux restores.
+        const val HALF_BLACK_MARKER: String = "ISSUE1153-HALFBLACK"
+        val HALF_BLACK_FULL_FRAME: List<String> = buildList {
+            add("HEADER $HALF_BLACK_MARKER full agent conversation restored from tmux")
+            repeat(29) {
+                add("$HALF_BLACK_MARKER full frame row $it with real agent conversation content here")
+            }
+        }
+
         const val AGENT_FRAME_MARKER: String = "ISSUE1138-AGENT-FRAME"
         val SPARSE_AGENT_FRAME: List<String> = buildList {
             add("HEADER $AGENT_FRAME_MARKER codex podwiki")

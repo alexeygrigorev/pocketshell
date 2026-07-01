@@ -500,6 +500,22 @@ JOURNEY_CLASSES=(
   # UNCONDITIONAL `reseedActivePaneForReattach`, not blank-only). Uses ONLY the
   # deterministic agents:2222 fixture (no toxiproxy) and does NOT self-skip on CI.
   "$FQCN_PREFIX.VoiceSendActivePaneStaysVisibleE2eTest"
+  # ADDED (#1153 — send-with-attachment half-black, v0.4.21 dogfood): a composer Send WITH AN
+  # ATTACHMENT is ALWAYS multi-line (it appends an "Attached files:" block), so it takes the
+  # bracketed-paste + submit branch and the alt-screen agent clear+redraws its WHOLE viewport; the
+  # overpaint leaves a >3-line HALF-BLACK band (input box + a few conversation lines + status) over
+  # a large black region, on a LIVE transport (no reconnect). The pre-#1153 #941 send heal gated on
+  # the LOCAL-ONLY `blank || partialBlank` heuristic (≤3 live lines) and SKIPPED the >3-line band,
+  # and its fixed 350 ms one-shot lost the race against the bigger attachment redraw. This journey
+  # seeds a FULL-screen frame, attaches, DISABLES the steady-state watchdog (so ONLY the SEND heal
+  # can green the pane), injects the >3-line half-black on the LIVE emulator (REMOTE tmux grid keeps
+  # the full frame → transport GUARANTEED LIVE), then drives a REAL with-attachment (multi-line)
+  # send and asserts the SEND heal restores the full frame with the transport still Connected and
+  # NO reconnect. RED on base (the local-only gate skips the >3-line band — unit-proven in
+  # PartialBlackPaneHealTest); GREEN with the widened capture-diff heal
+  # (`visibleRenderLostFrameVsCapture` case c + the bounded send-heal poll). Uses ONLY the
+  # deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT self-skip.
+  "$FQCN_PREFIX.SendWithAttachmentStaysVisibleE2eTest"
   # ADDED (#782, D30 / D28(3)): the pre-existing multi-window `[wN]`
   # switcher-entry journey. PocketShell no longer manages tmux windows; a session
   # that already has >1 window on the remote is surfaced as separate `<session>

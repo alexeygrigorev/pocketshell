@@ -105,6 +105,13 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.proof.CodexOverflowNoReconnectE2eTest"
   "com.pocketshell.app.proof.CodexRedrawOverflowReconnectE2eTest"
   "com.pocketshell.app.proof.CodexWindowStartupControlSequenceE2eTest"
+  # Nightly-extensive-only slow cold-dial robustness proof (#1064, R4). A
+  # NetworkFaultProofBase toxiproxy proof: it self-skips on CI
+  # (assumeNetworkFaultProofsEnabled -> tests.yml leaves network-fault-proxy:2228 +
+  # toxiproxy:8474 down), so wiring it into the per-PR ci-journey-suite.sh would only
+  # ALL-SKIP (the G3 vacuous-pass trap). It is enrolled in NETWORK_FAULT_CLASSES and
+  # runs via nightly-extensive.yml / scripts/nightly-extensive-suite.sh (proxy up).
+  "com.pocketshell.app.proof.ColdDialUnderBandwidthLimitE2eTest"
   "com.pocketshell.app.proof.ColdInstallE2eTest"
   "com.pocketshell.app.proof.DisconnectBlackholeE2eTest"
   "com.pocketshell.app.proof.DisconnectFlapSoakE2eTest"

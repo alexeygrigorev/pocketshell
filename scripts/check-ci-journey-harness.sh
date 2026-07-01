@@ -111,6 +111,15 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
   "com.pocketshell.app.proof.FastResumeReconnectE2eTest"
   "com.pocketshell.app.proof.MultiHostSessionE2eTest"
+  # Nightly-extensive-only carrier-NAT idle-mapping RECOVERY proof (#1063, R3).
+  # A NetworkFaultProofBase toxiproxy half-open proof: it self-skips on CI
+  # (assumeNetworkFaultProofsEnabled -> tests.yml leaves network-fault-proxy:2228 +
+  # toxiproxy:8474 down), so wiring it into the per-PR ci-journey-suite.sh would only
+  # ALL-SKIP (the G3 vacuous-pass trap). It is enrolled in NETWORK_FAULT_CLASSES and
+  # runs via nightly-extensive.yml / scripts/nightly-extensive-suite.sh (proxy up).
+  # The load-bearing per-push red->green survival pin lives in the Unit gate
+  # (shared/core-ssh NatIdleMappingSurvivalKeepAliveTest).
+  "com.pocketshell.app.proof.NatIdleMappingSurvivalE2eTest"
   "com.pocketshell.app.proof.NavigatorBackForegroundNoSshE2eTest"
   "com.pocketshell.app.proof.NetworkLatencyModelE2eTest"
   "com.pocketshell.app.proof.NoBackgroundWorkE2eTest"

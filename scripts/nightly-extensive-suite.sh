@@ -100,6 +100,19 @@ NETWORK_FAULT_CLASSES=(
   # D31's per-push gate is met without depending on the toxiproxy family). Reuses
   # network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
   "$FQCN_PREFIX.SilentMidSessionDropDetectionE2eTest"
+  # Issue #1063 (R3, #843 round-2 gap C2): the REAL-WIRE carrier-NAT idle-mapping
+  # RECOVERY proof (Arm 2). A toxiproxy `timeout=0` half-open blackhole models the
+  # carrier NAT reaping an idle TCP mapping mid-idle (no RST/FIN — all bytes,
+  # `-CC` included, silently dropped); the always-on transport keepalive must
+  # DETECT the dead half-open transport within its `countMax × interval` budget and
+  # drive recovery, after which the session returns to Connected and a post-recovery
+  # send round-trips. Self-skips per-push (needs network-fault-proxy:2228 +
+  # toxiproxy API:8474 which tests.yml leaves down), so it is enrolled here with its
+  # toxiproxy siblings. The LOAD-BEARING per-push red→green for Arm 1 (idle-mapping
+  # SURVIVAL: keepalive interval < NAT window keeps the mapping warm) lives at the
+  # keepalive layer in shared/core-ssh (NatIdleMappingSurvivalKeepAliveTest, the
+  # Unit gate). Reuses network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
+  "$FQCN_PREFIX.NatIdleMappingSurvivalE2eTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).

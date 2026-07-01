@@ -660,6 +660,34 @@ JOURNEY_CLASSES=(
   #   (d) the scope guard: a REAL cross-transport WIFI↔CELLULAR handoff STILL redials
   #       (network_reconnect_start) — the #548 proactive-handoff feature is preserved.
   "$FQCN_PREFIX.MobileSpuriousReconnectE2eTest"
+  # ADDED (#1082): the END-TO-END WIFI→CELLULAR dead-socket handoff journey — the
+  # real-path sibling of #1078's VM-unit proof (audit #843 gap G1, highest
+  # mobile-stability impact). #1078 fixed the headline ~90s FROZEN-but-Live handoff
+  # stall but proved it red→green at the unit level only; this drives the REAL
+  # MainActivity → attach → live `-CC` transport and exercises the same production
+  # onNetworkChanged → reducer → suppressNetworkTransportProvenAlive bounded-probe
+  # arm. Two deterministic agents:2222 journeys (no toxiproxy, the #780 synthetic-
+  # inject model — no assumeFalse(isRunningOnCi()), no self-skip on the load-bearing
+  # assertion):
+  #   (AC1) deadSocketWifiCellularHandoffRedialsWithinProbeBudgetNotFrozenLive: a
+  #     validated WIFI→CELLULAR handoff while PASSIVELY proven alive
+  #     (forceTransportProvenAliveForTest=true) but the bounded active probe DEAD
+  #     (forceLivenessProbeDeadForTest=true — genuinely dead socket post-handoff)
+  #     must REDIAL within the probe budget — network_reconnect_start
+  #     (classification=proactive_network_handoff) fires well inside the bounded
+  #     window (NOT a ~90s frozen-Live stall) — and the SAME session recovers to
+  #     Connected with a fresh marker round-trip (input routing restored). RED on
+  #     base (the suppress arm rode through on the passive timestamp with no probe/no
+  #     redial → frozen Live ~90s → no redial in the window); GREEN with #1078.
+  #   (AC2) aliveSocketWifiCellularHandoffRidesThroughWithNoSpuriousRedial: the same
+  #     passively-proven-alive handoff but the bounded probe ANSWERS over the live
+  #     socket (probe seam OFF) → RIDE THROUGH with ZERO redial diagnostics, attributed
+  #     to network_reconnect_skip cause=transport_proven_alive probeConfirmed=true (the
+  #     #981/#974/#1058 win preserved; class coverage D32 G2). Distinct from
+  #     MobileSpuriousReconnectE2eTest(d), which pins forceTransportProvenAliveForTest
+  #     =false and so never reaches the #1078 suppress arm. Uses ONLY the deterministic
+  #     agents:2222 fixture tests.yml already brings up — no new Docker service/port.
+  "$FQCN_PREFIX.Issue1078DeadSocketHandoffRedialJourneyE2eTest"
   # ADDED (#970): the realistic-wifi STABILITY regression gate — the durable proof
   # for #964 (D31/D32/D33). Only the DETERMINISTIC method is run by FQCN here; it
   # reproduces the #964 budget mismatch on the plain deterministic agents:2222

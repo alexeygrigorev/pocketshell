@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.Lifecycle
@@ -1804,6 +1805,59 @@ public class TmuxSessionViewModel @Inject constructor(
 
     internal fun setStaleRenderWatchdogAutoArmEnabledForTest(enabled: Boolean) {
         staleRenderWatchdogAutoArmEnabled = enabled
+    }
+
+    // Issue #1166: the single active stale-render watchdog loop. Cancelled and
+    // replaced on every (re-)arm so rapid A→B→A session switching can never
+    // stack multiple concurrent 4s `capture-pane` loops (arm-dedup).
+    private var staleRenderWatchdogJob: Job? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun staleRenderWatchdogJobForTest(): Job? = staleRenderWatchdogJob
+
+    // Issue #1166 (heal-latency fix): a WAKE signal so fresh `%output` on the
+    // ACTIVE visible pane snaps a BACKED-OFF watchdog straight back to the hot
+    // cadence instead of waiting out the current long (8s/16s) `delay(...)`.
+    // Without this the back-off is purely poll-based: a redraw arriving ~1s into
+    // a 16s backed-off window would not be captured/diffed/healed until the tick
+    // ~15s later — a visible partial-black regression vs the ≤4s hot bound. The
+    // watchdog loop RACES its backed-off delay against a receive on this channel;
+    // [recordVisiblePaneOutput] fires it on every active-pane %output. CONFLATED
+    // so a burst of output collapses to one pending wake and the streaming path's
+    // trySend never suspends.
+    private val staleRenderWatchdogWake = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * Issue #1166 test seam: fire the stale-render watchdog wake directly, so a
+     * JVM test can assert that a backed-off watchdog snaps to the hot cadence on a
+     * fresh `%output` wake WITHOUT standing up the real `-CC` output stream. The
+     * production wake is fired from [recordVisiblePaneOutput] on every active-pane
+     * output chunk (see [recordPaneOutputActivityForTest], which drives that real
+     * path end-to-end).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun signalStaleRenderWatchdogWakeForTest() {
+        staleRenderWatchdogWake.trySend(Unit)
+    }
+
+    // Issue #1166: a test override for [PowerManager.isInteractive] (screen-on).
+    // Null → read the real PowerManager (or default on when no context). A JVM
+    // test drives the foreground/screen gate deterministically without an AVD.
+    private var screenInteractiveOverrideForTest: Boolean? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setScreenInteractiveForTest(interactive: Boolean?) {
+        screenInteractiveOverrideForTest = interactive
+    }
+
+    // Issue #1166 test seam: set the active pane's last-`%output` wall-clock so a
+    // JVM test can deterministically simulate "the pane streamed new output since
+    // the last watchdog tick" (the back-off snap-to-hot signal) without depending
+    // on the real elapsedRealtime clock, which the coroutine test scheduler does
+    // not advance.
+    @androidx.annotation.VisibleForTesting
+    internal fun setPaneLastOutputAtMsForTest(paneId: String, atMs: Long) {
+        paneLastOutputAtMs[paneId] = atMs
     }
 
     /**
@@ -9685,6 +9739,15 @@ public class TmuxSessionViewModel @Inject constructor(
         // apart from a genuinely-exited agent (no output) before it counts the
         // empty detection toward agent-exit confirmation.
         paneLastOutputAtMs[event.paneId] = SystemClock.elapsedRealtime()
+        // Issue #1166 (heal-latency fix): fresh output on the ACTIVE visible pane
+        // WAKES a backed-off stale-render watchdog so a redraw during a long
+        // (8s/16s) backed-off window is captured/diffed/healed within the hot
+        // bound (≤4s) instead of the next backed-off tick. Gated to the active
+        // pane so a busy BACKGROUND pane can't defeat the battery back-off; the
+        // trySend is cheap + non-suspending (CONFLATED channel).
+        if (event.paneId == activeVisiblePane()?.paneId) {
+            staleRenderWatchdogWake.trySend(Unit)
+        }
         logFirstPaneOutput(event)
     }
 
@@ -10620,33 +10683,171 @@ public class TmuxSessionViewModel @Inject constructor(
      * watchdog is the missing oracle, gated by a `capture-pane` DIFF so it never
      * over-fires on a legitimately sparse-but-correct pane.
      *
-     * Cost: ONE `capture-pane` round-trip per [STALE_RENDER_WATCHDOG_TICK_MS], and
-     * only while the pane is NON-blank (the blank watchdog owns the blank case).
-     * The diff is computed from the captured text, so a healthy pane pays just the
-     * one cheap round-trip and never relayouts.
+     * Cost: ONE `capture-pane` round-trip per tick, and only while the pane is
+     * NON-blank (the blank watchdog owns the blank case). The diff is computed from
+     * the captured text, so a healthy pane pays just the one cheap round-trip and
+     * never relayouts.
+     *
+     * Issue #1166 (battery/heat) — the watchdog exists to heal the VISIBLE pane, so
+     * it is gated + backed off so an idle/hidden pane stops hammering `capture-pane`
+     * while a churning/agent pane still heals as fast as before:
+     *
+     *  - **Foreground + screen-on gate.** When the app is backgrounded OR the screen
+     *    is off there is nothing on screen to heal, so the tick SKIPS the capture
+     *    round-trip entirely (0 captures/min while backgrounded or screen-off). On
+     *    resume the back-off is reset so the FIRST foreground tick captures at the
+     *    hot 4s cadence — a pane that changed while away heals right on return.
+     *  - **Back-off when stable.** A tick that finds NO divergence AND saw no new
+     *    streamed `%output` widens the next interval (4s → 8s → 16s, capped). ANY
+     *    detected divergence, new streamed output, session switch (fresh arm), or a
+     *    reconnecting band snaps the cadence back to 4s so a black/partial-black
+     *    pane heals within the same bound as today (#1138/#1153/#874).
+     *  - **Immediate wake on output (issue #1166 heal-latency fix).** The back-off
+     *    is NOT purely poll-based: a fresh active-pane `%output` fires
+     *    [staleRenderWatchdogWake] (see [recordVisiblePaneOutput]) and the loop
+     *    RACES its backed-off `delay(...)` against that wake (see
+     *    [awaitStaleRenderWatchdogTick]). So a redraw arriving ~1s into a 16s
+     *    backed-off window is captured/diffed/healed within the hot bound (≤4s),
+     *    not up to 16s later — the partial-black (#1138) case whose sole steady-
+     *    state oracle is this watchdog can never sit visibly broken for a whole
+     *    backed-off interval.
+     *  - **Arm-dedup.** [staleRenderWatchdogJob] is cancelled before each re-arm so
+     *    rapid A→B→A switching can never stack multiple concurrent 4s loops.
      */
     private fun armActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
         if (!staleRenderWatchdogAutoArmEnabled) return
-        bridgeScope.launch {
+        launchActivePaneStaleRenderWatchdog(refreshGuard)
+    }
+
+    private fun launchActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
+        // Issue #1166 arm-dedup: cancel any prior loop before launching a new one.
+        // A stale loop otherwise only self-terminates on its NEXT tick via
+        // isCurrentRuntime (up to one full tick of double/triple captures per switch).
+        staleRenderWatchdogJob?.cancel()
+        staleRenderWatchdogJob = bridgeScope.launch {
             var tick = 0
+            // Issue #1166: consecutive stable ticks drive the back-off interval.
+            var stableTicks = 0
+            // Issue #1166: the last `%output` wall-clock we saw for the active pane;
+            // a newer stamp means the pane streamed output since the previous tick,
+            // so we snap the cadence back to hot rather than backing off a live pane.
+            var lastSeenOutputAtMs = 0L
             while (tick < staleRenderWatchdogMaxTicks) {
-                delay(STALE_RENDER_WATCHDOG_TICK_MS)
+                // Issue #1166: wait out the (possibly backed-off) interval, but a
+                // fresh active-pane %output wake cuts a backed-off wait short so the
+                // redraw is captured within the hot bound, not the next long tick.
+                val wokenByOutput = awaitStaleRenderWatchdogTick(stableTicks)
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
                 if (inlineConnectionStatus !is ConnectionStatus.Connected) {
                     // Paused mid-runtime (a transient reconnecting band): keep the
-                    // watchdog alive but skip the heal until Connected resumes.
+                    // watchdog alive but skip the heal until Connected resumes. Reset
+                    // the back-off so the resume tick captures at the hot cadence.
+                    stableTicks = 0
+                    tick += 1
+                    continue
+                }
+                // Issue #1166 foreground + screen-on gate: nothing to heal when the
+                // pane is not on screen. Skip the capture round-trip entirely and
+                // reset the back-off so the first tick after resume captures hot.
+                if (!shouldRunStaleRenderWatchdogCapture()) {
+                    stableTicks = 0
                     tick += 1
                     continue
                 }
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
-                    runCatching { healActivePaneIfStaleRender(client, activePane, refreshGuard) }
+                    // Issue #1166: did the pane stream NEW %output since last tick?
+                    val lastOutputAtMs = paneLastOutputAtMs[activePane.paneId] ?: 0L
+                    val hadNewOutput = lastOutputAtMs > lastSeenOutputAtMs
+                    lastSeenOutputAtMs = lastOutputAtMs
+                    val healed = runCatching {
+                        healActivePaneIfStaleRender(client, activePane, refreshGuard)
+                    }.getOrDefault(false)
+                    // Back off ONLY a truly-idle, non-diverging pane; a divergence
+                    // (heal fired), fresh streamed output, OR an output WAKE that cut
+                    // the backed-off wait short (issue #1166) keeps the cadence at 4s.
+                    stableTicks =
+                        if (healed || hadNewOutput || wokenByOutput) 0 else stableTicks + 1
                 }
                 tick += 1
             }
         }
+    }
+
+    /**
+     * Issue #1166 (heal-latency fix): wait out the watchdog interval for the
+     * current run of [stableTicks] stable ticks, but make the wait WAKEABLE while
+     * backed off. Returns `true` when a fresh active-pane `%output` wake cut the
+     * wait short (the caller then re-checks the pane immediately and snaps the
+     * cadence back to hot), `false` when the full interval simply elapsed.
+     *
+     * At the HOT cadence (interval == [STALE_RENDER_WATCHDOG_TICK_MS]) there is
+     * nothing to snap back to, so it drains any stale wake and plain-delays — the
+     * churning-pane behavior is unchanged (still a capture every 4s, no extra
+     * captures from output bursts). Only a BACKED-OFF wait (8s/16s) races the
+     * delay against a wake, so a redraw during the long window is captured within
+     * the hot bound instead of being deferred to the next backed-off tick.
+     */
+    private suspend fun awaitStaleRenderWatchdogTick(stableTicks: Int): Boolean {
+        val interval = staleRenderWatchdogIntervalMs(stableTicks)
+        if (interval <= STALE_RENDER_WATCHDOG_TICK_MS) {
+            // Hot cadence: drain a possibly-stale wake so it can't fire the FIRST
+            // backed-off wait spuriously, then plain-delay the hot interval.
+            staleRenderWatchdogWake.tryReceive()
+            delay(interval)
+            return false
+        }
+        // Backed off: whichever finishes first wins — the long delay OR a wake.
+        return withTimeoutOrNull(interval) { staleRenderWatchdogWake.receive() } != null
+    }
+
+    /**
+     * Issue #1166: the stale-render watchdog interval for the given run of
+     * consecutive stable (no-divergence, no-new-output) ticks. A steady pane
+     * widens 4s → 8s → 16s (capped); [stableTicks] is reset to 0 on any
+     * divergence / new output / switch, snapping the next interval back to 4s.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun staleRenderWatchdogIntervalMs(stableTicks: Int): Long {
+        if (stableTicks <= 0) return STALE_RENDER_WATCHDOG_TICK_MS
+        val doublings = stableTicks.coerceAtMost(STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS)
+        return (STALE_RENDER_WATCHDOG_TICK_MS shl doublings)
+            .coerceAtMost(STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS)
+    }
+
+    /**
+     * Issue #1166: the watchdog heals the VISIBLE pane, so it only pays the
+     * `capture-pane` round-trip while the app is foregrounded AND the screen is
+     * interactive (on). A backgrounded/screen-off stale render is invisible and is
+     * re-healed on the next foreground+screen-on tick anyway.
+     */
+    private fun shouldRunStaleRenderWatchdogCapture(): Boolean =
+        isProcessForegroundForCleared() && isScreenInteractive()
+
+    /**
+     * Issue #1166: true when the device screen is interactive (on). Reads the real
+     * [PowerManager.isInteractive]; a test override or a missing context (JVM unit
+     * test) defaults to "on" so non-gating tests keep their behavior.
+     */
+    private fun isScreenInteractive(): Boolean {
+        screenInteractiveOverrideForTest?.let { return it }
+        val ctx = applicationContext ?: return true
+        return runCatching {
+            (ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true
+        }.getOrDefault(true)
+    }
+
+    /**
+     * Issue #1166 test seam: drive the stale-render watchdog loop directly (bypasses
+     * the [staleRenderWatchdogAutoArmEnabled] auto-arm suppression a test sets to
+     * stop `connect()` from arming its own loop), so a JVM test can exercise the
+     * foreground/screen gate + back-off + arm-dedup deterministically.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun armActivePaneStaleRenderWatchdogForTest(refreshGuard: RuntimeRefreshGuard) {
+        launchActivePaneStaleRenderWatchdog(refreshGuard)
     }
 
     /**
@@ -17660,6 +17861,21 @@ internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
  * pane within a few seconds.
  */
 internal const val STALE_RENDER_WATCHDOG_TICK_MS: Long = 4_000L
+
+/**
+ * Issue #1166 (battery/heat): the stale-render watchdog interval ceiling. A stable
+ * foreground pane backs off 4s → 8s → 16s (each stable tick doubles the interval,
+ * capped here) so an idle pane stops paying ~15 `capture-pane` round-trips/min; any
+ * divergence / new streamed output / switch snaps the cadence back to
+ * [STALE_RENDER_WATCHDOG_TICK_MS] so a churning/agent pane heals as fast as before.
+ */
+internal const val STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS: Long = 16_000L
+
+/**
+ * Issue #1166: the number of interval doublings from [STALE_RENDER_WATCHDOG_TICK_MS]
+ * to reach [STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS] (4s → 8s → 16s = 2 doublings).
+ */
+internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 2
 
 /**
  * Issue #966/#967: upper bound on stale-render watchdog ticks for the runtime's

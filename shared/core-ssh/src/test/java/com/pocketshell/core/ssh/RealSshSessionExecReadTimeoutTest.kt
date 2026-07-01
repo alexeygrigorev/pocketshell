@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class RealSshSessionExecReadTimeoutTest {
 
     @Test
-    fun `wedged exec read fast-fails with SshExecTimeoutException instead of hanging`() =
+    fun `wedged exec read fast-fails with SshExecTimeoutException instead of hanging`() {
         runBlocking {
             val command = WedgedReadCommand()
             val sessionChannel = RecordingSessionChannel(command)
@@ -76,8 +76,15 @@ class RealSshSessionExecReadTimeoutTest {
                     thrown.command.contains("cat /tmp/wedged"),
                 )
 
-                // The bound CLOSED the wedged session so the lease pool self-heals:
-                // a disconnected session is discarded + re-dialed on next acquire.
+                // The timeout-close `exec` fires is ASYNC (issue #1135/#1144 —
+                // `close()` launches the transport-disconnect on closeScope and
+                // returns before `client.disconnect()` flips the flag). Join it
+                // before reading `isConnected` so the assertion is deterministic
+                // rather than racing the async disconnect (same de-flake shape as
+                // the #1149 integration-suite fix). The bound CLOSED the wedged
+                // session so the lease pool self-heals: a disconnected session is
+                // discarded + re-dialed on next acquire.
+                session.awaitClosed()
                 assertFalse(
                     "wedged exec timeout must close the session (lease self-heal)",
                     session.isConnected,
@@ -86,6 +93,7 @@ class RealSshSessionExecReadTimeoutTest {
                 session.close()
             }
         }
+    }
 
     /**
      * Reproduce-first regression for #1046: a slow-but-PROGRESSING exec (bytes
@@ -195,37 +203,48 @@ class RealSshSessionExecReadTimeoutTest {
      * progress. The budget resets while bytes flow, then bounds the final stall.
      */
     @Test
-    fun `exec that progresses then wedges is still bounded and closes the session`() = runBlocking {
-        val command = ProgressesThenWedgesCommand(chunkCount = 3, gapMillis = 100L)
-        val session = RealSshSession(
-            ConnectedClient(RecordingSessionChannel(command)),
-            execReadTimeoutMs = 400L,
-        )
+    fun `exec that progresses then wedges is still bounded and closes the session`() {
+        runBlocking {
+            val command = ProgressesThenWedgesCommand(chunkCount = 3, gapMillis = 100L)
+            val session = RealSshSession(
+                ConnectedClient(RecordingSessionChannel(command)),
+                execReadTimeoutMs = 400L,
+            )
 
-        try {
-            val thrown: SshExecTimeoutException = withTimeout(10_000L) {
-                try {
-                    session.exec("progress-then-wedge")
-                    throw AssertionError("a wedged-after-progress exec must not return")
-                } catch (e: SshExecTimeoutException) {
-                    e
+            try {
+                val thrown: SshExecTimeoutException = withTimeout(10_000L) {
+                    try {
+                        session.exec("progress-then-wedge")
+                        throw AssertionError("a wedged-after-progress exec must not return")
+                    } catch (e: SshExecTimeoutException) {
+                        e
+                    }
                 }
-            }
 
-            assertTrue(
-                "the wedge must have followed real progress",
-                command.deliveredCount() >= 1,
-            )
-            assertTrue(
-                "timeout exception must carry the wedged command",
-                thrown.command.contains("progress-then-wedge"),
-            )
-            assertFalse(
-                "a mid-stream wedge must still close the session (lease self-heal)",
-                session.isConnected,
-            )
-        } finally {
-            session.close()
+                assertTrue(
+                    "the wedge must have followed real progress",
+                    command.deliveredCount() >= 1,
+                )
+                assertTrue(
+                    "timeout exception must carry the wedged command",
+                    thrown.command.contains("progress-then-wedge"),
+                )
+                // The timeout-close `exec` fires on a wedged read is ASYNC (issue
+                // #1135/#1144 — `close()` launches its transport-disconnect on the
+                // object-owned closeScope and returns before `client.disconnect()`
+                // flips the flag). Join that teardown before reading `isConnected`
+                // so the assertion is deterministic, not a race against the async
+                // disconnect (the intermittent-CI flake this de-flake removes; same
+                // shape as the #1149 integration-suite fix). The LOAD-BEARING
+                // property is unchanged: the wedged exec MUST close the session.
+                session.awaitClosed()
+                assertFalse(
+                    "a mid-stream wedge must still close the session (lease self-heal)",
+                    session.isConnected,
+                )
+            } finally {
+                session.close()
+            }
         }
     }
 

@@ -706,6 +706,66 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #1138 — the steady-state stale-render watchdog's "the live render LOST the
+     * frame" predicate. It is the UNION of two miss cases against tmux's authoritative
+     * `capture-pane`:
+     *
+     *  (a) a DRAMATICALLY-stale render — [visibleScreenDivergesFromCapture] (the #966
+     *      scattered-fragment / mostly-black-on-a-dense-frame case), AND
+     *
+     *  (b) a PARTIAL-BLACK render — [visibleScreenIsPartiallyBlank] — whose surviving live
+     *      band happens to exceed 25% of tmux's frame, so (a)'s
+     *      [STALE_RENDER_MAX_RENDERED_FRACTION] ceiling reads it "healthy" and skips it.
+     *      This is the maintainer's live-streaming ALT-SCREEN agent pane (Codex + Claude,
+     *      v0.4.19 dogfood #1138): the agent redraws with cursor-addressed writes, so only
+     *      its live status line repaints locally while the upper alt-screen rows stay black.
+     *      An alt-screen agent frame is SPARSE (header + a big blank conversation area +
+     *      an input/status line), so its non-blank content is small and the lone status
+     *      line is a LARGE fraction of it — the #966 divergence oracle therefore never
+     *      fires, and the steady-state watchdog (whose ONLY predicate was that oracle) left
+     *      the pane stuck mostly-black on a live transport.
+     *
+     * For case (b) the heal fires ONLY when tmux's capture carries MATERIALLY MORE visible
+     * non-blank content than the render (its visible tail has ≥ [STALE_RENDER_MIN_CAPTURE_CHARS]
+     * AND at least [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] more than the render). That gap is the
+     * anti-thrash / distinguish-from-by-design guard:
+     *  - a legitimately-short prompt (tmux ALSO holds only those few lines → capture ≈ render)
+     *    never re-heals — no reseed-thrash on every watchdog tick; and
+     *  - the #807 by-design alt-screen void (the agent's OWN intentionally-empty frame → tmux
+     *    capture ≈ render, near-nothing to restore) is correctly left alone.
+     * Only a genuine unrepainted frame — tmux holds the full frame while the render shows the
+     * band — heals, restoring the FULL viewport from tmux's authoritative grid.
+     *
+     * Returns false when no emulator is attached (nothing rendered to judge).
+     */
+    fun visibleRenderLostFrameVsCapture(captureText: String): Boolean {
+        // (a) The #966 dramatic-divergence case (unchanged oracle).
+        if (visibleScreenDivergesFromCapture(captureText)) return true
+        // (b) The #1138 partial-black-vs-fuller-capture case.
+        if (!visibleScreenIsPartiallyBlank()) return false
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val visibleRows = try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (visibleRows <= 0) return false
+        val captureVisibleNonBlank = captureText
+            .split('\n')
+            .filter { it.isNotBlank() }
+            .takeLast(visibleRows)
+            .sumOf { line -> line.count { !it.isWhitespace() } }
+        // tmux has (near) nothing for this pane → no real frame to restore (the #807
+        // alt-screen void). Defer — do NOT heal a genuinely-empty pane to itself.
+        if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
+        val renderedNonBlank = renderedNonBlankCharCount()
+        // tmux carries MATERIALLY MORE than the render → the upper rows the render lost are
+        // still in tmux's grid; re-seed to restore them. A near-equal capture (short prompt /
+        // by-design void) sits under the gap and is left alone.
+        return captureVisibleNonBlank - renderedNonBlank >= PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS
+    }
+
+    /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is
      * attached or the session has no emulator yet (the View has not yet laid
@@ -989,6 +1049,27 @@ class TerminalSurfaceState(
          * normally (idempotent re-seed).
          */
         private const val NON_DESTRUCTIVE_SWAP_CLEAR_RATIO = 3
+
+        /**
+         * Issue #1138: the minimum EXTRA non-blank chars tmux's authoritative
+         * `capture-pane` frame must carry OVER the local render before the
+         * steady-state watchdog heals a PARTIAL-BLACK pane ([visibleRenderLostFrameVsCapture]).
+         *
+         * The maintainer's live-streaming ALT-SCREEN agent pane (Codex/Claude) shows only
+         * the live status line while the upper alt-screen rows stayed black. An alt-screen
+         * agent frame is SPARSE (a header + a large blank conversation area + an input/status
+         * line), so its non-blank content is small and the surviving status line is a LARGE
+         * fraction of it — above the 25% [STALE_RENDER_MAX_RENDERED_FRACTION] divergence
+         * ceiling, so the #966 divergence oracle reads it "healthy" and never heals it.
+         *
+         * Requiring tmux to carry at least this many MORE non-blank chars than the render is
+         * the anti-thrash guard: a legitimately-short prompt (tmux ALSO has only those few
+         * lines → capture ≈ render) and the #807 by-design alt-screen void (the agent's OWN
+         * empty frame → capture ≈ render) both sit UNDER this gap and are left alone. Only a
+         * genuine unrepainted frame — tmux holds the full frame, the render shows the band —
+         * clears it. One line's worth of real content (≈40 chars).
+         */
+        private const val PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS = 40
     }
 }
 

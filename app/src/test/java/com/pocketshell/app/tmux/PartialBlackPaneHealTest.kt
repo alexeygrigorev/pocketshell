@@ -324,6 +324,110 @@ class PartialBlackPaneHealTest {
         )
     }
 
+    // -------------------------------------------------------------------------
+    // (6) Issue #1138: a LIVE-STREAMING alt-screen AGENT pane (Codex/Claude) goes
+    //     partial-black — only the live status line painted, upper alt-screen rows
+    //     black — with NO user switch/send/reattach. The STEADY-STATE stale-render
+    //     watchdog is the ONLY net on this passively-observed pane. On base its sole
+    //     predicate ([visibleScreenDivergesFromCapture], 25% ceiling) MISSES the
+    //     sparse alt-screen frame (the surviving status line exceeds 25% of the
+    //     frame's few non-blank chars) -> the watchdog SKIPS the heal (RED). With the
+    //     union predicate ([visibleRenderLostFrameVsCapture]) the watchdog heals and
+    //     restores the FULL frame from tmux's authoritative capture (GREEN).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun steadyStateWatchdogHealsPartialBlackAltScreenAgentPane() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%6", title = "codex")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%6" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // Drive the pane onto the ALTERNATE screen and paint ONLY the live status line.
+        overpaintAltScreenPartialBlack(pane)
+        assertTrue(
+            "precondition: the live-streaming alt-screen agent pane is partial-black (#1138)",
+            pane.terminalState.visibleScreenIsPartiallyBlank(),
+        )
+        // RED discriminator: the OLD watchdog predicate MISSES the sparse alt-screen frame,
+        // so on base `healActivePaneIfStaleRenderForTest` (which used this oracle) returns
+        // false and the pane stays black on a live transport.
+        assertFalse(
+            "RED (#1138): the #966 divergence oracle ALONE SKIPS the sparse alt-screen " +
+                "partial-black — its surviving band exceeds the 25% ceiling of the frame",
+            pane.terminalState.visibleScreenDivergesFromCapture(SPARSE_AGENT_FRAME.joinToString("\n")),
+        )
+
+        // Queue the FULL sparse agent frame the heal `capture-pane` returns.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = SPARSE_AGENT_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // THE REAL PATH: one steady-state stale-render watchdog tick over the active pane.
+        val healed = vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+
+        assertTrue(
+            "REGRESSION (#1138): the steady-state watchdog must heal a partial-black " +
+                "alt-screen agent pane. On base the divergence-only predicate skipped it.",
+            healed,
+        )
+        assertTrue(
+            "the watchdog issued a heal capture-pane",
+            client.healCaptureCount() > healCapturesBefore,
+        )
+        assertFalse(
+            "the heal restored the FULL frame (no longer partial-black)",
+            pane.terminalState.visibleScreenIsPartiallyBlank(),
+        )
+        assertTrue(
+            "the restored pane shows tmux's authoritative content (the upper rows repainted)",
+            renderedTranscriptFor(pane).contains(AGENT_FRAME_MARKER),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // (7) Issue #1138 over-heal guard: the SAME steady-state watchdog must NOT heal
+    //     when tmux's alt-screen capture is ALSO near-empty (the #807 by-design void:
+    //     the agent's OWN intentionally-cleared frame). No lost frame to restore ->
+    //     no reseed-thrash every 4s on a legitimately-empty pane.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun steadyStateWatchdogDoesNotHealByDesignAltScreenVoid() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%7", title = "codex")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%7" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        overpaintAltScreenPartialBlack(pane)
+        assertTrue(pane.terminalState.visibleScreenIsPartiallyBlank())
+
+        // tmux ALSO returns only the status line — the agent genuinely cleared its frame.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 98L, output = listOf(" Working 7  esc to interrupt"), isError = false),
+        )
+
+        val healed = vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+
+        assertFalse(
+            "OVER-HEAL GUARD (#1138/#807): when tmux's alt-screen capture is ALSO near-empty " +
+                "there is no lost frame to restore — the watchdog must NOT heal",
+            healed,
+        )
+        assertTrue(
+            "the pane is left untouched (still partial-black) — no reseed-thrash on a " +
+                "by-design void",
+            pane.terminalState.visibleScreenIsPartiallyBlank(),
+        )
+    }
+
     // ------------------------------------------------------------------ Harness
 
     private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
@@ -389,6 +493,18 @@ class PartialBlackPaneHealTest {
         pane.terminalState.appendRemoteOutput(
             (CLEAR_ONLY + "ISSUE941-LIVE-LINE 7\r\n").toByteArray(Charsets.US_ASCII),
         )
+    }
+
+    /**
+     * Issue #1138: drive the pane onto the ALTERNATE screen (where Codex/Claude run their
+     * full-screen TUI) and paint ONLY the live status line at the bottom (cursor-addressed) —
+     * the maintainer's partial-black: the agent's status line repaints locally while the
+     * upper alt-screen rows stay black.
+     */
+    private fun overpaintAltScreenPartialBlack(pane: TmuxPaneState) {
+        val esc = ""
+        val frame = "$esc[?1049h$esc[2J$esc[H$esc[24;1H Working 7  esc to interrupt streaming the reply"
+        pane.terminalState.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
     }
 
     private fun FakeTmuxClient.captureCount(): Int =
@@ -509,5 +625,20 @@ class PartialBlackPaneHealTest {
 
         // ESC[2J ESC[H — clear screen + cursor home (the overpaint preamble).
         val CLEAR_ONLY: String = "[2J[H"
+
+        // Issue #1138: the SPARSE alt-screen agent frame tmux's grid holds while "Working" —
+        // a header, a couple of conversation lines, a large BLANK conversation area (the
+        // sparse part) and the input/status line. Its non-blank content is small enough that
+        // the surviving status line is > 25% of it (so the #966 divergence oracle MISSES it),
+        // yet > 3 non-blank lines so the healed pane is no longer partial-black.
+        const val AGENT_FRAME_MARKER: String = "ISSUE1138-AGENT-FRAME"
+        val SPARSE_AGENT_FRAME: List<String> = buildList {
+            add("HEADER $AGENT_FRAME_MARKER codex podwiki")
+            add("You: fix the partial-black bug")
+            add("Codex: sure, here is the plan and the change")
+            repeat(10) { add("") } // blank conversation area while Working (the sparse part)
+            add("input box: >_")
+            add(" Working 7  esc to interrupt")
+        }
     }
 }

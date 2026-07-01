@@ -44,14 +44,27 @@ class RealSshSessionTeardownOrderingTest {
             client.startSessionEntered.await(5, TimeUnit.SECONDS),
         )
 
-        val elapsedMs = measureTimeMillis {
+        // Issue #1135 / #1139: close() is now NON-BLOCKING on the caller — it
+        // launches the bounded teardown and returns in ~ms even though the
+        // dispatcher is wedged. The bounded-teardown property moved to the
+        // suspend [awaitClosed] seam, which ordering-sensitive callers join OFF
+        // Main.
+        val callerBlockedMs = measureTimeMillis {
             session.close()
         }
-
         assertTrue(
-            "close() must return within the session close budget instead of waiting " +
-                "for the dispatcher's full per-op ceiling; elapsed=${elapsedMs}ms",
-            elapsedMs < 3_500L,
+            "close() must return to the caller WITHOUT parking for the bounded " +
+                "teardown wait; caller-blocked=${callerBlockedMs}ms",
+            callerBlockedMs < 750L,
+        )
+
+        val teardownMs = measureTimeMillis {
+            session.awaitClosed()
+        }
+        assertTrue(
+            "awaitClosed() must return within the session close budget instead of " +
+                "waiting for the dispatcher's full per-op ceiling; elapsed=${teardownMs}ms",
+            teardownMs < 3_500L,
         )
         assertFalse("close must mark the session disconnected", session.isConnected)
         assertTrue(
@@ -81,16 +94,21 @@ class RealSshSessionTeardownOrderingTest {
             client.startSessionEntered.await(5, TimeUnit.SECONDS),
         )
 
-        val closeThread = Thread({ session.close() }, "ps-test-session-close").apply {
-            isDaemon = true
-            start()
+        // Issue #1135 / #1139: close() returns to the caller in ~ms even when the
+        // whole teardown (dispatcher drain + raw disconnect fallback) wedges; the
+        // bounded fallback runs on the object-owned IO close-scope, joined via
+        // [awaitClosed].
+        val callerBlockedMs = measureTimeMillis {
+            session.close()
         }
-        closeThread.join(5_500L)
-
-        assertFalse(
-            "close() must return even when the raw disconnect fallback wedges",
-            closeThread.isAlive,
+        assertTrue(
+            "close() must return to the caller WITHOUT parking even when the raw " +
+                "disconnect fallback wedges; caller-blocked=${callerBlockedMs}ms",
+            callerBlockedMs < 750L,
         )
+        withTimeout(8_000L) {
+            session.awaitClosed()
+        }
         assertTrue(
             "the raw fallback disconnect must have been attempted",
             client.rawDisconnectEntered.await(1, TimeUnit.SECONDS),
@@ -120,7 +138,11 @@ class RealSshSessionTeardownOrderingTest {
             command.readStarted.await(5, TimeUnit.SECONDS),
         )
 
+        // Issue #1135 / #1139: close() is non-blocking; the drain-then-disconnect
+        // ordering now runs inside the async teardown, joined via [awaitClosed]
+        // before we inspect the recorded event order.
         session.close()
+        session.awaitClosed()
         tail.cancelAndJoin()
 
         val snapshot = events.snapshot()

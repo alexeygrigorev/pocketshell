@@ -132,6 +132,12 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.proof.NoBackgroundWorkE2eTest"
   "com.pocketshell.app.proof.PacketLossNetworkFaultE2eTest"
   "com.pocketshell.app.proof.ProjectSwitcherDropdownE2eTest"
+  # Issue #1139: nightly toxiproxy proof (NetworkFaultProofBase subclass) — the
+  # push-resume-onto-dead-socket Main-responsiveness freeze proof. Needs the
+  # half-open blackhole to wedge the real close, so it runs in the nightly
+  # network-fault lane (scripts/nightly-extensive-suite.sh), not the per-push
+  # journey allowlist.
+  "com.pocketshell.app.proof.PushResumeDeadSocketMainResponsiveE2eTest"
   "com.pocketshell.app.proof.RideThroughInterruptionE2eTest"
   "com.pocketshell.app.proof.SessionSwipeSwitchE2eTest"
   "com.pocketshell.app.proof.SilentMidSessionDropDetectionE2eTest"

@@ -289,8 +289,29 @@ public interface SshSession : AutoCloseable {
      */
     public fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean = false
 
-    /** Disconnect and free all resources. Idempotent. */
+    /**
+     * Disconnect and free all resources. Idempotent.
+     *
+     * Issue #1135 / #1139: [RealSshSession.close] is NON-BLOCKING on the caller
+     * — it launches the bounded `SSH_MSG_DISCONNECT` teardown off the calling
+     * thread and returns immediately, so a Main-thread caller (e.g. the
+     * grace-loop lease-disconnect on `Dispatchers.Main.immediate`) never parks on
+     * a wedged socket. Callers that must observe the transport fully torn down
+     * before proceeding (a redial that reuses nothing but is ordering-sensitive)
+     * await via [awaitClosed] OFF Main.
+     */
     override fun close()
+
+    /**
+     * Await the bounded teardown that [close] launched asynchronously
+     * (issue #1135 / #1139). Suspends until the transport disconnect has drained;
+     * a no-op when [close] was never called or has already finished. Intended to
+     * run on an IO / background dispatcher only — never on Main. The default
+     * body is a no-op so the many per-test [SshSession] fakes (whose `close()` is
+     * already synchronous) need not override it; only [RealSshSession] joins its
+     * real teardown job.
+     */
+    public suspend fun awaitClosed() {}
 
     public companion object {
         /**

@@ -109,6 +109,19 @@ NETWORK_FAULT_CLASSES=(
   # D31's per-push gate is met without depending on the toxiproxy family). Reuses
   # network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
   "$FQCN_PREFIX.SilentMidSessionDropDetectionE2eTest"
+  # Issue #1139 (maintainer's #1 freeze / top v0.4.20 release-gate item): the
+  # push-notification → resume-an-idle-overnight-session UI freeze. A toxiproxy
+  # `timeout=0` blackhole DEAD-HOLDS the `-CC` socket (half-open, no FIN — the
+  # overnight NAT death) so the grace-loop teardown socket-write genuinely WEDGES,
+  # + `forceLivenessProbeDeadForTest` makes the app DETECT the dead socket and run
+  # its within-grace resume close/reconnect over it. The REAL
+  # MainThreadResponsivenessProbe measures Main-thread latency DURING that
+  # grace-loop close/reconnect and HARD-asserts Main stays responsive (< 750ms, no
+  # 2-4s ANR). RED on the base blocking close(), GREEN with the #1139 non-blocking
+  # RealSshShell/RealSshSession close. Needs the toxiproxy family (a happy or
+  # kill-9'd socket cannot wedge the close), so it is nightly, not per-push. Reuses
+  # network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
+  "$FQCN_PREFIX.PushResumeDeadSocketMainResponsiveE2eTest"
   # Issue #1063 (R3, #843 round-2 gap C2): the REAL-WIRE carrier-NAT idle-mapping
   # RECOVERY proof (Arm 2). A toxiproxy `timeout=0` half-open blackhole models the
   # carrier NAT reaping an idle TCP mapping mid-idle (no RST/FIN — all bytes,

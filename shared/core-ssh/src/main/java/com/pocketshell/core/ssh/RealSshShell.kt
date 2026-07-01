@@ -1,12 +1,15 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * sshj-backed implementation of [SshShell].
@@ -63,6 +66,26 @@ internal class RealSshShell(
     private val activityStderr: InputStream =
         InboundActivityInputStream(shell.errorStream, onInboundActivity)
 
+    /**
+     * Issue #1139 / #1136: guards the one-shot async teardown so a repeated
+     * [close] (idempotent by contract) launches the channel-close work at most
+     * once.
+     */
+    private val closeStarted = AtomicBoolean(false)
+
+    /**
+     * Issue #1139 / #1136: object-owned scope that runs the channel-close socket
+     * writes OFF the calling thread. [close] is called synchronously from
+     * `Dispatchers.Main.immediate` at the grace/reconnect teardown sites, so the
+     * teardown must never park the caller — it is launched here and the caller
+     * returns immediately. `SupervisorJob` so a wedged/failed close never
+     * escalates; `Dispatchers.IO` is the thread that parks (not Main) if the wire
+     * is truly wedged, until the dispatcher's per-op wall-clock ceiling reclaims
+     * it. The single launched job completes within [CLOSE_TIMEOUT_MS]; the scope
+     * is discarded with this shell instance after close, so it does not leak.
+     */
+    private val closeScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     override val stdin: OutputStream
         get() = serializedStdin
 
@@ -91,43 +114,55 @@ internal class RealSshShell(
         // so they go through the dispatcher (issue #847) which also serialises
         // them against any in-flight `-CC` write.
         //
-        // Issue #937 / S1-F1: this `close()` is called SYNCHRONOUSLY from the
-        // Main thread during `TmuxSessionViewModel.onCleared` (activity
-        // destroy). The previous body did a bare `dispatcher.runBlockingDispatch`
-        // which blocks the CALLING thread (Main) until the dispatch-thread op
-        // completes. On a half-open link that channel-close socket write wedges,
-        // so Main parks → ANR and the activity never finishes destroying. We now
-        // hop the whole teardown OFF Main onto `Dispatchers.IO` under a hard
-        // [CLOSE_TIMEOUT_MS] ceiling: the Main thread waits at most that long,
-        // and `Dispatchers.IO` (not Main) is the thread that parks if the wire
-        // is truly wedged. The dispatcher's own per-op ceiling (#937 S4-1) then
-        // interrupts the wedged op and reclaims its thread. The runBlocking here
-        // is a bounded bridge for the non-suspending [SshShell.close] contract,
-        // mirroring the proven `RecurringJobsViewModel`/`GitHistoryViewModel`
-        // off-Main bounded teardown pattern.
+        // Issue #1139 / #1136 / #937 S1-F1 (D33 / G2 class fix): this `close()`
+        // is invoked SYNCHRONOUSLY from `Dispatchers.Main.immediate` at SIX
+        // grace / silent-reattach / transport-reconnect teardown sites in
+        // `TmuxSessionViewModel` (each via `TmuxClient.close()` →
+        // `shell?.close()`), and again from `onCleared` (activity destroy).
         //
-        // sshj's `close` calls are idempotent, so the runCatching guards are
-        // belt-and-braces against the channel already being torn down by the
-        // remote side. If the dispatcher is already closed (parent session
-        // teardown drained it), the operation is rejected — there is nothing
-        // left to close, so swallow that too.
-        runCatching {
-            runBlocking(Dispatchers.IO) {
-                // Call the SUSPENDING `dispatcher.run` (not the blocking
-                // `runBlockingDispatch`) so `withTimeoutOrNull` can actually
-                // cancel the wait when the ceiling trips — a cancellation here
-                // unparks the IO coroutine; the dispatcher's own per-op ceiling
-                // (#937 S4-1) interrupts the wedged socket write and reclaims
-                // the dispatch thread.
-                //
-                // Each channel close is its OWN `dispatcher.run` op so each is
-                // independently bounded + interrupted: a single interrupt only
-                // unblocks ONE blocking call, so two closes in one op would let
-                // the second wedge silently after the first was interrupted.
-                withTimeoutOrNull(CLOSE_TIMEOUT_MS) {
-                    runCatching { dispatcher.run { shell.close() } }
-                    runCatching { dispatcher.run { sessionChannel.close() } }
-                }
+        // The PREVIOUS body wrapped the teardown in `runBlocking(Dispatchers.IO)
+        // { withTimeoutOrNull(CLOSE_TIMEOUT_MS) { … } }`. That kept the socket
+        // WRITE off Main (StrictMode-safe, #166) but `runBlocking` still PARKED
+        // the calling (Main) thread for up to CLOSE_TIMEOUT_MS (2s) waiting for
+        // that write on a degraded / half-open transport. Per stale-client close
+        // that is up to ~2s of Main park — and the grace/reconnect loops chain
+        // several — which is the maintainer's reported "UI fully freezes,
+        // buttons dead, restart required" wedge (#1139 push-resume; the everyday
+        // idle→return journey hits it too).
+        //
+        // HARD-CUT (D22): the default `close()` is now NON-BLOCKING on the
+        // caller. The entire bounded teardown is launched on an object-owned IO
+        // [closeScope] and this method returns immediately; the Main caller
+        // never waits. The [CLOSE_TIMEOUT_MS] ceiling stays INSIDE the launched
+        // coroutine, and the dispatcher's own per-op wall-clock ceiling (#937
+        // S4-1) still interrupts a wedged socket write and reclaims the dispatch
+        // thread — so teardown liveness is unchanged. The 2s ceiling already
+        // tolerated an incomplete teardown, so firing it fully async is no worse
+        // than the pre-existing give-up. This is the single SOURCE fix that makes
+        // all six `TmuxSessionViewModel` close sites (+ any future caller of
+        // `TmuxClient.close()` / `SshShell.close()`) non-blocking-on-Main by
+        // construction, rather than patching each call site.
+        //
+        // Idempotent: a second `close()` is a no-op (the [closeStarted] guard),
+        // and sshj's underlying channel closes are themselves idempotent, so the
+        // `runCatching` guards remain belt-and-braces against the channel already
+        // being torn down by the remote side / a drained dispatcher.
+        if (!closeStarted.compareAndSet(false, true)) return
+        closeScope.launch {
+            // Call the SUSPENDING `dispatcher.run` (not the blocking
+            // `runBlockingDispatch`) so `withTimeoutOrNull` can actually cancel
+            // the wait when the ceiling trips — a cancellation here unparks this
+            // IO coroutine; the dispatcher's own per-op ceiling (#937 S4-1)
+            // interrupts the wedged socket write and reclaims the dispatch
+            // thread.
+            //
+            // Each channel close is its OWN `dispatcher.run` op so each is
+            // independently bounded + interrupted: a single interrupt only
+            // unblocks ONE blocking call, so two closes in one op would let the
+            // second wedge silently after the first was interrupted.
+            withTimeoutOrNull(CLOSE_TIMEOUT_MS) {
+                runCatching { dispatcher.run { shell.close() } }
+                runCatching { dispatcher.run { sessionChannel.close() } }
             }
         }
     }

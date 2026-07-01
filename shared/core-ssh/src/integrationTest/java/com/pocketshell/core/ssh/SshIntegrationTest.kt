@@ -304,6 +304,17 @@ class SshIntegrationTest {
             knownHosts = KnownHostsPolicy.AcceptAll,
         ).getOrThrow()
         session.close()
+        // Issue #1149 / #1135 / #1139: close() is NON-BLOCKING on the caller —
+        // it launches the bounded transport teardown off the calling thread and
+        // returns immediately (the #1139 freeze fix). startShell() throws only
+        // once isConnected has flipped false, which happens when that async
+        // teardown drains the dispatcher; join it via awaitClosed() OFF the
+        // caller thread before probing the post-teardown state. No production
+        // caller starts a shell on a session it just close()'d without awaiting
+        // (redials acquire a FRESH session), so this is a test-contract
+        // migration mirroring RealSshSessionTeardownOrderingTest, not a
+        // regression.
+        session.awaitClosed()
         val ex = runCatching { session.startShell() }.exceptionOrNull()
         assertTrue(
             "expected SshException after close, got $ex",
@@ -753,6 +764,16 @@ class SshIntegrationTest {
 
         assertTrue(session.isConnected)
         session.close()
+        // Issue #1149 / #1135 / #1139: close() is NON-BLOCKING on the caller — it
+        // launches the bounded transport teardown off the calling thread and
+        // returns immediately (the #1139 freeze fix). isConnected only flips false
+        // once that teardown drains the dispatcher, so an ordering-sensitive
+        // observer joins it via awaitClosed() OFF the caller thread before reading
+        // the post-teardown state. No production caller reads synchronous
+        // post-close isConnected on the same session (redials acquire a FRESH
+        // session), so this is a test-contract migration mirroring
+        // RealSshSessionTeardownOrderingTest, not a regression.
+        session.awaitClosed()
         assertTrue("session should report disconnected after close", !session.isConnected)
     }
 

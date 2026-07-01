@@ -1083,13 +1083,32 @@ condition.
   condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
   (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`).
 
+**One shared Shape-B settle-pump (`drainMainLooperUntil`, #1048 criterion M).**
+The historically drifting, hand-rolled Shape-B pumps now converge on ONE
+audited helper in the test-only module `:shared:test-support`
+(`shared/test-support/src/main/java/com/pocketshell/testsupport/SettlePump.kt`),
+consumed via `testImplementation(project(":shared:test-support"))`. The helper
+owns the load-bearing invariants — a generous wall-clock deadline, a HARD
+`false` return on timeout (the caller `assertTrue`/​`throw`s on it, #1102), and it
+NEVER touches a clock itself (no kotlinx virtual-clock advance — the #1110/#793
+watchdog trap). The per-tick drain is injected because the callers' drains are
+genuinely different and must NOT be forced into one: `awaitCondition` idles
+NOTHING and only `runCurrent()`s (idling would risk the #793 re-seed watchdog);
+the SshTerminalBridge-fed flood pumps `idleFor(16ms)` + `runCurrent()` for the
+#803 frame-paced drain; `SshTerminalBridgeTest` has no `TestScope` so idles the
+looper only. The two pumps that intentionally advance the virtual clock
+(`PromptComposerViewModelTest.advanceSchedulerUntil`,
+`TmuxSessionWarmOpenTest.pumpUntil`) stay separate by design.
+
 **Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
 output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing
 assert.
 
 `scripts/check-test-validity.sh` carries an advisory `TIMING1` smell scoped to
 the connection/terminal test roots (`core-ssh`, `core-tmux`, `core-connection`,
-and the app `tmux`/`connectivity` test dirs): it flags a `runTest` test that
+the app `tmux`/`connectivity` test dirs, and — widened in #1048 to the areas
+that actually flaked this class — the app `composer` (#1102), `hosts` (#1110),
+and `projects` test dirs): it flags a `runTest` test that
 touches a real dispatcher/thread (`Dispatchers.IO`/`Dispatchers.Default`/
 `Executors.new`/`Thread.sleep`/`Thread(`/`CountDownLatch`) WITHOUT (a) a
 `StandardTestDispatcher`/`UnconfinedTestDispatcher` seam, (b) the bounded-pump

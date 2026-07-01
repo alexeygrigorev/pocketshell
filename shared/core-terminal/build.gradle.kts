@@ -151,6 +151,9 @@ dependencies {
     // (RenderFrameCoalescerTest) — runTest + advanceTimeBy, the same harness
     // LayoutChangeCoalescerTest uses in core-tmux.
     testImplementation(libs.kotlinx.coroutines.test)
+    // Issue #1048: the ONE audited shared de-flake settle-pump
+    // (`drainMainLooperUntil`) the SshTerminalBridge flood pump converges on.
+    testImplementation(project(":shared:test-support"))
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.core)

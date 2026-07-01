@@ -3123,6 +3123,14 @@ class PromptComposerViewModelTest {
      * after an arbitrary tick budget. Callers HARD-FAIL on the boolean result
      * ([settleUntil] / [waitForSidecarsCleared] / [waitForSendCount]); the
      * pump's exit condition is the load-bearing assertion, never the loop body.
+     *
+     * Issue #1048: this pump is deliberately NOT migrated onto the shared
+     * `drainMainLooperUntil` settle-pump. It intentionally `advanceTimeBy`s /
+     * `advanceUntilIdle`s the kotlinx VIRTUAL clock AND yields to the real
+     * `Dispatchers.IO` each tick — that virtual-clock advance is incompatible with
+     * the shared pump's "never touch a clock" invariant and is genuinely required
+     * here to flush the sidecar store's timed work, so it stays separate (the
+     * #1048 brief's "do NOT force genuinely-different pumps into one" rule).
      */
     private suspend fun kotlinx.coroutines.test.TestScope.advanceSchedulerUntil(
         predicate: suspend () -> Boolean,

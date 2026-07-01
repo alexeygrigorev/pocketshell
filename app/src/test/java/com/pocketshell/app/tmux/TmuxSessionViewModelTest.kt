@@ -49,6 +49,7 @@ import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
+import com.pocketshell.testsupport.drainMainLooperUntil as drainMainLooperUntilShared
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -297,19 +298,24 @@ class TmuxSessionViewModelTest {
      * real-wall-clock-drain shape as [waitForSentCommandCount].
      */
     private fun TestScope.awaitCondition(predicate: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + AWAIT_CONDITION_TIMEOUT_MS
-        while (true) {
-            runCurrent()
-            if (predicate()) return
-            if (System.currentTimeMillis() >= deadline) break
-            Thread.sleep(1L)
-        }
-        runCurrent()
+        // Issue #1048: the bounded-wall-clock loop + the HARD deadline now live in
+        // the ONE shared, audited settle-pump. The per-tick drain here is
+        // `runCurrent()` ONLY — it deliberately does NOT idle the main looper,
+        // because advancing the looper clock could trip the #793 re-seed watchdog
+        // (the #1110 lesson). `runCurrent()` drains Main continuations after the
+        // real-Dispatchers.IO recorded-kind read WITHOUT advancing the virtual
+        // clock.
+        val settled = drainMainLooperUntilShared(
+            deadlineMs = AWAIT_CONDITION_TIMEOUT_MS,
+            sleepMs = 1L,
+            onTick = { runCurrent() },
+            condition = predicate,
+        )
         assertTrue(
             "awaitCondition timed out after ${AWAIT_CONDITION_TIMEOUT_MS}ms wall-clock before the " +
                 "predicate held — the work it awaits (e.g. the real-Dispatchers.IO recorded-kind " +
                 "read driving the cache-restore re-seed) never drained (issue #1110)",
-            predicate(),
+            settled,
         )
     }
 
@@ -7495,17 +7501,24 @@ class TmuxSessionViewModelTest {
     private fun TestScope.drainMainLooperUntil(
         deadlineMs: Long = SLOW_FEED_DRAIN_TIMEOUT_MS,
         condition: () -> Boolean,
-    ): Boolean {
-        val deadline = System.currentTimeMillis() + deadlineMs
-        do {
-            shadowOf(Looper.getMainLooper())
-                .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-            runCurrent()
-            if (condition()) return true
-            Thread.sleep(20)
-        } while (System.currentTimeMillis() < deadline)
-        return false
-    }
+    ): Boolean =
+        // Issue #1048: delegates the bounded-wall-clock loop + HARD deadline to the
+        // ONE shared, audited settle-pump. The SshTerminalBridge-fed flood/codex
+        // drain is frame-paced (#803/#804), so the per-tick drain MUST idle the main
+        // looper one frame (to fire the `postDelayed` continuation — a bare `idle()`
+        // never runs it) AND `runCurrent()` (to progress suspended coroutines);
+        // neither advances the kotlinx virtual clock. Returns false on the wall-clock
+        // deadline — callers HARD-FAIL on it (the load-bearing assertion).
+        drainMainLooperUntilShared(
+            deadlineMs = deadlineMs,
+            sleepMs = 20L,
+            onTick = {
+                shadowOf(Looper.getMainLooper())
+                    .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                runCurrent()
+            },
+            condition = condition,
+        )
 
     private fun TestScope.waitForSentCommandCount(client: FakeTmuxClient, expectedCount: Int) {
         repeat(100) {

@@ -294,6 +294,13 @@ TIMING1_BASELINE=(
   "app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelVoiceTest.kt"                # real-IO factoryScope
   "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/SshConnectionCancellationTest.kt"    # CountDownLatch cross-thread sync
   "shared/core-ssh/src/test/java/com/pocketshell/core/ssh/TransportDispatcherWedgeBoundTest.kt" # deliberate wall-clock wedge harness
+  # Issue #1048: surfaced when the TIMING1 scope widened to app/hosts. This is the
+  # #1110 fix's deliberate Shape-B real-await — the off-main close assertion needs
+  # a REAL background thread, so it bounds completion with a generous wall-clock
+  # CountDownLatch.await(10s) (not the idleFor+currentTimeMillis loop the lint can
+  # auto-recognise). Legitimate convention shape, not a smell — same as
+  # SshConnectionCancellationTest above.
+  "app/src/test/java/com/pocketshell/app/hosts/HostListViewModelTest.kt"                        # CountDownLatch off-main close await (#1110 Shape-B)
 )
 
 # Connection/terminal test roots TIMING1 is scoped to (path-prefix match).
@@ -306,6 +313,16 @@ timing1_in_scope() {
     app/src/androidTest/java/com/pocketshell/app/tmux/*) return 0 ;;
     app/src/test/java/com/pocketshell/app/connectivity/*) return 0 ;;
     app/src/androidTest/java/com/pocketshell/app/connectivity/*) return 0 ;;
+    # Issue #1048: widened to the areas that actually flaked this class —
+    # composer (#1102, sidecar-store real-IO drain) and hosts (#1110, real
+    # off-main close) — plus projects, the sibling source-binding area, so a
+    # future virtual-clock-vs-real-dispatcher timing flake there gets linted.
+    app/src/test/java/com/pocketshell/app/composer/*) return 0 ;;
+    app/src/androidTest/java/com/pocketshell/app/composer/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/hosts/*) return 0 ;;
+    app/src/androidTest/java/com/pocketshell/app/hosts/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/projects/*) return 0 ;;
+    app/src/androidTest/java/com/pocketshell/app/projects/*) return 0 ;;
   esac
   return 1
 }

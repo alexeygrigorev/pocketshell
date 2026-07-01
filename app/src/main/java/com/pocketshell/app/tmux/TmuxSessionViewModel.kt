@@ -2105,6 +2105,20 @@ public class TmuxSessionViewModel @Inject constructor(
     // known, the VM reports this size through `refresh-client -C`.
     private var remoteColumns: Int = 0
     private var remoteRows: Int = 0
+    // Issue #1169: the live on-screen viewport grid, fed ONLY by the real
+    // Compose measure ([resizeRemotePty] / `onTerminalSizeChanged`). Unlike
+    // remoteColumns/remoteRows — which [restoreCachedRuntime] OVERWRITES with a
+    // parked (possibly stale/shrunk) value on a warm reattach — this survives
+    // cached-runtime restores and session switches because the phone's physical
+    // viewport is the same across every session on the device. It is the FLOOR
+    // for any size sent to tmux: the tmux window (and therefore the alt-screen
+    // agent TUI) must never be left SMALLER than what the emulator will actually
+    // render, or the pane is drawn cut with black below (the maintainer's
+    // Codex-cut symptom). SOFT_INPUT_ADJUST_NOTHING means the view pixel size
+    // does NOT re-measure on a within-grace foreground return, so the cached
+    // replay path never re-derives the full grid on its own — the floor does.
+    private var liveMeasuredColumns: Int = 0
+    private var liveMeasuredRows: Int = 0
     private var appliedControlClientColumns: Int = 0
     private var appliedControlClientRows: Int = 0
     private var controlClientSizeGeneration: Long = 0L
@@ -14769,6 +14783,14 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun resizeRemotePty(columns: Int, rows: Int) {
         if (columns <= 0 || rows <= 0) return
+        // Issue #1169: record the current on-screen viewport grid as the floor
+        // for every size we subsequently send to tmux. This is set on EVERY real
+        // Compose measure (before the no-op short-circuit below) so it always
+        // tracks the true emulator viewport; the floor guard in
+        // [maybeRefreshControlClientSize] then keeps a warm reattach / cached
+        // replay / session switch from shrinking the tmux window below it.
+        liveMeasuredColumns = columns
+        liveMeasuredRows = rows
         if (columns == remoteColumns && rows == remoteRows) {
             // Issue #717 (the missed-heal gate): a composer/keyboard-dismiss after a
             // voice-send fires `onTerminalSizeChanged` with the EXACT same grid the
@@ -14800,11 +14822,28 @@ public class TmuxSessionViewModel @Inject constructor(
         maybeRefreshControlClientSize()
     }
 
+    /**
+     * Issue #1169: the size to send to tmux is the FLOOR-GUARDED, re-derived
+     * grid — never smaller than the live on-screen viewport
+     * ([liveMeasuredColumns]/[liveMeasuredRows]). The cached remoteColumns/
+     * remoteRows a warm reattach / session switch / within-grace foreground
+     * replays can be a stale or transiently-shrunk value; the live measured grid
+     * is the authority for how tall the emulator will actually render. Sending
+     * the LARGER of the two guarantees the tmux window (and therefore the
+     * alt-screen agent TUI) fills the viewport with no top-rows-then-black cut,
+     * and because `window-size latest` makes the phone authoritative, a second
+     * client (Terminus) attached to the same window inherits the full size too.
+     * A too-small window is the reported bug; a window >= the view is safe.
+     */
+    private fun effectiveControlClientColumns(): Int = maxOf(remoteColumns, liveMeasuredColumns)
+
+    private fun effectiveControlClientRows(): Int = maxOf(remoteRows, liveMeasuredRows)
+
     private fun maybeRefreshControlClientSize() {
         val client = clientRef ?: return
         val target = activeTarget ?: return
-        val cols = remoteColumns
-        val rows = remoteRows
+        val cols = effectiveControlClientColumns()
+        val rows = effectiveControlClientRows()
         if (cols <= 0 || rows <= 0) return
         if (cols == appliedControlClientColumns && rows == appliedControlClientRows) {
             // EPIC #687 slice 2 (#717): same-dimension short-circuit. A repeated
@@ -14857,7 +14896,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 return@launch
             }
             if (controlClientSizeGeneration != generation) return@launch
-            if (remoteColumns != cols || remoteRows != rows) return@launch
+            // Issue #1169: re-derive the floor-guarded size; a mid-flight change
+            // to either the cached target or the live measured viewport
+            // invalidates this in-flight refresh (a newer one will run).
+            if (effectiveControlClientColumns() != cols || effectiveControlClientRows() != rows) {
+                return@launch
+            }
             val policyResponse = policyResult.getOrNull()
             if (policyResult.isFailure || policyResponse?.isError == true) {
                 Log.w(
@@ -15776,6 +15820,30 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /** Issue #285 test seam: snapshot the latest phone grid reported by Compose. */
     internal fun remoteDimensionsForTest(): Pair<Int, Int> = remoteColumns to remoteRows
+
+    /** Issue #1169 test seam: the live measured viewport floor. */
+    internal fun liveMeasuredDimensionsForTest(): Pair<Int, Int> =
+        liveMeasuredColumns to liveMeasuredRows
+
+    /**
+     * Issue #1169 test seam: faithfully reproduce the cached-runtime size replay
+     * of a warm reattach / within-grace foreground return / session switch. This
+     * is exactly what [restoreCachedRuntime] (`remoteColumns/remoteRows =
+     * runtime.remoteColumns/remoteRows; resetControlClientSizeForAttach()`) plus
+     * [launchCachedRuntimeRemoteRefresh] (`maybeRefreshControlClientSize()`) do —
+     * it sets the cached (possibly shrunk) target, resets the applied cache, and
+     * re-drives the control-client size. On base this REPLAYS the small cached
+     * value and shrinks the tmux window; with the floor guard it re-derives the
+     * full live viewport so the window is never left cut. A passthrough — no
+     * test-only behavior.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun replayCachedControlClientSizeForTest(cachedColumns: Int, cachedRows: Int) {
+        remoteColumns = cachedColumns
+        remoteRows = cachedRows
+        resetControlClientSizeForAttach()
+        maybeRefreshControlClientSize()
+    }
 
     /**
      * Quote a string for inclusion inside single quotes in a tmux command

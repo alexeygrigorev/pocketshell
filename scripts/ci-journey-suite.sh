@@ -1420,6 +1420,22 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). It lives under
   # com.pocketshell.app.env, so it carries its FQCN directly.
   "com.pocketshell.app.env.EnvScreenE2eTest"
+  # ADDED (#1169 — Codex/agent pane rendered CUT: tmux window resized too small
+  # and NOT restored). The maintainer's agent pane showed only the top ~10 rows
+  # with the rest BLACK because a transient (keyboard/composer/switch/within-grace
+  # foreground) shrank the tmux window and the warm-reattach REPLAYED the cached
+  # shrunk size instead of re-deriving the live viewport (`window-size latest`
+  # makes the shrink persist, so Terminus inherits the cut too). This journey
+  # attaches at the full phone grid, drives the EXACT production cached-replay path
+  # with a shrunk grid (TmuxSessionViewModel.replayCachedControlClientSizeForTest —
+  # verbatim what restoreCachedRuntime + launchCachedRuntimeRemoteRefresh do), then
+  # asserts `#{window_width}x#{window_height}` returns to the full viewport (NOT
+  # stuck shrunk) and the pane fills the screen (no black-below). Load-bearing
+  # red→green; runs the specific method so the pre-existing #285 auto-resize test
+  # in the same class is unaffected. Uses only the deterministic agents:2222
+  # fixture tests.yml already brings up (no toxiproxy / new port), and does NOT
+  # self-skip on CI. Lives under com.pocketshell.app.tmux, so it carries its FQCN.
+  "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest#cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut"
 )
 
 # ---------------------------------------------------------------------------

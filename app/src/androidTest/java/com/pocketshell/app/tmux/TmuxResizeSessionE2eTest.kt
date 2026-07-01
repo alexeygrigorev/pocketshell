@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -197,7 +198,152 @@ class TmuxResizeSessionE2eTest {
         Unit
     } }
 
+    /**
+     * Issue #1169 — connected reproduction of the Codex/agent pane CUT (only top
+     * rows, rest black) caused by the tmux window being resized too small and not
+     * restored.
+     *
+     * Mechanism (confirmed): PocketShell is the sole tmux window-size authority
+     * (`refresh-client -C` under `window-size latest`). The live emulator grid is
+     * measured from pixels, but a warm reattach / within-grace foreground return /
+     * session switch REPLAYS a CACHED (possibly transiently-shrunk) grid through
+     * `maybeRefreshControlClientSize` rather than re-deriving the current viewport.
+     * SOFT_INPUT_ADJUST_NOTHING means Compose does NOT re-measure on return, so the
+     * cached replay is the only size assertion — and if that cached value is small,
+     * the tmux window shrinks, the alt-screen agent TUI redraws into the small
+     * window, and the taller emulator paints those rows at the top with BLACK
+     * below (and, via `window-size latest`, a second client such as Terminus
+     * inherits the identical cut).
+     *
+     * Reproduction (the #780 synthetic-injection model — deterministic, no self-
+     * skip): attach at the full phone grid (auto-resize syncs the window), then
+     * drive the EXACT production cached-replay path with a SHRUNK grid via
+     * [TmuxSessionViewModel.replayCachedControlClientSizeForTest] — which is
+     * verbatim what [restoreCachedRuntime] + [launchCachedRuntimeRemoteRefresh] do
+     * on a real warm reattach / foreground return / switch. On base this leaves
+     * `#{window_width}x#{window_height}` STUCK at the shrunk size (the pane is cut);
+     * with the floor guard the window returns to the full live viewport and the
+     * pane fills the screen (no black-below). This is the load-bearing red→green.
+     *
+     * The cached-replay path is the shared sink for EVERY shrinking transient the
+     * maintainer listed (keyboard up→down, composer open→close, session switch,
+     * background→foreground within grace) — they all end up re-asserting a
+     * cached/computed size through `maybeRefreshControlClientSize`, so restoring
+     * the floor here covers the class.
+     */
+    @Test
+    fun cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut() { runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedDesktopSizedSession(key)
+        val hostRowTag = seedDockerHost(key, "Issue1169 Agent Cut")
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        // --- Attach to the seeded session via the picker.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 30_000) {
+            compose.onAllNodesWithText(SESSION_LAB, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText(SESSION_LAB).performClick()
+
+        compose.waitUntil(timeoutMillis = 30_000) {
+            compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.waitUntil(timeoutMillis = 30_000) { terminalGridSizeOrNull() != null }
+
+        // --- Wait for the auto-resize to sync the tmux window to the phone grid.
+        var phoneGrid = terminalGridSize()
+        var remotePaneSize = readRemotePaneSize(key)
+        val syncDeadline = SystemClock.elapsedRealtime() + RESIZE_TIMEOUT_MS
+        while (remotePaneSize != phoneGrid && SystemClock.elapsedRealtime() < syncDeadline) {
+            kotlinx.coroutines.delay(200)
+            phoneGrid = terminalGridSize()
+            remotePaneSize = readRemotePaneSize(key)
+        }
+        assertEquals(
+            "baseline: tmux pane should auto-size to the phone viewport before the transient",
+            phoneGrid,
+            remotePaneSize,
+        )
+        val fullWindowDims = readRemoteDims(key)
+        assertEquals(
+            "baseline: window should equal the full phone grid; got $fullWindowDims",
+            "${phoneGrid.columns}x${phoneGrid.rows}",
+            fullWindowDims,
+        )
+        captureFullDevice("01-full-before-transient")
+
+        // --- Drive the production cached-replay of a SHRUNK grid (a transient /
+        //     warm reattach parked a small size in the runtime cache). The shrunk
+        //     grid is deliberately far smaller than the phone viewport so a stuck
+        //     window is unambiguous.
+        val shrunkCols = 40
+        val shrunkRows = 8
+        require(shrunkCols < phoneGrid.columns && shrunkRows < phoneGrid.rows) {
+            "shrunk grid ${shrunkCols}x${shrunkRows} must be smaller than phone grid $phoneGrid"
+        }
+        replayCachedSize(shrunkCols, shrunkRows)
+
+        // --- The floor guard must re-derive the full live viewport: the window
+        //     must NOT be left stuck at the shrunk size, and the pane must fill the
+        //     viewport (no black-below).
+        var windowDims = readRemoteDims(key)
+        var paneAfter = readRemotePaneSize(key)
+        val restoreDeadline = SystemClock.elapsedRealtime() + RESIZE_TIMEOUT_MS
+        val expectedWindow = "${phoneGrid.columns}x${phoneGrid.rows}"
+        while (
+            (windowDims != expectedWindow || paneAfter != phoneGrid) &&
+            SystemClock.elapsedRealtime() < restoreDeadline
+        ) {
+            kotlinx.coroutines.delay(200)
+            windowDims = readRemoteDims(key)
+            paneAfter = readRemotePaneSize(key)
+        }
+        captureFullDevice("02-restored-after-transient")
+
+        assertTrue(
+            "tmux window must NOT be left stuck at the shrunk size " +
+                "${shrunkCols}x${shrunkRows}; got $windowDims",
+            windowDims != "${shrunkCols}x${shrunkRows}",
+        )
+        assertEquals(
+            "tmux window must return to the full phone viewport after the transient",
+            expectedWindow,
+            windowDims,
+        )
+        assertEquals(
+            "tmux pane must fill the phone viewport (no black-below cut)",
+            phoneGrid,
+            paneAfter,
+        )
+        Unit
+    } }
+
     // ---------------------------------------------------------------- Helpers
+
+    /**
+     * Issue #1169: reach the live activity-scoped [TmuxSessionViewModel] and drive
+     * the production cached-runtime size replay. Runs on the main thread via
+     * `onActivity`.
+     */
+    private fun replayCachedSize(cachedColumns: Int, cachedRows: Int) {
+        val scenario = launchedActivity ?: error("activity not launched")
+        scenario.onActivity { activity ->
+            ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                .replayCachedControlClientSizeForTest(cachedColumns, cachedRows)
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()

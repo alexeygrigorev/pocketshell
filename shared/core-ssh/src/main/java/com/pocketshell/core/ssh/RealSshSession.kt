@@ -14,7 +14,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,6 +40,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.logging.Level
 import java.util.logging.Logger
@@ -114,6 +114,41 @@ internal class RealSshSession(
      * `scope.cancel()` erase the cleanup before it reaches the dispatcher.
      */
     private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Issue #1135 / #1139 (D33 / G1 / G2 — the class SOURCE fix): guards the
+     * one-shot async teardown so a repeated [close] (idempotent by contract)
+     * launches the transport-disconnect work at most once.
+     */
+    private val closeStarted = AtomicBoolean(false)
+
+    /**
+     * Issue #1135 / #1139: the [Job] running the bounded transport teardown
+     * launched by [close]. Ordering-sensitive callers await it via [awaitClosed]
+     * (off Main), so a redial that truly needs the old transport fully torn down
+     * first can join without ever parking the caller thread inside [close].
+     */
+    @Volatile
+    private var closeJob: Job? = null
+
+    /**
+     * Issue #1135 / #1139: object-owned scope that runs the final
+     * `client.disconnect()` socket write (and the drain/force-disconnect
+     * fallback) OFF the calling thread. [close] is reached SYNCHRONOUSLY from
+     * `Dispatchers.Main.immediate` on the grace-loop lease-disconnect path
+     * (`TmuxSessionViewModel` → `SshLeaseManager.disconnect` inside
+     * `withContext(NonCancellable)`) and off IO on the port-forward path
+     * (`AutoForwarderSupervisor`). `client.disconnect()` blocks the caller up to
+     * [SESSION_CLOSE_TIMEOUT_MS] (2s) on a wedged socket — on Main that is the
+     * maintainer's "UI fully freezes" wedge. The teardown is launched here and
+     * [close] returns immediately; the caller never parks. `SupervisorJob` so a
+     * wedged/failed disconnect never escalates; `Dispatchers.IO` is the thread
+     * that parks (never Main) if the wire is truly wedged, until the bounded
+     * ceiling + `TransportDispatcher` per-op wall-clock ceiling reclaim it. The
+     * launched job completes within the ceiling; the scope is discarded with this
+     * session after close, so it does not leak.
+     */
+    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Single-writer dispatch owner for this connection's transport (issue
@@ -1697,8 +1732,14 @@ internal class RealSshSession(
     )
 
     override fun close() {
+        // Issue #1135 / #1139 (D33 / G1 / G2): idempotent + one-shot. A second
+        // close() is a no-op (contract), and this guard also ensures the async
+        // teardown below is launched at most once.
+        if (!closeStarted.compareAndSet(false, true)) return
         // Issue #945: stop the transport keepalive before tearing the scope down
         // so no keepalive op is submitted to a dispatcher that is about to close.
+        // Both of these are NON-BLOCKING (job cancellations), so they stay on the
+        // caller thread — only the network-touching disconnect is offloaded.
         keepAlive.stop()
         // Cancel active exec/tail/upload jobs before the dispatcher drain. Their
         // cancellation handlers enqueue best-effort channel closes on
@@ -1760,28 +1801,44 @@ internal class RealSshSession(
         // leaving the sshj transport in a half-closed state and producing
         // logcat noise on every teardown.
         //
-        // The fix dispatches the network-touching `disconnect()` call onto
-        // `Dispatchers.IO` via `runBlocking(Dispatchers.IO) { ... }`:
-        // the calling thread (which may be Main) still blocks until the
-        // disconnect finishes (preserving the AutoCloseable ordering
-        // contract), but the actual SSH_MSG_DISCONNECT socket write
-        // happens on an IO worker thread, so the
-        // BlockGuard / StrictMode `onNetwork` probe never fires on Main.
-        // Hopping the suspending boundary higher (e.g. making
-        // `SshSession.close()` itself a suspend) would ripple through
-        // every caller; the AutoCloseable-preserving thread hop is the
-        // surgical fix called for by the issue.
-        try {
-            // Issue #847: drain the dispatcher and run `disconnect()` as the
-            // FINAL serialised operation. `closeAndAwaitDrain` (a) queues the
-            // disconnect BEHIND any in-flight write/channel op so we never tear
-            // the transport down underneath one (which is exactly the
-            // write-racing-`die()` desync the actor exists to prevent), and (b)
-            // marks the dispatcher closed under its lock so any later op is
-            // rejected before it can touch the dead transport. The disconnect
-            // socket write still happens on the dispatch (IO) thread, so the
-            // StrictMode `NetworkOnMainThreadException` guard (issue #166) holds.
-            runBlocking(Dispatchers.IO) {
+        // Issue #1135 / #1139 (D33 / G1 / G2 — HARD-CUT D22): the teardown is
+        // NON-BLOCKING on the caller. The network-touching `client.disconnect()`
+        // (an `SSH_MSG_DISCONNECT` socket write that blocks up to
+        // SESSION_CLOSE_TIMEOUT_MS on a wedged / half-open transport) is launched
+        // on the object-owned IO [closeScope] and close() returns immediately.
+        // The PREVIOUS body wrapped it in `runBlocking(Dispatchers.IO) { … }`,
+        // which kept the socket WRITE off Main (StrictMode-safe, #166) but still
+        // PARKED the CALLING thread for up to 2s. On the grace-loop
+        // lease-disconnect path — `TmuxSessionViewModel` →
+        // `SshLeaseManager.disconnect` inside `withContext(NonCancellable)` on
+        // `viewModelScope` = `Dispatchers.Main.immediate` (no dispatcher hop) —
+        // that 2s park was on Main, the maintainer's "UI fully freezes, buttons
+        // dead, restart required" wedge (#1139 push-resume residual). The
+        // AutoForwarder path (#1135) and every other Main caller hit the SAME
+        // `close()`, so offloading HERE fixes the whole class in one place.
+        //
+        // The bounded ceiling stays INSIDE the launched coroutine, and the
+        // `TransportDispatcher` per-op wall-clock ceiling still interrupts a
+        // wedged socket write and reclaims the dispatch thread — teardown
+        // liveness is unchanged, only the caller no longer waits for it. The 2s
+        // ceiling already tolerated an incomplete teardown, so firing it fully
+        // async is no worse than the pre-existing give-up. Ordering-sensitive
+        // callers (a redial that truly needs the old transport torn down first)
+        // join the teardown via [awaitClosed] OFF Main; the socket write still
+        // runs on the dispatch (IO) thread so the StrictMode
+        // `NetworkOnMainThreadException` guard (#166) holds. Making
+        // `SshSession.close()` itself suspend would ripple through every
+        // AutoCloseable caller, so the non-blocking launch + suspend
+        // [awaitClosed] seam is the surgical shape.
+        closeJob = closeScope.launch {
+            try {
+                // Issue #847: drain the dispatcher and run `disconnect()` as the
+                // FINAL serialised operation. `closeAndAwaitDrain` (a) queues the
+                // disconnect BEHIND any in-flight write/channel op so we never
+                // tear the transport down underneath one (the write-racing-`die()`
+                // desync the actor exists to prevent), and (b) marks the
+                // dispatcher closed under its lock so any later op is rejected
+                // before it can touch the dead transport.
                 val drained = withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
                     dispatcher.closeAndAwaitDrain {
                         client.disconnect()
@@ -1797,53 +1854,67 @@ internal class RealSshSession(
                     dispatcher.closeNow()
                     forceDisconnectRawClient()
                 }
+            } catch (e: TransportException) {
+                // Issue #239: close() is idempotent and silent by contract.
+                // Every TransportException here is teardown-time and not
+                // actionable — swallow and log.
+                CLOSE_LOGGER.log(
+                    Level.INFO,
+                    "[$CLOSE_LOG_TAG] swallowed TransportException during close() " +
+                        "(reason=${e.disconnectReason}): ${e.message}",
+                )
+            } catch (e: SSHException) {
+                // sshj's `SSHException` is the parent of `TransportException`
+                // (already handled) and `ConnectionException`. A
+                // `ConnectionException` surfacing here is the same shape of
+                // already-down-transport teardown noise — silently no-op so
+                // the idempotency contract holds.
+                CLOSE_LOGGER.log(
+                    Level.INFO,
+                    "[$CLOSE_LOG_TAG] swallowed SSHException during close(): ${e.message}",
+                )
+            } catch (e: IOException) {
+                // sshj declares `disconnect()` as `throws IOException`. A
+                // non-SSHException IO failure during shutdown is best-effort:
+                // nothing the caller can do, propagating it would defeat the
+                // idempotency contract. Swallowed deliberately to preserve the
+                // pre-#151 `runCatching` semantics for this path.
+                CLOSE_LOGGER.log(
+                    Level.INFO,
+                    "[$CLOSE_LOG_TAG] swallowed IOException during close(): ${e.message}",
+                )
+            } catch (e: RuntimeException) {
+                // Belt-and-suspenders: the pre-#151 implementation wrapped the
+                // whole disconnect in `runCatching`, which silently swallowed
+                // every Throwable. With #166 the socket write now runs on
+                // `Dispatchers.IO` so StrictMode `NetworkOnMainThreadException`
+                // can no longer originate here — but we keep this catch for
+                // any other RuntimeException sshj may surface during teardown
+                // (e.g. an exotic state-machine error) so close() stays
+                // idempotent in the face of unknown teardown failure modes.
+                CLOSE_LOGGER.log(
+                    Level.INFO,
+                    "[$CLOSE_LOG_TAG] swallowed RuntimeException during close(): ${e.message}",
+                )
+            } finally {
+                execDrainExecutor.shutdownNow()
+                teardownScope.cancel()
             }
-        } catch (e: TransportException) {
-            // Issue #239: close() is idempotent and silent by contract.
-            // Every TransportException here is teardown-time and not
-            // actionable — swallow and log.
-            CLOSE_LOGGER.log(
-                Level.INFO,
-                "[$CLOSE_LOG_TAG] swallowed TransportException during close() " +
-                    "(reason=${e.disconnectReason}): ${e.message}",
-            )
-        } catch (e: SSHException) {
-            // sshj's `SSHException` is the parent of `TransportException`
-            // (already handled) and `ConnectionException`. A
-            // `ConnectionException` surfacing here is the same shape of
-            // already-down-transport teardown noise — silently no-op so
-            // the idempotency contract holds.
-            CLOSE_LOGGER.log(
-                Level.INFO,
-                "[$CLOSE_LOG_TAG] swallowed SSHException during close(): ${e.message}",
-            )
-        } catch (e: IOException) {
-            // sshj declares `disconnect()` as `throws IOException`. A
-            // non-SSHException IO failure during shutdown is best-effort:
-            // nothing the caller can do, propagating it would defeat the
-            // idempotency contract. Swallowed deliberately to preserve the
-            // pre-#151 `runCatching` semantics for this path.
-            CLOSE_LOGGER.log(
-                Level.INFO,
-                "[$CLOSE_LOG_TAG] swallowed IOException during close(): ${e.message}",
-            )
-        } catch (e: RuntimeException) {
-            // Belt-and-suspenders: the pre-#151 implementation wrapped the
-            // whole disconnect in `runCatching`, which silently swallowed
-            // every Throwable. With #166 the socket write now runs on
-            // `Dispatchers.IO` so StrictMode `NetworkOnMainThreadException`
-            // can no longer originate here — but we keep this catch for
-            // any other RuntimeException sshj may surface during teardown
-            // (e.g. an exotic state-machine error) so close() stays
-            // idempotent in the face of unknown teardown failure modes.
-            CLOSE_LOGGER.log(
-                Level.INFO,
-                "[$CLOSE_LOG_TAG] swallowed RuntimeException during close(): ${e.message}",
-            )
-        } finally {
-            execDrainExecutor.shutdownNow()
-            teardownScope.cancel()
         }
+    }
+
+    /**
+     * Issue #1135 / #1139: await the bounded transport teardown launched by
+     * [close]. [close] is non-blocking-on-caller by construction, so a caller
+     * that must NOT redial / reuse the transport until the old
+     * `SSH_MSG_DISCONNECT` has drained (the ordering-sensitive teardown-then-
+     * disconnect contract the `RealSshSessionTeardownOrderingTest` pins) joins
+     * the teardown here. Off Main ONLY — this is a suspend seam meant to run on
+     * an IO / background dispatcher. A no-op when [close] was never called
+     * ([closeJob] is null) or when the teardown has already finished.
+     */
+    override suspend fun awaitClosed() {
+        closeJob?.join()
     }
 
     private suspend fun forceDisconnectRawClient() {

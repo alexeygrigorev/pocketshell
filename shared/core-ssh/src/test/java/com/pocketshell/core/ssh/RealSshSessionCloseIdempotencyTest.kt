@@ -1,5 +1,6 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.runBlocking
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.DisconnectReason
 import net.schmizz.sshj.connection.ConnectionException
@@ -64,7 +65,13 @@ class RealSshSessionCloseIdempotencyTest {
 
         // No exception should propagate — the BY_APPLICATION case is the
         // "transport already gone" no-op `close()` already wanted to be.
-        session.close()
+        // Issue #1135 / #1139: close() is non-blocking; the disconnect runs on the
+        // async close-scope, so await it via [SshSession.awaitClosed] before
+        // asserting the disconnect happened.
+        runBlocking {
+            session.close()
+            session.awaitClosed()
+        }
 
         assertTrue(
             "expected SSHClient.disconnect() to have been called on the first close()",
@@ -93,8 +100,13 @@ class RealSshSessionCloseIdempotencyTest {
         )
         val session = RealSshSession(client)
 
-        session.close()
-        session.close()
+        // Issue #1135 / #1139: close() is non-blocking + one-shot ([closeStarted]
+        // guard). The second close() is a no-op; the first launches the teardown.
+        runBlocking {
+            session.close()
+            session.close()
+            session.awaitClosed()
+        }
 
         assertEquals(
             "expected SSHClient.disconnect() to run exactly once across repeated " +
@@ -120,7 +132,10 @@ class RealSshSessionCloseIdempotencyTest {
         val session = RealSshSession(client)
 
         // Must NOT throw — widened contract per issue #239.
-        session.close()
+        runBlocking {
+            session.close()
+            session.awaitClosed()
+        }
 
         assertEquals(1, client.disconnectCallCount)
     }
@@ -160,7 +175,10 @@ class RealSshSessionCloseIdempotencyTest {
         )
         val session = RealSshSession(client)
 
-        session.close() // must not throw
+        runBlocking {
+            session.close() // must not throw
+            session.awaitClosed()
+        }
 
         assertEquals(1, client.disconnectCallCount)
     }
@@ -176,7 +194,10 @@ class RealSshSessionCloseIdempotencyTest {
         )
         val session = RealSshSession(client)
 
-        session.close() // must not throw
+        runBlocking {
+            session.close() // must not throw
+            session.awaitClosed()
+        }
 
         assertEquals(1, client.disconnectCallCount)
     }
@@ -201,7 +222,6 @@ class RealSshSessionCloseIdempotencyTest {
             ),
         )
         val firstSession = RealSshSession(firstClient)
-        firstSession.close()
         // Second close on an already-disconnected client: raises a
         // raw SocketException (the underlying socket is gone).
         val secondClient = ThrowingDisconnectClient(
@@ -209,7 +229,12 @@ class RealSshSessionCloseIdempotencyTest {
         )
         val secondSession = RealSshSession(secondClient)
 
-        secondSession.close() // must not throw
+        runBlocking {
+            firstSession.close()
+            firstSession.awaitClosed()
+            secondSession.close() // must not throw
+            secondSession.awaitClosed()
+        }
 
         assertEquals(1, firstClient.disconnectCallCount)
         assertEquals(1, secondClient.disconnectCallCount)

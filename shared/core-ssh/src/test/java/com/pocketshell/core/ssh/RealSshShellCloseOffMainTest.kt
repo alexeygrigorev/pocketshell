@@ -78,6 +78,67 @@ class RealSshShellCloseOffMainTest {
     }
 
     /**
+     * Issue #1139 / #1136 (D33 / G1 / G2 — the class fix): the caller returns
+     * ALMOST IMMEDIATELY, NOT after the bounded [RealSshShell.CLOSE_TIMEOUT_MS]
+     * (2s) wait, when the channel close wedges on a half-open transport.
+     *
+     * This is the load-bearing regression for the maintainer's "UI fully
+     * freezes, buttons dead, restart required" wedge. The OLD body wrapped the
+     * teardown in `runBlocking(Dispatchers.IO) { withTimeoutOrNull(2000) { … } }`,
+     * so while the socket write ran off-Main the CALLER still PARKED for up to
+     * ~2s per stale-client close. The `close returns within the bound` test
+     * above only asserts the caller returns "within the 2s bound" — a 2s Main
+     * park still passes it — so it did NOT catch this class. Here we assert the
+     * caller returns in well UNDER the 2s ceiling: RED on base (blocks ~2s),
+     * GREEN with the async source fix (returns in ~ms while the wedged teardown
+     * drains on the IO close-scope).
+     *
+     * Class coverage (G2): this is the SOURCE guarantee. Every one of the six
+     * `Dispatchers.Main.immediate` teardown sites in `TmuxSessionViewModel`
+     * (`:7932, :8056, :8156, :8196, :8290, :8304`) reaches this method via
+     * `TmuxClient.close()` → `closeInternal()` → `shell?.close()`, and
+     * `closeInternal`'s only other work (state-flag flips, `readerJob.cancel()`,
+     * in-memory pane-pipe closes, `clientScope.cancel()`) is non-blocking. So a
+     * non-blocking `RealSshShell.close()` makes all six sites — and any future
+     * caller of `SshShell.close()` / `TmuxClient.close()` — non-blocking-on-Main
+     * by construction, rather than patching each call site.
+     */
+    @Test
+    fun `close returns to the caller without parking for the bounded teardown wait`() {
+        val closeEntered = CountDownLatch(1)
+        val neverReturns = CountDownLatch(1)
+        val shell = wedgingShell(closeEntered, neverReturns)
+        val session = wedgingSession(closeEntered, neverReturns)
+        val realShell = RealSshShell(session, shell, TransportDispatcher())
+
+        // Call close() DIRECTLY on this (caller/Main-equivalent) thread and
+        // measure how long it parks. With the async source fix it launches the
+        // teardown and returns in ~ms; on base it blocks until the 2s
+        // CLOSE_TIMEOUT_MS ceiling trips inside runBlocking.
+        val start = System.nanoTime()
+        realShell.close()
+        val callerBlockedMs = (System.nanoTime() - start) / 1_000_000
+
+        assertTrue(
+            "close() must return to the caller WITHOUT parking for the bounded " +
+                "teardown wait — the caller (Main in production) must not block " +
+                "while a half-open channel close drains. RED on base (~2s park), " +
+                "GREEN with the async source fix. caller-blocked=${callerBlockedMs}ms",
+            callerBlockedMs < CALLER_RETURN_BOUND_MS,
+        )
+        // The teardown must still actually run (off the caller thread): the
+        // wedged channel close is entered on the IO close-scope. Proves the fix
+        // is non-blocking, NOT a no-op (G6 — not a vacuous pass).
+        assertTrue(
+            "the channel-close teardown must still run asynchronously (entered " +
+                "off the caller thread): caller-blocked=${callerBlockedMs}ms",
+            closeEntered.await(5, TimeUnit.SECONDS),
+        )
+
+        neverReturns.countDown() // let the wedged proxy thread unwind
+    }
+
+    /**
      * The channel-close work runs OFF the calling thread (on Dispatchers.IO),
      * so the Main thread is never the one doing the blocking socket write —
      * the StrictMode/ANR concern (#166/#937 S1-F1).
@@ -165,5 +226,17 @@ class RealSshShellCloseOffMainTest {
         InputStream::class.java -> ByteArrayInputStream(ByteArray(0))
         Void.TYPE -> null
         else -> null
+    }
+
+    private companion object {
+        /**
+         * Upper bound on how long the caller thread may block inside a
+         * non-blocking [RealSshShell.close]. The async fix returns in ~ms; the
+         * base (blocking runBlocking) parks the caller until the 2s
+         * `CLOSE_TIMEOUT_MS` ceiling. 750ms sits decisively between the two:
+         * comfortably above coroutine-launch + scheduling jitter on a loaded CI
+         * box, and far below the ~2000ms base park it must catch.
+         */
+        const val CALLER_RETURN_BOUND_MS: Long = 750L
     }
 }

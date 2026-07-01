@@ -1334,6 +1334,23 @@ JOURNEY_CLASSES=(
   # assumeFalse(isRunningOnCi()) on the load-bearing assertions). It lives under
   # com.pocketshell.app.diagnostics, so it carries its FQCN directly.
   "com.pocketshell.app.diagnostics.ConnectionLogHostMirrorReconnectDockerTest"
+  # ADDED (#1094, durability for #1092): the env edit/add on-device journeys. The
+  # #1092 review shipped the edit-in-place + empty-state-CTA fix proven by a
+  # reviewer-run local connected pass + gated JVM tests, but EnvScreenE2eTest
+  # itself sat on the pre-existing unwired allowlist, so the env journeys did NOT
+  # auto-run in CI — a D31/G9 durability gap for the env feature class
+  # (edit-in-place, reveal-into-editor, add/create first key, D24 stdin-not-argv).
+  # Wiring the whole class here runs ALL its methods at PR/batched time:
+  # envScreenListsRevealsAddsAndCopies, editExistingKeyInPlaceUpdatesValueViaSetKeys
+  # (the #1092 fix), and emptyFolderSurfacesAddKeyCtaThatCreatesFirstKey. The class
+  # drives the production EnvScreen via createComposeRule against an in-memory DAO +
+  # a fake EnvGateway (the env CLI wire contract is proven separately against the
+  # real `pocketshell env` CLI), so it needs NO Docker fixture / SSH / tmux /
+  # toxiproxy / port — a pure Compose-rule UI journey, deterministic on the CI
+  # swiftshader AVD, so it needs no tests.yml service change — and it does NOT
+  # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). It lives under
+  # com.pocketshell.app.env, so it carries its FQCN directly.
+  "com.pocketshell.app.env.EnvScreenE2eTest"
 )
 
 # ---------------------------------------------------------------------------

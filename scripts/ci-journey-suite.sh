@@ -656,12 +656,13 @@ JOURNEY_CLASSES=(
   # link the instant it reaches its (shortened) budget — records
   # liveness_probe_silent_drop, bumps TMUX_CONNECT_ATTEMPTS, raises the Reconnecting
   # band — so the ZERO-reconnect assertions FAIL (RED). With #964 the probe DEFERS
-  # to the still-healthy keepalive and never redials (GREEN). It does NOT self-skip
-  # on CI (the deterministic method has no assumeNetworkFaultProofsEnabled gate); the
-  # opt-in realistic-jitter toxiproxy method in the same class DOES self-skip and is
-  # NOT run by this FQCN entry at PR time. The other (long-running, toxiproxy)
-  # method is gated by assumeNetworkFaultProofsEnabled so only the deterministic
-  # method asserts here.
+  # to the still-healthy keepalive and never redials (GREEN). BOTH methods in this
+  # class run per-push and HARD-assert on CI — NEITHER self-skips (#1081): the
+  # `realisticJitteryWifiOnRealLinkNeverRedials` method was rebuilt on the #780
+  # synthetic-injection model (repeated synthetic `-CC` probe-failure bursts on the
+  # keepalive-proven-live agents:2222 transport — NO toxiproxy, NO
+  # assumeNetworkFaultProofsEnabled gate), replacing the old opt-in toxiproxy variant
+  # that self-skipped on CI and provided ZERO protection while appearing covered.
   #
   # INTEGRATION NOTE: this gate is RED until #964 lands, so it MUST be integrated
   # WITH or AFTER #964 — never before — or it reds the per-push journey job.

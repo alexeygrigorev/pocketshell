@@ -101,23 +101,41 @@ import java.io.File
  *     assertions FAIL → **RED**. With #964 the probe DEFERS to the still-healthy
  *     keepalive and never redials → **GREEN**.
  *
- *  2. [realisticJitteryWifiOnRealLinkNeverRedials] — the OPT-IN realistic-link
- *     variant (gated by [assumeNetworkFaultProofsEnabled], self-skips on CI like
- *     every [NetworkFaultProofBase] proof since `tests.yml` does not bring up the
- *     toxiproxy proxy family). It holds a steady `latency=50ms, jitter=30ms`
- *     ([ToxiproxyControl.addJitterLatency]) + brief sub-budget stalls
- *     ([starveLinkFor]) + a same-IP reassoc on the REAL wire, LONGER than the
- *     slowest detection budget, and asserts the SAME ZERO-reconnect invariant
- *     against the REAL `refresh-client` probe + the REAL keepalive (no synthetic
- *     `forceLivenessProbeDeadForTest`). This is the faithful realistic-link proof;
- *     the deterministic variant above is its CI-runnable, never-self-skipping
- *     sibling.
+ *  2. [realisticJitteryWifiOnRealLinkNeverRedials] — the SYNTHETIC-JITTER,
+ *     PER-PUSH CI variant (issue #1081). It USED to be an opt-in toxiproxy proof
+ *     gated by `assumeNetworkFaultProofsEnabled()`, which SELF-SKIPPED on CI (the
+ *     `tests.yml` per-push job does not start the toxiproxy proxy family). That
+ *     self-skip made the headline "jittery real Wi-Fi never spuriously redials"
+ *     assertion provide ZERO protection on CI while appearing covered — the exact
+ *     #657/#780 self-skip anti-pattern (F3: no `assumeFalse(isRunningOnCi())` on a
+ *     load-bearing assertion). Per #1081 it is now rebuilt on the #780
+ *     SYNTHETIC-INJECTION model: it runs on the plain deterministic `agents:2222`
+ *     fixture (NO toxiproxy, NO new Docker service, NO self-skip), so it is a
+ *     genuine per-push CI gate that HARD-asserts on CI.
+ *
+ *     Jitter is dispatched DETERMINISTICALLY: a physically-stable-but-jittery wifi
+ *     link is modelled as REPEATED `-CC` probe-failure BURSTS (via the existing
+ *     `forceLivenessProbeDeadForTest` seam) interleaved with healthy gaps, WHILE
+ *     the transport keepalive is pinned PROVEN-ALIVE (`forceTransportProvenAliveForTest
+ *     = true` — the #964 slow-but-live signal, and the pin the #1103 whole-link-death
+ *     seam requires so a `-CC`-only wedge on a live transport is NOT misread as a
+ *     transport death). Most bursts are SUB-budget (fewer than [failureThreshold]
+ *     consecutive misses — the N-consecutive reset guard absorbs them); one burst
+ *     spans MORE THAN TWO shortened probe budgets (it reaches the threshold — the
+ *     #964/#982 keepalive deferral absorbs it with no time ceiling). Either way the
+ *     app must record ZERO reconnect. It asserts the SAME ZERO-reconnect invariant
+ *     as the deterministic sibling and NEVER self-skips, so the jittery-link
+ *     property is protected on every push. The faithful-real-wire toxiproxy variant
+ *     is deliberately NOT carried alongside (D22 hard-cut): wiring the network-fault
+ *     fixture into the per-push gate is a non-goal (#1081) because it makes the gate
+ *     heavier/slower, and the deterministic decision logic (defer vs declare,
+ *     N-consecutive reset) is proven RED→GREEN by the pure-JVM `LivenessProbeTest`.
  *
  * Assertions are USER-VISIBLE (D28(3)/D33): the cause-trail / diagnostics that
  * record a reconnect, the rendered connection-status indicators, the connect
  * attempt counter, and the painted terminal viewport — never internal/shadow
- * state. NO `assumeTrue` / `assumeFalse(isRunningOnCi())` on the deterministic
- * variant's load-bearing assertions (D31/F3/G4).
+ * state. NO `assumeTrue` / `assumeFalse(isRunningOnCi())` on EITHER method's
+ * load-bearing assertions (D31/F3/G4).
  */
 @RunWith(AndroidJUnit4::class)
 class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase() {
@@ -206,6 +224,16 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         // which the new contract still escalates via the keepalive death signal or
         // the 180s absolute backstop).
         val stallStart = SystemClock.elapsedRealtime()
+        // Issue #1103 fix: EXPLICITLY pin the keepalive PROVEN-ALIVE while the `-CC`
+        // dead-seam is armed. #1103 changed isTransportKeepAliveProvenAliveRecently()
+        // to report the transport DEAD whenever `forceLivenessProbeDeadForTest` is
+        // armed with NO explicit pin (a WHOLE-link death, for the #822 silent-drop
+        // proof) — which would make this slow-but-LIVE scenario declare a drop and
+        // redial (a false RED). The #1103 comment itself prescribes this: "the #964
+        // slow-but-live phase deliberately sets it true WHILE the `-CC` dead-seam is
+        // armed." An EXPLICIT pin always wins, so the probe defers as this test
+        // intends. Cleared below so the recovered channel reads the real keepalive.
+        currentViewModel().forceTransportProvenAliveForTest = true
         currentViewModel().forceLivenessProbeDeadForTest = true
         recordTiming("stable_slow_cc_armed_at_ms", stallStart - attachStart)
 
@@ -215,6 +243,7 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         watchNoSpuriousReconnect("during-slow-cc", SLOW_CC_HOLD_MS)
 
         currentViewModel().forceLivenessProbeDeadForTest = false
+        currentViewModel().forceTransportProvenAliveForTest = null
         recordTiming("stable_slow_cc_cleared_at_ms", SystemClock.elapsedRealtime() - attachStart)
 
         // Let a couple of real probes run after the channel recovers — they must
@@ -262,29 +291,32 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
     }
 
     /**
-     * THE OPT-IN REALISTIC-LINK VARIANT (toxiproxy, self-skips on CI).
+     * THE SYNTHETIC-JITTER, PER-PUSH CI VARIANT (issue #1081 — no toxiproxy, no
+     * self-skip, the #780 model).
      *
-     * A steady jittery wifi link (latency 50ms + jitter 30ms) with brief
-     * sub-budget stalls and a same-IP reassoc, held LONGER than the slowest
-     * detection budget, must NOT spuriously reconnect on the REAL probe + keepalive
-     * path (no synthetic seam). RED on base for the #964 reason; GREEN once #964
-     * lands. This is the faithful realistic-link proof; the deterministic method
-     * above is its CI-runnable sibling.
+     * A physically-stable-but-jittery wifi link (repeated `-CC` probe-failure
+     * bursts on a genuinely-live, keepalive-proven transport) must NOT spuriously
+     * reconnect. Modelled synthetically on the deterministic `agents:2222` fixture
+     * so it HARD-asserts on every push instead of self-skipping. RED on rc/0.4.18
+     * (WITHOUT #964 the over-budget burst force-redials the FINE link at its budget
+     * regardless of the keepalive); GREEN once #964 coordinates the probe to defer
+     * to the still-healthy keepalive AND the N-consecutive reset guard absorbs the
+     * sub-budget bursts. The deterministic decision logic (defer vs declare,
+     * N-consecutive reset) is proven RED→GREEN by the pure-JVM `LivenessProbeTest`.
      */
     @Test
     fun realisticJitteryWifiOnRealLinkNeverRedials() = runBlocking<Unit> {
-        assumeNetworkFaultProofsEnabled()
-
         val key = readFixtureKey()
         val marker = "jw${System.currentTimeMillis().toString(36).takeLast(5)}"
         val sessionName = "issue970-jitter-$marker"
         val hostName = "Issue970 JitterWifi $marker"
-        prepareProxyAndRemoteSession(
-            key = key,
-            sessionName = sessionName,
-            readyText = "ISSUE970-JITTER-READY-$marker",
-        )
-        val hostRowTag = seedNetworkFaultHost(key, hostName)
+
+        // DETERMINISTIC fixture: the plain agents:2222 link, GENUINELY LIVE — NO
+        // toxiproxy. We seed the session + host directly on DEFAULT_PORT, exactly
+        // like the deterministic sibling above.
+        waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
+        seedExtraSession(key, sessionName, "ISSUE970-JITTER-READY-$marker")
+        val hostRowTag = seedNetworkFaultHost(key, hostName, port = DEFAULT_PORT)
 
         val attemptsBefore = TMUX_CONNECT_ATTEMPTS.get()
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -299,59 +331,82 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         diagnostics!!.clear()
         val attemptsAfterAttach = TMUX_CONNECT_ATTEMPTS.get()
 
-        // STABLE-BUT-JITTERY: a steady latency+jitter band the whole hold — a
-        // physically stable wifi/mobile link whose RTT wobbles but is never down.
-        toxiproxy().addJitterLatency(latencyMs = JITTER_LATENCY_MS, jitterMs = JITTER_BAND_MS)
+        // Pin the transport keepalive PROVEN ALIVE for the WHOLE jittery hold: the
+        // wifi RTT wobbles but the link is never actually down, so the always-on
+        // keepalive keeps seeing inbound transport activity. This is the #964
+        // slow-but-live signal the probe defers to — and the EXPLICIT pin the
+        // #1103 whole-link-death seam requires (arming only the `-CC` dead-seam
+        // reports the transport DEAD, which would model a WHOLE-link drop, not the
+        // jittery-but-live link under test). An EXPLICIT pin always wins in
+        // isTransportKeepAliveProvenAliveRecently().
+        currentViewModel().forceTransportProvenAliveForTest = true
         try {
-            // Brief sub-budget stalls + a same-IP reassoc interleaved across a hold
-            // LONGER than the slowest detection budget. starveLinkFor itself asserts
-            // no disconnect band surfaces while starved; between stalls the link is
-            // its jittery-but-live self. The reassoc is modelled by clearing then
-            // re-applying the jitter toxic mid-hold (a same-IP RF reassoc keeps the
-            // socket; the latency band re-arms) — NOT a socket drop.
-            val rounds = SLOWEST_BUDGET_HOLD_MS / JITTER_ROUND_MS
-            for (round in 0 until rounds) {
-                // A brief sub-budget stall — shorter than the probe's per-probe
-                // timeout, so a STABLE client rides through it.
-                starveLinkFor("jitter_round_${round}_substall", downMillis = SUB_BUDGET_STALL_MS)
-                if (round == rounds / 2) {
-                    // Same-IP reassoc mid-hold: drop + re-arm the latency band.
-                    toxiproxy().clearToxics()
-                    toxiproxy().addJitterLatency(latencyMs = JITTER_LATENCY_MS, jitterMs = JITTER_BAND_MS)
-                    recordTiming("jitter_reassoc_at_ms", SystemClock.elapsedRealtime() - attachStart)
-                }
-                // Ride the jittery-but-live link between stalls.
-                watchNoSpuriousReconnect("jitter_round_$round", JITTER_ROUND_MS - SUB_BUDGET_STALL_MS)
+            // SYNTHETIC JITTER (the #780 model — dispatch the fault deterministically,
+            // no toxiproxy, no self-skip): model a physically-stable-but-jittery wifi
+            // link as REPEATED `-CC` probe-failure BURSTS interleaved with healthy
+            // gaps. Each burst arms the probe DEAD (a momentarily congested control
+            // channel), then CLEARS it (the RTT recovers). Most bursts are SUB-budget
+            // (fewer than PROBE_FAILURE_THRESHOLD consecutive misses — the
+            // N-consecutive reset guard absorbs them, resetting on the next healthy
+            // probe); the MIDDLE burst spans MORE THAN TWO shortened probe budgets, so
+            // it reaches the threshold WHILE the keepalive proves the transport alive
+            // (the #964/#982 unconditional deferral absorbs it). Either way ZERO redial
+            // across every burst AND every gap.
+            for (round in 0 until JITTER_ROUNDS) {
+                val crossesBudget = round == JITTER_ROUNDS / 2
+                val deadBurstMs = if (crossesBudget) OVER_BUDGET_BURST_MS else SUB_BUDGET_BURST_MS
+                // Arm the momentarily-congested `-CC` channel.
+                currentViewModel().forceLivenessProbeDeadForTest = true
+                recordTiming("jitter_round_${round}_dead_burst_ms", deadBurstMs)
+                // The probe must NEVER redial during the burst: a sub-budget burst
+                // never reaches the counter; the over-budget burst is deferred to the
+                // proven-alive keepalive. (On base the over-budget burst redials the
+                // instant the shortened threshold is reached.)
+                watchNoSpuriousReconnect("jitter_round_${round}_dead", deadBurstMs)
+                // The RTT recovers: real probes answer, the failure run resets.
+                currentViewModel().forceLivenessProbeDeadForTest = false
+                watchNoSpuriousReconnect("jitter_round_${round}_live", JITTER_LIVE_GAP_MS)
             }
         } finally {
-            toxiproxy().clearToxics()
+            currentViewModel().forceLivenessProbeDeadForTest = false
+            currentViewModel().forceTransportProvenAliveForTest = null
             recordTiming("jitter_total_hold_ms", SystemClock.elapsedRealtime() - attachStart)
         }
 
-        assertNoReconnectCauseEvents("realistic jittery wifi")
-        assertNoReconnectingTransition("realistic jittery wifi")
+        // ---- LOAD-BEARING ASSERTIONS (ZERO reconnect, viewport painted) ----
+        assertNoReconnectCauseEvents("synthetic jittery wifi")
         assertNoExtraConnectAttempts(
             attemptsAfterAttach,
             expectedDelta = 0,
             label = "no redial across the jittery-but-live hold",
         )
         waitForConnected("after jittery hold")
+        waitForVisibleTerminalText("viewport stays painted") { "LIVE-$marker" in it }
+        assertNoReconnectingTransition("synthetic jittery wifi")
+        captureViewport("issue970-03-after-jitter")
 
+        // The SAME session is still live + input-accepting.
         sendCommandThroughTerminalInput("printf 'AFTER-$marker\\n'", "post-jitter")
         waitForVisibleTerminalText("post-jitter round-trip") { "AFTER-$marker" in it }
-        waitForClientCountAtMost(key, sessionName, max = 1, label = "post-jitter same client")
 
         writeSummary(
             testName = "RealisticWifiStabilityNoSpuriousReconnect-jitter",
             lines = listOf(
                 "session=$sessionName",
-                "fixture=network-fault-proxy:$NETWORK_FAULT_SSH_PORT (toxiproxy)",
-                "scenario=latency ${JITTER_LATENCY_MS}ms jitter ${JITTER_BAND_MS}ms + sub-budget stalls + reassoc",
-                "hold_ms=$SLOWEST_BUDGET_HOLD_MS",
+                "fixture=agents:$DEFAULT_PORT (deterministic, NO toxiproxy)",
+                "scenario=repeated -CC probe-failure bursts (synthetic jitter) on a " +
+                    "keepalive-proven-live transport",
+                "probe_budget_ms=${PROBE_RAW_BUDGET_MS} (interval $PROBE_INTERVAL_MS x threshold " +
+                    "$PROBE_FAILURE_THRESHOLD)",
+                "jitter_rounds=$JITTER_ROUNDS",
+                "sub_budget_burst_ms=$SUB_BUDGET_BURST_MS (under the $PROBE_RAW_BUDGET_MS budget)",
+                "over_budget_burst_ms=$OVER_BUDGET_BURST_MS (spans >2 budgets — keepalive defer)",
+                "live_gap_ms=$JITTER_LIVE_GAP_MS",
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsAfterAttach}",
                 "liveness_probe_silent_drop=${diagnostics!!.eventsNamed("liveness_probe_silent_drop").size}",
-                "expectation=ZERO reconnect on a stable jittery link (#964)",
-                "expected_base=RED (probe redials at ~48s budget before keepalive rides through)",
+                "reconnect_start=${diagnostics!!.eventsNamed("reconnect_start").size}",
+                "expectation=ZERO reconnect on a stable jittery link (#964/#982, #1081)",
+                "expected_base=RED (over-budget burst redials at its budget regardless of keepalive)",
             ),
         )
     }
@@ -598,17 +653,24 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         const val SLOW_CC_HOLD_MS: Long = 12_000L
         const val POST_RECOVER_WATCH_MS: Long = 4_000L
 
-        // Realistic-link (toxiproxy) variant knobs.
-        const val JITTER_LATENCY_MS: Int = 50
-        const val JITTER_BAND_MS: Int = 30
-        // A brief stall SHORTER than the probe's per-probe timeout so a STABLE
-        // client rides through it without counting a failure on its own.
-        const val SUB_BUDGET_STALL_MS: Long = 800L
-        const val JITTER_ROUND_MS: Long = 12_000L
-        // Held LONGER than the production probe budget (~48s) so the realistic
-        // variant truly exercises the full detection window the deterministic
-        // variant shortens. 60s > 48s.
-        const val SLOWEST_BUDGET_HOLD_MS: Long = 60_000L
+        // --- Synthetic-jitter (issue #1081) variant knobs — NO toxiproxy. ---
+        // Number of jitter rounds (each = one dead burst + one healthy gap). Spans
+        // several probe budgets in total so both guards are exercised repeatedly.
+        const val JITTER_ROUNDS: Int = 5
+        // A SUB-budget dead burst: shorter than one full failure-threshold budget
+        // (PROBE_RAW_BUDGET_MS = 4.5s), so it produces FEWER than
+        // PROBE_FAILURE_THRESHOLD consecutive misses — the N-consecutive reset guard
+        // absorbs it (the counter resets the moment the healthy gap's probe answers).
+        const val SUB_BUDGET_BURST_MS: Long = 2_500L
+        // The MIDDLE round's OVER-budget dead burst: spans MORE THAN TWO shortened
+        // probe budgets (so it reaches the failure threshold), exercising the
+        // #964/#982 unconditional keepalive deferral (no time ceiling) — mirrors the
+        // deterministic sibling's SLOW_CC_HOLD_MS. On base (no #964) this burst
+        // force-redials at its budget → the ZERO-reconnect assertion goes RED.
+        const val OVER_BUDGET_BURST_MS: Long = 12_000L
+        // The healthy gap between bursts — a couple of real probes answer, resetting
+        // the failure run, and STILL no reconnect fires.
+        const val JITTER_LIVE_GAP_MS: Long = 3_000L
 
         val CONNECTED_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 20_000L

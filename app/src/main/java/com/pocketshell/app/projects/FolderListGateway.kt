@@ -2022,6 +2022,27 @@ class SshFolderListGateway internal constructor(
          * This makes the "fall back" signal robust to BOTH binary-absent and
          * verb-absent hosts while never swallowing a real create failure.
          *
+         * Issue #1170: the FINAL real `create-detached` invocation runs with the
+         * daemon's inherited standard fds pointed AWAY from the SSH exec channel
+         * (`</dev/null >/dev/null 2>"$errfile"`). tmuxctl starts the detached
+         * tmux SERVER under a `systemd-run --user --scope` wrapper that — unlike
+         * a plain `tmux new-session -d`, which double-forks and re-opens /dev/null
+         * — keeps the spawned server attached to the scope and lets it INHERIT
+         * the caller's stdout/stderr. When those are the SSH exec channel (as they
+         * are for [execBounded]'s blocking read), the daemon holds the channel
+         * open, the read never reaches EOF, and the create FALSE-fails on the
+         * [EXEC_READ_TIMEOUT_MS] bound even though the session was created — after
+         * which the agent-launch never runs and the session is left a bare shell.
+         * Redirecting the create's own stdin/stdout to /dev/null (so the inherited
+         * server fds are /dev/null, not the channel) lets the exec reach EOF as
+         * soon as tmuxctl returns. tmuxctl's OWN stderr is captured to a temp file
+         * and echoed back to the channel AFTERWARDS (`cat "$errfile" >&2`), so a
+         * GENUINE create error (tmux / systemd-run failure) is still surfaced to
+         * the client with its real message — the redirect fixes the false hang
+         * without masking real failures. The create's exit status is preserved via
+         * `$?` and re-exited so the client's exit-code checks are unchanged.
+         * (`command -v` / `--help` probes stay as-is — they spawn no daemon.)
+         *
          * [quotedName] and [quotedCwd] must already be shell-quoted by the
          * caller (via [shellQuoteValue]).
          */
@@ -2029,7 +2050,13 @@ class SshFolderListGateway internal constructor(
             "command -v tmuxctl >/dev/null 2>&1 || exit $TMUXCTL_UNSUPPORTED_EXIT_CODE; " +
                 "tmuxctl create-detached --help >/dev/null 2>&1 || " +
                 "exit $TMUXCTL_UNSUPPORTED_EXIT_CODE; " +
-                "tmuxctl create-detached $quotedName -c $quotedCwd"
+                "__ps_cd_err=\$(mktemp 2>/dev/null || printf %s \"\${TMPDIR:-/tmp}/ps-create-detached.\$\$\"); " +
+                "tmuxctl create-detached $quotedName -c $quotedCwd " +
+                "</dev/null >/dev/null 2>\"\$__ps_cd_err\"; " +
+                "__ps_cd_rc=\$?; " +
+                "[ -s \"\$__ps_cd_err\" ] && cat \"\$__ps_cd_err\" >&2; " +
+                "rm -f \"\$__ps_cd_err\"; " +
+                "exit \$__ps_cd_rc"
 
         /**
          * Issue #726: the pre-#726 raw, uncapped fallback create — used only

@@ -423,13 +423,24 @@ are looking at before proposing a fix:
     `shadowOf(Looper.getMainLooper()).idleFor(16ms)` + small sleep to a
     `System.currentTimeMillis()` deadline that HARD-FAILS; assert the exit
     condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
-    (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`).
+    (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`). The
+    drifting hand-rolled Shape-B pumps now share ONE audited helper —
+    `drainMainLooperUntil` in the test-only module `:shared:test-support`
+    (`shared/test-support/src/main/java/com/pocketshell/testsupport/SettlePump.kt`,
+    `testImplementation(project(":shared:test-support"))`). It owns the generous
+    wall-clock deadline + the HARD `false`-on-timeout return + the "never touch a
+    clock" guarantee; the per-tick drain (`runCurrent()` / `idleFor` / both) is
+    injected per call site because those drains are genuinely different (idle
+    nothing to spare the #793 watchdog vs idle a frame for the #803 drain vs no
+    `TestScope` at all) and must not be forced into one. Clock-advancing pumps
+    (`advanceSchedulerUntil`, `pumpUntil`) stay separate by design.
   - **Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
     output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing
     assert. `scripts/check-test-validity.sh`'s advisory `TIMING1` smell surfaces
-    connection/terminal `runTest` tests that touch a real dispatcher/thread
-    without a pinned seam or bounded pump, and hard-fails a NEW bare
-    `Thread.sleep(N)`-before-assert with no bounded loop.
+    `runTest` tests that touch a real dispatcher/thread without a pinned seam or
+    bounded pump, and hard-fails a NEW bare `Thread.sleep(N)`-before-assert with
+    no bounded loop. Scope: the connection/terminal roots plus (widened in #1048)
+    the app `composer`/`hosts`/`projects` test dirs where #1102/#1110 flaked.
 - **File CI failures as issues.** Every red CI run on `main` (or local release-gate
   failure) becomes a GitHub issue with the run URL, failure snippet, and fix
   proposal — don't retry silently. Recurring classes (AVD contention) get one

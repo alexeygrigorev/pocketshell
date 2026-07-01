@@ -289,6 +289,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.testcontainers)
+    // Issue #1048: the ONE audited shared de-flake settle-pump
+    // (`drainMainLooperUntil`) the tmux/composer wall-clock pumps converge on.
+    testImplementation(project(":shared:test-support"))
     testRuntimeOnly(libs.slf4j.nop)
 
     // Robolectric provides a Looper / Handler / Context implementation so

@@ -1,6 +1,7 @@
 package com.pocketshell.core.terminal.bridge
 
 import android.os.Looper
+import com.pocketshell.testsupport.drainMainLooperUntil as drainMainLooperUntilShared
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -1088,19 +1089,23 @@ class SshTerminalBridgeTest {
             SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
 
     private fun drainMainLooperUntil(done: () -> Boolean) {
-        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-        while (!done()) {
-            // Issue #803: the off-main live drain is now frame-paced — the
-            // MainThreadDrainScheduler `postDelayed`s its continuation one frame
-            // (16ms) out so the main looper is guaranteed a servicing gap between
-            // parse turns. Under Robolectric PAUSED looper a plain `idle()` only
-            // runs tasks already DUE, so advance the virtual clock one frame per
-            // pump to fire the delayed continuations and let the whole queue drain.
-            shadowOf(Looper.getMainLooper()).idleFor(16L, TimeUnit.MILLISECONDS)
-            if (System.nanoTime() > deadlineNanos) {
-                throw AssertionError("timed out waiting for feedBytes burst to drain")
-            }
-            Thread.sleep(1)
+        // Issue #1048: the bounded-wall-clock loop + the HARD deadline now live in
+        // the ONE shared, audited settle-pump. This test is NOT inside a `runTest`,
+        // so it has no `TestScope` and cannot `runCurrent()` — its only per-tick
+        // drain is idling the main looper a frame. Issue #803: the off-main live
+        // drain is frame-paced — the MainThreadDrainScheduler `postDelayed`s its
+        // continuation one frame (16ms) out so the main looper is guaranteed a
+        // servicing gap between parse turns. Under Robolectric PAUSED looper a
+        // plain `idle()` only runs tasks already DUE, so advance the looper one
+        // frame per tick to fire the delayed continuations and let the queue drain.
+        val drained = drainMainLooperUntilShared(
+            deadlineMs = TimeUnit.SECONDS.toMillis(10),
+            sleepMs = 1L,
+            onTick = { shadowOf(Looper.getMainLooper()).idleFor(16L, TimeUnit.MILLISECONDS) },
+            condition = done,
+        )
+        if (!drained) {
+            throw AssertionError("timed out waiting for feedBytes burst to drain")
         }
         // Final flush: drain any trailing scheduled continuation.
         shadowOf(Looper.getMainLooper()).idleFor(64L, TimeUnit.MILLISECONDS)

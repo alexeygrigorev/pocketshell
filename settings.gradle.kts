@@ -40,3 +40,7 @@ include(":shared:core-voice")
 include(":shared:core-assistant")
 include(":shared:core-connection")
 include(":shared:ui-kit")
+
+// Test-only support module (issue #1048): the ONE audited shared de-flake
+// settle-pump, consumed via `testImplementation` only — never ships in the APK.
+include(":shared:test-support")

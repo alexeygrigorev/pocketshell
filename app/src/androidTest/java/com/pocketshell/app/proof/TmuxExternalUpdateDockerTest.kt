@@ -146,7 +146,7 @@ class TmuxExternalUpdateDockerTest {
     }
 
     @Test
-    fun externalTmuxWriteRepaintsAttachedPocketShellViewport() = runBlocking {
+    fun externalTmuxWriteRepaintsAttachedPocketShellViewport() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val key = instrumentation.context
             .assets
@@ -371,10 +371,10 @@ class TmuxExternalUpdateDockerTest {
             externalRepaintMs = externalRepaintMs,
         )
         Unit
-    }
+    } }
 
     @Test
-    fun codexScaleExternalTmuxBurstKeepsViewportResponsive() = runBlocking {
+    fun codexScaleExternalTmuxBurstKeepsViewportResponsive() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val key = instrumentation.context
             .assets
@@ -542,7 +542,7 @@ class TmuxExternalUpdateDockerTest {
             doneMarker in afterArtifact.visibleText || doneMarker in synchronized(outputDrain) { outputDrain.toString() },
         )
         Unit
-    }
+    } }
 
     // ----------------------------------------------------------------
     // helpers

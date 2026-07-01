@@ -62,7 +62,7 @@ class TerminalFilePathTapToViewerDockerTest {
     private var seededDir: String? = null
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -74,10 +74,10 @@ class TerminalFilePathTapToViewerDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (seededPaths.isNotEmpty() || seededDir != null) {
             withTimeout(15_000) {
                 connect()?.use { session ->
@@ -89,10 +89,10 @@ class TerminalFilePathTapToViewerDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun detectedRelativePngPathOpensImageViewerResolvedAgainstCwd(): Unit = runBlocking {
+    fun detectedRelativePngPathOpensImageViewerResolvedAgainstCwd(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         // Seed under a unique cwd so a project-relative `out/<png>` resolves to
         // the seeded file the same way the live pane's cwd would resolve it.
@@ -147,7 +147,7 @@ class TerminalFilePathTapToViewerDockerTest {
         }
         composeRule.onNodeWithTag(FILE_VIEWER_IMAGE_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue500-tap-opens-image-viewer")
-    }
+    } }
 
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,

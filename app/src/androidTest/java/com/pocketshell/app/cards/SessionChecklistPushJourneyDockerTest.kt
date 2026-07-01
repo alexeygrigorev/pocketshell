@@ -83,7 +83,7 @@ class SessionChecklistPushJourneyDockerTest {
     private val cleanupCommands = mutableListOf<String>()
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (cleanupCommands.isNotEmpty()) {
             runCatching {
                 withTimeout(15_000) {
@@ -94,10 +94,10 @@ class SessionChecklistPushJourneyDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun hostPushChecklistRendersInAppFeedAndTickRoundTripsToHost(): Unit = runBlocking {
+    fun hostPushChecklistRendersInAppFeedAndTickRoundTripsToHost(): Unit { runBlocking {
         bootstrapKey()
         waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
@@ -282,10 +282,10 @@ class SessionChecklistPushJourneyDockerTest {
             "after the app untick the host store must clear run-the-tests-1",
             "run-the-tests-1" in afterUntick.checkedIds,
         )
-    }
+    } }
 
     @Test
-    fun noChecklistPushedYieldsEmptyFeedAndNoChip(): Unit = runBlocking {
+    fun noChecklistPushedYieldsEmptyFeedAndNoChip(): Unit { runBlocking {
         bootstrapKey()
         waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
@@ -317,7 +317,7 @@ class SessionChecklistPushJourneyDockerTest {
             }
         }
         composeRule.onNodeWithTag(SESSION_CHECKLIST_CHIP_TAG).assertDoesNotExist()
-    }
+    } }
 
     /**
      * RED→GREEN guard (D32 G10): the load-bearing "card reaches the feed"
@@ -330,7 +330,7 @@ class SessionChecklistPushJourneyDockerTest {
      * THIS test would fail. The two together pin the real path.
      */
     @Test
-    fun readPathBroken_wrongSessionName_yieldsEmptyFeed_redGuard(): Unit = runBlocking {
+    fun readPathBroken_wrongSessionName_yieldsEmptyFeed_redGuard(): Unit { runBlocking {
         bootstrapKey()
         waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
@@ -374,7 +374,7 @@ class SessionChecklistPushJourneyDockerTest {
                 wrong.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>(),
             ),
         )
-    }
+    } }
 
     // ----------------------------------------------------------- Helpers
 

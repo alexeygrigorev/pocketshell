@@ -65,16 +65,16 @@ class TerminalLabDockerTest {
     }
 
     @Test
-    fun terminalLabConnectsAndRunsStressCommandsThroughInputPath() = runBlocking {
+    fun terminalLabConnectsAndRunsStressCommandsThroughInputPath() { runBlocking {
         runTerminalWorkbench(
             markerPrefix = "pslab",
             capturePrefix = "",
             holdOpenMs = 0L,
         )
-    }
+    } }
 
     @Test
-    fun terminalWorkbenchKeepsDockerShellOpenForVisualIteration() = runBlocking {
+    fun terminalWorkbenchKeepsDockerShellOpenForVisualIteration() { runBlocking {
         val holdOpenMs = InstrumentationRegistry.getArguments()
             .getString("terminalWorkbenchHoldMs")
             ?.toLongOrNull()
@@ -84,10 +84,10 @@ class TerminalLabDockerTest {
             capturePrefix = "workbench-",
             holdOpenMs = holdOpenMs,
         )
-    }
+    } }
 
     @Test
-    fun terminalWorkbenchCapturesRealAgentCliScreens() = runBlocking {
+    fun terminalWorkbenchCapturesRealAgentCliScreens() { runBlocking {
         assumeRealAgentCliScreensEnabled()
         launchTerminalWorkbench(markerPrefix = "psagent")
         assertRemotePtyMatchesTerminalGrid("agents")
@@ -143,7 +143,7 @@ class TerminalLabDockerTest {
         TerminalLabArtifacts.writeTimings(timings)
         writeArtifactSummary("agents")
         Unit
-    }
+    } }
 
     private fun assumeRealAgentCliScreensEnabled() {
         val enabled = InstrumentationRegistry.getArguments()

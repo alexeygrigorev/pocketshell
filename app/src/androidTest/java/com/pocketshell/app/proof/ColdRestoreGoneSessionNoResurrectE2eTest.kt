@@ -126,7 +126,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
     }
 
     @Test
-    fun coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList() = runBlocking {
+    fun coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList() { runBlocking {
         val key = fixtureKey
 
         // ---- (1) Attach to the seeded session via the normal journey.
@@ -204,7 +204,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         recordTiming("restore_to_list_ms", SystemClock.elapsedRealtime() - resumeAt)
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #834 — DELETING an agent session must NOT auto-open the (deleted)
@@ -236,7 +236,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
      * for the deleted session.
      */
     @Test
-    fun deletingActiveSessionDoesNotAutoOpenItOnResume() = runBlocking {
+    fun deletingActiveSessionDoesNotAutoOpenItOnResume() { runBlocking {
         val key = fixtureKey
 
         // ---- (1) Attach to the seeded session via the normal journey.
@@ -317,7 +317,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             !sessionScreenStillUp,
         )
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

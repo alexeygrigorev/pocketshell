@@ -91,7 +91,7 @@ class EmulatorDockerSshSmokeTest {
     }
 
     @Test
-    fun debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias() = runBlocking {
+    fun debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias() { runBlocking {
         val key = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -240,10 +240,10 @@ class EmulatorDockerSshSmokeTest {
                 )
             }
         }
-    }
+    } }
 
     @Test
-    fun walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands() = runBlocking {
+    fun walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val appVersion = appContext.packageManager
@@ -517,7 +517,7 @@ class EmulatorDockerSshSmokeTest {
             )
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #532 root cause + fix. The host-detail tree auto-expands any

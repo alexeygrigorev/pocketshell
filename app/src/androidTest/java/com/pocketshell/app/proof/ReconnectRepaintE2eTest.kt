@@ -137,7 +137,7 @@ class ReconnectRepaintE2eTest {
     }
 
     @Test
-    fun reconnectRepaintsFullPaneContentNotJustLiveDeltas() = runBlocking {
+    fun reconnectRepaintsFullPaneContentNotJustLiveDeltas() { runBlocking {
         val key = fixtureKey
 
         // ---- (1) Tap host, attach to the seeded session.
@@ -212,7 +212,7 @@ class ReconnectRepaintE2eTest {
         writeTimings()
         writeSummary()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

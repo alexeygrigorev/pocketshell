@@ -79,7 +79,7 @@ class HostDetailAssistantFlowTest {
     private val hostId = 334L
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         runCatching {
@@ -111,7 +111,7 @@ class HostDetailAssistantFlowTest {
                 path = "/home/u/code",
             ),
         )
-    }
+    } }
 
     @After
     fun tearDown() {

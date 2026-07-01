@@ -89,7 +89,7 @@ class MultiHostSessionE2eTest {
     }
 
     @Test
-    fun switchingBetweenHostsPreservesRemoteSessionTranscript() = runBlocking {
+    fun switchingBetweenHostsPreservesRemoteSessionTranscript() { runBlocking {
         val key = readFixtureKey()
         val pem = SshKey.Pem(key)
         waitForSshFixtureReady(pem, port = AGENTS_PORT)
@@ -163,7 +163,7 @@ class MultiHostSessionE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()

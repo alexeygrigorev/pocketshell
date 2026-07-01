@@ -80,7 +80,7 @@ class SystemBackForegroundE2eTest {
     }
 
     @Test
-    fun systemBackOnHostDetailAndTerminalKeepsAppForegrounded() = kotlinx.coroutines.runBlocking {
+    fun systemBackOnHostDetailAndTerminalKeepsAppForegrounded() { kotlinx.coroutines.runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
@@ -167,7 +167,7 @@ class SystemBackForegroundE2eTest {
             )
         }
         Unit
-    }
+    } }
 
     /**
      * Wait until the host-detail (FolderList) screen is mounted. Gates on the

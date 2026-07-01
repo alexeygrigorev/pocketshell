@@ -22,7 +22,7 @@ import org.junit.runner.RunWith
 class DisconnectBlackholeE2eTest : NetworkFaultProofBase() {
 
     @Test
-    fun halfOpenBlackholeSurfacesErrorAndReconnectsExplicitly() = runBlocking {
+    fun halfOpenBlackholeSurfacesErrorAndReconnectsExplicitly() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -69,5 +69,5 @@ class DisconnectBlackholeE2eTest : NetworkFaultProofBase() {
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore}",
             ),
         )
-    }
+    } }
 }

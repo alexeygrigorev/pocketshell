@@ -142,7 +142,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
      * exists stays reachable + readable after live detection drops.
      */
     @Test
-    fun conversationStaysReachableAfterLiveDetectionDropsWithLoadedTranscript() = runBlocking {
+    fun conversationStaysReachableAfterLiveDetectionDropsWithLoadedTranscript() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
 
@@ -234,7 +234,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         captureFullFrame("issue1057-conversation-after-detection-drop")
         stamp("tap_to_switch_shows_transcript_after_exit_ok")
         Unit
-    }
+    } }
 
     /**
      * #894 no-flap adjacency control: a genuine no-agent recorded shell shows NO
@@ -243,7 +243,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
      * conversation-less shell.
      */
     @Test
-    fun plainShellShowsNoConversationToggleEvenThroughTeardown() = runBlocking {
+    fun plainShellShowsNoConversationToggleEvenThroughTeardown() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
 
@@ -270,7 +270,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         captureFullFrame("issue1057-plain-shell-no-toggle")
         stamp("plain_shell_no_toggle_through_teardown_ok")
         Unit
-    }
+    } }
 
     // -------------------------------------------------------------- seed-before-launch
 

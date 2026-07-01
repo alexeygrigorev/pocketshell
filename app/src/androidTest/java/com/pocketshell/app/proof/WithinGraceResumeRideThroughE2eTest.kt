@@ -74,7 +74,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
     }
 
     @Test
-    fun withinGraceForegroundDuringLinkCutRidesThroughWithoutReconnect() = runBlocking {
+    fun withinGraceForegroundDuringLinkCutRidesThroughWithoutReconnect() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -183,7 +183,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
                 "probe_results=" + causeTrail.count { it.fields["stage"] == "tmux_probe_result" },
             ),
         )
-    }
+    } }
 
     /**
      * Issue #754 (slice 1c-iv-c): the maintainer's #1 dogfood blocker, reproduced as the
@@ -223,7 +223,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
      * PASSES after the fix.
      */
     @Test
-    fun withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect() = runBlocking {
+    fun withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -327,7 +327,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
                     .joinToString(",") { "${it.fields["outcome"]}" },
             ),
         )
-    }
+    } }
 
     /**
      * Issue #754: assert the "Attaching…" SwitchingLoadingPlaceholder overlay

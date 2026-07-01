@@ -58,7 +58,7 @@ class AutoForwardControlScreenshotTest {
     }
 
     @Test
-    fun capturesAutoForwardOffAndOn() = runBlocking {
+    fun capturesAutoForwardOffAndOn() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
 
@@ -139,7 +139,7 @@ class AutoForwardControlScreenshotTest {
         }
 
         withContext(Dispatchers.Main) { viewModel.leavePanel() }
-    }
+    } }
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

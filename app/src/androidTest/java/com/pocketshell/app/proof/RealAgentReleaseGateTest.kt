@@ -109,7 +109,7 @@ class RealAgentReleaseGateTest {
     }
 
     @Test
-    fun seedDockerHostWritesCompleteReadyBootstrapCache() = runBlocking {
+    fun seedDockerHostWritesCompleteReadyBootstrapCache() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
         val hostRowTag = seedDockerHost(key, "Real Agent Ready Cache")
@@ -138,10 +138,10 @@ class RealAgentReleaseGateTest {
             "expected release-gate seed to model an enabled pocketshell daemon",
             host.pocketshellDaemonEnabled == true,
         )
-    }
+    } }
 
     @Test
-    fun realClaudeCliRunsInTmuxPaneAndProducesJsonlConversationLog() = runBlocking {
+    fun realClaudeCliRunsInTmuxPaneAndProducesJsonlConversationLog() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
@@ -193,10 +193,10 @@ class RealAgentReleaseGateTest {
             cleanupRemoteFixture(key, workDir, sessionName, claudeProjectsCwd = workDir)
         }
         Unit
-    }
+    } }
 
     @Test
-    fun realCodexCliRunsInTmuxPaneAndProducesJsonlRolloutLog() = runBlocking {
+    fun realCodexCliRunsInTmuxPaneAndProducesJsonlRolloutLog() { runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key), port = REAL_AGENT_PORT)
@@ -241,7 +241,7 @@ class RealAgentReleaseGateTest {
             cleanupRemoteFixture(key, workDir, sessionName, claudeProjectsCwd = null)
         }
         Unit
-    }
+    } }
 
     // ---------------- helpers ----------------
 

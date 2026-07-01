@@ -83,7 +83,7 @@ class PortForwardPanelLifecycleE2eTest {
     }
 
     @Test
-    fun lifecycleStopKeepsTunnels_lifecycleStartDoesNotReconnectThem() = runBlocking {
+    fun lifecycleStopKeepsTunnels_lifecycleStartDoesNotReconnectThem() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
 
@@ -190,7 +190,7 @@ class PortForwardPanelLifecycleE2eTest {
         withContext(Dispatchers.Main) {
             viewModel.leavePanel()
         }
-    }
+    } }
 
     private suspend fun waitFor(label: String, predicate: () -> Boolean) {
         while (!predicate()) {

@@ -64,7 +64,7 @@ class FolderListClientCacheInstantRenderDockerTest {
     private val fixturePort: Int get() = DEFAULT_PORT
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -84,10 +84,10 @@ class FolderListClientCacheInstantRenderDockerTest {
             .build()
         cache = TreeClientCache(context)
         waitForSshFixtureReady(sshKey, port = fixturePort)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         if (createdSessions.isNotEmpty()) {
             runCatching {
@@ -112,10 +112,10 @@ class FolderListClientCacheInstantRenderDockerTest {
         runCatching { db.close() }
         runCatching { keyFile.delete() }
         runCatching { cache.write(HOST_NAME, TreeClientCache.CachedTree(nodes = emptyList())) }
-    }
+    } }
 
     @Test
-    fun coldConnectRendersCachedTreeInstantly_thenReconcilesAgainstLiveHost(): Unit = runBlocking {
+    fun coldConnectRendersCachedTreeInstantly_thenReconcilesAgainstLiveHost(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue867-$suffix"
         val sessionName = "issue867-$suffix"
@@ -256,7 +256,7 @@ class FolderListClientCacheInstantRenderDockerTest {
                 "(authoritative confirm) — state=$finalState",
             finalState.flatSessions.any { it.sessionName == sessionName },
         )
-    }
+    } }
 
     private fun newViewModel(): FolderListViewModel {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

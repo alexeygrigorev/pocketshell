@@ -60,7 +60,7 @@ class ProfileChipRelaunchDockerTest {
     private val zaiProfileLabel = "Claude (Z.AI)"
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (cleanupCommands.isNotEmpty()) {
             runCatching {
                 withTimeout(15_000) {
@@ -69,10 +69,10 @@ class ProfileChipRelaunchDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun zaiSessionRelaunchedAsDefaultClaudeDropsTheStaleProfileChip(): Unit = runBlocking {
+    fun zaiSessionRelaunchedAsDefaultClaudeDropsTheStaleProfileChip(): Unit { runBlocking {
         bootstrapKey()
         waitForSshFixtureReady(sshKey)
 
@@ -153,7 +153,7 @@ class ProfileChipRelaunchDockerTest {
                 "was '${finalEntry.recordedProfile}'",
             finalEntry.recordedProfile,
         )
-    }
+    } }
 
     // ----------------------------------------------------------- Helpers
 

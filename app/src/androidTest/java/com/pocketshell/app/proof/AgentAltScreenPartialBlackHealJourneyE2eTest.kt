@@ -130,7 +130,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     }
 
     @Test
-    fun steadyStateWatchdogHealsPartialBlackAltScreenAgentPane() = runBlocking {
+    fun steadyStateWatchdogHealsPartialBlackAltScreenAgentPane() { runBlocking {
         // Issue #788/#848: the sparse alt-screen tmux session + DB host row were
         // already seeded BEFORE MainActivity launched, by [seedBeforeLaunch] in
         // the rule chain's `before()`. Attach to it from the freshly-launched app.
@@ -145,7 +145,12 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
         // Clear the alt screen and paint ONLY the live status line (cursor-addressed) — the
         // maintainer's semi-black: upper rows black, only the status line survives. The REMOTE
         // tmux grid keeps the full sparse frame, so the transport stays GUARANTEED LIVE.
-        feedFrameToEmulator("[2J[H[24;1H Working 7  esc to interrupt streaming the reply")
+        // Real ESC (0x1B) bytes: this feeds the LOCAL emulator directly via
+        // emulator.append() (no remote printf to expand octal \033), so the CSI
+        // control sequences must carry an actual ESC or they paint as literal
+        // text and never clear the screen (the injected partial-black is a no-op).
+        val esc = ""
+        feedFrameToEmulator("$esc[2J$esc[H$esc[24;1H Working 7  esc to interrupt streaming the reply")
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         capturePaintedRows("issue1138-01-partial-black")
 
@@ -198,7 +203,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
         writeSummary()
-    }
+    } }
 
     // ---------------------------------------------------------------- Heal driver
 

@@ -155,7 +155,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
     }
 
     @Test
-    fun bareLossHoldsTheLeaseThenRestoreDrivesAFastReconnect() = runBlocking<Unit> {
+    fun bareLossHoldsTheLeaseThenRestoreDrivesAFastReconnect() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -276,7 +276,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
         captureViewport("issue997-03-after-restore")
 
         writeTimings()
-    }
+    } }
 
     /**
      * ISSUE #1065 (R5, audit C5) — the BOUNDED-PROBE redial arm after a LONG IDLE
@@ -304,7 +304,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
      * won — neither is true here) → recovers Connected with a painted viewport.
      */
     @Test
-    fun longIdleOutageThenRestoreRedialsViaBoundedProbeNotFastPath() = runBlocking<Unit> {
+    fun longIdleOutageThenRestoreRedialsViaBoundedProbeNotFastPath() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -408,7 +408,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
         captureViewport("issue1065redial-03-redialled")
 
         writeTimings()
-    }
+    } }
 
     private fun currentViewModel(): TmuxSessionViewModel {
         lateinit var vm: TmuxSessionViewModel

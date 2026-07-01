@@ -76,7 +76,7 @@ class FolderListOldCliHydrateDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         // Issue #849: NO assumeFalse(isRunningOnCi()) self-skip. The
         // emulator-journey workflow (and the pre-release gate) now start the
         // agents-old-cli fixture on 2238, so this connect-break regression
@@ -102,10 +102,10 @@ class FolderListOldCliHydrateDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey, port = OLD_CLI_PORT)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         if (createdSessions.isNotEmpty()) {
             runCatching {
@@ -129,7 +129,7 @@ class FolderListOldCliHydrateDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     /**
      * RED on v0.4.10: with a host whose CLI lacks `tree`, the cold-start hydrate
@@ -137,7 +137,7 @@ class FolderListOldCliHydrateDockerTest {
      * LIVE tree (the seeded session appears) within the connect window.
      */
     @Test
-    fun connectsToLiveTree_onHostWithOldCliLackingTreeCommand(): Unit = runBlocking {
+    fun connectsToLiveTree_onHostWithOldCliLackingTreeCommand(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue847-old-cli-$suffix"
         val sessionName = "issue847-old-cli-$suffix"
@@ -216,7 +216,7 @@ class FolderListOldCliHydrateDockerTest {
                 (finalState as FolderListUiState.Ready).flatSessions
                     .any { it.sessionName == sessionName },
         )
-    }
+    } }
 
     private fun newViewModel(): FolderListViewModel {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

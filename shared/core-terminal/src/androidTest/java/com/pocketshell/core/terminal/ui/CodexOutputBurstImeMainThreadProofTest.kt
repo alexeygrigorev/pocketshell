@@ -110,7 +110,7 @@ class CodexOutputBurstImeMainThreadProofTest {
     private var observedImeBottomPx: Int = 0
 
     @Test
-    fun codexOutputBurstWithKeyboardUpKeepsMainThreadResponsive() = runBlocking {
+    fun codexOutputBurstWithKeyboardUpKeepsMainThreadResponsive() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
@@ -483,7 +483,7 @@ class CodexOutputBurstImeMainThreadProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #796 (REOPENED) — the OTHER half of the gate: a SHELL / non-agent pane
@@ -500,7 +500,7 @@ class CodexOutputBurstImeMainThreadProofTest {
      * and scanning the viewport for a non-agent pane.
      */
     @Test
-    fun shellPaneStillRunsAffordanceScanners() = runBlocking {
+    fun shellPaneStillRunsAffordanceScanners() { runBlocking {
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -571,7 +571,7 @@ class CodexOutputBurstImeMainThreadProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

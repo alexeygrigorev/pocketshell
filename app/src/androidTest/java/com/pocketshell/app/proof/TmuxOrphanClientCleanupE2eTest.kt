@@ -116,7 +116,7 @@ class TmuxOrphanClientCleanupE2eTest {
     }
 
     @Test
-    fun closingTheAppDoesNotLeaveAnOrphanCcClient() = runBlocking {
+    fun closingTheAppDoesNotLeaveAnOrphanCcClient() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -229,7 +229,7 @@ class TmuxOrphanClientCleanupE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

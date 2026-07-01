@@ -145,7 +145,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
      * Runs unchanged in-fixture (the absence assertion needs no daemon classify).
      */
     @Test
-    fun plainShellRecordedSessionShowsNoConversationToggle() = runBlocking {
+    fun plainShellRecordedSessionShowsNoConversationToggle() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
 
@@ -168,7 +168,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         captureFullFrame("issue962-plain-shell-no-toggle")
         stamp("plain_shell_no_toggle_ok")
         Unit
-    }
+    } }
 
     /**
      * Issue #975 (B1, classify-miss) — the REAL-PATH reproduction of the
@@ -185,7 +185,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
      * "Conversation" segment.
      */
     @Test
-    fun conversationToggleReturnsForMaskedLiveClaudeInRecordedShellSession() = runBlocking {
+    fun conversationToggleReturnsForMaskedLiveClaudeInRecordedShellSession() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
 
@@ -255,7 +255,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         captureFullFrame("issue975-masked-claude-toggle-returns")
         stamp("masked_claude_toggle_returned_ok")
         Unit
-    }
+    } }
 
     // -------------------------------------------------------------- seed-before-launch
 

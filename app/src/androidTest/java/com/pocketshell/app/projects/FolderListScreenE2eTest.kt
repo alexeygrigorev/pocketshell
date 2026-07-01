@@ -89,7 +89,7 @@ class FolderListScreenE2eTest {
     private val hostId: Long = 7L
 
     @Before
-    fun openDatabase(): Unit = runBlocking {
+    fun openDatabase(): Unit { runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -131,7 +131,7 @@ class FolderListScreenE2eTest {
                 path = "~/archive",
             ),
         )
-    }
+    } }
 
     @After
     fun closeDatabase() {

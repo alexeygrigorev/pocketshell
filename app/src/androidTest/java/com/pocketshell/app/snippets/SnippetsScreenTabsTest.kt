@@ -42,7 +42,7 @@ class SnippetsScreenTabsTest {
     private var hostId: Long = 0L
 
     @Before
-    fun setUp() = runBlocking {
+    fun setUp() { runBlocking {
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
@@ -66,7 +66,7 @@ class SnippetsScreenTabsTest {
         )
         viewModel = SnippetsViewModel(db.snippetDao())
         commandTemplatesViewModel = CommandTemplatesViewModel(db.commandTemplateDao())
-    }
+    } }
 
     @After
     fun tearDown() {
@@ -74,7 +74,7 @@ class SnippetsScreenTabsTest {
     }
 
     @Test
-    fun managerTabs_filterPromptsAndCommands() = runBlocking {
+    fun managerTabs_filterPromptsAndCommands() { runBlocking {
         db.snippetDao().insert(
             SnippetEntity(
                 hostId = hostId,
@@ -112,7 +112,7 @@ class SnippetsScreenTabsTest {
 
         compose.onNodeWithText("List files").assertIsDisplayed()
         compose.onNodeWithText("Continue task").assertDoesNotExist()
-    }
+    } }
 
     @Test
     fun addSnippet_defaultsToSelectedTabKind() {

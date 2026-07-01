@@ -61,7 +61,7 @@ class FolderListGatewayDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -80,10 +80,10 @@ class FolderListGatewayDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         // Best-effort cleanup — kill any tmux sessions we created so
         // re-runs / sibling tests start from a clean slate.
         if (createdSessions.isEmpty()) return@runBlocking
@@ -102,10 +102,10 @@ class FolderListGatewayDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun gatewayGroupsThreeSessionsAcrossTwoFolders(): Unit = runBlocking {
+    fun gatewayGroupsThreeSessionsAcrossTwoFolders(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folderA = "/tmp/issue171-folder-a-$suffix"
         val folderB = "/tmp/issue171-folder-b-$suffix"
@@ -230,5 +230,5 @@ class FolderListGatewayDockerTest {
         assertEquals(SessionAgentKind.Shell, entries.first().agentKind)
         assertNotNull(rowA)
         assertNotNull(rowB)
-    }
+    } }
 }

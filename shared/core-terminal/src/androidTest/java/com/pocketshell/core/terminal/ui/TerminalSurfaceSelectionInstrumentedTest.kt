@@ -70,7 +70,7 @@ class TerminalSurfaceSelectionInstrumentedTest {
     }
 
     @Test
-    fun selectingTextAndCopyingRoutesPlainTextThroughClipboardSink() = runBlocking {
+    fun selectingTextAndCopyingRoutesPlainTextThroughClipboardSink() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -178,10 +178,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             state.detachExternalProducer()
             state.setOnCopySelection(null)
         }
-    }
+    } }
 
     @Test
-    fun visibleUrlIsScannedAndHitTestRoutesTapToUrl() = runBlocking {
+    fun visibleUrlIsScannedAndHitTestRoutesTapToUrl() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -360,10 +360,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun visibleSmartSelectionHitTestChoosesPressedSameLineMatch() = runBlocking {
+    fun visibleSmartSelectionHitTestChoosesPressedSameLineMatch() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -454,10 +454,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun visibleSmartSelectionAffordancesUseQuietChromeForPathAndError() = runBlocking {
+    fun visibleSmartSelectionAffordancesUseQuietChromeForPathAndError() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -546,10 +546,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun visibleSmartSelectionSupportsLegacyValueOnlyMatcherForHitTesting() = runBlocking {
+    fun visibleSmartSelectionSupportsLegacyValueOnlyMatcherForHitTesting() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -610,10 +610,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun visibleSmartSelectionCanBeRecomputedAfterScrollWithoutNewOutput() = runBlocking {
+    fun visibleSmartSelectionCanBeRecomputedAfterScrollWithoutNewOutput() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -684,10 +684,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun visibleUrlRegionsCanBeRecomputedAfterScrollWithoutNewOutput() = runBlocking {
+    fun visibleUrlRegionsCanBeRecomputedAfterScrollWithoutNewOutput() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -758,10 +758,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun emulatorSetInvalidatesViewportForOverlayRecompute() = runBlocking {
+    fun emulatorSetInvalidatesViewportForOverlayRecompute() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -809,7 +809,7 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     private object LegacyTicketMatcher : TerminalMatcher {
         override fun matches(text: String): List<TerminalMatch> =

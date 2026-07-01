@@ -44,7 +44,7 @@ import java.io.FileOutputStream
 class WrappedUrlReassemblyInstrumentedTest {
 
     @Test
-    fun urlWrappedAcrossRowsIsReassembledIntoOneFullTarget() = runBlocking {
+    fun urlWrappedAcrossRowsIsReassembledIntoOneFullTarget() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -139,7 +139,7 @@ class WrappedUrlReassemblyInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     private fun centerX(region: UrlRegion, view: TerminalView): Float {
         val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }

@@ -60,7 +60,7 @@ class LinkTapParsingDockerTest {
     private val seededDirs = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -72,10 +72,10 @@ class LinkTapParsingDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (seededDirs.isNotEmpty()) {
             withTimeout(15_000) {
                 connect()?.use { session ->
@@ -84,12 +84,12 @@ class LinkTapParsingDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     // --- #558 bug 3: `~` expands to $HOME --------------------------------------
 
     @Test
-    fun tildePathExpandsToHomeAndOpensTheImageViewer(): Unit = runBlocking {
+    fun tildePathExpandsToHomeAndOpensTheImageViewer(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         // Seed a real PNG under $HOME so a `~/...` path must expand to open it.
         val relUnderHome = "issue558-tilde-$suffix/shot.png"
@@ -128,12 +128,12 @@ class LinkTapParsingDockerTest {
         }
         composeRule.onNodeWithTag(FILE_VIEWER_IMAGE_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue558-tilde-path-opens")
-    }
+    } }
 
     // --- #558 bug 1: relative `../` normalizes for resolution + breadcrumb -----
 
     @Test
-    fun relativeDotDotPathResolvesAndShowsNormalizedBreadcrumb(): Unit = runBlocking {
+    fun relativeDotDotPathResolvesAndShowsNormalizedBreadcrumb(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         // Seed the file at a known absolute path.
         val baseDir = "/tmp/issue558-rel-$suffix"
@@ -181,7 +181,7 @@ class LinkTapParsingDockerTest {
         val resolved = RemotePathResolver.resolve(relInput, cwd)
         assertEquals("$baseDir/target/shot.png", resolved)
         assertTrue("breadcrumb path must not contain literal ..", !resolved.contains(".."))
-    }
+    } }
 
     // (The #558 bug-2 wrapped-URL reassembly is covered on the live grid by
     // core-terminal's WrappedUrlReassemblyInstrumentedTest, which can reach the
@@ -190,7 +190,7 @@ class LinkTapParsingDockerTest {
     // --- #557: conversation-view path opens the viewer, not the keyboard ------
 
     @Test
-    fun conversationPathTapOpensFileViewer(): Unit = runBlocking {
+    fun conversationPathTapOpensFileViewer(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val cwd = "/tmp/issue557-convo-$suffix"
         val relPath = "out/shot.png"
@@ -269,7 +269,7 @@ class LinkTapParsingDockerTest {
         }
         composeRule.onNodeWithTag(FILE_VIEWER_IMAGE_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue557-conversation-path-opens-viewer")
-    }
+    } }
 
     private fun instrumentationRunOnMain(block: () -> Unit) {
         InstrumentationRegistry.getInstrumentation().runOnMainSync(block)

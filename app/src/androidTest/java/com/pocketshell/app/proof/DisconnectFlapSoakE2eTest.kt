@@ -40,7 +40,7 @@ class DisconnectFlapSoakE2eTest : NetworkFaultProofBase() {
     }
 
     @Test
-    fun repeatedBlackholeFlapsRecoverWithoutStaleClientsOrUnboundedMemoryGrowth() = runBlocking {
+    fun repeatedBlackholeFlapsRecoverWithoutStaleClientsOrUnboundedMemoryGrowth() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -119,7 +119,7 @@ class DisconnectFlapSoakE2eTest : NetworkFaultProofBase() {
                 "explicit_connect_attempts=$explicitConnectAttempts",
             ),
         )
-    }
+    } }
 
     private fun usedHeapKb(): Long {
         Runtime.getRuntime().gc()

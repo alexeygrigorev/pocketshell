@@ -46,7 +46,7 @@ class TerminalLabInteractiveInputTest {
     private val captures = mutableListOf<InteractiveCapture>()
 
     @Test
-    fun fullScreenTuiAcceptsEditingNavigationEnterAndCtrlCThroughTerminalView() = runBlocking {
+    fun fullScreenTuiAcceptsEditingNavigationEnterAndCtrlCThroughTerminalView() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -149,7 +149,7 @@ class TerminalLabInteractiveInputTest {
             InteractiveArtifacts.writeTimings(timings)
             Unit
         }
-    }
+    } }
 
     private fun withTerminalInputConnection(
         scenario: ActivityScenario<TerminalLabActivity>,

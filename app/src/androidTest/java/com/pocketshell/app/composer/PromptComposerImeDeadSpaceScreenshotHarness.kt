@@ -90,23 +90,23 @@ class PromptComposerImeDeadSpaceScreenshotHarness {
     )
 
     @Test
-    fun emptyDraftKeyboardUpHold() = stageAndHold(draft = null)
+    fun emptyDraftKeyboardUpHold() { stageAndHold(draft = null) }
 
     // Issue #873: the maintainer's EXACT reported state — a SHORT one-word draft
     // ("gghh") with the keyboard up. Stages it for the keyboard-up screenshot that
     // must show the compact field with NO ~1cm dead band below the text.
     @Test
-    fun shortDraftKeyboardUpHold() = stageAndHold(draft = "gghh")
+    fun shortDraftKeyboardUpHold() { stageAndHold(draft = "gghh") }
 
     @Test
-    fun longDraftKeyboardUpHold() = stageAndHold(
+    fun longDraftKeyboardUpHold() { stageAndHold(
         draft = "Reduce the connector/indent cell width so the tree lines stop " +
             "overlapping the file name.\n" +
             "Then wrap the long folder paths instead of clipping them.\n" +
             "Wrote 23 lines to issue.md describing the repro.\n" +
             "Make the attachment tiles compact and re-check the keyboard-up layout.\n" +
             "Finally, confirm Send and the paperclip stay reachable above the IME.",
-    )
+    ) }
 
     private fun stageAndHold(draft: String?) {
         val holdMs = InstrumentationRegistry.getArguments()

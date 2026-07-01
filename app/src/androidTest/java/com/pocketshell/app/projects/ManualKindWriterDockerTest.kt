@@ -53,7 +53,7 @@ class ManualKindWriterDockerTest {
     private val cleanupCommands = mutableListOf<String>()
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (cleanupCommands.isNotEmpty()) {
             runCatching {
                 withTimeout(15_000) {
@@ -64,10 +64,10 @@ class ManualKindWriterDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun foreignSessionStartsUnknownThenManualPickAndChangeAreDurable(): Unit = runBlocking {
+    fun foreignSessionStartsUnknownThenManualPickAndChangeAreDurable(): Unit { runBlocking {
         bootstrapKey()
         waitForSshFixtureReady(sshKey)
 
@@ -164,7 +164,7 @@ class ManualKindWriterDockerTest {
             ).stdout.trim()
             assertEquals("manual shell classification must persist host-side", "shell", raw)
         }
-    }
+    } }
 
     // ----------------------------------------------------------- Helpers
 

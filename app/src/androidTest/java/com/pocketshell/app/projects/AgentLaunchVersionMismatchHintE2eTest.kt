@@ -38,7 +38,7 @@ import java.io.File
 class AgentLaunchVersionMismatchHintE2eTest {
 
     @Test
-    fun outdatedHostAgentLaunchSurfacesFriendlyHintOnDevice(): Unit = runBlocking {
+    fun outdatedHostAgentLaunchSurfacesFriendlyHintOnDevice(): Unit { runBlocking {
         val gateway = SshFolderListGateway()
         // Reusable extracted seam (issue #853): an old host that rejects the
         // new-in-this-release subcommands (here: `agent`, surfaced by the
@@ -88,7 +88,7 @@ class AgentLaunchVersionMismatchHintE2eTest {
         )
 
         writeArtifact(hint, session.execCommands)
-    }
+    } }
 
     private fun writeArtifact(hint: String, commands: List<String>) {
         val dir = File(

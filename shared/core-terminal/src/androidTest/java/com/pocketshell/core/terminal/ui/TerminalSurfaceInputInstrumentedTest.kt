@@ -31,7 +31,7 @@ import java.io.OutputStream
 class TerminalSurfaceInputInstrumentedTest {
 
     @Test
-    fun rawCommandImeCommitRoutesTextAndEnterToRemoteStdin() = runBlocking {
+    fun rawCommandImeCommitRoutesTextAndEnterToRemoteStdin() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -80,10 +80,10 @@ class TerminalSurfaceInputInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun rawMultiLineImeCommitRoutesAsOneBracketedPasteBlock() = runBlocking {
+    fun rawMultiLineImeCommitRoutesAsOneBracketedPasteBlock() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -123,10 +123,10 @@ class TerminalSurfaceInputInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun smartTextImeStagesCommittedTextUntilEnterConfirms() = runBlocking {
+    fun smartTextImeStagesCommittedTextUntilEnterConfirms() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -191,10 +191,10 @@ class TerminalSurfaceInputInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun smartTextSendKeyEventEnterFlushesStagedTextBeforeCarriageReturn() = runBlocking {
+    fun smartTextSendKeyEventEnterFlushesStagedTextBeforeCarriageReturn() { runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             instrumentation.runOnMainSync {
                 inputConnection.commitText("echo ok", 1)
@@ -205,10 +205,10 @@ class TerminalSurfaceInputInstrumentedTest {
             remoteStdin.awaitSnapshot("echo ok\r")
             assertEquals("echo ok\r", remoteStdin.snapshot())
         }
-    }
+    } }
 
     @Test
-    fun smartTextMultiLineImeCommitBypassesStaleStagingAndRoutesAsBracketedPaste() = runBlocking {
+    fun smartTextMultiLineImeCommitBypassesStaleStagingAndRoutesAsBracketedPaste() { runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             val paste = "alpha\nbeta\ngamma"
             val expected = "\u001B[200~$paste\u001B[201~"
@@ -224,10 +224,10 @@ class TerminalSurfaceInputInstrumentedTest {
             assertTrue("staged smart text must not prefix paste payload", !remoteStdin.snapshot().contains("discard me"))
             assertTrue("multi-line smart IME paste must not send Enter bytes", !remoteStdin.snapshot().contains("\r"))
         }
-    }
+    } }
 
     @Test
-    fun smartTextComposingTextWaitsForEditorConfirmation() = runBlocking {
+    fun smartTextComposingTextWaitsForEditorConfirmation() { runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             instrumentation.runOnMainSync {
                 inputConnection.setComposingText("echo composed", 1)
@@ -242,10 +242,10 @@ class TerminalSurfaceInputInstrumentedTest {
             remoteStdin.awaitSnapshot("echo composed\r")
             assertEquals("echo composed\r", remoteStdin.snapshot())
         }
-    }
+    } }
 
     @Test
-    fun smartTextStagingClearsBeforeCtrlCAndEscapeControls() = runBlocking {
+    fun smartTextStagingClearsBeforeCtrlCAndEscapeControls() { runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             instrumentation.runOnMainSync {
                 inputConnection.commitText("discard me", 1)
@@ -267,10 +267,10 @@ class TerminalSurfaceInputInstrumentedTest {
             remoteStdin.awaitSnapshot("\u001B\r")
             assertEquals("\u001B\r", remoteStdin.snapshot())
         }
-    }
+    } }
 
     @Test
-    fun smartTextStagingClearsBeforePasteActionAndHotkey() = runBlocking {
+    fun smartTextStagingClearsBeforePasteActionAndHotkey() { runBlocking {
         withSmartTextInputConnection { instrumentation, inputConnection, remoteStdin ->
             instrumentation.runOnMainSync {
                 inputConnection.commitText("discard me", 1)
@@ -292,7 +292,7 @@ class TerminalSurfaceInputInstrumentedTest {
             remoteStdin.awaitSnapshot("\u0016\r")
             assertEquals("\u0016\r", remoteStdin.snapshot())
         }
-    }
+    } }
 
     private suspend fun withSmartTextInputConnection(
         block: suspend (Instrumentation, InputConnection, RecordingOutputStream) -> Unit,

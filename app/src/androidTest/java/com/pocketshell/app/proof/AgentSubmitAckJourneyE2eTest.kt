@@ -122,7 +122,7 @@ class AgentSubmitAckJourneyE2eTest {
     }
 
     @Test
-    fun composerSendSubmitsPromptIncludingWrappedLongPromptOnAgentPane() = runBlocking<Unit> {
+    fun composerSendSubmitsPromptIncludingWrappedLongPromptOnAgentPane() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
@@ -216,7 +216,7 @@ class AgentSubmitAckJourneyE2eTest {
             appendLine("short_prompt=$shortPrompt")
             appendLine("long_prompt=$longPrompt")
         })
-    }
+    } }
 
     /**
      * Sidecar SSH `capture-pane -p` of the seeded session, polled until the

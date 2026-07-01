@@ -107,7 +107,7 @@ class FolderListDurableTreeDaemonDockerTest {
     private var hostName: String = "issue839-host"
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         // Issue #839: NO assumeFalse(isRunningOnCi()) self-skip. The
         // emulator-journey workflow now brings up the `agents-daemon` fixture on
         // port 2239 (and verifies its real `pocketshell tree` persists) AND this
@@ -135,10 +135,10 @@ class FolderListDurableTreeDaemonDockerTest {
             .allowMainThreadQueries()
             .build()
         waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         runCatching {
             withTimeout(20_000) {
@@ -161,7 +161,7 @@ class FolderListDurableTreeDaemonDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     /**
      * The load-bearing journey: collapse a folder + hold an order, KILL +
@@ -170,7 +170,7 @@ class FolderListDurableTreeDaemonDockerTest {
      * a delta and a refresh picks up an added session.
      */
     @Test
-    fun durableTreeSurvivesAppKillAndRelaunch_thenReconcilesDeltas(): Unit = runBlocking {
+    fun durableTreeSurvivesAppKillAndRelaunch_thenReconcilesDeltas(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         hostName = "issue839-host-$suffix"
         val rootDir = "/tmp/issue839-$suffix"
@@ -376,7 +376,7 @@ class FolderListDurableTreeDaemonDockerTest {
             afterAdd.flatSessions.any { it.sessionName == gammaSession } &&
                 afterAdd.flatSessions.any { it.sessionName == alphaSession },
         )
-    }
+    } }
 
     private fun bind(vm: FolderListViewModel, host: HostEntity) {
         vm.bind(

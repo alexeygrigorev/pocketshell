@@ -95,7 +95,7 @@ class TmuxShellComposerOcclusionE2eTest {
     }
 
     @Test
-    fun shellComposerControlsAreVisibleAndReachableInBothKeyboardStates() = runBlocking {
+    fun shellComposerControlsAreVisibleAndReachableInBothKeyboardStates() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedShellSession(key)
@@ -213,7 +213,7 @@ class TmuxShellComposerOcclusionE2eTest {
             keyBarBottomScreenPx < 0,
         )
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- IME insets
 

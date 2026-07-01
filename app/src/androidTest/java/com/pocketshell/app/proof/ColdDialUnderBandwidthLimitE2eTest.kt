@@ -61,7 +61,7 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
      * cover a multi-second handshake, the dial would abort and this goes red.
      */
     @Test
-    fun coldDialUnderBufferbloatCompletesWithinBudget() = runBlocking {
+    fun coldDialUnderBufferbloatCompletesWithinBudget() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -133,7 +133,7 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
             ),
         )
         Unit
-    }
+    } }
 
     /**
      * (2) Genuinely STALLED cold dial: the link is up (TCP connects through the
@@ -143,7 +143,7 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
      * indefinite spinner. The retry affordance proves the failure is recoverable.
      */
     @Test
-    fun stalledColdDialFailsCleanlyToRetryablePickerWithoutWedge() = runBlocking {
+    fun stalledColdDialFailsCleanlyToRetryablePickerWithoutWedge() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -204,7 +204,7 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
             ),
         )
         Unit
-    }
+    } }
 
     private fun waitForHostRow(hostRowTag: String) {
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {

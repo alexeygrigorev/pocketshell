@@ -88,7 +88,7 @@ class ShowKeyboardChipE2eTest {
     }
 
     @Test
-    fun showKeyboardChipBringsUpSoftInput() = runBlocking {
+    fun showKeyboardChipBringsUpSoftInput() { runBlocking {
         // Issue #171 (round 2, D22 hard-cut): the "Continue with SSH"
         // raw-shell escape hatch was deleted when the host-tap surface
         // flipped to FolderListScreen. The chip behaviour this test
@@ -198,7 +198,7 @@ class ShowKeyboardChipE2eTest {
                 "ime_visible_after_tap=$shown raisedMs=$raisedMs",
             shown,
         )
-    }
+    } }
 
     // --- Host seeding ------------------------------------------------------
 

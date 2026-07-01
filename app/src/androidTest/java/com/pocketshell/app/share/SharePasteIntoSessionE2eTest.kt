@@ -117,7 +117,7 @@ class SharePasteIntoSessionE2eTest {
     }
 
     @Test
-    fun shareIntentPastesTextIntoAttachedSession() = runBlocking {
+    fun shareIntentPastesTextIntoAttachedSession() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -267,7 +267,7 @@ class SharePasteIntoSessionE2eTest {
             // teardown() unregisters and closes; nothing extra here.
         }
         Unit
-    }
+    } }
 
     private suspend fun pollForPayloadInPane(
         client: TmuxClient,

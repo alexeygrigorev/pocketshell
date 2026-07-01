@@ -10,7 +10,7 @@ import org.junit.Test
 class ReleaseCheckerInstrumentedTest {
 
     @Test
-    fun check_usesFakeReleaseFeedAndReturnsExactDottedApk() = runTest {
+    fun check_usesFakeReleaseFeedAndReturnsExactDottedApk() { runTest {
         val server = MockWebServer()
         server.enqueue(
             MockResponse()
@@ -53,10 +53,10 @@ class ReleaseCheckerInstrumentedTest {
         } finally {
             server.shutdown()
         }
-    }
+    } }
 
     @Test
-    fun check_returnsNullForEqualFakeRelease() = runTest {
+    fun check_returnsNullForEqualFakeRelease() { runTest {
         val server = MockWebServer()
         server.enqueue(
             MockResponse()
@@ -85,5 +85,5 @@ class ReleaseCheckerInstrumentedTest {
         } finally {
             server.shutdown()
         }
-    }
+    } }
 }

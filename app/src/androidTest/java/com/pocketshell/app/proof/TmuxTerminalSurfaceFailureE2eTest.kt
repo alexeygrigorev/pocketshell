@@ -116,7 +116,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
     }
 
     @Test
-    fun keyboardSurfaceFailureAfterLargePromptRecoversWithoutSshReconnect() = runBlocking<Unit> {
+    fun keyboardSurfaceFailureAfterLargePromptRecoversWithoutSshReconnect() { runBlocking<Unit> {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -239,7 +239,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
         )
 
         writeTimings()
-    }
+    } }
 
     // ----------------------------------------------------------------
     // ViewModel access (production seam used by the screen)

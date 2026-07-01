@@ -135,7 +135,7 @@ class TmuxDetachOnBackgroundE2eTest {
     }
 
     @Test
-    fun backgroundingTheAppDetachesTmuxAndDesktopGetsFullSize() = runBlocking {
+    fun backgroundingTheAppDetachesTmuxAndDesktopGetsFullSize() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
@@ -292,7 +292,7 @@ class TmuxDetachOnBackgroundE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

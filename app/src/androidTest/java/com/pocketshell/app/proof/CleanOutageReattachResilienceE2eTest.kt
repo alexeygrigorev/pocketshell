@@ -123,7 +123,7 @@ class CleanOutageReattachResilienceE2eTest {
     }
 
     @Test
-    fun cleanSustainedOutageAutoRecoversWithoutSessionSwitchDance() = runBlocking<Unit> {
+    fun cleanSustainedOutageAutoRecoversWithoutSessionSwitchDance() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -220,7 +220,7 @@ class CleanOutageReattachResilienceE2eTest {
             roundTripped,
         )
         writeTimings()
-    }
+    } }
 
     // -- user-visible recovery helpers (parity with the Slice D specs) -------------
 

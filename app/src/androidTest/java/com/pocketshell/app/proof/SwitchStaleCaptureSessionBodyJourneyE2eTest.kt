@@ -116,7 +116,7 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
     }
 
     @Test
-    fun switchToBWhileAStillStreamsShowsBInBodyAndHeaderNoStaleBoundary() = runBlocking {
+    fun switchToBWhileAStillStreamsShowsBInBodyAndHeaderNoStaleBoundary() { runBlocking {
         val key = requireNotNull(seededKey) { "seed-before-launch key missing" }
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
 
@@ -160,7 +160,7 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
         writeSummary()
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Switch A→B (Back → picker → tap B), then assert from the rendered PANE

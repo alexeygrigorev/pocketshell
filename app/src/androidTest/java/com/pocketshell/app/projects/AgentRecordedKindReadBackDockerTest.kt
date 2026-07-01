@@ -47,7 +47,7 @@ class AgentRecordedKindReadBackDockerTest {
     private val cleanupCommands = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val keyText = instrumentation.context.assets.open("test_key")
             .bufferedReader().use { it.readText() }
@@ -60,10 +60,10 @@ class AgentRecordedKindReadBackDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (cleanupCommands.isNotEmpty()) {
             runCatching {
                 withTimeout(15_000) {
@@ -74,10 +74,10 @@ class AgentRecordedKindReadBackDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun launchedAgentsRecordKindAndGatewayReadsBackTheSameKind(): Unit = runBlocking {
+    fun launchedAgentsRecordKindAndGatewayReadsBackTheSameKind(): Unit { runBlocking {
         val gateway = SshFolderListGateway()
         val host = dockerHost()
         val suffix = System.currentTimeMillis().toString().takeLast(8)
@@ -136,7 +136,7 @@ class AgentRecordedKindReadBackDockerTest {
                 row.agentKind,
             )
         }
-    }
+    } }
 
     private suspend fun ensureRemoteDir(path: String) {
         withTimeout(15_000) {

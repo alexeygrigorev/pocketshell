@@ -142,7 +142,7 @@ class SilentMidSessionDropDetectionE2eTest : NetworkFaultProofBase() {
      * connection-lost indicator never appears inside [DROP_DETECT_WINDOW_MS].
      */
     @Test
-    fun silentIdleDropSurfacesConnectionLostIndicatorWithoutSending() = runBlocking {
+    fun silentIdleDropSurfacesConnectionLostIndicatorWithoutSending() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -223,7 +223,7 @@ class SilentMidSessionDropDetectionE2eTest : NetworkFaultProofBase() {
                 "FAIL until the LivenessProbe (Slice D) lands.",
             detected,
         )
-    }
+    } }
 
     /**
      * #822: after a silent drop, the SAME session must auto-recover (or recover via
@@ -236,7 +236,7 @@ class SilentMidSessionDropDetectionE2eTest : NetworkFaultProofBase() {
      * accepting state on its own.
      */
     @Test
-    fun silentDropAutoRecoversWithoutSessionSwitchDance() = runBlocking {
+    fun silentDropAutoRecoversWithoutSessionSwitchDance() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -323,7 +323,7 @@ class SilentMidSessionDropDetectionE2eTest : NetworkFaultProofBase() {
                 "reconnect ladder (Slice C) lands.",
             recovered && roundTripped,
         )
-    }
+    } }
 
     // -- user-visible state helpers ------------------------------------------------
 

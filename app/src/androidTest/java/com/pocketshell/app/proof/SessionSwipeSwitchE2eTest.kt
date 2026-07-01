@@ -149,7 +149,7 @@ class SessionSwipeSwitchE2eTest {
     }
 
     @Test
-    fun swipeDownPagerSwitchesSessionReusingSshAndDetaching() = runBlocking {
+    fun swipeDownPagerSwitchesSessionReusingSshAndDetaching() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -319,7 +319,7 @@ class SessionSwipeSwitchE2eTest {
         )
 
         Unit
-    }
+    } }
 
     /**
      * Open the session pager with a swipe-DOWN gesture, then swipe it one page

@@ -86,7 +86,7 @@ class HostDetailAssistantFolderDisambiguationTest {
     private val workshopB = "/home/u/code/notes/workshop"
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         runCatching {
@@ -118,7 +118,7 @@ class HostDetailAssistantFolderDisambiguationTest {
                 path = "/home/u/code",
             ),
         )
-    }
+    } }
 
     @After
     fun tearDown() {

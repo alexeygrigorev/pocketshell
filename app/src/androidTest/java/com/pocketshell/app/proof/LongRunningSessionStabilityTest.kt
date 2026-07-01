@@ -158,7 +158,7 @@ class LongRunningSessionStabilityTest {
     }
 
     @Test
-    fun tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth() = runBlocking {
+    fun tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth() { runBlocking {
         assumeLongRunningTestEnabled()
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -314,7 +314,7 @@ class LongRunningSessionStabilityTest {
             runCatching { cleanupTmuxSession(key, sessionName, workDir) }
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #794 fast regression: a ~90s STEADY foreground hold that
@@ -337,7 +337,7 @@ class LongRunningSessionStabilityTest {
      * assertEquals(0, reconnectEvents).
      */
     @Test
-    fun steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds() = runBlocking {
+    fun steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -388,7 +388,7 @@ class LongRunningSessionStabilityTest {
             runCatching { cleanupTmuxSession(key, sessionName, workDir) }
         }
         Unit
-    }
+    } }
 
     // ---------------- helpers ----------------
 

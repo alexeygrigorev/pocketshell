@@ -131,7 +131,7 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
      * (D32 G2).
      */
     @Test
-    fun staleRenderHealsWhileTransportStaysConnectedAcrossAllKinds() = runBlocking {
+    fun staleRenderHealsWhileTransportStaysConnectedAcrossAllKinds() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -155,7 +155,7 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         for (kind in StaleKind.values()) {
             runStaleKind(kind)
         }
-    }
+    } }
 
     private enum class StaleKind { FULLY_BLANK, SCATTERED_FRAGMENT, STALE_AFTER_BURST }
 

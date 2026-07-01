@@ -106,7 +106,7 @@ class TmuxAttachPrefillDockerTest {
     }
 
     @Test
-    fun attachExistingTmuxSessionPrefillsFullScreenQuickly() = runBlocking {
+    fun attachExistingTmuxSessionPrefillsFullScreenQuickly() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val key = instrumentation.context.assets
@@ -330,7 +330,7 @@ class TmuxAttachPrefillDockerTest {
             cleanupRemoteTmuxSession(key, sessionName)
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #259 — the reattach seed must restore tmux's true cursor so the
@@ -356,7 +356,7 @@ class TmuxAttachPrefillDockerTest {
      *    after the live rewrite.
      */
     @Test
-    fun reattachSeedRestoresCursorSoLiveSpinnerRewriteDoesNotGarble() = runBlocking {
+    fun reattachSeedRestoresCursorSoLiveSpinnerRewriteDoesNotGarble() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val key = instrumentation.context.assets
@@ -473,7 +473,7 @@ class TmuxAttachPrefillDockerTest {
             cleanupRemoteTmuxSession(key, sessionName)
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

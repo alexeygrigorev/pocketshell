@@ -78,7 +78,7 @@ class FolderListSessionResumeDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -99,10 +99,10 @@ class FolderListSessionResumeDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         if (createdSessions.isNotEmpty()) {
             runCatching {
@@ -126,10 +126,10 @@ class FolderListSessionResumeDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun sessionReappearsOnFolderTreeAfterBackgroundResume(): Unit = runBlocking {
+    fun sessionReappearsOnFolderTreeAfterBackgroundResume(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue430-resume-$suffix"
         val sessionName = "issue430-resume-$suffix"
@@ -191,7 +191,7 @@ class FolderListSessionResumeDockerTest {
         // 5. Foreground / resume → immediate probe → session reappears.
         relaunchVm.setProcessStartedForTest(true)
         awaitSession(relaunchVm, sessionName)
-    }
+    } }
 
     private fun newViewModel(): FolderListViewModel {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

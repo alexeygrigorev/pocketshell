@@ -62,7 +62,7 @@ class ProfileDiscoveryPickerDockerTest {
     private lateinit var keyFile: File
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -74,10 +74,10 @@ class ProfileDiscoveryPickerDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @Test
-    fun discoversSeededHostProfilesAndSelectsOneEndToEnd(): Unit = runBlocking {
+    fun discoversSeededHostProfilesAndSelectsOneEndToEnd(): Unit { runBlocking {
         val leaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector())
         val gateway = SshProfilesGateway(leaseManager)
         val host = HostEntity(
@@ -189,5 +189,5 @@ class ProfileDiscoveryPickerDockerTest {
                 "${banner.stdout} stderr=${banner.stderr}",
             (banner.stdout + banner.stderr).contains("claude", ignoreCase = true),
         )
-    }
+    } }
 }

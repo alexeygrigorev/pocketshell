@@ -107,7 +107,7 @@ class ConversationOpenLatencyRttDockerTest {
     }
 
     @Test
-    fun coldOpenAndWarmSwitchUnderRealisticRtt(): Unit = runBlocking {
+    fun coldOpenAndWarmSwitchUnderRealisticRtt(): Unit { runBlocking {
         // Opt-in, local-only: the network-fault-proxy is not started by CI.
         Assume.assumeFalse(
             "network-fault-proxy is an opt-in Docker fixture; tests.yml does not start it",
@@ -135,7 +135,7 @@ class ConversationOpenLatencyRttDockerTest {
         // One-way latencies of 75 / 40 ms; toxiproxy delays each direction.
         measureAtRtt(key, keyPath, oneWayMs = 75)
         measureAtRtt(key, keyPath, oneWayMs = 40)
-    }
+    } }
 
     private suspend fun measureAtRtt(key: String, keyPath: String, oneWayMs: Int) {
         val rttMs = oneWayMs * 2

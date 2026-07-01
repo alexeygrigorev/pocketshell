@@ -35,7 +35,7 @@ import org.junit.runner.RunWith
 class StaleLeaseSwitchRecoveryE2eTest : NetworkFaultProofBase() {
 
     @Test
-    fun openingSecondSessionOverStaleLeaseAutoRecoversWithoutDisconnectBand() = runBlocking {
+    fun openingSecondSessionOverStaleLeaseAutoRecoversWithoutDisconnectBand() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -103,7 +103,7 @@ class StaleLeaseSwitchRecoveryE2eTest : NetworkFaultProofBase() {
             ),
         )
         Unit
-    }
+    } }
 
     private companion object {
         // Long enough that the clean socket drop has fully killed the warm

@@ -94,7 +94,7 @@ class CodexOverflowNoReconnectE2eTest {
     }
 
     @Test
-    fun codexStyleTerminalFloodWithComposerSendKeysDoesNotShowReconnect() = runBlocking<Unit> {
+    fun codexStyleTerminalFloodWithComposerSendKeysDoesNotShowReconnect() { runBlocking<Unit> {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -160,7 +160,7 @@ class CodexOverflowNoReconnectE2eTest {
             Log.i(LOG_TAG, "grid before=$gridBefore after=$gridAfter")
         }
         writeTimings()
-    }
+    } }
 
     private fun attachSeededSession(hostRowTag: String) {
         compose.waitUntil(timeoutMillis = 15_000) {

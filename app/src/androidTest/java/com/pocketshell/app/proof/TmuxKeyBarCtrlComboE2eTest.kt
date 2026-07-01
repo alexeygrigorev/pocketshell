@@ -110,7 +110,7 @@ class TmuxKeyBarCtrlComboE2eTest {
     }
 
     @Test
-    fun hotkeysPanelCtrlCInterruptsRunningProcessAndEnterSubmits() = runBlocking {
+    fun hotkeysPanelCtrlCInterruptsRunningProcessAndEnterSubmits() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
@@ -344,7 +344,7 @@ class TmuxKeyBarCtrlComboE2eTest {
                 "key-bar Enter submitted the pending line; got:\n$transcript",
             transcript.split(ENTER_MARKER).size >= 3,
         )
-    }
+    } }
 
     /**
      * Issue #1091 / AC1 — the maintainer was TRAPPED in `nano` (a fully
@@ -369,7 +369,7 @@ class TmuxKeyBarCtrlComboE2eTest {
      * `*-visible-terminal.txt` + `nano-summary.txt` + `timings.txt`.
      */
     @Test
-    fun hotkeysPanelCtrlOAndCtrlXSaveAndExitNanoFromPanelControls() = runBlocking {
+    fun hotkeysPanelCtrlOAndCtrlXSaveAndExitNanoFromPanelControls() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
@@ -507,7 +507,7 @@ class TmuxKeyBarCtrlComboE2eTest {
                 "'$NANO_CONTENT' from disk, proving the `^O` save persisted; got tail:\n$catOutput",
             catOutput.contains(NANO_CONTENT),
         )
-    }
+    } }
 
     private fun buildNanoSummary(nanoFile: String): String = buildString {
         appendLine("issue=1091 scenario=nano-save-exit-from-hotkeys-panel")

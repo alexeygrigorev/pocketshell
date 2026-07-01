@@ -98,7 +98,7 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
     private var observedImeBottomPx: Int = 0
 
     @Test
-    fun openingComposerDuringCodexBurstDoesNotRecomposeTerminalPager() = runBlocking {
+    fun openingComposerDuringCodexBurstDoesNotRecomposeTerminalPager() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
@@ -282,7 +282,7 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     // --------------------------------------------------------------- harness
 

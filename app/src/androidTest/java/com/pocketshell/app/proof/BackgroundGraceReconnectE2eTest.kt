@@ -156,7 +156,7 @@ class BackgroundGraceReconnectE2eTest {
     }
 
     @Test
-    fun quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
+    fun quickAppSwitchWithinBackgroundGraceDoesNotShowOrRecordReconnect() { runBlocking<Unit> {
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
@@ -235,7 +235,7 @@ class BackgroundGraceReconnectE2eTest {
         recordTiming("post_grace_cycle_ms", SystemClock.elapsedRealtime() - postStart)
         captureViewport("issue548-03-post-grace-reattached")
         writeTimings()
-    }
+    } }
 
     /**
      * Issue #959 — DURABLE END-TO-END REGRESSION for the beyond-grace
@@ -260,7 +260,7 @@ class BackgroundGraceReconnectE2eTest {
      * GREEN once the producer + input re-bind to the new client.
      */
     @Test
-    fun postGraceReattachLeavesTerminalLiveWithFreshInputEcho() = runBlocking<Unit> {
+    fun postGraceReattachLeavesTerminalLiveWithFreshInputEcho() { runBlocking<Unit> {
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
@@ -333,7 +333,7 @@ class BackgroundGraceReconnectE2eTest {
         waitForVisibleTerminal("post-grace fresh input echo") { it.contains(postToken) }
         captureViewport("issue959-03-post-grace-fresh-echo")
         writeTimings()
-    }
+    } }
 
     /**
      * Issue #959: send a line of text + Enter to the active pane through the
@@ -378,7 +378,7 @@ class BackgroundGraceReconnectE2eTest {
     }
 
     @Test
-    fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() = runBlocking<Unit> {
+    fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() { runBlocking<Unit> {
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
@@ -424,7 +424,7 @@ class BackgroundGraceReconnectE2eTest {
         assertWithinGraceReseedOnlyDriverOwned("six-second production-grace foreground")
         captureViewport("issue548-sixsec-02-foreground")
         writeTimings()
-    }
+    } }
 
     /**
      * Issue #743 de-flake: a plain WALL-CLOCK poll loop, DECOUPLED from the Compose

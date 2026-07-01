@@ -58,7 +58,7 @@ class AgentLaunchCommandDockerTest {
     private lateinit var artifactDir: File
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val keyText = instrumentation.context.assets.open("test_key")
             .bufferedReader().use { it.readText() }
@@ -75,10 +75,10 @@ class AgentLaunchCommandDockerTest {
             "agent-launch-command",
         ).apply { mkdirs() }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (createdSessions.isNotEmpty()) {
             withTimeout(15_000) {
                 SshConnection.connect(
@@ -96,10 +96,10 @@ class AgentLaunchCommandDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun shortWrapperCommandLaunchesAgentToReadyState(): Unit = runBlocking {
+    fun shortWrapperCommandLaunchesAgentToReadyState(): Unit { runBlocking {
         val gateway = SshFolderListGateway()
         val host = dockerHost()
         val suffix = System.currentTimeMillis().toString().takeLast(6)
@@ -196,7 +196,7 @@ class AgentLaunchCommandDockerTest {
         }
 
         File(artifactDir, "agent-launch-command-summary.txt").writeText(summary.toString())
-    }
+    } }
 
     private fun agentChoice(agent: AgentCli, skip: Boolean, cwd: String) =
         SessionTypeChoice(

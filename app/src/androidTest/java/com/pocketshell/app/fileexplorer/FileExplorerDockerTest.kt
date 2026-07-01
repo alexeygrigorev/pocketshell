@@ -71,7 +71,7 @@ class FileExplorerDockerTest {
         FileExplorerViewModel(leaseManager)
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -84,10 +84,10 @@ class FileExplorerDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         seededRoot?.let { root ->
             withTimeout(15_000) {
                 connect()?.use { session -> runCatching { session.exec("rm -rf '$root'") } }
@@ -95,10 +95,10 @@ class FileExplorerDockerTest {
         }
         runCatching { keyFile.delete() }
         runCatching { leaseManager.close() }
-    }
+    } }
 
     @Test
-    fun browsesDirectoriesAndOpensAFile(): Unit = runBlocking {
+    fun browsesDirectoriesAndOpensAFile(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue528-$suffix"
         seededRoot = root
@@ -163,10 +163,10 @@ class FileExplorerDockerTest {
             "resolved path should end with /readme.txt, was $openedFilePath",
             openedFilePath!!.endsWith("/readme.txt"),
         )
-    }
+    } }
 
     @Test
-    fun uploadsADeviceFileThenDownloadsItBack(): Unit = runBlocking {
+    fun uploadsADeviceFileThenDownloadsItBack(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue643-$suffix"
         seededRoot = root
@@ -248,10 +248,10 @@ class FileExplorerDockerTest {
             "issue643 round-trip payload",
             String(downloaded!!),
         )
-    }
+    } }
 
     @Test
-    fun showsPermissionDeniedForUnreadableDirectory(): Unit = runBlocking {
+    fun showsPermissionDeniedForUnreadableDirectory(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue528-perm-$suffix"
         seededRoot = root
@@ -286,10 +286,10 @@ class FileExplorerDockerTest {
         }
         composeRule.onNodeWithTag(FILE_EXPLORER_ERROR_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue528-explorer-permission-denied")
-    }
+    } }
 
     @Test
-    fun browseReusesTheWarmLeaseInsteadOfHandshakingAgain(): Unit = runBlocking {
+    fun browseReusesTheWarmLeaseInsteadOfHandshakingAgain(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue697-$suffix"
         seededRoot = root
@@ -365,7 +365,7 @@ class FileExplorerDockerTest {
             handshakeCount.get(),
         )
         warmLease.release()
-    }
+    } }
 
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,

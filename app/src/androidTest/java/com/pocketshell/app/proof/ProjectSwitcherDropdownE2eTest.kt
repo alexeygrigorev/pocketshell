@@ -91,7 +91,7 @@ class ProjectSwitcherDropdownE2eTest {
     }
 
     @Test
-    fun projectCrumbDropdownWarmSwitchesToSiblingSession() = runBlocking {
+    fun projectCrumbDropdownWarmSwitchesToSiblingSession() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -219,7 +219,7 @@ class ProjectSwitcherDropdownE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

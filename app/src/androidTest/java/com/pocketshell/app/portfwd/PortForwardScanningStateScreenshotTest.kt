@@ -54,7 +54,7 @@ class PortForwardScanningStateScreenshotTest {
     }
 
     @Test
-    fun capturesScanningEmptyState() = runBlocking {
+    fun capturesScanningEmptyState() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
 
@@ -122,7 +122,7 @@ class PortForwardScanningStateScreenshotTest {
         captureFullDevice(File(ensureArtifactDir(), "portfwd-scanning-empty.png"))
 
         withContext(Dispatchers.Main) { viewModel.leavePanel() }
-    }
+    } }
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

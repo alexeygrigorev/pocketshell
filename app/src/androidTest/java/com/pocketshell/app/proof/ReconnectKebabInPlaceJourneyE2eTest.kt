@@ -129,7 +129,7 @@ class ReconnectKebabInPlaceJourneyE2eTest {
     }
 
     @Test
-    fun kebabReconnectRecoversDroppedSessionInPlaceThenSendRoundTrips() = runBlocking<Unit> {
+    fun kebabReconnectRecoversDroppedSessionInPlaceThenSendRoundTrips() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         val key = requireNotNull(seededKey)
         attachSeededTmuxSession(hostRowTag)
@@ -204,7 +204,7 @@ class ReconnectKebabInPlaceJourneyE2eTest {
         )
 
         writeSummary()
-    }
+    } }
 
     // -- kebab + indicator helpers -------------------------------------------------
 

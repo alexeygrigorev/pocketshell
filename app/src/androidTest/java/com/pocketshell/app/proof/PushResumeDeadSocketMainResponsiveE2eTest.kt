@@ -137,7 +137,7 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
     }
 
     @Test
-    fun withinGraceResumeOntoDeadHeldSocketKeepsMainResponsiveDuringGraceLoopClose() =
+    fun withinGraceResumeOntoDeadHeldSocketKeepsMainResponsiveDuringGraceLoopClose() {
         runBlocking {
             assumeNetworkFaultProofsEnabled()
 
@@ -276,7 +276,7 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
                 ),
             )
             Unit
-        }
+        } }
 
     // ---- VM seams (accessed on the live VM via the launched activity) --------------
 

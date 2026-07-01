@@ -1800,6 +1800,110 @@ class TmuxSessionViewModelTest {
         TmuxSessionLatencyTelemetry.resetForTest()
     }
 
+    /**
+     * Issue #1169 (Codex/agent pane cut — tmux window resized too small and not
+     * restored). Reproduce the maintainer's mechanism at the size-derivation
+     * layer: PocketShell measures the live viewport once (full grid), then a warm
+     * reattach / within-grace foreground return / session switch REPLAYS a cached
+     * (shrunk) grid through the same `maybeRefreshControlClientSize` path. On base
+     * that replays the SMALL cached size — `refresh-client -C 80x12` — which
+     * shrinks the shared tmux window so the alt-screen agent TUI draws cut with
+     * black below (and, via `window-size latest`, a second client inherits the
+     * cut). The fix floor-guards the size to the live measured viewport, so the
+     * replay never sends a size smaller than what the emulator will render.
+     */
+    @Test
+    fun cachedSizeReplayNeverShrinksTmuxBelowLiveViewport() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\tcodex\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.responses.addLast(
+            CommandResponse(
+                number = 4L,
+                output = listOf("%0\t@0\t\$0\tcodex\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("codex seed"), isError = false),
+        )
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+        )
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "codex",
+            client = client,
+            trigger = TmuxConnectTrigger.FastSwitch,
+        )
+
+        // (1) Live viewport measured once at the FULL Pixel-7-ish grid.
+        val fullCols = 85
+        val fullRows = 40
+        vm.resizeRemotePty(columns = fullCols, rows = fullRows)
+        advanceUntilIdle()
+        assertTrue(
+            "the initial full-viewport measure must reach tmux; sent=${client.sentCommands}",
+            client.sentCommands.contains("refresh-client -C ${fullCols}x${fullRows}"),
+        )
+
+        // (2) A warm reattach / within-grace foreground return / switch REPLAYS a
+        //     cached, shrunk grid (what a transient keyboard/composer/switch parked
+        //     in the runtime cache). SOFT_INPUT_ADJUST_NOTHING means Compose does
+        //     NOT re-measure on return, so this replay is the only size assertion.
+        val shrunkCols = 80
+        val shrunkRows = 12
+        vm.replayCachedControlClientSizeForTest(cachedColumns = shrunkCols, cachedRows = shrunkRows)
+        advanceUntilIdle()
+
+        // (3) The load-bearing assertion: the shrunk size must NEVER have been sent
+        //     to tmux. On base this fails (the replay sends `refresh-client -C
+        //     80x12`); with the floor guard the replay re-derives the full live
+        //     viewport instead.
+        assertFalse(
+            "cached replay must not shrink the tmux window below the live viewport; " +
+                "sent=${client.sentCommands}",
+            client.sentCommands.contains("refresh-client -C ${shrunkCols}x${shrunkRows}"),
+        )
+        // The live viewport floor is preserved across the cached replay.
+        assertEquals(
+            "live measured viewport must remain the full grid",
+            fullCols to fullRows,
+            vm.liveMeasuredDimensionsForTest(),
+        )
+        // Every refresh-client the VM emitted is at least as tall/wide as the live
+        // viewport — the window is never left cut.
+        val refreshDims = client.sentCommands
+            .filter { it.startsWith("refresh-client -C ") }
+            .map { it.removePrefix("refresh-client -C ") }
+            .mapNotNull { spec ->
+                val parts = spec.split('x')
+                val c = parts.getOrNull(0)?.toIntOrNull()
+                val r = parts.getOrNull(1)?.toIntOrNull()
+                if (c != null && r != null) c to r else null
+            }
+        assertTrue(
+            "expected at least one refresh-client size; sent=${client.sentCommands}",
+            refreshDims.isNotEmpty(),
+        )
+        assertTrue(
+            "no refresh-client may drop the window below the live viewport; dims=$refreshDims",
+            refreshDims.all { (c, r) -> c >= fullCols && r >= fullRows },
+        )
+    }
+
     @Test
     fun parseTmuxPaneCursorReadsWellFormedReply() {
         // Issue #259: the cursor reply is `cursor_x,cursor_y` (0-based).

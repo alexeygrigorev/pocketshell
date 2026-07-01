@@ -39,9 +39,11 @@ import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +52,9 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class TerminalLabActivity : FragmentActivity() {
 
@@ -142,8 +146,19 @@ data class TerminalLabTarget(
 
 class TerminalLabController(
     private val target: TerminalLabTarget,
+    // Freeze sweep (follow-up to #1128 / #1085 F-E): the dispatcher the
+    // socket-touching SSH close is offloaded to in [close]. Defaults to
+    // [Dispatchers.IO] so a wedged `SSH_MSG_DISCONNECT` write can never pin the
+    // caller thread; a unit test injects a single-thread dispatcher to prove the
+    // caller (`onDestroy` on Main) is not blocked.
+    private val teardownDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AutoCloseable {
     val terminalState: TerminalSurfaceState = TerminalSurfaceState()
+
+    // Application-independent scope for the off-thread SSH teardown. It outlives
+    // this controller (the Activity is already being destroyed) so the disconnect
+    // still runs to completion off Main.
+    private val teardownScope: CoroutineScope = CoroutineScope(SupervisorJob() + teardownDispatcher)
 
     private val _uiState = MutableStateFlow(
         TerminalLabUiState(status = "connecting to ${target.user}@${target.host}:${target.port}"),
@@ -313,8 +328,36 @@ class TerminalLabController(
         connectJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
-        ignoreClose { shell?.close() }
-        ignoreClose { session?.close() }
+        // Freeze sweep (follow-up to #1128 / #1085 F-E): [close] runs on the Main
+        // thread (the Activity's `onDestroy`). `SshShell.close()` and
+        // `SshSession.close()` (→ `RealSshSession.close()`) BLOCK the caller until
+        // the `SSH_MSG_DISCONNECT` socket write finishes — on a wedged socket that
+        // froze the UI. Offload both to the teardown dispatcher, bounded +
+        // interruptible, so `onDestroy` returns promptly even when the disconnect
+        // hangs. The disconnect still happens; it just no longer rides Main.
+        if (shell != null || session != null) {
+            teardownScope.launch {
+                ignoreClose {
+                    withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
+                        runInterruptible {
+                            ignoreClose { shell?.close() }
+                            ignoreClose { session?.close() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Test seam (freeze sweep): install a live shell/session so a unit test can
+     * drive [close] against a hung-close transport WITHOUT a real SSH handshake.
+     * Production sets these fields only from [connect].
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun installTransportForTest(session: SshSession?, shell: SshShell?) {
+        sessionRef = session
+        shellRef = shell
     }
 
     private companion object {
@@ -329,6 +372,14 @@ class TerminalLabController(
          * at its full 24 KB cap.
          */
         const val LooksLikePromptWindowChars: Int = 1_024
+
+        /**
+         * Wall-clock ceiling for the off-thread SSH teardown in [close], mirroring
+         * `RealSshSession.SESSION_CLOSE_TIMEOUT_MS` and the AutoForwarderSupervisor
+         * teardown bound (#1128): a wedged disconnect socket cannot pin the
+         * teardown worker forever either.
+         */
+        const val SESSION_CLOSE_TIMEOUT_MS: Long = 2_000L
     }
 }
 

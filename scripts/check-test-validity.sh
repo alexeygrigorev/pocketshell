@@ -202,7 +202,6 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
   "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
   "com.pocketshell.app.costs.CostsScreenE2eTest"
   "com.pocketshell.app.crash.ShareAllReportsDockerTest"
-  "com.pocketshell.app.env.EnvScreenE2eTest"
   "com.pocketshell.app.fileexplorer.FileExplorerDockerTest"
   "com.pocketshell.app.fileviewer.FileViewerDockerTest"
   "com.pocketshell.app.fileviewer.LinkTapParsingDockerTest"

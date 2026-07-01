@@ -471,6 +471,21 @@ JOURNEY_CLASSES=(
   # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does
   # NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.StaleRenderHealOnLiveTransportJourneyE2eTest"
+  # ADDED (#1138): the SEMI/PARTIAL-black on a live AGENT ALT-SCREEN pane (v0.4.19 dogfood,
+  # reproduced on BOTH Codex and Claude). The agent redraws with cursor-addressed writes, so
+  # only its live status line repaints locally while the upper ALT-SCREEN rows stay black. An
+  # alt-screen agent frame is SPARSE (header + a big blank conversation area + status), so the
+  # surviving status line is a LARGE fraction of it — ABOVE the #966 25% divergence ceiling, so
+  # the v0.4.18 steady-state stale-render watchdog (whose ONLY predicate was
+  # `visibleScreenDivergesFromCapture`) read it "healthy" and never healed. This journey seeds a
+  # SPARSE alt-screen app, attaches, injects the partial-black (clear + only the status line) on
+  # the LIVE emulator (the REMOTE tmux grid keeps the full sparse alt frame → transport
+  # GUARANTEED LIVE), asserts the pane is partial-black + Connected, then drives ONE watchdog
+  # tick and asserts the FULL alt frame (header marker + upper rows) re-renders. RED on base
+  # (divergence-only skips the sparse frame — unit-proven in PartialBlackPaneHealTest); GREEN
+  # with the union predicate `visibleRenderLostFrameVsCapture`. Uses ONLY the deterministic
+  # agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT self-skip on CI.
+  "$FQCN_PREFIX.AgentAltScreenPartialBlackHealJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an

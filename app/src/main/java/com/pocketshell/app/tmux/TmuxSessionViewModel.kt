@@ -10893,7 +10893,15 @@ public class TmuxSessionViewModel @Inject constructor(
         // The discriminating check: tmux carries a real frame but the local render
         // shows almost none of it → stale render on a live transport. If the
         // render already matches tmux, this is false and we never touch the grid.
-        if (!pane.terminalState.visibleScreenDivergesFromCapture(captureText)) return false
+        //
+        // Issue #1138: use the UNION predicate so a live-streaming ALT-SCREEN agent pane
+        // (Codex/Claude) that went PARTIAL-BLACK — only the live status line painted, upper
+        // rows black — is healed too. Its sparse alt-screen frame puts the surviving band
+        // ABOVE the #966 25% divergence ceiling, so the old `visibleScreenDivergesFromCapture`
+        // predicate alone read it "healthy" and the watchdog never fired. The new predicate
+        // also heals a partial-black pane when tmux's grid holds materially more (anti-thrash
+        // guarded), restoring the FULL viewport from tmux's authoritative capture.
+        if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) return false
         val cursor = parseTmuxPaneCursor(combined.cursorReply)
         Log.i(
             ISSUE_145_RECONNECT_TAG,

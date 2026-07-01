@@ -14,6 +14,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
+import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -638,6 +639,124 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("Terminal"), state.labels)
         assertEquals(0, state.selectedIndex)
         assertTrue(!state.showsConversationTab)
+    }
+
+    // ─── Issue #1158 (recurrence of #962/#1057): a RECORDED agent kind forces ──
+    // the Conversation tab present even when live detection AND source-binding
+    // both fail. The prior #962/#1057 fixes only covered vanilla Claude via the
+    // detection/transcript path; Codex and glm/Z.AI-Claude regressed silently
+    // because their transcript-source binding fails on the maintainer's fleet
+    // and NOTHING wired the already-recorded kind into tab presence. These tests
+    // cover the WHOLE class (Claude, Codex, glm/Z.AI), not the one reported
+    // instance (D31/D32/G2 class-coverage).
+    //
+    // RED→GREEN: on base — remove the `|| recordedAgentKind` OR-term from
+    // `tmuxSessionTabState.showsConversationTab` — each of the three
+    // recorded-agent cases below FAILS (single "Terminal" pill, no toggle),
+    // exactly the maintainer's #1158 symptom. With the fix the term is present
+    // and all three GREEN, while the recorded-Shell no-flap control (#894) and
+    // the null/unknown control stay GREEN either way. ──────────────────────────
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForRecordedClaudeWithoutDetectionOrContent() {
+        // Recorded `@ps_agent_kind=claude` (covers vanilla AND node-wrapped
+        // Claude), confirmed-shell surface (presumedAgent == false), NO live
+        // detection, NO transcript content: the tab MUST be present because the
+        // tree recorded the session as an agent. RED on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Claude),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForRecordedCodexWithoutDetectionOrContent() {
+        // Recorded `@ps_agent_kind=codex`, whose transcript is NOT cwd-enumerable
+        // / daemon classify `unknown` (needs the `/proc/<pid>/fd` process-match
+        // that frequently can't bind). The sibling kind #962/#975 never proved.
+        // RED on base — the tab was permanently gone for the maintainer's Codex
+        // sessions.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Codex),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForRecordedZaiClaudeWithoutDetectionOrContent() {
+        // glm / Z.AI-Claude is recorded as the Claude KIND with a non-default
+        // profile (`@ps_agent_profile` = "Claude (Z.AI)"), but its transcript
+        // lives at a different path/format (the #820 class), so live
+        // source-binding fails. Tab presence follows the recorded KIND, so a
+        // recorded Claude-with-Z.AI-profile session still shows the toggle. RED
+        // on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            // The recorded KIND for a Z.AI-pointed Claude is still Claude; the
+            // provider divergence lives in the profile, not the kind. The tab
+            // signal is kind-driven.
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Claude),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForRecordedOpenCodeWithoutDetectionOrContent() {
+        // OpenCode completes the recorded-agent class; same tab-presence rule.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.OpenCode),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateHidesConversationForRecordedShellNoFlapControl() {
+        // #894 no-flap invariant: a recorded PLAIN SHELL (`@ps_agent_kind=shell`)
+        // with no agent evidence must NOT force the Conversation tab. This must
+        // stay GREEN both on base and with the fix — the recorded-agent signal
+        // is agent-kinds-only, never Shell.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Shell),
+        )
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionRecordedAgentKindClassifiesEveryKind() {
+        // The recorded-agent signal is true ONLY for the agent kinds and never
+        // for shell / transient / unknown / null — locking the classification so
+        // a future kind addition can't silently flip the no-flap control.
+        assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.Claude))
+        assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.Codex))
+        assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.OpenCode))
+        assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Shell))
+        assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Probing))
+        assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Exited))
+        assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Unknown))
+        assertTrue(!tmuxSessionRecordedAgentKind(null))
     }
 
     @Test

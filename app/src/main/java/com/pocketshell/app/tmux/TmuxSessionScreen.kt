@@ -196,6 +196,7 @@ import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -1530,11 +1531,20 @@ public fun TmuxSessionScreen(
             // OFF the 60ms agent-streaming flush. The projection re-runs each
             // flush but the resulting [TmuxSessionTabState] is structurally equal,
             // so the body is not invalidated.
-            val tabState by remember(surfaceConversationPaneId, presumedAgent) {
+            // Issue #1158: the active session's RECORDED agent kind
+            // (`@ps_agent_kind`, collected above at [currentSessionRecordedKind])
+            // projected to a stable boolean so it can force the Conversation tab
+            // present for a recorded agent even when live detection /
+            // transcript-source binding never bound. Independent of the
+            // per-pane `presumedAgent` gate so a recorded Codex / Z.AI-Claude
+            // session shows the toggle regardless of the fragile binding.
+            val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
+            val tabState by remember(surfaceConversationPaneId, presumedAgent, recordedAgentKind) {
                 derivedStateOf {
                     tmuxSessionTabState(
                         surfaceConversationPaneId?.let { agentConversationsState.value[it] },
                         presumedAgent,
+                        recordedAgentKind,
                     )
                 }
             }
@@ -3658,9 +3668,45 @@ internal fun tmuxSessionShouldPromoteSettledCachedPane(
     return true
 }
 
+/**
+ * Issue #1158 (recurrence of #962/#1057): whether the tree has RECORDED this
+ * session as a known agent kind (Claude / Codex / OpenCode), independent of
+ * whether live agent-detection or conversation-source binding has succeeded.
+ *
+ * This is the "record, don't guess" signal (epic #821): a session that
+ * PocketShell launched (or the user classified) as an agent carries a durable
+ * `@ps_agent_kind` tmux option that reads back as one of these kinds. The
+ * detection / transcript-source layer FREQUENTLY fails to bind for the
+ * maintainer's real fleet — node-wrapped Claude, Codex (needs a
+ * `/proc/<pid>/fd` process-match), and glm/Z.AI-Claude (transcript at a
+ * different path/format, the #820 class) — but we STILL know it is an agent
+ * because we recorded the kind. So the Conversation tab's *presence* must
+ * follow the recorded kind, not the fragile live binding, or the toggle
+ * vanishes for the life of the session (the maintainer's #1158 symptom).
+ *
+ * [SessionAgentKind.Shell] (a recorded plain shell), [SessionAgentKind.Probing]
+ * / [SessionAgentKind.Exited] (transient), [SessionAgentKind.Unknown], and
+ * `null` (foreign / not-yet-classified) are NOT recorded-agent kinds: they must
+ * NOT force the tab, so the #894 "a confirmed shell with no agent evidence
+ * hides the Conversation tab" no-flap invariant stays intact. (A foreign /
+ * unknown session already keeps the tab via the presumed-agent path.)
+ */
+internal fun tmuxSessionRecordedAgentKind(recordedKind: SessionAgentKind?): Boolean =
+    when (recordedKind) {
+        SessionAgentKind.Claude,
+        SessionAgentKind.Codex,
+        SessionAgentKind.OpenCode -> true
+        SessionAgentKind.Shell,
+        SessionAgentKind.Probing,
+        SessionAgentKind.Exited,
+        SessionAgentKind.Unknown,
+        null -> false
+    }
+
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,
     presumedAgent: Boolean = false,
+    recordedAgentKind: Boolean = false,
 ): TmuxSessionTabState {
     // The Conversation tab exists for a live-detected agent OR a presumed
     // agent (#716). Issue #778: the active index now follows the user's
@@ -3697,8 +3743,22 @@ internal fun tmuxSessionTabState(
     } == true
     val userOpenedConversation =
         currentAgentConversation?.selectedTab == SessionTab.Conversation
+    // Issue #1158 (recurrence of #962/#1057): a RECORDED agent kind
+    // (Claude / Codex / OpenCode) is a first-class tab-presence signal on its
+    // own — the tab shows even when live detection AND transcript-source binding
+    // both failed. This is the durable fix for the maintainer's fleet where the
+    // detection/source layer can't bind (node-wrapped Claude, Codex `/proc`
+    // process-match, glm/Z.AI alternate transcript path) yet the tree KNOWS the
+    // session is an agent. The existing detection/content/presumed-agent signals
+    // are kept as ADDITIONAL signals (recorded-kind OR detection → show tab), so
+    // the vanilla-Claude case and the #894 confirmed-shell-hides-tab no-flap
+    // invariant are unchanged. When the tab is shown but the source can't bind,
+    // the user reaches the existing Placeholder/Failed surface
+    // ([tmuxSessionConversationSurface]) — the whole tab is NEVER collapsed on a
+    // source-binding hiccup.
     val showsConversationTab =
-        hasLiveDetection || presumedAgent || hasConversationContent || userOpenedConversation
+        hasLiveDetection || presumedAgent || hasConversationContent ||
+            userOpenedConversation || recordedAgentKind
     return TmuxSessionTabState(
         labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
         selectedIndex = if (showsConversationTab && userOpenedConversation) 1 else 0,

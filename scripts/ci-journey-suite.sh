@@ -833,6 +833,15 @@ JOURNEY_CLASSES=(
   #   - plainShellRecordedSessionShowsNoConversationToggle (#894 no-flap ADJACENCY):
   #     a recorded-shell session with NO agent transcript shows NO toggle (a recorded
   #     shell must not flash the Conversation tab).
+  #   - conversationTogglePresentForRecordedCodexAgentWhenSourceBindingFails (#1158):
+  #     a session recorded `@ps_agent_kind=codex` whose conversation source cannot
+  #     bind (no `/proc` match, no cwd transcript in-fixture) STILL shows a present +
+  #     tappable Terminal/Conversation toggle, and tapping it routes to the
+  #     Conversation placeholder (never collapses the tab). Tab presence follows the
+  #     RECORDED agent kind, independent of the fragile live binding. This is the
+  #     second kind in the class (Codex), covering the recurrence #962/#975 missed by
+  #     only proving vanilla Claude. (Fast JVM sibling: TmuxSessionScreenTest
+  #     .tmuxSessionTabStateShowsConversationForRecorded{Claude,Codex,ZaiClaude,OpenCode}*.)
   # It uses ONLY agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that
   # tests.yml already brings up, and does NOT self-skip on CI (no assumeTrue /
   # assumeFalse(isRunningOnCi())). Lives under com.pocketshell.app.tmux.

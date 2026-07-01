@@ -124,7 +124,7 @@ class CodexRedrawOverflowReconnectE2eTest : NetworkFaultProofBase() {
     }
 
     @Test
-    fun codexAltScreenRedrawOverflowTimesOutFatalAndReconnects() = runBlocking {
+    fun codexAltScreenRedrawOverflowTimesOutFatalAndReconnects() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -292,7 +292,7 @@ class CodexRedrawOverflowReconnectE2eTest : NetworkFaultProofBase() {
                 "disconnected=$clientDisconnected band(diagnostic)=$sawReconnectBand",
         )
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

@@ -34,7 +34,7 @@ class ShareAllReportsDockerTest {
     }
 
     @Test
-    fun shareAllPreparesZipForShareSheetThenDeleteAllClearsReports() = runBlocking {
+    fun shareAllPreparesZipForShareSheetThenDeleteAllClearsReports() { runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         clearReportsDir()
         clearArchivesDir()
@@ -111,7 +111,7 @@ class ShareAllReportsDockerTest {
         assertEquals(0, store.list().size)
 
         writeEvidence(evidence.toString())
-    }
+    } }
 
     private fun clearReportsDir() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext

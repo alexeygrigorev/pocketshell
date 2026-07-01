@@ -57,7 +57,7 @@ class FolderListSessionClickTest {
     private val hostId: Long = 11L
 
     @Before
-    fun openDatabase(): Unit = runBlocking {
+    fun openDatabase(): Unit { runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -75,7 +75,7 @@ class FolderListSessionClickTest {
                 keyId = keyId,
             ),
         )
-    }
+    } }
 
     @After
     fun closeDatabase() {

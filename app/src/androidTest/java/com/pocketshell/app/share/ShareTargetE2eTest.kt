@@ -122,7 +122,7 @@ class ShareTargetE2eTest {
     }
 
     @Test
-    fun shareIntentUploadsFileToHostInbox() = runBlocking {
+    fun shareIntentUploadsFileToHostInbox() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -234,7 +234,7 @@ class ShareTargetE2eTest {
             cleanInboxOnRemote(key)
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #258: selecting several files and sharing them must upload
@@ -244,7 +244,7 @@ class ShareTargetE2eTest {
      * round-tripped contents.
      */
     @Test
-    fun shareMultipleIntentUploadsEveryFileToHostInbox() = runBlocking {
+    fun shareMultipleIntentUploadsEveryFileToHostInbox() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -366,7 +366,7 @@ class ShareTargetE2eTest {
             cleanInboxOnRemote(key)
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #473: share a file targeting a specific PROJECT. Seeds a
@@ -376,7 +376,7 @@ class ShareTargetE2eTest {
      * round-tripped contents (and that `.inbox/` was created on demand).
      */
     @Test
-    fun shareIntentUploadsFileToProjectInbox() = runBlocking {
+    fun shareIntentUploadsFileToProjectInbox() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -470,7 +470,7 @@ class ShareTargetE2eTest {
             cleanProjectOnRemote(key, projectPath)
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #507: the share destination picker must offer the
@@ -490,7 +490,7 @@ class ShareTargetE2eTest {
      * project) is captured as authoritative UI evidence.
      */
     @Test
-    fun shareIntentUploadsFileToOpenSessionProject() = runBlocking {
+    fun shareIntentUploadsFileToOpenSessionProject() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -652,7 +652,7 @@ class ShareTargetE2eTest {
             cleanProjectOnRemote(key, projectPath)
         }
         Unit
-    }
+    } }
 
     /**
      * Issue #560: an active session must be offered as a share destination,
@@ -668,7 +668,7 @@ class ShareTargetE2eTest {
      * row) is captured as authoritative UI evidence.
      */
     @Test
-    fun shareIntentStagesFileIntoActiveSession() = runBlocking {
+    fun shareIntentStagesFileIntoActiveSession() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -834,7 +834,7 @@ class ShareTargetE2eTest {
             runCatching { cleanAttachmentScope(key, hostId, sessionName) }
         }
         Unit
-    }
+    } }
 
     private suspend fun pollRemoteUntilAttachmentExists(
         key: String,

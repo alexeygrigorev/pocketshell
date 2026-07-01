@@ -96,7 +96,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
     }
 
     @Test
-    fun terminalDoesNotPanOrResizeWhenSoftKeyboardShows() = runBlocking {
+    fun terminalDoesNotPanOrResizeWhenSoftKeyboardShows() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedShellSession(key)
@@ -226,7 +226,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
             slopPx,
         )
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- geometry
 

@@ -143,7 +143,7 @@ class TerminalViewReattachLateSubscribeRepaintInstrumentedTest {
     }
 
     @Test
-    fun lateSubscribeAfterReattachSeedRepaintsRealViewWholeBuffer() = runBlocking {
+    fun lateSubscribeAfterReattachSeedRepaintsRealViewWholeBuffer() { runBlocking {
         val instr = InstrumentationRegistry.getInstrumentation()
         val context = instr.targetContext
 
@@ -267,7 +267,7 @@ class TerminalViewReattachLateSubscribeRepaintInstrumentedTest {
             paintedRows,
         )
         assertNonBackgroundPixelsAcrossAllRows(bitmap, renderer)
-    }
+    } }
 
     private fun assertNonBackgroundPixelsAcrossAllRows(bitmap: Bitmap, renderer: TerminalRenderer) {
         for (i in 0 until rows) {

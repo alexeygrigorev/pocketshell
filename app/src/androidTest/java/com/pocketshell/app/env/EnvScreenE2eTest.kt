@@ -69,7 +69,7 @@ class EnvScreenE2eTest {
     private val secret = "sk-ENVSCREEN-SECRET-264"
 
     @Before
-    fun openDatabase(): Unit = runBlocking {
+    fun openDatabase(): Unit { runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -87,7 +87,7 @@ class EnvScreenE2eTest {
                 keyId = keyId,
             ),
         )
-    }
+    } }
 
     @After
     fun closeDatabase() {

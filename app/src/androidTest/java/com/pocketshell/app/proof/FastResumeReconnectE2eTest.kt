@@ -137,7 +137,7 @@ class FastResumeReconnectE2eTest {
     }
 
     @Test
-    fun resumeAfterBackgroundRestoresCachedViewFastThenReconnects() = runBlocking {
+    fun resumeAfterBackgroundRestoresCachedViewFastThenReconnects() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
@@ -254,7 +254,7 @@ class FastResumeReconnectE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

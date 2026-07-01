@@ -60,7 +60,7 @@ class ShowAllPortsScreenshotTest {
     }
 
     @Test
-    fun capturesDefaultFilteredAndShowAllTables() = runBlocking {
+    fun capturesDefaultFilteredAndShowAllTables() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
 
@@ -135,7 +135,7 @@ class ShowAllPortsScreenshotTest {
         captureFullDevice(File(ensureArtifactDir(), "show-all-ports-checked.png"))
 
         withContext(Dispatchers.Main) { viewModel.leavePanel() }
-    }
+    } }
 
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

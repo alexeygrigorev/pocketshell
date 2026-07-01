@@ -64,7 +64,7 @@ class HostBootstrapScenarioSuiteTest {
     }
 
     @Test
-    fun ready() = scenario("ready") {
+    fun ready() { scenario("ready") {
         launchSeededHost()
         capture("01-host-list")
         tapSeededHost()
@@ -74,10 +74,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("ready profile should expose all server tools and an enabled daemon") {
             installedToolsAndEnabledDaemonCommand()
         }
-    }
+    } }
 
     @Test
-    fun uvInstall() = scenario("uv-install") {
+    fun uvInstall() { scenario("uv-install") {
         launchSeededHost()
         tapSeededHost()
 
@@ -96,10 +96,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("uv install should leave all server tools available") {
             installedToolsAndEnabledDaemonCommand()
         }
-    }
+    } }
 
     @Test
-    fun uvUpgrade() = scenario("uv-upgrade") {
+    fun uvUpgrade() { scenario("uv-upgrade") {
         launchSeededHost()
         tapSeededHost()
 
@@ -125,10 +125,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("uv upgrade should leave an app-compatible pocketshell CLI") {
             installedToolsAndEnabledDaemonCommand(targetAppVersion())
         }
-    }
+    } }
 
     @Test
-    fun uvUpgradeFailure() = scenario("uv-upgrade-failure") {
+    fun uvUpgradeFailure() { scenario("uv-upgrade-failure") {
         launchSeededHost()
         tapSeededHost()
 
@@ -156,10 +156,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("failed uv upgrade should leave the old pocketshell CLI in place") {
             installedToolsAndEnabledDaemonCommand("0.1.0")
         }
-    }
+    } }
 
     @Test
-    fun appUpdateRequired() = scenario("app-update-required") {
+    fun appUpdateRequired() { scenario("app-update-required") {
         // Issue #514 (DESIGN REFINEMENT 2026-06-05): remote pocketshell CLI
         // is NEWER than this app build. A minor delta rarely breaks
         // compatibility, so the host must stay fully usable — usage panel,
@@ -224,10 +224,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("app-update-required profile should still expose the newer host CLI") {
             installedToolsAndEnabledDaemonCommand()
         }
-    }
+    } }
 
     @Test
-    fun unsupported() = scenario("unsupported") {
+    fun unsupported() { scenario("unsupported") {
         launchSeededHost()
         tapSeededHost()
 
@@ -251,10 +251,10 @@ class HostBootstrapScenarioSuiteTest {
                 "! command -v uv >/dev/null 2>&1 && " +
                 "! command -v pipx >/dev/null 2>&1"
         }
-    }
+    } }
 
     @Test
-    fun daemonDisabled() = scenario("daemon-disabled") {
+    fun daemonDisabled() { scenario("daemon-disabled") {
         launchSeededHost()
         tapSeededHost()
 
@@ -265,10 +265,10 @@ class HostBootstrapScenarioSuiteTest {
                 "command -v pocketshell >/dev/null && " +
                 "! systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
         }
-    }
+    } }
 
     @Test
-    fun userLocalPath() = scenario("user-local-path") {
+    fun userLocalPath() { scenario("user-local-path") {
         launchSeededHost()
         tapSeededHost()
 
@@ -277,10 +277,10 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("user-local-path profile should expose all server tools through expanded PATH") {
             installedToolsAndEnabledDaemonCommand()
         }
-    }
+    } }
 
     @Test
-    fun fishUserLocalPath() = scenario("fish-user-local-path") {
+    fun fishUserLocalPath() { scenario("fish-user-local-path") {
         launchSeededHost()
         tapSeededHost()
 
@@ -289,7 +289,7 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("fish-user-local-path profile should expose all server tools through login PATH handling") {
             installedToolsAndEnabledDaemonCommand()
         }
-    }
+    } }
 
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
         assumeScenariosEnabled()

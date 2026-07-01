@@ -147,7 +147,7 @@ class StrictModeNoNetworkOnMainE2eTest {
     }
 
     @Test
-    fun fullAttachAndDisconnectCycleEmitsNoNetworkOnMainViolation() = runBlocking {
+    fun fullAttachAndDisconnectCycleEmitsNoNetworkOnMainViolation() { runBlocking {
         val key = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -238,7 +238,7 @@ class StrictModeNoNetworkOnMainE2eTest {
             "expected the SSH session smoke test to have produced a live session",
             session,
         )
-    }
+    } }
 
     private companion object {
         const val LOG_TAG = "Issue166StrictModeNet"

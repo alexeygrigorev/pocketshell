@@ -54,7 +54,7 @@ class GitHistoryDockerTest {
     private var seededRoot: String? = null
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -66,20 +66,20 @@ class GitHistoryDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         seededRoot?.let { root ->
             withTimeout(15_000) {
                 connect()?.use { session -> runCatching { session.exec("rm -rf '$root'") } }
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun rendersSeededCommitHistory(): Unit = runBlocking {
+    fun rendersSeededCommitHistory(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue646-$suffix"
         val repo = "$root/proj"
@@ -148,10 +148,10 @@ class GitHistoryDockerTest {
             dialCount.get(),
         )
         WalkthroughScreenshotArtifacts.capture("issue646-git-history")
-    }
+    } }
 
     @Test
-    fun rendersBranchesWorktreesAndStatusOverview(): Unit = runBlocking {
+    fun rendersBranchesWorktreesAndStatusOverview(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue647-$suffix"
         val repo = "$root/proj"
@@ -206,10 +206,10 @@ class GitHistoryDockerTest {
         composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + repo).assertExists()
         composeRule.onNodeWithTag(GIT_WORKTREE_ROW_TAG_PREFIX + "$root/proj-feature").assertExists()
         WalkthroughScreenshotArtifacts.capture("issue647-git-overview")
-    }
+    } }
 
     @Test
-    fun gitHubOriginShowsOpenOnGitHubAction(): Unit = runBlocking {
+    fun gitHubOriginShowsOpenOnGitHubAction(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue648-$suffix"
         val repo = "$root/proj"
@@ -261,10 +261,10 @@ class GitHistoryDockerTest {
         composeRule.onNodeWithTag(GIT_OPEN_ON_GITHUB_TAG).assertExists()
         composeRule.onNodeWithText("github.com/pocketshell/demo").assertExists()
         WalkthroughScreenshotArtifacts.capture("issue648-open-on-github")
-    }
+    } }
 
     @Test
-    fun issuesTabShowsConfigureGhHintWhenGhNotConfigured(): Unit = runBlocking {
+    fun issuesTabShowsConfigureGhHintWhenGhNotConfigured(): Unit { runBlocking {
         // The deterministic `agents` fixture has no authenticated `gh` (and most
         // likely no `pocketshell` either), so the Issues tab must degrade to the
         // "configure gh" hint rather than show a list — issue #649's gated path.
@@ -318,10 +318,10 @@ class GitHistoryDockerTest {
         }
         composeRule.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue649-configure-gh-hint")
-    }
+    } }
 
     @Test
-    fun nonGitDirectoryShowsNotARepoState(): Unit = runBlocking {
+    fun nonGitDirectoryShowsNotARepoState(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val root = "/tmp/issue646-plain-$suffix"
         seededRoot = root
@@ -353,7 +353,7 @@ class GitHistoryDockerTest {
         }
         composeRule.onNodeWithTag(GIT_HISTORY_NOT_A_REPO_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue646-git-not-a-repo")
-    }
+    } }
 
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,

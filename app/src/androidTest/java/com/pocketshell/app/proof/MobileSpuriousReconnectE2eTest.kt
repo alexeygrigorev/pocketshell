@@ -149,7 +149,7 @@ class MobileSpuriousReconnectE2eTest {
 
     // (a) cause #1 — the link SURVIVED the brief dip: ride through, NO redial.
     @Test
-    fun briefLossRestoreWithSurvivingSocketRidesThroughWithNoRedial() = runBlocking<Unit> {
+    fun briefLossRestoreWithSurvivingSocketRidesThroughWithNoRedial() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -223,12 +223,12 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after ride-through terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1042a-02-rode-through")
         writeTimings("issue1042a")
-    }
+    } }
 
     // (b2) cause #1 ARM 2 — keepalive aged out but the bounded probe ANSWERS over the
     // live socket: must RIDE THROUGH with no redial (cause="probe_answered").
     @Test
-    fun briefLossRestoreWhereBoundedProbeAnswersRidesThrough() = runBlocking<Unit> {
+    fun briefLossRestoreWhereBoundedProbeAnswersRidesThrough() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -289,7 +289,7 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after probe-answered terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1042b2-02-rode-through")
         writeTimings("issue1042b2")
-    }
+    } }
 
     // (b3) ISSUE #1065 (R5, audit C5) — the BOUNDED-PROBE ride-through arm after a
     // LONG IDLE OUTAGE, distinct from the keepalive-proven FAST PATH.
@@ -324,7 +324,7 @@ class MobileSpuriousReconnectE2eTest {
     //      "transport_proven_alive", which would mean step 1 won) and ZERO redial.
     //   7. the session rides through to Connected with a painted viewport — recovered.
     @Test
-    fun longIdleOutageThenRestoreRidesThroughViaBoundedProbeNotFastPath() = runBlocking<Unit> {
+    fun longIdleOutageThenRestoreRidesThroughViaBoundedProbeNotFastPath() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -421,11 +421,11 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after bounded-probe terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1065-03-rode-through")
         writeTimings("issue1065")
-    }
+    } }
 
     // (c) cause #2 — a same-identity {CELLULAR} reassoc must NOT redial.
     @Test
-    fun cellularSameIdentityReassocDoesNotRedial() = runBlocking<Unit> {
+    fun cellularSameIdentityReassocDoesNotRedial() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -473,11 +473,11 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after cellular reassoc terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1042c-02-no-redial")
         writeTimings("issue1042c")
-    }
+    } }
 
     // (d) cause #2 scope guard — a REAL cross-transport handoff must STILL redial.
     @Test
-    fun crossTransportHandoffStillRedials() = runBlocking<Unit> {
+    fun crossTransportHandoffStillRedials() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -526,7 +526,7 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after cross-transport terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1042d-02-redialled")
         writeTimings("issue1042d")
-    }
+    } }
 
     private fun currentViewModel(): TmuxSessionViewModel {
         lateinit var vm: TmuxSessionViewModel

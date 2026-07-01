@@ -80,7 +80,7 @@ class UsageScreenE2eTest {
     }
 
     @Test
-    fun usagePanel_populatedCell_showsProviderCards() = runBlocking {
+    fun usagePanel_populatedCell_showsProviderCards() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -166,10 +166,10 @@ class UsageScreenE2eTest {
                 appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )
-    }
+    } }
 
     @Test
-    fun usagePanel_staleIncompatFlag_remoteNewerHost_stillShowsUsage() = runBlocking {
+    fun usagePanel_staleIncompatFlag_remoteNewerHost_stillShowsUsage() { runBlocking {
         // Issue #525 regression on-device: a reachable host that carries a
         // STALE `pocketshellVersionCompatible = false` (written before #514
         // replaced exact-`==` with semver, when the remote CLI 0.3.23 was
@@ -234,10 +234,10 @@ class UsageScreenE2eTest {
                 appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )
-    }
+    } }
 
     @Test
-    fun usagePanel_emptyCell_rendersBreadcrumbAndEmptyState() = runBlocking {
+    fun usagePanel_emptyCell_rendersBreadcrumbAndEmptyState() { runBlocking {
         val key = readFixtureKey()
         // Best-effort probe; an unreachable agents target still lets the
         // empty-cell test prove the panel renders for hosts that can't
@@ -299,7 +299,7 @@ class UsageScreenE2eTest {
                 appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )
-    }
+    } }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()

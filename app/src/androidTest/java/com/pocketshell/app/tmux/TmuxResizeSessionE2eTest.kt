@@ -88,7 +88,7 @@ class TmuxResizeSessionE2eTest {
     }
 
     @Test
-    fun attachAutomaticallySizesTmuxToPhoneViewport() = runBlocking {
+    fun attachAutomaticallySizesTmuxToPhoneViewport() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedDesktopSizedSession(key)
@@ -195,7 +195,7 @@ class TmuxResizeSessionE2eTest {
             clients = clients,
         )
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

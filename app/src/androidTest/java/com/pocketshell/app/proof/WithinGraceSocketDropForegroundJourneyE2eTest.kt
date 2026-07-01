@@ -139,7 +139,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
     }
 
     @Test
-    fun withinGraceForegroundAfterSocketDropReseedsWithoutReconnect() = runBlocking {
+    fun withinGraceForegroundAfterSocketDropReseedsWithoutReconnect() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -236,7 +236,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         writeSummary()
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

@@ -131,7 +131,7 @@ class BoundedGraceSessionHoldJourneyE2eTest {
     }
 
     @Test
-    fun withinGraceHoldsSeamlessly_thenBeyondGraceTearsDownAndReattaches() = runBlocking<Unit> {
+    fun withinGraceHoldsSeamlessly_thenBeyondGraceTearsDownAndReattaches() { runBlocking<Unit> {
         assertEquals("API 35 evidence must run on Android 15", 35, android.os.Build.VERSION.SDK_INT)
 
         val attachStart = SystemClock.elapsedRealtime()
@@ -233,7 +233,7 @@ class BoundedGraceSessionHoldJourneyE2eTest {
         )
         captureViewport("issue1123-04-foreground-reattached")
         writeSummary()
-    }
+    } }
 
     private suspend fun seedBeforeLaunch() {
         notificationManager.cancelAll()

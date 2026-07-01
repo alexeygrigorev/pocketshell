@@ -35,7 +35,7 @@ class NetworkLatencyModelE2eTest : NetworkFaultProofBase() {
     }
 
     @Test
-    fun delayedJitteredSshRemainsUsableWithoutFalseDisconnects() = runBlocking {
+    fun delayedJitteredSshRemainsUsableWithoutFalseDisconnects() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -88,7 +88,7 @@ class NetworkLatencyModelE2eTest : NetworkFaultProofBase() {
                 "explicit_connect_attempts=$explicitConnectAttempts",
             ),
         )
-    }
+    } }
 
     private companion object {
         const val DEGRADED_STABILITY_WINDOW_MS: Long = 5_000L

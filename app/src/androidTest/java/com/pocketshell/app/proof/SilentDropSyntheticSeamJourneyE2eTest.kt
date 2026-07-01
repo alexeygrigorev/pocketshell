@@ -131,7 +131,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
     }
 
     @Test
-    fun syntheticSilentDropSurfacesIndicatorThenAutoRecoversWithoutSwitchDance() =
+    fun syntheticSilentDropSurfacesIndicatorThenAutoRecoversWithoutSwitchDance() {
         runBlocking<Unit> {
             val hostRowTag = requireNotNull(seededHostRowTag)
             attachSeededTmuxSession(hostRowTag)
@@ -204,7 +204,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                 roundTripped,
             )
             writeTimings()
-        }
+        } }
 
     /**
      * Issue #964 / #822 — the slow-but-live wifi journey, threaded against the
@@ -228,7 +228,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
      * assertions (D31/F3).
      */
     @Test
-    fun slowButLiveWifiKeepaliveRidesThroughButWedgedControlChannelStillRecovers() =
+    fun slowButLiveWifiKeepaliveRidesThroughButWedgedControlChannelStillRecovers() {
         runBlocking<Unit> {
             val hostRowTag = requireNotNull(seededHostRowTag)
             attachSeededTmuxSession(hostRowTag)
@@ -308,7 +308,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                 recovered,
             )
             writeTimings()
-        }
+        } }
 
     // -- user-visible indicator helpers (parity with the toxiproxy spec) -----------
 

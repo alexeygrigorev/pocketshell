@@ -86,7 +86,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -106,10 +106,10 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         runCatching { ccClient?.close() }
         runCatching { ccSession?.close() }
@@ -134,10 +134,10 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun windowClosedOnHostWhileOffTreeScreenIsPrunedWithoutRefresh(): Unit = runBlocking {
+    fun windowClosedOnHostWhileOffTreeScreenIsPrunedWithoutRefresh(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue783-$suffix"
         val sessionName = "issue783-$suffix"
@@ -282,7 +282,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
             1,
             windowIdsAfter.size,
         )
-    }
+    } }
 
     private fun windowIds(vm: FolderListViewModel, sessionName: String): List<String?> {
         val state = vm.state.value as? FolderListUiState.Ready ?: return emptyList()

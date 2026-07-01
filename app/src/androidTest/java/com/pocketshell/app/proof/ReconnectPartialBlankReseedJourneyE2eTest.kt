@@ -167,7 +167,7 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
     }
 
     @Test
-    fun withinGraceReattachRestoresFullViewportNotJustTheLiveLine() = runBlocking {
+    fun withinGraceReattachRestoresFullViewportNotJustTheLiveLine() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -255,7 +255,7 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
         writeSummary()
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #879 — a BEYOND-GRACE reconnect of a static-banner SHELL pane must come back
@@ -273,9 +273,9 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
      * assertion fails. GREEN with the fix.
      */
     @Test
-    fun beyondGraceReconnectFullyRepaintsShellPane() = runBlocking {
+    fun beyondGraceReconnectFullyRepaintsShellPane() { runBlocking {
         runBeyondGraceFullyRepaintsJourney(altScreen = false, namePrefix = "issue879-shell")
-    }
+    } }
 
     /**
      * Issue #879 — class coverage (D32 G2): a BEYOND-GRACE reconnect of an IDLE
@@ -289,9 +289,9 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
      * painted on the fresh View.
      */
     @Test
-    fun beyondGraceReconnectFullyRepaintsIdleAltScreenPane() = runBlocking {
+    fun beyondGraceReconnectFullyRepaintsIdleAltScreenPane() { runBlocking {
         runBeyondGraceFullyRepaintsJourney(altScreen = true, namePrefix = "issue879-altscreen")
-    }
+    } }
 
     /**
      * Shared body for both #879 beyond-grace tests. [altScreen] selects whether the seeded

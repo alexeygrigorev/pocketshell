@@ -95,7 +95,7 @@ class AttachmentStagerRealUploadDockerTest {
     }
 
     @Test
-    fun stagesAttachmentThroughRealUploadFileAndBytesLandOnHost() = runBlocking {
+    fun stagesAttachmentThroughRealUploadFileAndBytesLandOnHost() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         // The size-less test provider is registered in the androidTest
         // manifest, so it lives in the TEST APK process and is only
@@ -248,7 +248,7 @@ class AttachmentStagerRealUploadDockerTest {
         )
 
         Unit
-    }
+    } }
 
     private fun md5Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("MD5").digest(bytes)

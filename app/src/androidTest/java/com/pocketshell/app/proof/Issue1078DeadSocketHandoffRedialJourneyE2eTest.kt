@@ -176,7 +176,7 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
     // AC1 — the dead-socket handoff must REDIAL within the probe budget (NOT a
     // ~90s frozen-Live stall), with input routing restored after.
     @Test
-    fun deadSocketWifiCellularHandoffRedialsWithinProbeBudgetNotFrozenLive() = runBlocking<Unit> {
+    fun deadSocketWifiCellularHandoffRedialsWithinProbeBudgetNotFrozenLive() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -266,12 +266,12 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
         ) { it.contains("AFTER-$MARKER") }
         captureViewport("issue1078a-02-redialled-input-restored")
         writeTimings("issue1078a")
-    }
+    } }
 
     // AC2 — class coverage: the ALIVE-socket handoff must RIDE THROUGH with NO
     // spurious redial (the #981/#974/#1058 win preserved), attributed to the probe.
     @Test
-    fun aliveSocketWifiCellularHandoffRidesThroughWithNoSpuriousRedial() = runBlocking<Unit> {
+    fun aliveSocketWifiCellularHandoffRidesThroughWithNoSpuriousRedial() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -343,7 +343,7 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
         ) { it.contains("AFTER-$MARKER") }
         captureViewport("issue1078b-02-rode-through")
         writeTimings("issue1078b")
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

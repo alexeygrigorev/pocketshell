@@ -157,7 +157,7 @@ class ColdInstallE2eTest {
     }
 
     @Test
-    fun coldInstallJourney_addsHost_attachesTmuxSession_runsCommand_andDefaultsAreSane() = runBlocking {
+    fun coldInstallJourney_addsHost_attachesTmuxSession_runsCommand_andDefaultsAreSane() { runBlocking {
         // ---------------------------------------------------------------
         // Phase 1 — "uninstall + install". We replay an effective cold
         // install by wiping every persistent PocketShell artifact the app
@@ -408,7 +408,7 @@ class ColdInstallE2eTest {
             "HOST_ROW_TAG_PREFIX should remain non-empty (used to namespace host rows)",
             newHostRowTagPrefix.isNotEmpty(),
         )
-    }
+    } }
 
     // ---------------------------------------------------------------------
     // Helpers

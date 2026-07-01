@@ -94,7 +94,7 @@ class CodexAppendBurstMainThreadProofTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun denseColoredDiffAppendBurstKeepsMainThreadResponsiveAndRendersFinalState() = runBlocking {
+    fun denseColoredDiffAppendBurstKeepsMainThreadResponsiveAndRendersFinalState() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
@@ -251,7 +251,7 @@ class CodexAppendBurstMainThreadProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

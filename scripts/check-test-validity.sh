@@ -145,6 +145,24 @@ collect_test_files() {
 }
 mapfile -t ALL_TEST_FILES < <(collect_test_files)
 
+# --------------------------------------------------------------------------
+# #1154: the androidTest (connected/instrumented) roots — app/src/androidTest
+# plus every shared/*/src/androidTest. V1 (non-void @Test) is scoped to these
+# because a non-void @Test fails JUnit init SILENTLY here: when the emulator
+# journey lane is infra-down (#771) the whole test class InvalidTestClassErrors
+# and simply never runs, so the guard shows green with zero coverage (the
+# #1138 black-screen journey shipped exactly this way). Unit-job src/test
+# @Test failures are LOUD by contrast (./gradlew test runs them directly), and
+# src/test legitimately holds ~1400 void expression-body `= runTest { }`
+# methods — so V1 does NOT scan src/test.
+# --------------------------------------------------------------------------
+collect_android_test_files() {
+  [[ -d app/src/androidTest ]] && find app/src/androidTest -type f -name '*.kt'
+  find shared -maxdepth 4 -type d -path 'shared/*/src/androidTest' 2>/dev/null \
+    | while IFS= read -r d; do find "$d" -type f -name '*.kt'; done
+}
+mapfile -t ANDROID_TEST_FILES < <(collect_android_test_files)
+
 REPORT_MODE=0
 if [[ "${1:-}" == "--report" ]]; then
   REPORT_MODE=1
@@ -845,6 +863,74 @@ scan_timing1() {
 }
 
 # --------------------------------------------------------------------------
+# V1 scan (#1154) — non-void @Test (and @Before/@After lifecycle) methods in
+# androidTest. A Kotlin EXPRESSION body — `@Test fun x() = runBlocking { … }` —
+# returns the block's last expression. When that is non-Unit (e.g. the block
+# ends with `writeSummary(): File` or `capturePaintedRows(): File`), the method
+# compiles fine but is NON-VOID, so JUnit4 rejects the ENTIRE class at load with
+#   InvalidTestClassError: Method x() should be void
+# and every test in that class NEVER RUNS. The #1138 connected journey shipped
+# broken exactly this way (found in v0.4.20 release validation). It slips every
+# other gate: it COMPILES, passes check-ci-journey-harness.sh (shape only), and
+# the batched emulator lane where it would surface is infra-down (#771).
+#
+# The bulletproof, non-fragile static rule is: an androidTest JUnit lifecycle
+# method MUST use a BLOCK body (which is always Unit), never an expression body
+# (which MAY be non-Unit and cannot be statically type-checked here). So V1
+# HARD-FAILS on ANY `@Test`/`@Before`/`@After`/`@BeforeClass`/`@AfterClass`
+# method declared with an expression body `fun name(...) [: T] = …`. The fix is
+# a void block body: `fun name(...) { … }` (or wrap the call — the expression
+# body's value is discarded and the method returns Unit). No baseline: the
+# #1154 sweep converted every androidTest occurrence, so this must stay at zero.
+# --------------------------------------------------------------------------
+declare -a V1_NEW=()
+
+# JUnit4 lifecycle annotations whose method MUST be void.
+V1_JUNIT_ANNOT='@(Test|Before|After|BeforeClass|AfterClass)([[:space:](]|$)'
+# An expression-bodied fun declaration: `fun name(<no nested paren>) [: T] = <expr>`.
+# The `=` must be OUTSIDE the parens (a default-arg `=` sits inside `(...)` and is
+# excluded by `[^)]*`), so this does not false-positive on `fun f(a: Int = 5) { }`.
+V1_FUN_EXPR='^[[:space:]]*(override[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)*fun[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\([^)]*\)[[:space:]]*(:[[:space:]]*[^={]+)?='
+
+scan_void1() {
+  local file
+  for file in "${ANDROID_TEST_FILES[@]}"; do
+    [[ -z "$file" ]] && continue
+    # Cheap pre-filter: only files that even have a lifecycle annotation.
+    grep -Eq "$V1_JUNIT_ANNOT" "$file" || continue
+    local total lineno
+    total="$(wc -l < "$file")"
+    while IFS= read -r lineno; do
+      [[ -z "$lineno" ]] && continue
+      # Same-line form: `@Test fun x() = …` on the annotation line itself.
+      local annline
+      annline="$(sed -n "${lineno}p" "$file")"
+      if printf '%s' "$annline" | grep -Eq "$V1_FUN_EXPR"; then
+        V1_NEW+=("$file:$lineno")
+        continue
+      fi
+      # Otherwise walk forward to the next `fun` declaration, skipping further
+      # annotations, blank lines, and comment lines.
+      local j="$((lineno + 1))" text
+      while [[ "$j" -le "$total" ]]; do
+        text="$(sed -n "${j}p" "$file")"
+        case "$(printf '%s' "$text" | sed -e 's/^[[:space:]]*//')" in
+          '@'*|''|'//'*|'/*'*|'*'*) j=$((j + 1)); continue ;;
+        esac
+        break
+      done
+      [[ "$j" -gt "$total" ]] && continue
+      text="$(sed -n "${j}p" "$file")"
+      # Only flag when this is actually a `fun` declaration (an expression body).
+      if printf '%s' "$text" | grep -Eq '^[[:space:]]*(override[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)*fun[[:space:]]' \
+         && printf '%s' "$text" | grep -Eq "$V1_FUN_EXPR"; then
+        V1_NEW+=("$file:$j")
+      fi
+    done < <(grep -nE "$V1_JUNIT_ANNOT" "$file" | cut -d: -f1)
+  done
+}
+
+# --------------------------------------------------------------------------
 # Validate baselines: prune entries whose file no longer exists.
 # --------------------------------------------------------------------------
 declare -a STALE_BASELINE=()
@@ -859,6 +945,7 @@ scan_fake1
 scan_await1
 scan_j1
 scan_timing1
+scan_void1
 
 echo "=============================================================="
 echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048)"
@@ -908,6 +995,7 @@ print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, n
 print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
 print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"
 print_list "TIMING1 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${TIMING1_JUSTIFIED[@]:-}"
+print_list "V1 — NEW non-void expression-body @Test/@Before/@After in androidTest (JUnit InvalidTestClassError -> class never runs) [HARD FAIL]" "${V1_NEW[@]:-}"
 
 if [[ "${#STALE_BASELINE[@]}" -gt 0 ]]; then
   echo
@@ -936,6 +1024,10 @@ echo "        Shape B: drive an Android Handler/Thread worker with a bounded"
 echo "        advanceUntilIdle()+idleFor(16ms) pump to a currentTimeMillis/"
 echo "        nanoTime deadline that HARD-FAILS (TmuxSessionWarmOpenTest.pumpUntil"
 echo "        :131-150; codex pump TmuxSessionViewModelTest:5602-5657)."
+echo " V1     androidTest @Test/@Before/@After must use a VOID BLOCK body, not an"
+echo "        expression body. Change  fun x() = runBlocking { … }  to"
+echo "        fun x() { runBlocking { … } }  (the block body is always Unit; the"
+echo "        expression-body value that made the method non-void is discarded)."
 echo "--------------------------------------------------------------"
 
 # Collect the HARD-FAIL categories (A5 + C1 + J1 + TIMING1).
@@ -946,7 +1038,8 @@ for x in \
   "${J1_NEW[@]:-}" \
   "${J1_STALE_BASELINE[@]:-}" \
   "${J1_PARSER_FAILURE[@]:-}" \
-  "${TIMING1_NEW_HARD[@]:-}"; do
+  "${TIMING1_NEW_HARD[@]:-}" \
+  "${V1_NEW[@]:-}"; do
   [[ -n "$x" ]] && real_hard_fail+=("$x")
 done
 
@@ -958,12 +1051,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048)::A NEW load-bearing self-skip, ungated androidTest journey, or fixed-sleep-before-assert was found. An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1 + V1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, or fixed-sleep-before-assert flakes (A5 + C1 + J1 + TIMING1)."
+echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, or non-void androidTest @Test methods (A5 + C1 + J1 + TIMING1 + V1)."
 exit 0

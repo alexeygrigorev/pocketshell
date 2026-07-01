@@ -67,7 +67,7 @@ class FileViewerDockerTest {
     private lateinit var leasing: CountingLeaseManager
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -80,10 +80,10 @@ class FileViewerDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (seededPaths.isNotEmpty()) {
             withTimeout(15_000) {
                 connect()?.use { session ->
@@ -97,10 +97,10 @@ class FileViewerDockerTest {
         }
         runCatching { keyFile.delete() }
         runCatching { leasing.manager.close() }
-    }
+    } }
 
     @Test
-    fun viewsRemotePngAndTextFromFixture(): Unit = runBlocking {
+    fun viewsRemotePngAndTextFromFixture(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val pngPath = "/tmp/issue497-image-$suffix.png"
         val textPath = "/tmp/issue497-notes-$suffix.txt"
@@ -145,10 +145,10 @@ class FileViewerDockerTest {
         }
         composeRule.onNodeWithTag(FILE_VIEWER_IMAGE_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue497-file-viewer-image")
-    }
+    } }
 
     @Test
-    fun viewsRemoteTextFromFixture(): Unit = runBlocking {
+    fun viewsRemoteTextFromFixture(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val textPath = "/tmp/issue497-text-$suffix.txt"
         val textBody = "PocketShell file viewer issue #497\nrelative-path + size-cap covered by unit tests\n"
@@ -183,10 +183,10 @@ class FileViewerDockerTest {
         }
         composeRule.onNodeWithTag(FILE_VIEWER_TEXT_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue497-file-viewer-text")
-    }
+    } }
 
     @Test
-    fun viewsRemotePdfPagesFromFixture(): Unit = runBlocking {
+    fun viewsRemotePdfPagesFromFixture(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val pdfPath = "/tmp/issue498-doc-$suffix.pdf"
 
@@ -248,10 +248,10 @@ class FileViewerDockerTest {
         composeRule.waitUntil(timeoutMillis = 15_000) {
             composeRule.onAllNodesWithText("Page 2 / 3").fetchSemanticsNodes().isNotEmpty()
         }
-    }
+    } }
 
     @Test
-    fun playsRemoteAudioFromFixture(): Unit = runBlocking {
+    fun playsRemoteAudioFromFixture(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val wavPath = "/tmp/issue499-clip-$suffix.wav"
 
@@ -313,10 +313,10 @@ class FileViewerDockerTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue499-audio-after-seek")
-    }
+    } }
 
     @Test
-    fun opensAFileReusingTheWarmLeaseInsteadOfHandshakingAgain(): Unit = runBlocking {
+    fun opensAFileReusingTheWarmLeaseInsteadOfHandshakingAgain(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val textPath = "/tmp/issue697-viewer-$suffix.txt"
         val textBody = "issue #697 — file open reuses the warm transport\nno per-open handshake\n"
@@ -378,10 +378,10 @@ class FileViewerDockerTest {
             leasing.handshakeCount.get(),
         )
         warmLease.release()
-    }
+    } }
 
     @Test
-    fun submitsAReviewYamlToTheReviewsInboxOverTheReusedLease(): Unit = runBlocking {
+    fun submitsAReviewYamlToTheReviewsInboxOverTheReusedLease(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val srcPath = "/tmp/issue714-review-$suffix.kt"
         val srcBody = "val x = doThing(y)\nreturn null\n"
@@ -495,7 +495,7 @@ class FileViewerDockerTest {
         composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { attachedPrompts.isNotEmpty() }
         assertEquals(reviewAttachPrompt(surfacedPath), attachedPrompts.single())
-    }
+    } }
 
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,

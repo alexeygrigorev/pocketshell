@@ -132,7 +132,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     }
 
     @Test
-    fun inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints() = runBlocking {
+    fun inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         // Fresh summary file for this run (both entry points append to it).
@@ -144,7 +144,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
         // folder/session so the two runs don't interfere.
         runEntryPoint(EntryPoint.KEBAB, hostRowTag)
         runEntryPoint(EntryPoint.SWITCHER, hostRowTag)
-    }
+    } }
 
     private enum class EntryPoint(val slug: String) {
         KEBAB("kebab"),

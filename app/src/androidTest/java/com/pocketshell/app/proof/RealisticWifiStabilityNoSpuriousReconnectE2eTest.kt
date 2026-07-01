@@ -182,7 +182,7 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
      * coordinates the probe to defer to the keepalive.
      */
     @Test
-    fun stableSlowControlChannelOnLiveTransportNeverRedials() = runBlocking<Unit> {
+    fun stableSlowControlChannelOnLiveTransportNeverRedials() { runBlocking<Unit> {
         val key = readFixtureKey()
         val marker = "rw${System.currentTimeMillis().toString(36).takeLast(5)}"
         val sessionName = "issue970-stable-$marker"
@@ -288,7 +288,7 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
                 "expected_base=RED (probe redials at its budget regardless of keepalive)",
             ),
         )
-    }
+    } }
 
     /**
      * THE SYNTHETIC-JITTER, PER-PUSH CI VARIANT (issue #1081 — no toxiproxy, no
@@ -305,7 +305,7 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
      * N-consecutive reset) is proven RED→GREEN by the pure-JVM `LivenessProbeTest`.
      */
     @Test
-    fun realisticJitteryWifiOnRealLinkNeverRedials() = runBlocking<Unit> {
+    fun realisticJitteryWifiOnRealLinkNeverRedials() { runBlocking<Unit> {
         val key = readFixtureKey()
         val marker = "jw${System.currentTimeMillis().toString(36).takeLast(5)}"
         val sessionName = "issue970-jitter-$marker"
@@ -409,7 +409,7 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
                 "expected_base=RED (over-budget burst redials at its budget regardless of keepalive)",
             ),
         )
-    }
+    } }
 
     // -- ZERO-reconnect assertions (the load-bearing ones) ------------------------
 

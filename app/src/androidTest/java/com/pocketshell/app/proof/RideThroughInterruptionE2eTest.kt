@@ -35,7 +35,7 @@ import org.junit.runner.RunWith
 class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
 
     @Test
-    fun briefLinkCutRidesThroughWithoutDisconnectOrTeardown() = runBlocking {
+    fun briefLinkCutRidesThroughWithoutDisconnectOrTeardown() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -81,10 +81,10 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore}",
             ),
         )
-    }
+    } }
 
     @Test
-    fun sustainedLinkCutReconnectsCleanlyWithoutHang() = runBlocking {
+    fun sustainedLinkCutReconnectsCleanlyWithoutHang() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -135,7 +135,7 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore}",
             ),
         )
-    }
+    } }
 
     private companion object {
         const val BRIEF_BLIP_MS: Long = 5_000L

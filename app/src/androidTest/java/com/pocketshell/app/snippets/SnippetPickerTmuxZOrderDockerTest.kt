@@ -88,7 +88,7 @@ class SnippetPickerTmuxZOrderDockerTest {
     }
 
     @Test
-    fun snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen() = runBlocking {
+    fun snippetPickerIsFullyVisibleAboveKeyBarOnTmuxScreen() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -175,7 +175,7 @@ class SnippetPickerTmuxZOrderDockerTest {
             runCatching { withTimeout(20_000) { killStaleTmuxSession(sshKey, sshPort) } }
         }
         Unit
-    }
+    } }
 
     // Issue #761: ensure the seeded folder ends EXPANDED with its session row
     // visible, independent of #471's auto-expand starting state. Toggle the

@@ -186,7 +186,7 @@ class TerminalSurfaceComposeIntegrationTest {
     }
 
     @Test
-    fun copyActionRoutesSelectedTextThroughRealClipboardManager() = runBlocking {
+    fun copyActionRoutesSelectedTextThroughRealClipboardManager() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
@@ -353,7 +353,7 @@ class TerminalSurfaceComposeIntegrationTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     /**
      * [ContextWrapper] that pretends to be a complete context but routes
@@ -393,7 +393,7 @@ class TerminalSurfaceComposeIntegrationTest {
     }
 
     @Test
-    fun tappingDetectedUrlFiresIntentActionView() = runBlocking {
+    fun tappingDetectedUrlFiresIntentActionView() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
@@ -579,10 +579,10 @@ class TerminalSurfaceComposeIntegrationTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun tappingEmptyAreaDoesNotFocusOrRequestSoftInput() = runBlocking {
+    fun tappingEmptyAreaDoesNotFocusOrRequestSoftInput() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
@@ -669,10 +669,10 @@ class TerminalSurfaceComposeIntegrationTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun longPressOnTextSelectsAndCopyRoutesThroughClipboard() = runBlocking {
+    fun longPressOnTextSelectsAndCopyRoutesThroughClipboard() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
@@ -852,7 +852,7 @@ class TerminalSurfaceComposeIntegrationTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     /**
      * Find the [TerminalView] AndroidView interop pushes into the activity's

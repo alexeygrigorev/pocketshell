@@ -69,7 +69,7 @@ class FolderListKillSessionDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -89,10 +89,10 @@ class FolderListKillSessionDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         factoryScope.cancel()
         if (createdSessions.isNotEmpty()) {
@@ -117,10 +117,10 @@ class FolderListKillSessionDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun killSessionDropsRowFromFolderTreePromptly(): Unit = runBlocking {
+    fun killSessionDropsRowFromFolderTreePromptly(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue464-kill-$suffix"
         val keep = "issue464-keep-$suffix"
@@ -268,7 +268,7 @@ class FolderListKillSessionDockerTest {
             tmuxVm.clearForTest()
             folderVm.stopPolling()
         }
-    }
+    } }
 
     private fun hasSession(vm: FolderListViewModel, sessionName: String): Boolean {
         val state = vm.state.value as? FolderListUiState.Ready ?: return false

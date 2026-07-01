@@ -54,7 +54,7 @@ class EngineCommandTapInstrumentedTest {
     private val claudeCommands = setOf("/clear", "/compact", "/rewind", "/model")
 
     @Test
-    fun clearTokenIsTappableAndRoutesTheCommandWhileNonCommandFallsThrough() = runBlocking {
+    fun clearTokenIsTappableAndRoutesTheCommandWhileNonCommandFallsThrough() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -204,7 +204,7 @@ class EngineCommandTapInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     /**
      * Render the live [TerminalView] off-screen to a bitmap and persist it under

@@ -149,7 +149,7 @@ class Issue796ImeRecompositionProofTest {
     }
 
     @Test
-    fun imeInsetBurstDoesNotRecomposeTerminalSubtreeDuringCodexOutputStorm() = runBlocking {
+    fun imeInsetBurstDoesNotRecomposeTerminalSubtreeDuringCodexOutputStorm() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -288,7 +288,7 @@ class Issue796ImeRecompositionProofTest {
             runCatching { withTimeout(20_000) { killSession(sshKey, sshPort) } }
         }
         Unit
-    }
+    } }
 
     // ----------------------------------------------------- keyboard-up containment
 

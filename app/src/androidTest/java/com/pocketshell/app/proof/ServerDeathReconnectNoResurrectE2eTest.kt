@@ -125,7 +125,7 @@ class ServerDeathReconnectNoResurrectE2eTest {
     }
 
     @Test
-    fun serverDeathOnReconnectDropsToListAndNeverResurrects() = runBlocking {
+    fun serverDeathOnReconnectDropsToListAndNeverResurrects() { runBlocking {
         val key = fixtureKey
 
         // ---- (1) Attach to the primary seeded session via the normal journey.
@@ -206,7 +206,7 @@ class ServerDeathReconnectNoResurrectE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

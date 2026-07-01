@@ -66,7 +66,7 @@ class WarmLeaseReuseBatchCDockerTest {
     }
 
     @Test
-    fun usageRepoBrowserAndWatchedFoldersAllReuseOneWarmTransport() = runBlocking {
+    fun usageRepoBrowserAndWatchedFoldersAllReuseOneWarmTransport() { runBlocking {
         val keyContent = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         val key = SshKey.Pem(keyContent)
@@ -185,7 +185,7 @@ class WarmLeaseReuseBatchCDockerTest {
         } finally {
             db.close()
         }
-    }
+    } }
 
     private fun writeKeyToFile(content: String): String {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext

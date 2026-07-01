@@ -90,7 +90,7 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
      * Connected and a post-recovery send round-trips.
      */
     @Test
-    fun severedIdleNatMappingRecoversWithinKeepAliveBudget() = runBlocking<Unit> {
+    fun severedIdleNatMappingRecoversWithinKeepAliveBudget() { runBlocking<Unit> {
         assumeNetworkFaultProofsEnabled()
         // SHORT keepalive so the dead-transport detection budget (interval × count)
         // is small and deterministic: 3s × 3 = ~9s.
@@ -158,7 +158,7 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
                 "expectation=keepalive detects half-open within budget => recovery + send",
             ),
         )
-    }
+    } }
 
     // -- helpers ------------------------------------------------------------------
 

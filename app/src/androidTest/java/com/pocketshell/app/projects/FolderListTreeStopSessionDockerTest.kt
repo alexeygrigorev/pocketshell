@@ -58,7 +58,7 @@ class FolderListTreeStopSessionDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -78,10 +78,10 @@ class FolderListTreeStopSessionDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         if (createdSessions.isNotEmpty()) {
             runCatching {
@@ -105,10 +105,10 @@ class FolderListTreeStopSessionDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun stopSessionFromTreeKillsRemoteAndDropsRow(): Unit = runBlocking {
+    fun stopSessionFromTreeKillsRemoteAndDropsRow(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue518-stop-$suffix"
         val keep = "issue518-keep-$suffix"
@@ -209,7 +209,7 @@ class FolderListTreeStopSessionDockerTest {
         } finally {
             folderVm.stopPolling()
         }
-    }
+    } }
 
     private fun hasSession(vm: FolderListViewModel, sessionName: String): Boolean {
         val state = vm.state.value as? FolderListUiState.Ready ?: return false

@@ -86,7 +86,7 @@ class EmulatorWorkflowE2eTest {
     }
 
     @Test
-    fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() = runBlocking {
+    fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() { runBlocking {
         // STOPGAP — tracked in #207/#470/#835. The historical terminal-input
         // assertion is wrap-tolerant now, but PR #905 proved the journey still
         // reaches terminal input through the tmux picker enumeration path. On CI
@@ -146,7 +146,7 @@ class EmulatorWorkflowE2eTest {
         )
 
         writeSummary("tmux-workflow")
-    }
+    } }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()

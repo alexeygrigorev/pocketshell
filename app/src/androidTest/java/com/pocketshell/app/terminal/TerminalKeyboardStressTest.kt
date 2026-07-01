@@ -109,7 +109,7 @@ class TerminalKeyboardStressTest {
     }
 
     @Test
-    fun typingAndKeyboardToggleStayResponsiveUnderLiveOutput() = runBlocking {
+    fun typingAndKeyboardToggleStayResponsiveUnderLiveOutput() { runBlocking {
         // Issue #142 re-enabled this test on CI by decoupling the IME-ack
         // measurement from the layout-stable measurement. The old
         // `totalHideMs < 3000` ceiling conflated a slow `dumpsys input_method`
@@ -476,7 +476,7 @@ class TerminalKeyboardStressTest {
                 "be observing a frozen frame); distinct=${viewportHashes.toSet().size} samples=${viewportHashes.size}",
             viewportHashes.toSet().size >= 3,
         )
-    }
+    } }
 
     // --- IME helpers -------------------------------------------------------
 

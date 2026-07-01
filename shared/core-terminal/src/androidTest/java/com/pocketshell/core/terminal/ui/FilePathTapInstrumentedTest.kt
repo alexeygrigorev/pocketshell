@@ -52,7 +52,7 @@ import java.io.FileOutputStream
 class FilePathTapInstrumentedTest {
 
     @Test
-    fun pngAndTextPathsAreScannedAndTapRoutesToFileViewerPath() = runBlocking {
+    fun pngAndTextPathsAreScannedAndTapRoutesToFileViewerPath() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -215,10 +215,10 @@ class FilePathTapInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     @Test
-    fun generatedImagePathsWrappedAcrossRowsRouteFullFileViewerPath() = runBlocking {
+    fun generatedImagePathsWrappedAcrossRowsRouteFullFileViewerPath() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -355,7 +355,7 @@ class FilePathTapInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
-    }
+    } }
 
     private fun centerX(region: FilePathRegion, view: TerminalView): Float {
         val renderer = requireNotNull(view.mRenderer) { "renderer should be initialised" }

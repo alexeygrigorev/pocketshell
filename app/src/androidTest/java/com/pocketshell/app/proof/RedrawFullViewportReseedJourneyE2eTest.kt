@@ -133,9 +133,9 @@ class RedrawFullViewportReseedJourneyE2eTest {
      * over the warm session, with no reconnect surface.
      */
     @Test
-    fun redrawRestoresFullViewportOnPartialBlackShellPane() = runBlocking {
+    fun redrawRestoresFullViewportOnPartialBlackShellPane() { runBlocking {
         runRedrawJourney(altScreen = false, namePrefix = "issue892-shell")
-    }
+    } }
 
     /**
      * Issue #892 — class coverage (D32 G2): Redraw must ALSO restore an idle
@@ -144,9 +144,9 @@ class RedrawFullViewportReseedJourneyE2eTest {
      * nothing incrementally heals it — without Redraw it stays black indefinitely.
      */
     @Test
-    fun redrawRestoresFullViewportOnIdleAltScreenPane() = runBlocking {
+    fun redrawRestoresFullViewportOnIdleAltScreenPane() { runBlocking {
         runRedrawJourney(altScreen = true, namePrefix = "issue892-altscreen")
-    }
+    } }
 
     private suspend fun runRedrawJourney(altScreen: Boolean, namePrefix: String) {
         val key = readFixtureKey()

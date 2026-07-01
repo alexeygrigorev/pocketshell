@@ -150,7 +150,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
     }
 
     @Test
-    fun sameSsidWifiReassociationDoesNotReconnectOrBlankViewport() = runBlocking<Unit> {
+    fun sameSsidWifiReassociationDoesNotReconnectOrBlankViewport() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -214,7 +214,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
         )
 
         writeTimings()
-    }
+    } }
 
     /**
      * ISSUE #981 — a REAL validated WIFI→CELLULAR identity flip (which DOES emit,
@@ -240,7 +240,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
      * viewport painted, session stays Connected (GREEN).
      */
     @Test
-    fun realValidatedHandoffWhileTransportProvenAliveDoesNotReconnect() = runBlocking<Unit> {
+    fun realValidatedHandoffWhileTransportProvenAliveDoesNotReconnect() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -321,7 +321,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
         }
 
         writeTimings()
-    }
+    } }
 
     private fun currentViewModel(): TmuxSessionViewModel {
         lateinit var vm: TmuxSessionViewModel

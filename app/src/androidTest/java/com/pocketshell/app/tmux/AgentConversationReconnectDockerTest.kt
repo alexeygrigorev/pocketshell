@@ -130,7 +130,7 @@ class AgentConversationReconnectDockerTest {
     }
 
     @Test
-    fun reconnectRestoresConversationTabImmediatelyForAgentSession() = runBlocking {
+    fun reconnectRestoresConversationTabImmediatelyForAgentSession() { runBlocking {
         // Local-only reconnect evidence. The remember/restore/reconcile/tab
         // logic is owned on CI by AgentSessionMemoryTest + the
         // TmuxSessionViewModelTest reconnect cases; this connected reconnect
@@ -455,7 +455,7 @@ class AgentConversationReconnectDockerTest {
         } finally {
             vm.clearForTest()
         }
-    }
+    } }
 
     /**
      * Issue #778 — tapping the Conversation tab must NOT be a no-op while live
@@ -480,7 +480,7 @@ class AgentConversationReconnectDockerTest {
      * real-transcript path).
      */
     @Test
-    fun conversationTapIsHonouredBeforeDetectionLands(): Unit = runBlocking {
+    fun conversationTapIsHonouredBeforeDetectionLands(): Unit { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -588,7 +588,7 @@ class AgentConversationReconnectDockerTest {
         } finally {
             vm.clearForTest()
         }
-    }
+    } }
 
     /**
      * Issue #818 — an AGENT session OPENS on the configured default tab
@@ -623,7 +623,7 @@ class AgentConversationReconnectDockerTest {
      *    conversation row is ever created → it stays on the raw Terminal.
      */
     @Test
-    fun agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow(): Unit = runBlocking {
+    fun agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow(): Unit { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -1031,7 +1031,7 @@ class AgentConversationReconnectDockerTest {
         } finally {
             shellVm.clearForTest()
         }
-    }
+    } }
 
     /**
      * Issue #874 (residual black-screen): a presumed-agent pane that is
@@ -1062,7 +1062,7 @@ class AgentConversationReconnectDockerTest {
      * invokes; no synthetic stand-in for the surface logic itself.
      */
     @Test
-    fun reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice(): Unit = runBlocking {
+    fun reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice(): Unit { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -1207,7 +1207,7 @@ class AgentConversationReconnectDockerTest {
         } finally {
             vm.clearForTest()
         }
-    }
+    } }
 
     private suspend inline fun <reified T : TmuxSessionViewModel.ConnectionStatus> waitForStatus(
         vm: TmuxSessionViewModel,

@@ -123,7 +123,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
     }
 
     @Test
-    fun voiceSendComposerDismissResizeKeepsActivePaneVisible() = runBlocking {
+    fun voiceSendComposerDismissResizeKeepsActivePaneVisible() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         attachSeededTmuxSession(hostRowTag)
 
@@ -212,7 +212,7 @@ class VoiceSendActivePaneStaysVisibleE2eTest {
         writeSummary()
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

@@ -100,7 +100,7 @@ class WatchedFoldersE2eTest {
     }
 
     @Test
-    fun addFolderRoundTripsThroughDao(): Unit = runBlocking {
+    fun addFolderRoundTripsThroughDao(): Unit { runBlocking {
         val dao = db.projectRootDao()
         val hostId = 17L
 
@@ -147,10 +147,10 @@ class WatchedFoldersE2eTest {
         // The empty-state hint is replaced by the row.
         compose.onNodeWithTag(WATCHED_FOLDERS_EMPTY_HINT_TAG).assertDoesNotExist()
         compose.onNodeWithTag(watchedFolderRowTestTag(saved.id)).assertExists()
-    }
+    } }
 
     @Test
-    fun chipRowRendersConfiguredFoldersAndCallsBack(): Unit = runBlocking {
+    fun chipRowRendersConfiguredFoldersAndCallsBack(): Unit { runBlocking {
         val dao = db.projectRootDao()
         val hostId = 33L
         dao.insert(
@@ -180,10 +180,10 @@ class WatchedFoldersE2eTest {
             .performClick()
 
         assertEquals("~/code/site", lastChip)
-    }
+    } }
 
     @Test
-    fun chipRowShowsEmptyNudgeWhenNoFolders(): Unit = runBlocking {
+    fun chipRowShowsEmptyNudgeWhenNoFolders(): Unit { runBlocking {
         val chipsVm = WatchedFoldersChipsViewModel(projectRootDao = db.projectRootDao())
         compose.setContent {
             PocketShellTheme {
@@ -195,10 +195,10 @@ class WatchedFoldersE2eTest {
             }
         }
         compose.onNodeWithTag(WATCHED_FOLDERS_CHIP_EMPTY_NUDGE_TAG).assertExists()
-    }
+    } }
 
     @Test
-    fun deletingFolderDropsItFromDao(): Unit = runBlocking {
+    fun deletingFolderDropsItFromDao(): Unit { runBlocking {
         val dao = db.projectRootDao()
         val hostId = 8L
         val insertedId = dao.insert(
@@ -239,10 +239,10 @@ class WatchedFoldersE2eTest {
             vm.state.value.roots.none { it.id == insertedId }
         }
         compose.onNodeWithTag(WATCHED_FOLDERS_EMPTY_HINT_TAG).assertExists()
-    }
+    } }
 
     @Test
-    fun hostDetailViewModeRowsDispatchPreferenceChanges(): Unit = runBlocking {
+    fun hostDetailViewModeRowsDispatchPreferenceChanges(): Unit { runBlocking {
         val vm = WatchedFoldersViewModel(
             projectRootDao = db.projectRootDao(),
             sshLeaseManager = SshLeaseManager(connector = DefaultSshLeaseConnector()),
@@ -269,5 +269,5 @@ class WatchedFoldersE2eTest {
             .performClick()
 
         assertEquals(HostDetailViewMode.Flat, selected)
-    }
+    } }
 }

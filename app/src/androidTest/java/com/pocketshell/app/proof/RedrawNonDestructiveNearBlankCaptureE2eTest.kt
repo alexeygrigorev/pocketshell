@@ -101,7 +101,7 @@ class RedrawNonDestructiveNearBlankCaptureE2eTest {
     }
 
     @Test
-    fun redrawKeepsRichContentWhenRemoteCaptureIsNearBlank(): Unit = runBlocking {
+    fun redrawKeepsRichContentWhenRemoteCaptureIsNearBlank(): Unit { runBlocking {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -157,7 +157,7 @@ class RedrawNonDestructiveNearBlankCaptureE2eTest {
         )
 
         writeSummary()
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

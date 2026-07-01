@@ -94,7 +94,7 @@ class HostAndFolderListScrollE2eTest {
     }
 
     @Test
-    fun hostListScrollsToLastHostWithoutVersionFooterAboveFab(): Unit = runBlocking {
+    fun hostListScrollsToLastHostWithoutVersionFooterAboveFab(): Unit { runBlocking {
         val lastHostId = seedOverflowHosts(count = 24)
         val lastHostTag = HOST_ROW_TAG_PREFIX + lastHostId
 
@@ -115,7 +115,7 @@ class HostAndFolderListScrollE2eTest {
                 .fetchSemanticsNodes().isEmpty(),
         )
         captureFullDevice("02-host-list-bottom-viewport.png")
-    }
+    } }
 
     private suspend fun seedOverflowHosts(count: Int): Long {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -187,7 +187,7 @@ class FolderListScrollE2eTest {
     }
 
     @Test
-    fun folderSessionListScrollsToLastSessionInTreeAndFlatModes(): Unit = runBlocking {
+    fun folderSessionListScrollsToLastSessionInTreeAndFlatModes(): Unit { runBlocking {
         val database = Room.inMemoryDatabaseBuilder(
             InstrumentationRegistry.getInstrumentation().targetContext,
             AppDatabase::class.java,
@@ -275,7 +275,7 @@ class FolderListScrollE2eTest {
         compose.waitForIdle()
         compose.onNodeWithTag(lastFlatRowTag, useUnmergedTree = true).assertIsDisplayed()
         captureFullDevice("05-folder-flat-bottom-viewport.png")
-    }
+    } }
 
     private suspend fun seedFolderHost(db: AppDatabase): Long {
         db.clearAllTables()

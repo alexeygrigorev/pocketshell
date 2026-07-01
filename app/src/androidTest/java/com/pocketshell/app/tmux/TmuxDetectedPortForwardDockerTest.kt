@@ -98,7 +98,7 @@ class TmuxDetectedPortForwardDockerTest {
     }
 
     @Test
-    fun detectedPortOverlayForwardsAndReturnsToSession() = runBlocking {
+    fun detectedPortOverlayForwardsAndReturnsToSession() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -198,7 +198,7 @@ class TmuxDetectedPortForwardDockerTest {
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort) } }
         }
         Unit
-    }
+    } }
 
     // ====================================================== fixture helpers
 

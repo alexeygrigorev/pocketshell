@@ -153,7 +153,7 @@ class AttachmentNoReconnectE2eTest {
     }
 
     @Test
-    fun addingAttachmentWithinGraceDoesNotReconnectOrBlankViewport() = runBlocking<Unit> {
+    fun addingAttachmentWithinGraceDoesNotReconnectOrBlankViewport() { runBlocking<Unit> {
         val key = requireNotNull(seededKey)
         // Session seeded by [seedFixtureRule] before MainActivity launched.
         val hostRowTag = requireNotNull(seededHostRowTag)
@@ -226,7 +226,7 @@ class AttachmentNoReconnectE2eTest {
         assertNoReconnectDiagnostics("after attachment")
         captureViewport("issue785-02-after-attachment")
         writeTimings()
-    }
+    } }
 
     private fun attachSeededTmuxSession(hostRowTag: String) {
         compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {

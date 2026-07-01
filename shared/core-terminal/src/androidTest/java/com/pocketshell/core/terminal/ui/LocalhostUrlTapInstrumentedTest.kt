@@ -54,7 +54,7 @@ import java.io.FileOutputStream
 class LocalhostUrlTapInstrumentedTest {
 
     @Test
-    fun localhostReferencesTapClassifiesAsServerLocalWhileRealHostStaysBrowser() = runBlocking {
+    fun localhostReferencesTapClassifiesAsServerLocalWhileRealHostStaysBrowser() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -192,7 +192,7 @@ class LocalhostUrlTapInstrumentedTest {
             state.detachExternalProducer()
         }
         assertTrue(true)
-    }
+    } }
 
     /**
      * Render the live [TerminalView] off-screen to a bitmap and persist it

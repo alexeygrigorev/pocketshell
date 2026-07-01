@@ -82,7 +82,7 @@ class CodexMultiChunkSeedAttachMainThreadProofTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun multiChunkSeedAttachDoesNotPinTheMainThread() = runBlocking {
+    fun multiChunkSeedAttachDoesNotPinTheMainThread() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
@@ -316,7 +316,7 @@ class CodexMultiChunkSeedAttachMainThreadProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

@@ -117,7 +117,7 @@ class TmuxBracketedPasteDictationE2eTest {
     }
 
     @Test
-    fun multiLineDictationArrivesAsBracketedPasteBlock() = runBlocking {
+    fun multiLineDictationArrivesAsBracketedPasteBlock() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val key = instrumentation.context
             .assets
@@ -290,7 +290,7 @@ class TmuxBracketedPasteDictationE2eTest {
             0,
             crCount,
         )
-    }
+    } }
 
     // ----------------------------------------------------------------
     // helpers

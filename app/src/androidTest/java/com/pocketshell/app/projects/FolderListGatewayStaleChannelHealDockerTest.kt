@@ -71,7 +71,7 @@ class FolderListGatewayStaleChannelHealDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -87,10 +87,10 @@ class FolderListGatewayStaleChannelHealDockerTest {
             setReadable(true, true)
         }
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         if (createdSessions.isEmpty()) {
             runCatching { keyFile.delete() }
             return@runBlocking
@@ -110,10 +110,10 @@ class FolderListGatewayStaleChannelHealDockerTest {
             }
         }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun staleLeaseHealsToFreshDockerDialWithinSameRefresh(): Unit = runBlocking {
+    fun staleLeaseHealsToFreshDockerDialWithinSameRefresh(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val folder = "/tmp/issue680-heal-$suffix"
         val session = "issue680-heal-$suffix"
@@ -180,10 +180,10 @@ class FolderListGatewayStaleChannelHealDockerTest {
             2,
             connectCount.get(),
         )
-    }
+    } }
 
     @Test
-    fun genuineDisconnectStillSurfacesAnError(): Unit = runBlocking {
+    fun genuineDisconnectStillSurfacesAnError(): Unit { runBlocking {
         // Point the gateway at a dead port so BOTH the initial dial and the
         // heal retry genuinely fail to connect — the refresh must NOT pretend
         // success; it surfaces an accurate error.
@@ -203,7 +203,7 @@ class FolderListGatewayStaleChannelHealDockerTest {
             "a genuine disconnect must surface an error, got $result",
             result is FolderListResult.ConnectFailed || result is FolderListResult.Failed,
         )
-    }
+    } }
 
     /**
      * Pooled session that LIES about connectivity (sshj reports a silently-dead

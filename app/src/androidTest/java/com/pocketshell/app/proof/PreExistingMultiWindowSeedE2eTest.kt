@@ -104,7 +104,7 @@ class PreExistingMultiWindowSeedE2eTest {
     }
 
     @Test
-    fun preExistingMultiWindowSurfacesPerWindowSwitcherEntriesAndSeedsEach() = runBlocking {
+    fun preExistingMultiWindowSurfacesPerWindowSwitcherEntriesAndSeedsEach() { runBlocking {
         val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
 
         // Open the host tree. Under createAndroidComposeRule, MainActivity cold
@@ -179,7 +179,7 @@ class PreExistingMultiWindowSeedE2eTest {
         captureViewport("issue782-03-window0-after-reselect")
 
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

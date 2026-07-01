@@ -75,7 +75,7 @@ class FolderListStopSessionTest {
     private val doomed = "doomed-agent"
 
     @Before
-    fun openDatabase(): Unit = runBlocking {
+    fun openDatabase(): Unit { runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -96,7 +96,7 @@ class FolderListStopSessionTest {
         db.projectRootDao().insert(
             ProjectRootEntity(hostId = hostId, label = "[00] git", path = "~/git"),
         )
-    }
+    } }
 
     @After
     fun closeDatabase() {

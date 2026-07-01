@@ -131,7 +131,7 @@ class BackgroundResumeSocketDeathE2eTest {
     }
 
     @Test
-    fun socketDeathDuringPauseDoesNotCrashOnResume() = runBlocking {
+    fun socketDeathDuringPauseDoesNotCrashOnResume() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -316,7 +316,7 @@ class BackgroundResumeSocketDeathE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     /** Arm/disarm the genuinely-unrecoverable-host seam on the live VM (main thread). */
     private fun setUnrecoverableHostForTest(value: Boolean) {

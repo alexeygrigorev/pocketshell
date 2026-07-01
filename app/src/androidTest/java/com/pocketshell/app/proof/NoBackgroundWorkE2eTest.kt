@@ -102,7 +102,7 @@ class NoBackgroundWorkE2eTest {
     }
 
     @Test
-    fun usageScheduler_doesNotTickWhileBackgrounded() = runBlocking {
+    fun usageScheduler_doesNotTickWhileBackgrounded() { runBlocking {
         val key = readFixtureKey()
         seedHostWithPocketshell(key)
 
@@ -188,7 +188,7 @@ class NoBackgroundWorkE2eTest {
             "scheduler must resume ticking on ON_START; snapshot=$snapshot final=${scheduler.tickCount}",
             scheduler.tickCount > snapshot,
         )
-    }
+    } }
 
     /**
      * Issue #450: a foreground within the grace window must cancel the
@@ -197,7 +197,7 @@ class NoBackgroundWorkE2eTest {
      * relaxation did not introduce an unbounded background timer.
      */
     @Test
-    fun graceWindow_foregroundWithinWindow_neverTearsDownAndHoldsNoTimer() = runBlocking {
+    fun graceWindow_foregroundWithinWindow_neverTearsDownAndHoldsNoTimer() { runBlocking {
         val teardowns = AtomicInteger(0)
         val foregrounds = mutableListOf<Boolean>()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -231,7 +231,7 @@ class NoBackgroundWorkE2eTest {
         } finally {
             scope.cancel()
         }
-    }
+    } }
 
     /**
      * Issue #450: staying backgrounded past the grace window must run the
@@ -240,7 +240,7 @@ class NoBackgroundWorkE2eTest {
      * repeating background job.
      */
     @Test
-    fun graceWindow_stayingBackgroundedPastWindow_tearsDownExactlyOnce() = runBlocking {
+    fun graceWindow_stayingBackgroundedPastWindow_tearsDownExactlyOnce() { runBlocking {
         val teardowns = AtomicInteger(0)
         val foregrounds = mutableListOf<Boolean>()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -281,7 +281,7 @@ class NoBackgroundWorkE2eTest {
         } finally {
             scope.cancel()
         }
-    }
+    } }
 
     private suspend fun waitForTickCountAtLeast(
         scheduler: UsageScheduler,

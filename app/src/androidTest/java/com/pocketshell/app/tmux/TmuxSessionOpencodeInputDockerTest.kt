@@ -174,7 +174,7 @@ class TmuxSessionOpencodeInputDockerTest {
     }
 
     @Test
-    fun typedPromptLandsInOpencodeInputFrameOnTmuxSessionScreen() = runBlocking {
+    fun typedPromptLandsInOpencodeInputFrameOnTmuxSessionScreen() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -352,10 +352,10 @@ class TmuxSessionOpencodeInputDockerTest {
             runCatching { withTimeout(20_000) { killStaleTmuxSession(sshKey, sshPort) } }
         }
         Unit
-    }
+    } }
 
     @Test
-    fun issue303TerminalConversationPillStaysInToolbarRow() = runBlocking {
+    fun issue303TerminalConversationPillStaysInToolbarRow() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -473,10 +473,10 @@ class TmuxSessionOpencodeInputDockerTest {
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME) } }
         }
         Unit
-    }
+    } }
 
     @Test
-    fun keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen() = runBlocking {
+    fun keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen() { runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
@@ -551,7 +551,7 @@ class TmuxSessionOpencodeInputDockerTest {
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_297_SESSION_NAME) } }
         }
         Unit
-    }
+    } }
 
     // ============================================================ Test helpers
 

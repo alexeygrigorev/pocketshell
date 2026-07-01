@@ -144,7 +144,7 @@ class AttachmentDropReconnectRecoversE2eTest {
      * drop fires), and assert the teardown OWNS + CANCELS the in-flight upload.
      */
     @Test
-    fun attachUploadTornDownOnRealTransportIsOwnedAndCancelled() = runBlocking<Unit> {
+    fun attachUploadTornDownOnRealTransportIsOwnedAndCancelled() { runBlocking<Unit> {
         val key = requireNotNull(seededKey)
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
@@ -203,7 +203,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         )
         captureViewport("issue1072-A-upload-torn-down")
         writeTimings("upload-torn-down")
-    }
+    } }
 
     /**
      * The literal #1072 acceptance criterion, faithful + end-to-end: a GENUINE clean
@@ -223,7 +223,7 @@ class AttachmentDropReconnectRecoversE2eTest {
      * false`, so the lease never reuses the upload-poisoned one).
      */
     @Test
-    fun genuineDropDuringUploadRecoversToLiveWithoutRestart() = runBlocking<Unit> {
+    fun genuineDropDuringUploadRecoversToLiveWithoutRestart() { runBlocking<Unit> {
         val key = requireNotNull(seededKey)
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
@@ -343,7 +343,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         } finally {
             runCatching { killer.close() }
         }
-    }
+    } }
 
     // -- upload + in-flight helpers ------------------------------------------------
 

@@ -128,7 +128,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     }
 
     @Test
-    fun sameHostSessionSwitchReusesSshTransport() = runBlocking {
+    fun sameHostSessionSwitchReusesSshTransport() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -283,10 +283,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     @Test
-    fun dashboardSameHostSessionTapReusesSshTransport() = runBlocking {
+    fun dashboardSameHostSessionTapReusesSshTransport() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -363,10 +363,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     @Test
-    fun sameHostWarmSwitchBenchmarkReportsRepeatedStats() = runBlocking {
+    fun sameHostWarmSwitchBenchmarkReportsRepeatedStats() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -456,7 +456,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             writeTimings()
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

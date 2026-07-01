@@ -87,7 +87,7 @@ class FolderListOutOfBandSessionDockerTest {
     private val createdSessions = mutableListOf<String>()
 
     @Before
-    fun setUp(): Unit = runBlocking {
+    fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context
             .assets
@@ -107,10 +107,10 @@ class FolderListOutOfBandSessionDockerTest {
             AppDatabase::class.java,
         ).allowMainThreadQueries().build()
         waitForSshFixtureReady(sshKey)
-    }
+    } }
 
     @After
-    fun tearDown(): Unit = runBlocking {
+    fun tearDown(): Unit { runBlocking {
         viewModelStore.clear()
         runCatching { ccClient?.close() }
         runCatching { ccSession?.close() }
@@ -135,10 +135,10 @@ class FolderListOutOfBandSessionDockerTest {
         }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-    }
+    } }
 
     @Test
-    fun outOfBandSessionAppearsInPickerWithinSeconds(): Unit = runBlocking {
+    fun outOfBandSessionAppearsInPickerWithinSeconds(): Unit { runBlocking {
         val suffix = System.currentTimeMillis().toString().takeLast(6)
         val anchorFolder = "/tmp/issue706-anchor-$suffix"
         val anchorSession = "issue706-anchor-$suffix"
@@ -271,7 +271,7 @@ class FolderListOutOfBandSessionDockerTest {
         )
         // Sanity: the anchor session is still listed too.
         assertTrue("anchor session must remain listed", hasSession(vm, anchorSession))
-    }
+    } }
 
     private fun hasSession(vm: FolderListViewModel, sessionName: String): Boolean {
         val state = vm.state.value as? FolderListUiState.Ready ?: return false

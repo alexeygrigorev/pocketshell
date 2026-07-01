@@ -105,7 +105,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
      * (the agent pane wired no scanner), GREEN with the off-main overlay.
      */
     @Test
-    fun codexAgentPaneFilePathAndUrlAreTappable() = runBlocking {
+    fun codexAgentPaneFilePathAndUrlAreTappable() { runBlocking {
         agentPaneFilePathAndUrlAreTappable(
             kindLabel = "Codex",
             filePath = "tmp/bathtub_central_cavity_new_feedback.png",
@@ -114,7 +114,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
             urlPrefix = "See ",
             artifactName = "issue871-codex-agent-pane-tappable",
         )
-    }
+    } }
 
     /**
      * Issue #871 / G2 class coverage — CLAUDE agent pane: an ABSOLUTE file path
@@ -135,7 +135,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
      * same two shapes through the identical code.
      */
     @Test
-    fun claudeAgentPaneFilePathAndUrlAreTappable() = runBlocking {
+    fun claudeAgentPaneFilePathAndUrlAreTappable() { runBlocking {
         agentPaneFilePathAndUrlAreTappable(
             kindLabel = "Claude",
             filePath = "/home/alexey/git/pocketshell/src/MainActivity.kt",
@@ -144,7 +144,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
             urlPrefix = "Reference: ",
             artifactName = "issue871-claude-agent-pane-tappable",
         )
-    }
+    } }
 
     private suspend fun agentPaneFilePathAndUrlAreTappable(
         kindLabel: String,
@@ -313,7 +313,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
      * If this is violated the #803/#866/#796 ANR comes straight back.
      */
     @Test
-    fun agentPaneScanRunsOffMainNotPerFrame() = runBlocking {
+    fun agentPaneScanRunsOffMainNotPerFrame() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
@@ -440,7 +440,7 @@ class AgentPaneLinkAffordanceOffMainProofTest {
             state.detachExternalProducer()
         }
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

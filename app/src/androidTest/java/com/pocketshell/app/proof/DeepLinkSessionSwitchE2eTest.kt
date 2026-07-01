@@ -95,7 +95,7 @@ class DeepLinkSessionSwitchE2eTest {
     }
 
     @Test
-    fun deepLinkAttachShowsCorrectSessionContentWithoutPickerAndSwitchesCleanly() = runBlocking {
+    fun deepLinkAttachShowsCorrectSessionContentWithoutPickerAndSwitchesCleanly() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
@@ -124,7 +124,7 @@ class DeepLinkSessionSwitchE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     private fun attachViaDeepLinkAndAssert(
         seeded: SeededHost,

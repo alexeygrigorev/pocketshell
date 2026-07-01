@@ -112,7 +112,7 @@ class TmuxSessionSwitchE2eTest {
     }
 
     @Test
-    fun switchingBetweenTmuxSessionsViaDrawerDoesNotCrash() = runBlocking {
+    fun switchingBetweenTmuxSessionsViaDrawerDoesNotCrash() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -217,7 +217,7 @@ class TmuxSessionSwitchE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #652 (epic #636): the SEVERE wrong-project regression. The
@@ -238,7 +238,7 @@ class TmuxSessionSwitchE2eTest {
      * typed now reaches A.
      */
     @Test
-    fun backThenTapSessionRowLandsInThatSessionNotAnotherOne() = runBlocking {
+    fun backThenTapSessionRowLandsInThatSessionNotAnotherOne() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSessions(key)
@@ -349,7 +349,7 @@ class TmuxSessionSwitchE2eTest {
 
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

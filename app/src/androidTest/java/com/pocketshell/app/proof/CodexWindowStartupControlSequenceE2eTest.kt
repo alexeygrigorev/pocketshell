@@ -127,7 +127,7 @@ class CodexWindowStartupControlSequenceE2eTest {
     }
 
     @Test
-    fun secondaryWindowStartupDropsRawControlSequence() = runBlocking {
+    fun secondaryWindowStartupDropsRawControlSequence() { runBlocking {
         val key = readTestKeyOrNull()
             ?: error("test_key asset missing; cannot reach Docker agents fixture")
 
@@ -299,7 +299,7 @@ class CodexWindowStartupControlSequenceE2eTest {
             },
         )
         Unit
-    }
+    } }
 
     // ----------------------------------------------------------------
     // helpers

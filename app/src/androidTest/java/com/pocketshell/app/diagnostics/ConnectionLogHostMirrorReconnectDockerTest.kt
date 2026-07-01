@@ -132,7 +132,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
     }
 
     @Test
-    fun mirrorWritesConnectionLogOverTheWarmLeaseOnReconnect() = runBlocking {
+    fun mirrorWritesConnectionLogOverTheWarmLeaseOnReconnect() { runBlocking {
         waitForSshFixtureReady(sshKey, port = DEFAULT_PORT)
 
         val marker = "k${System.currentTimeMillis().toString(36).takeLast(6)}"
@@ -215,10 +215,10 @@ class ConnectionLogHostMirrorReconnectDockerTest {
             warmLease.release()
         }
         Unit
-    }
+    } }
 
     @Test
-    fun wrongLeaseKeyMappingDoesNotLandOverTheWarmLease() = runBlocking {
+    fun wrongLeaseKeyMappingDoesNotLandOverTheWarmLease() { runBlocking {
         // G6/G10 RED guard: this pins the byte-identical-key property as the
         // LOAD-BEARING assertion of the GREEN test. It drives the SAME warm-lease
         // write helper the mirror uses ([com.pocketshell.app.sessions.LeaseSessionExec]
@@ -278,7 +278,7 @@ class ConnectionLogHostMirrorReconnectDockerTest {
             warmLease.release()
         }
         Unit
-    }
+    } }
 
     // ---- helpers ----
 

@@ -118,7 +118,7 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
     }
 
     @Test
-    fun composerLauncherPresentAndContainedAfterEverySwitchAcrossAgentAndShell() = runBlocking {
+    fun composerLauncherPresentAndContainedAfterEverySwitchAcrossAgentAndShell() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -188,7 +188,7 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
         )
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Drive ONE switch [fromSession] -> [toSession] via the Back -> session-list

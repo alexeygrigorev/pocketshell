@@ -140,7 +140,7 @@ class SendNoReconnectE2eTest {
     }
 
     @Test
-    fun sendingOnAWarmConnectionDoesNotReconnectOrBlankViewport() = runBlocking<Unit> {
+    fun sendingOnAWarmConnectionDoesNotReconnectOrBlankViewport() { runBlocking<Unit> {
         val key = requireNotNull(seededKey)
         val hostRowTag = requireNotNull(seededHostRowTag)
         val baselineSshdPids = listSshdPidsForTestuser(key)
@@ -207,7 +207,7 @@ class SendNoReconnectE2eTest {
         assertNoReconnectDiagnostics("after send")
         captureViewport("issue872-02-after-send")
         writeTimings()
-    }
+    } }
 
     private fun attachSeededTmuxSession(hostRowTag: String) {
         compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {

@@ -205,7 +205,7 @@ class MultiSessionSwitchJourneyE2eTest {
     }
 
     @Test
-    fun rapidMultiSessionSwitchAlwaysShowsCorrectSessionWithoutSpuriousReconnect() = runBlocking {
+    fun rapidMultiSessionSwitchAlwaysShowsCorrectSessionWithoutSpuriousReconnect() { runBlocking {
         // Issue #788: the three live sessions (A/B/C) + DB host row + flat
         // host-detail mode were already seeded BEFORE MainActivity launched, by
         // [seedForCurrentTest] in the rule chain's `before()`. The journey is
@@ -273,7 +273,7 @@ class MultiSessionSwitchJourneyE2eTest {
         )
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #620 (the maintainer's #1 recurring ask) — the FIRST session open
@@ -297,7 +297,7 @@ class MultiSessionSwitchJourneyE2eTest {
      * is caught at PR time, not only in the release gate.
      */
     @Test
-    fun firstOpenFromHostDetailReusesWarmLeaseNoFreshHandshake() = runBlocking {
+    fun firstOpenFromHostDetailReusesWarmLeaseNoFreshHandshake() { runBlocking {
         // Issue #788: sessions + DB host row + flat mode seeded BEFORE launch by
         // the rule chain's `before()`.
         waitForHostRowPresent(hostRowTag)
@@ -371,7 +371,7 @@ class MultiSessionSwitchJourneyE2eTest {
         )
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #686 (D28, reveal/session-identity slice 1) — the SINGLE-IDENTITY
@@ -407,7 +407,7 @@ class MultiSessionSwitchJourneyE2eTest {
      * toxiproxy, no [assumeFalse(isRunningOnCi())].
      */
     @Test
-    fun backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb() = runBlocking {
+    fun backToPickerThenOpenShowsSingleTargetIdentityNeverStaleProjectCrumb() { runBlocking {
         // Issue #788: the three sessions in DISTINCT project directories
         // (proj-a / proj-b / proj-c) + DB host row + flat mode were seeded
         // BEFORE launch by the rule chain's `before()`. With distinct crumbs a
@@ -458,7 +458,7 @@ class MultiSessionSwitchJourneyE2eTest {
         )
         writeTimings()
         Unit
-    }
+    } }
 
     /**
      * Issue #686 — back->picker->open [toSession], then assert the header is

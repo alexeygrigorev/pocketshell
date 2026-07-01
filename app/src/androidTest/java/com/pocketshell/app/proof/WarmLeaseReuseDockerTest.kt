@@ -55,7 +55,7 @@ class WarmLeaseReuseDockerTest {
     }
 
     @Test
-    fun autocompleteAssistantAndEnvAllReuseOneWarmTransport() = runBlocking {
+    fun autocompleteAssistantAndEnvAllReuseOneWarmTransport() { runBlocking {
         val keyContent = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         val key = SshKey.Pem(keyContent)
@@ -160,7 +160,7 @@ class WarmLeaseReuseDockerTest {
             "warm autocomplete probes should be faster than the cold handshake\n$summary",
             warmAvg < firstLatency.toDouble() || firstLatency < 1_000L,
         )
-    }
+    } }
 
     private fun writeKeyToFile(content: String): String {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext

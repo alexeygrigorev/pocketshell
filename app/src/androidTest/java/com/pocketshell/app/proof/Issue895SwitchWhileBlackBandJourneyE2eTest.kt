@@ -115,7 +115,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
     }
 
     @Test
-    fun dropDuringSwitchingWindowSurfacesEscapableBand() = runBlocking<Unit> {
+    fun dropDuringSwitchingWindowSurfacesEscapableBand() { runBlocking<Unit> {
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
@@ -164,7 +164,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
             hasTag(TMUX_SESSION_SCREEN_TAG),
         )
         writeTimings()
-    }
+    } }
 
     // -- escapable-band helpers ----------------------------------------------------
 

@@ -134,7 +134,7 @@ class SshReconnectE2eTest {
     }
 
     @Test
-    fun transportDropSilentlyRidesThroughAndRecoversWithoutManualTap() = runBlocking {
+    fun transportDropSilentlyRidesThroughAndRecoversWithoutManualTap() { runBlocking {
         val key = readFixtureKey()
         // Wait for the flaky-agent fixture port (2226) to accept SSH.
         // The fixture kills each accepted SSH session after ~12s, but
@@ -252,10 +252,10 @@ class SshReconnectE2eTest {
         val artifactsDir = ensureArtifactDir()
         writeSummary(artifactsDir, sessionName, marker, totalAttempts)
         Unit
-    }
+    } }
 
     @Test
-    fun nonRetryableDropShortCircuitsToManualReconnectAffordance() = runBlocking {
+    fun nonRetryableDropShortCircuitsToManualReconnectAffordance() { runBlocking {
         // Issue #440 / #444: a non-retryable failure during the auto-reconnect
         // loop (bad auth, unknown host, missing key) must NOT burn the whole
         // backoff schedule — it short-circuits straight to the manual
@@ -352,7 +352,7 @@ class SshReconnectE2eTest {
             vm.clearForTest()
         }
         Unit
-    }
+    } }
 
     // ---- helpers ----
 

@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
 class PacketLossNetworkFaultE2eTest : NetworkFaultProofBase() {
 
     @Test
-    fun sshTmuxSessionSurvivesPacketLossWithoutFalseDisconnectOrDuplicateReconnects() = runBlocking {
+    fun sshTmuxSessionSurvivesPacketLossWithoutFalseDisconnectOrDuplicateReconnects() { runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -78,7 +78,7 @@ class PacketLossNetworkFaultE2eTest : NetworkFaultProofBase() {
                 "expected_duplicate_reconnects=0",
             ),
         )
-    }
+    } }
 
     private companion object {
         const val PACKET_LOSS_RATE: String = "5%"

@@ -168,7 +168,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
     }
 
     @Test
-    fun backThenOpenSecondSessionReusesWarmLeaseNoReconnect() = runBlocking {
+    fun backThenOpenSecondSessionReusesWarmLeaseNoReconnect() { runBlocking {
         // Issue #788: sessions + watched-root host seeded BEFORE launch by the
         // rule chain's `before()`; the forced-symptom hook was disarmed there too.
 
@@ -350,7 +350,7 @@ class BackThenOpenSecondSessionReusesWarmLeaseE2eTest {
         )
         writeTimings()
         Unit
-    }
+    } }
 
     // ---------------------------------------------------------------- Helpers
 

@@ -5,7 +5,7 @@ import android.graphics.Canvas
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -13,7 +13,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BackgroundGraceTestOverride
@@ -34,7 +33,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -78,37 +76,64 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class AgentAltScreenPartialBlackHealJourneyE2eTest {
 
+    // Issue #788/#848: `createAndroidComposeRule<MainActivity>()` (NOT
+    // `createEmptyComposeRule()` + a hand-rolled `ActivityScenario.launch`) so the
+    // Compose test clock drives the SAME foreground MainActivity the Termux
+    // `TerminalView` AndroidView interop child is placed into — fixing the #470
+    // swiftshader interop-placement / enumeration stall. The rule launches
+    // MainActivity in its own `before()` phase, so the DB host row + remote
+    // alt-screen tmux session must be seeded BEFORE launch — done by
+    // [SeedBeforeLaunchRule] in the RuleChain below.
+    val compose = createAndroidComposeRule<MainActivity>()
+
+    // Deterministic seed-before-launch ordering via RuleChain (outer `before()`
+    // runs first):
+    //   1. PreGrantPermissionsRule — grant runtime perms before launch (no focus
+    //      theft from the system GrantPermissionsActivity, #470 blocker #1).
+    //   2. SeedBeforeLaunchRule     — seed the remote sparse alt-screen tmux
+    //      session + DB host row (resolving [fixtureKey] + [hostRowTag]) BEFORE
+    //      the compose rule launches MainActivity so it reads a populated DB.
+    //   3. compose                  — launch MainActivity.
     @get:Rule
-    val compose = createEmptyComposeRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    // Resolved during [seedBeforeLaunch] (the rule's `before()` phase), read by
+    // the test body after launch.
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
-    private var seededKey: String? = null
-
-    @Before
-    fun setUp() {
+    /**
+     * Seed lambda invoked by [SeedBeforeLaunchRule] in the rule's `before()`
+     * phase, BEFORE [compose] launches MainActivity. Establishes the remote
+     * sparse alt-screen tmux session + DB host row so MainActivity's first
+     * `hostDao.getAll()` read sees the populated DB — exactly the work the body
+     * used to do inline before `ActivityScenario.launch`.
+     */
+    private suspend fun seedBeforeLaunch() {
         BackgroundGraceTestOverride.setForTest(null)
+        val key = readFixtureKey()
+        fixtureKey = key
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedAltScreenSession(key)
+        hostRowTag = seedDockerHost(key)
     }
 
     @After
     fun tearDown() {
-        runCatching { launchedActivity?.close() }
-        launchedActivity = null
         BackgroundGraceTestOverride.setForTest(null)
-        seededKey?.let { key -> runCatching { runBlocking { cleanupRemoteTmuxSession(key) } } }
+        if (::fixtureKey.isInitialized) {
+            runCatching { runBlocking { cleanupRemoteTmuxSession(fixtureKey) } }
+        }
     }
 
     @Test
     fun steadyStateWatchdogHealsPartialBlackAltScreenAgentPane() = runBlocking {
-        val key = readFixtureKey()
-        seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
-        seedAltScreenSession(key)
-
-        val hostRowTag = seedDockerHost(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        // Issue #788/#848: the sparse alt-screen tmux session + DB host row were
+        // already seeded BEFORE MainActivity launched, by [seedBeforeLaunch] in
+        // the rule chain's `before()`. Attach to it from the freshly-launched app.
         attachSeededTmuxSession(hostRowTag)
 
         // Baseline: the sparse alt-screen frame is in the live pane and the session is Connected.
@@ -180,7 +205,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     private fun driveStaleRenderHeal(): Boolean {
         var result = false
         val latch = java.util.concurrent.CountDownLatch(1)
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
             runBlocking { result = vm.healActivePaneIfStaleRenderForTest() }
             latch.countDown()
@@ -192,7 +217,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
 
     private fun activePanePartiallyBlank(): Boolean {
         var hit = false
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
             hit = vm.panes.value.firstOrNull()
                 ?.terminalState
@@ -203,7 +228,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
 
     private fun clientDisconnected(): Boolean {
         var disconnected = false
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
             disconnected = vm.clientDisconnectedForTest()
         }
@@ -215,7 +240,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     private fun feedFrameToEmulator(frame: String) {
         val bytes = frame.toByteArray(Charsets.UTF_8)
         var fed = false
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             val emulator = view.mEmulator ?: return@onActivity
             emulator.append(bytes, bytes.size)
@@ -240,7 +265,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     private fun renderViewportBitmap(): Bitmap? {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
@@ -280,14 +305,24 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     // ---------------------------------------------------------------- Attach / wait
 
     private fun attachSeededTmuxSession(hostRowTag: String) {
-        compose.waitUntil(timeoutMillis = 15_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
+        // Issue #788/#848: cold-compose-aware presence poll. Under
+        // createAndroidComposeRule the activity launches in the rule's `before()`;
+        // on a contended swiftshader emulator its cold compose to the HostList
+        // route can take tens of seconds, and the first frames throw
+        // IllegalStateException "No compose hierarchies found" instead of an empty
+        // node list — wrap so the poll keeps trying rather than propagating the ISE.
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            runCatching {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
-            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
+            runCatching {
+                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
         }
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -297,7 +332,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -317,7 +352,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
 
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
         var status: TmuxSessionViewModel.ConnectionStatus = TmuxSessionViewModel.ConnectionStatus.Idle
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
                 .connectionStatus.value
         }
@@ -344,7 +379,7 @@ class AgentAltScreenPartialBlackHealJourneyE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()?.currentSession?.emulator?.screen?.transcriptText.orEmpty()
         }

@@ -13026,50 +13026,78 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #941 (black-screen B1): after a send's submit Enter, the agent's
-     * `%output` overpaint can leave the active pane partial-black. Wait one settle
-     * tick for the overpaint to land, then — ONLY if the active pane is blank /
-     * partial-black — do the UNCONDITIONAL active-pane full-viewport restore
-     * ([reseedActivePaneForReattach], a `capture-pane` clear+repaint). Guarded by a
-     * [RuntimeRefreshGuard] keyed to the current generation + target + client so a
-     * late heal can never paint a switched-away session, and scoped to the pane the
-     * user is actually looking at (the active visible pane), since only that pane's
-     * overpaint is the reported "everything went black".
+     * Issue #941 (black-screen B1) + issue #1153 (send-with-attachment half-black): after a
+     * send's submit Enter, the agent's `%output` overpaint can leave the active pane BLACK or
+     * partial-black. A composer Send WITH AN ATTACHMENT is always multi-line (it appends an
+     * "Attached files:" block), so it takes the bracketed-paste + submit branch and the
+     * alt-screen agent clear+cursor-address-redraws its WHOLE viewport — the overpaint blanks
+     * the grid and the agent only PARTIALLY repaints, leaving the maintainer's "partly redrew
+     * but still too black" pane on a LIVE transport (no reconnect).
      *
-     * One-shot, no loop: a real one-line agent prompt looks partial-black too, and
-     * re-capturing it just re-paints the same authoritative content, so there is no
-     * reseed-thrash. The heal is a no-op when the overpaint left a normally-painted
-     * pane (the common case — a multi-line agent response), so a healthy send costs
-     * nothing beyond the cheap blank/partial-blank pre-check.
+     * The pre-#1153 heal had TWO gaps this closes:
+     *  1. It gated on the LOCAL-ONLY `visibleScreenIsBlank() || visibleScreenIsPartiallyBlank()`
+     *     heuristic (≤3 live lines / ≤25% rows). A "partly redrew" frame has MORE than 3 live
+     *     lines (input box + a few conversation lines + status) yet materially less than tmux's
+     *     full grid, so it failed the gate and the heal skipped. Now the heal judges the pane
+     *     against tmux's AUTHORITATIVE `capture-pane` via [healActivePaneIfStaleRender] — the
+     *     #1138 union oracle [TerminalSurfaceState.visibleRenderLostFrameVsCapture], widened for
+     *     #1153 to catch the >3-line half-black band — so it fires whenever the on-screen frame
+     *     is materially less than the authoritative grid, not only when ≤3 lines survive.
+     *  2. Its fixed 350 ms one-shot lost the race against the bigger attachment redraw (the pane
+     *     could still be mid-clear at 350 ms, or the redraw could land AFTER it). Now it re-checks
+     *     on a bounded cadence ([SEND_OVERPAINT_HEAL_MAX_TICKS] settle ticks), so a late/large
+     *     redraw is still caught and a re-overpaint after an early heal is re-healed.
+     *
+     * A DENSE, normally-painted response is a no-op: each tick pays only the cheap LOCAL
+     * [TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] pre-check and pays for the
+     * authoritative `capture-pane` diff ONLY when the render looks sparse enough to possibly be
+     * a lost frame. The heal is guarded by a [RuntimeRefreshGuard] keyed to the current
+     * generation + target + client so a late heal can never paint a switched-away session, and
+     * is scoped to the pane the send targeted while it is still the active pane.
      */
     private fun scheduleSendOverpaintHeal(client: TmuxClient, paneId: String) {
         val target = activeTarget ?: return
         val healGeneration = connectGeneration
+        val guard = RuntimeRefreshGuard(
+            generation = healGeneration,
+            target = target,
+            client = client,
+        )
         bridgeScope.launch {
-            // Let the post-submit agent overpaint land before judging the pane.
-            delay(SEND_OVERPAINT_HEAL_SETTLE_MS)
-            if (clientRef !== client) return@launch
-            if (client.disconnected.value) return@launch
-            val activePane = activeVisiblePane() ?: return@launch
-            // Heal only the pane the send targeted while it is still the active pane
-            // (the reported "sent a message → everything black" is the focused pane).
-            if (activePane.paneId != paneId) return@launch
-            val blank = activePane.terminalState.visibleScreenIsBlank()
-            val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
-            if (!blank && !partialBlank) return@launch
-            Log.i(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-send-overpaint-active-pane-heal pane=${activePane.paneId} " +
-                    "window=${activePane.windowId} session=${target.sessionName} " +
-                    "blank=$blank partialBlank=$partialBlank",
-            )
-            reseedActivePaneForReattach(
-                RuntimeRefreshGuard(
-                    generation = healGeneration,
-                    target = target,
-                    client = client,
-                ),
-            )
+            repeat(SEND_OVERPAINT_HEAL_MAX_TICKS) { tick ->
+                // Let the post-submit agent overpaint land (and re-check on later ticks for a
+                // late/large attachment redraw) before judging the pane.
+                delay(SEND_OVERPAINT_HEAL_SETTLE_MS)
+                if (clientRef !== client) return@launch
+                if (client.disconnected.value) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+                if (!isCurrentRuntime(guard)) return@launch
+                val activePane = activeVisiblePane() ?: return@launch
+                // Heal only the pane the send targeted while it is still the active pane
+                // (the reported "sent a message → everything black" is the focused pane).
+                if (activePane.paneId != paneId) return@launch
+                // Cheap LOCAL pre-check: skip the capture round-trip on a dense, normally-painted
+                // response (its live rows sit above the sparse ceiling). Only a fully-blank /
+                // partial-black / >3-line half-black render pays for the authoritative diff.
+                if (!activePane.terminalState.visibleScreenLooksSparseForSendHeal()) return@repeat
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-send-overpaint-active-pane-heal-check pane=${activePane.paneId} " +
+                        "window=${activePane.windowId} session=${target.sessionName} tick=$tick",
+                )
+                // Authoritative heal: capture tmux's grid, diff it against the render, and
+                // re-seed ONLY when the render is materially less than the authoritative frame.
+                val healed = runCatching {
+                    healActivePaneIfStaleRender(client, activePane, guard)
+                }.getOrDefault(false)
+                if (healed) {
+                    Log.i(
+                        ISSUE_145_RECONNECT_TAG,
+                        "tmux-send-overpaint-active-pane-heal-applied pane=${activePane.paneId} " +
+                            "session=${target.sessionName} tick=$tick",
+                    )
+                }
+            }
         }
     }
 
@@ -14256,6 +14284,16 @@ public class TmuxSessionViewModel @Inject constructor(
         bytes: ByteArray,
     ): Result<Unit> = runCatching {
         sendInputBytesToPane(client, paneId, bytes)
+        // Issue #1153 (class coverage — shell pane): the agent send path
+        // ([sendAgentPayloadToPaneResult]) already schedules the post-send overpaint heal, but
+        // the shell `RawBytes` route had NONE. A MULTI-LINE paste into a full-screen shell TUI
+        // (vim/htop/less/…) can trigger the same clear+redraw overpaint that leaves the pane
+        // half-black on a live transport. Schedule the same bounded, capture-diff-gated heal
+        // ONLY for a multi-line payload — a single keystroke never overpaints the whole
+        // viewport, so per-keystroke input pays nothing.
+        if (BracketedPaste.containsLineBreak(bytes)) {
+            scheduleSendOverpaintHeal(client, paneId)
+        }
     }
 
     internal fun sendControlInputToPane(
@@ -17571,6 +17609,17 @@ internal const val STALE_RENDER_WATCHDOG_MAX_TICKS: Int = 10_000
  * multi-line agent response has painted (so the heal correctly no-ops).
  */
 internal const val SEND_OVERPAINT_HEAL_SETTLE_MS: Long = 350L
+
+/**
+ * Issue #1153: the post-send overpaint heal re-checks the active pane this many times, once
+ * per [SEND_OVERPAINT_HEAL_SETTLE_MS] settle tick. The pre-#1153 heal was a SINGLE fixed
+ * 350 ms one-shot, which lost the race against the bigger with-attachment (multi-line paste)
+ * agent redraw — the pane could still be mid-clear at 350 ms, or the redraw could land AFTER
+ * it. A short bounded poll (≈1.4 s over 4 ticks) catches a late/large redraw and re-heals a
+ * re-overpaint after an early heal, while a dense normally-painted response pays only the cheap
+ * local pre-check each tick (no capture). Bounded so a send never leaves a lingering poll.
+ */
+internal const val SEND_OVERPAINT_HEAL_MAX_TICKS: Int = 4
 
 /**
  * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line

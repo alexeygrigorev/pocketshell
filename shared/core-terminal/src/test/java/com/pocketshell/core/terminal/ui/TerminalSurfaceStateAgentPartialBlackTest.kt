@@ -91,6 +91,36 @@ class TerminalSurfaceStateAgentPartialBlackTest {
         append(" Working 7  esc to interrupt\n")
     }
 
+    /**
+     * Issue #1153 — the full alt-screen agent frame tmux's grid holds after a multi-line send:
+     * a header + a real (non-sparse) conversation body filling ~20 rows. Its non-blank content
+     * is LARGE, so the surviving half-black band (~8 lines) is well under the 25% divergence
+     * ceiling of it — the RED gap the #966 oracle leaves.
+     */
+    private fun fullAgentFrame(): String = buildString {
+        append("HEADER: codex full conversation frame on podwiki host\n")
+        repeat(19) { row -> append("Codex conversation row $row : a real line of agent output with content\n") }
+    }
+
+    /**
+     * Issue #1153 — drive the emulator onto the alt screen, clear, and paint 8 HARD-newline
+     * content lines, leaving the remaining ~2/3 of the 24-row viewport BLACK. MORE than 3 live
+     * lines (so NOT the ≤3-line partial-black) yet only ~1/3 of the visible rows live — the
+     * half-black band. (Hard `\r\n` lines, NOT cursor-addressed: contiguous cursor-positioned
+     * short lines are joined into ONE logical line by `getSelectedText`, which would read as a
+     * single live line.)
+     */
+    private fun paintHalfBlackBand(state: TerminalSurfaceState) {
+        val frame = buildString {
+            append("$esc[?1049h$esc[2J$esc[H")
+            for (row in 0 until 8) {
+                append("ISSUE1153 half-black conversation/status line $row filler content here\r\n")
+            }
+        }
+        state.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
     /** Drive the emulator onto the alt screen and paint ONLY the live status line. */
     private fun paintAltScreenPartialBlack(state: TerminalSurfaceState) {
         val frame = buildString {
@@ -129,6 +159,68 @@ class TerminalSurfaceStateAgentPartialBlackTest {
             "GREEN (#1138): the union predicate must detect the alt-screen partial-black " +
                 "against the agent's authoritative full capture and heal it",
             state.visibleRenderLostFrameVsCapture(fullAgentAltCapture()),
+        )
+    }
+
+    /**
+     * Issue #1153 — the >3-live-line HALF-BLACK render the pre-#1153 union oracle MISSED. A
+     * composer Send with an attachment is always multi-line → bracketed-paste + submit → the
+     * alt-screen agent clear+redraws its WHOLE viewport, and the overpaint leaves a large black
+     * BAND above a surviving input box + a few conversation lines + status. That band has MORE
+     * than the ≤3 live lines the partial-black heuristic caps at, so BOTH the #966 divergence
+     * oracle (surviving band > 25% of the frame) AND the pre-#1153 case (b) (requires
+     * partial-black) MISS it — the "partly redrew but still too black" state.
+     */
+    @Test
+    fun halfBlackOverThreeLinesIsMissedByDivergenceButHealedByUnion() = withAttachedSurface { state ->
+        paintHalfBlackBand(state)
+
+        assertFalse(
+            "precondition: a half-black band is NOT fully blank",
+            state.visibleScreenIsBlank(),
+        )
+        assertFalse(
+            "precondition (#1153): the half-black band has MORE than 3 live lines, so it is NOT " +
+                "the ≤3-line partial-black the pre-#1153 case (b) required",
+            state.visibleScreenIsPartiallyBlank(),
+        )
+        // RED gap: the #966 divergence oracle reads the >3-line band "healthy" (its surviving
+        // content exceeds the 25% ceiling of the full frame), so the pre-#1153 union missed it.
+        assertFalse(
+            "RED (#1153): the #966 divergence oracle MISSES the >3-line half-black band",
+            state.visibleScreenDivergesFromCapture(fullAgentFrame()),
+        )
+        // GREEN: the widened union predicate heals it — the render lost most of the frame tmux
+        // still holds, and its live share of the visible rows is below the ceiling.
+        assertTrue(
+            "GREEN (#1153): the widened union predicate must heal a >3-line half-black band " +
+                "against tmux's authoritative full frame",
+            state.visibleRenderLostFrameVsCapture(fullAgentFrame()),
+        )
+    }
+
+    /**
+     * Issue #1153 over-heal guard: a DENSE render (well over half the visible rows live) must
+     * NOT heal even when tmux's capture carries somewhat MORE — the fraction ceiling keeps a
+     * normally-painted, slightly-lagging pane from re-seeding on every send/watchdog tick.
+     */
+    @Test
+    fun denseRenderDoesNotHealEvenWhenCaptureHasSomewhatMore() = withAttachedSurface { state ->
+        val frame = buildString {
+            append("$esc[2J$esc[H")
+            repeat(20) { row -> append("dense row $row : lots of real painted agent content here padding text\r\n") }
+        }
+        state.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        // tmux holds a few MORE rows than the render (a slight stream lag), but the render is
+        // DENSE (20 of 24 rows live) — above the half-black ceiling — so it must NOT heal.
+        val fullerCapture = buildString {
+            repeat(24) { row -> append("dense row $row : lots of real painted agent content here padding text\n") }
+        }
+        assertFalse(
+            "a dense render (live rows above the ceiling) must NOT heal even when tmux holds a " +
+                "few more rows — no reseed-thrash on a slightly-lagging healthy pane",
+            state.visibleRenderLostFrameVsCapture(fullerCapture),
         )
     }
 

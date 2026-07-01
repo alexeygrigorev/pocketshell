@@ -741,8 +741,6 @@ class TerminalSurfaceState(
     fun visibleRenderLostFrameVsCapture(captureText: String): Boolean {
         // (a) The #966 dramatic-divergence case (unchanged oracle).
         if (visibleScreenDivergesFromCapture(captureText)) return true
-        // (b) The #1138 partial-black-vs-fuller-capture case.
-        if (!visibleScreenIsPartiallyBlank()) return false
         val emulator = bridge?.emulator ?: _session?.emulator ?: return false
         val visibleRows = try {
             emulator.screen.visibleScreenRows
@@ -759,10 +757,78 @@ class TerminalSurfaceState(
         // alt-screen void). Defer — do NOT heal a genuinely-empty pane to itself.
         if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
         val renderedNonBlank = renderedNonBlankCharCount()
-        // tmux carries MATERIALLY MORE than the render → the upper rows the render lost are
-        // still in tmux's grid; re-seed to restore them. A near-equal capture (short prompt /
-        // by-design void) sits under the gap and is left alone.
-        return captureVisibleNonBlank - renderedNonBlank >= PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS
+        // tmux carries MATERIALLY MORE than the render → the frame the render lost is still in
+        // tmux's grid; re-seed to restore it. A near-equal capture (short prompt / by-design
+        // void) sits under the gap and is left alone — the anti-thrash / distinguish-by-design
+        // guard shared by both partial-black branches below.
+        if (captureVisibleNonBlank - renderedNonBlank < PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS) return false
+        // (b) The #1138 partial-black render (≤3 live lines): an alt-screen agent's surviving
+        //     status line, the upper rows black.
+        if (visibleScreenIsPartiallyBlank()) return true
+        // (c) Issue #1153 — the >3-live-line HALF-BLACK render. A composer Send whose multi-line
+        //     payload (a with-attachment send is ALWAYS multi-line — it appends an "Attached
+        //     files:" block) takes the bracketed-paste + submit branch; the alt-screen agent then
+        //     clear+cursor-address-redraws its WHOLE viewport, and the overpaint blanks the grid
+        //     while the agent only PARTIALLY repaints — leaving a large black BAND above a
+        //     surviving input box + a few conversation lines + status. That band carries MORE
+        //     than the ≤3 live lines the partial-black heuristic (b) caps at (so (b) misses it),
+        //     yet its live share of the visible rows is still materially below a fully-painted
+        //     frame. Combined with the "tmux holds materially more" gate already passed above,
+        //     heal it too — the maintainer's "partly redrew but still too black" send state
+        //     (#1153). The fraction ceiling keeps a DENSE healthy pane (its live rows sit ABOVE
+        //     the ceiling) from firing; the capture-diff gate already excluded a legitimately
+        //     sparse-but-correct pane (capture ≈ render).
+        val renderedLiveLines = renderedVisibleNonBlankLineCount()
+        if (renderedLiveLines <= 0) return false
+        return renderedLiveLines.toDouble() / visibleRows.toDouble() <= LOST_FRAME_MAX_LIVE_FRACTION
+    }
+
+    /**
+     * Issue #1153 — the count of non-blank lines the emulator has actually rendered onto its
+     * currently VISIBLE viewport (scrollback excluded), the sibling of [renderedNonBlankCharCount]
+     * measured in LINES. Used to judge the live-line FRACTION of the visible grid — how large the
+     * black BAND left by a half-repainted send overpaint is — for [visibleRenderLostFrameVsCapture]
+     * case (c) and the cheap send-heal pre-check [visibleScreenLooksSparseForSendHeal].
+     *
+     * Returns 0 when no emulator is attached or the visible screen is blank.
+     */
+    private fun renderedVisibleNonBlankLineCount(): Int {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return 0
+        val text = try {
+            emulator.screen.visibleScreenText
+        } catch (_: Throwable) {
+            return 0
+        }
+        if (text.isBlank()) return 0
+        return text.split('\n').count { it.isNotBlank() }
+    }
+
+    /**
+     * Issue #1153 — a CHEAP, LOCAL-ONLY pre-check the post-send overpaint heal
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.scheduleSendOverpaintHeal]) runs each
+     * settle tick to decide whether paying for an authoritative `capture-pane` diff is
+     * worthwhile. It is TRUE when the rendered viewport is sparse enough to POSSIBLY be a
+     * half-repainted send overpaint: fully blank, the ≤3-line partial-black
+     * ([visibleScreenIsBlankOrPartiallyBlank]), OR a >3-line half-black band whose live share
+     * of the visible rows is at most [LOST_FRAME_MAX_LIVE_FRACTION].
+     *
+     * It does NOT confirm a lost frame — only the `capture-pane` diff ([visibleRenderLostFrameVsCapture])
+     * can, since a legitimately-sparse-but-correct pane looks identical locally. This gate exists
+     * only to keep a DENSE, normally-painted agent response (its live rows sit above the ceiling)
+     * from paying for a capture round-trip on every send.
+     */
+    fun visibleScreenLooksSparseForSendHeal(): Boolean {
+        if (visibleScreenIsBlankOrPartiallyBlank()) return true
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val visibleRows = try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (visibleRows <= 0) return false
+        val liveLines = renderedVisibleNonBlankLineCount()
+        if (liveLines <= 0) return false
+        return liveLines.toDouble() / visibleRows.toDouble() <= LOST_FRAME_MAX_LIVE_FRACTION
     }
 
     /**
@@ -1070,6 +1136,23 @@ class TerminalSurfaceState(
          * clears it. One line's worth of real content (≈40 chars).
          */
         private const val PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS = 40
+
+        /**
+         * Issue #1153: the upper bound on the rendered live-line FRACTION of the visible rows for
+         * [visibleRenderLostFrameVsCapture]'s >3-live-line HALF-BLACK branch (and the cheap
+         * send-heal pre-check [visibleScreenLooksSparseForSendHeal]). The maintainer's composer
+         * Send (with-attachment, so multi-line → bracketed-paste + submit) left the alt-screen
+         * agent pane "partly redrew but still too black": a surviving input box + a few
+         * conversation lines + status (MORE than the ≤3 live lines
+         * [PARTIAL_BLANK_MAX_LIVE_LINES] caps at) over a large black BAND. Half-or-more of the
+         * visible rows black is "materially black"; a DENSE, normally-painted response paints
+         * well over half its rows and sits ABOVE this ceiling, so it never heals. It is HIGHER
+         * than [PARTIAL_BLANK_MAX_LIVE_FRACTION] (0.25) precisely to catch the >3-line band the
+         * narrow partial-black heuristic misses, and the capture-diff gate
+         * ([PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS]) still guards against healing a sparse-but-correct
+         * pane where tmux holds no more content than the render.
+         */
+        private const val LOST_FRAME_MAX_LIVE_FRACTION = 0.5
     }
 }
 

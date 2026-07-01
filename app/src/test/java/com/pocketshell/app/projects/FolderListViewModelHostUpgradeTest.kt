@@ -5,8 +5,12 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
@@ -27,6 +31,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -202,7 +207,230 @@ class FolderListViewModelHostUpgradeTest {
         assertTrue("must exit 127 when no installer is found", cmd.contains("exit 127"))
     }
 
+    // --- Issue #1157: no false "Not connected" while the host is connected ---
+    //
+    // The upgrade runs over the FolderList's WARM-LEASE session, which is SEPARATE
+    // from the live terminal sessions. When the warm lease is absent/expired but
+    // the host is genuinely connected (13 live terminal sessions in the report),
+    // the old path dead-ended at `awaitWarmSession() == null` and surfaced a FALSE
+    // "Not connected to the host — reconnect and try again." that contradicted the
+    // tree ("13 active") and the tray. These reproduce that class red→green: the
+    // upgrade must (re)acquire a live session robustly and never falsely claim the
+    // host is disconnected.
+
+    @Test
+    fun update_warmLeaseReleased_whileConnected_reacquires_noFalseNotConnected() = runTest {
+        // Bind → banner raised (host connected, warm lease held).
+        val session = UpgradableSession(
+            initialVersion = "0.4.19",
+            upgradedVersion = "0.4.20",
+            upgradeResult = ExecResult("upgraded pocketshell 0.4.19 -> 0.4.20", "", 0),
+        )
+        val rig = newViewModelRig({ session }, expectedVersion = "0.4.20")
+        bind(rig.vm)
+        advanceUntilIdle()
+        assertTrue("banner must be raised before update", rig.vm.cliVersionMismatch.value != null)
+
+        // Leave the FolderList screen: the warm lease is scheduled for release
+        // (stopPolling → scheduleWarmRelease). The host stays genuinely connected
+        // (its live terminal sessions keep the pooled transport open on device),
+        // but this screen's warm lease is now gone — the exact #1157 state.
+        rig.vm.stopPolling()
+        advanceUntilIdle()
+
+        rig.vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        val state = rig.vm.cliVersionUpdateState.value
+        assertFalse(
+            "the banner must NOT surface a false 'Not connected' when the host is " +
+                "genuinely connected — was $state",
+            state is FolderListViewModel.CliVersionUpdateState.Failure &&
+                (state as FolderListViewModel.CliVersionUpdateState.Failure).message.contains("Not connected"),
+        )
+        assertTrue("the upgrade must actually run over the re-acquired session", session.upgradeRan)
+        assertNull("a successful re-acquired upgrade clears the banner", rig.vm.cliVersionMismatch.value)
+        assertEquals(
+            FolderListViewModel.CliVersionUpdateState.Idle,
+            rig.vm.cliVersionUpdateState.value,
+        )
+    }
+
+    @Test
+    fun update_warmLeaseExpired_whileConnected_reacquiresLiveSession() = runTest {
+        // The warm lease is PRESENT but its transport went stale (a network
+        // handoff): `awaitWarmSession()` returns a DISCONNECTED session. The host
+        // is still reachable, so a robust re-acquire must yield a LIVE session and
+        // succeed — not run the upgrade over the dead transport.
+        val expiredWarmSession = UpgradableSession(
+            initialVersion = "0.4.19",
+            upgradedVersion = "0.4.19",
+            upgradeResult = ExecResult("", "broken pipe", 1),
+            connectedOverride = true, // flipped to false below to simulate expiry
+        )
+        val liveReacquiredSession = UpgradableSession(
+            initialVersion = "0.4.19",
+            upgradedVersion = "0.4.20",
+            upgradeResult = ExecResult("upgraded pocketshell 0.4.19 -> 0.4.20", "", 0),
+        )
+        // Supplier hands out the warm session first (bind), then the fresh live
+        // session once the warm one has "expired" (isConnected flipped false).
+        val rig = newViewModelRig(
+            sessionSupplier = { if (expiredWarmSession.isConnected) expiredWarmSession else liveReacquiredSession },
+            expectedVersion = "0.4.20",
+        )
+        bind(rig.vm)
+        advanceUntilIdle()
+        assertTrue("banner must be raised before update", rig.vm.cliVersionMismatch.value != null)
+
+        // The warm lease's transport goes stale (still leased, now disconnected).
+        expiredWarmSession.isConnected = false
+
+        rig.vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        assertTrue(
+            "the upgrade must run over a freshly re-acquired LIVE session, not the " +
+                "expired warm one",
+            liveReacquiredSession.upgradeRan,
+        )
+        assertNull("the re-acquired upgrade clears the banner", rig.vm.cliVersionMismatch.value)
+        val state = rig.vm.cliVersionUpdateState.value
+        assertFalse(
+            "the banner must NOT falsely claim 'Not connected' — was $state",
+            state is FolderListViewModel.CliVersionUpdateState.Failure &&
+                (state as FolderListViewModel.CliVersionUpdateState.Failure).message.contains("Not connected"),
+        )
+    }
+
+    @Test
+    fun update_warmLeaseAbsent_reusesLivePooledTransport_noNewConnect() = runTest {
+        // Class coverage + D21 proof: with a live pooled transport (the live
+        // terminal sessions hold a ref on the SAME lease manager), the re-acquire
+        // must REUSE it — no new SSH connect — rather than dial a second one.
+        val session = UpgradableSession(
+            initialVersion = "0.4.19",
+            upgradedVersion = "0.4.20",
+            upgradeResult = ExecResult("upgraded pocketshell 0.4.19 -> 0.4.20", "", 0),
+        )
+        val rig = newViewModelRig({ session }, expectedVersion = "0.4.20")
+        bind(rig.vm)
+        advanceUntilIdle()
+        assertTrue("banner must be raised before update", rig.vm.cliVersionMismatch.value != null)
+
+        // Simulate the live terminal sessions holding the pooled transport: take a
+        // second lease on the shared manager and keep it (never released).
+        val liveTerminalLease = rig.manager.acquire(leaseTarget()).getOrNull()
+        assertTrue("a live pooled lease must be held", liveTerminalLease != null)
+        val connectsAfterBind = rig.connectCount
+
+        // Leave the screen → warm lease released, but the pooled transport stays
+        // OPEN (refCount > 0 via the live terminal lease).
+        rig.vm.stopPolling()
+        advanceUntilIdle()
+
+        rig.vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        assertTrue("the upgrade must run over the reused pooled session", session.upgradeRan)
+        assertNull("the reused-session upgrade clears the banner", rig.vm.cliVersionMismatch.value)
+        assertEquals(
+            "the upgrade must REUSE the live pooled transport — NO new SSH connect (D21)",
+            connectsAfterBind,
+            rig.connectCount,
+        )
+    }
+
+    @Test
+    fun update_noBoundHost_doesNotFalselySayNotConnected() = runTest {
+        // Class coverage: bound == null. The mismatch banner is only ever raised
+        // for a bound host, so this is a defensive edge — but it must NEVER claim
+        // a false "Not connected" (which contradicts a connected tray/tree).
+        val session = UpgradableSession(
+            initialVersion = "0.4.19",
+            upgradedVersion = "0.4.20",
+            upgradeResult = ExecResult("ok", "", 0),
+        )
+        val rig = newViewModelRig({ session }, expectedVersion = "0.4.20")
+        // Deliberately do NOT bind — bound stays null.
+
+        rig.vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        val state = rig.vm.cliVersionUpdateState.value
+        assertTrue(
+            "an unbound upgrade must end in a Failure state — was $state",
+            state is FolderListViewModel.CliVersionUpdateState.Failure,
+        )
+        val message = (state as FolderListViewModel.CliVersionUpdateState.Failure).message
+        assertFalse(
+            "must NOT falsely claim 'Not connected to the host — reconnect' — was: $message",
+            message.contains("Not connected"),
+        )
+    }
+
     // --- helpers ------------------------------------------------------------
+
+    private fun leaseTarget(): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = HOST.hostname,
+                port = HOST.port,
+                user = HOST.username,
+                credentialId = "${HOST.id}:$KEY_PATH",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(java.io.File(KEY_PATH)),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
+
+    private class Rig(
+        val vm: FolderListViewModel,
+        val manager: SshLeaseManager,
+        val connectCounter: java.util.concurrent.atomic.AtomicInteger,
+    ) {
+        val connectCount: Int get() = connectCounter.get()
+    }
+
+    private fun TestScope.newViewModelRig(
+        sessionSupplier: () -> SshSession,
+        expectedVersion: String,
+    ): Rig {
+        val dispatcher = UnconfinedTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        val connectCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        val manager = SshLeaseManager(
+            connector = SshLeaseConnector {
+                connectCounter.incrementAndGet()
+                Result.success(sessionSupplier())
+            },
+            scope = this,
+            idleTtlMillis = 0L,
+            connectTimeoutContext = dispatcher,
+            nowMillis = { testScheduler.currentTime },
+        )
+        val vm = FolderListViewModel(
+            gateway = StubGateway(listOf(sessionRow("alpha"))),
+            hostDao = FakeHostDao(HOST),
+            projectRootDao = FakeProjectRootDao(),
+            sshLeaseManager = manager,
+            forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
+            treeRemoteSource = TreeRemoteSource().apply {
+                remoteExecDispatcher = dispatcher
+            },
+            expectedPocketshellVersionProvider = { expectedVersion },
+            attachLifecycle = false,
+        ).also {
+            it.ioDispatcher = dispatcher
+            it.treeDispatcher = dispatcher
+            it.setHostPocketshellUpgradeForTest(
+                HostPocketshellUpgrade().apply { execDispatcher = dispatcher },
+            )
+            it.setProcessStartedForTest(true)
+            viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
+        }
+        return Rig(vm, manager, connectCounter)
+    }
 
     private fun bind(vm: FolderListViewModel) {
         vm.bind(
@@ -270,9 +498,13 @@ class FolderListViewModelHostUpgradeTest {
         private val upgradedVersion: String?,
         private val upgradeResult: ExecResult,
         private val wedgeUpgrade: Boolean = false,
+        connectedOverride: Boolean = true,
     ) : SshSession {
         @Volatile var upgradeRan: Boolean = false
-        override val isConnected: Boolean = true
+
+        // Issue #1157: mutable so a test can flip a warm session to "expired"
+        // (transport went stale after a network handoff) mid-scenario.
+        @Volatile override var isConnected: Boolean = connectedOverride
 
         override suspend fun exec(command: String): ExecResult {
             return when {

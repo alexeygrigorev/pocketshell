@@ -599,17 +599,35 @@ class FolderListViewModel internal constructor(
         if (_cliVersionUpdateState.value is CliVersionUpdateState.Running) return
         val params = bound
         if (params == null) {
+            // Issue #1157: with NO bound host there is genuinely no "the host" to
+            // upgrade over — the mismatch banner is only ever raised for a bound
+            // host (see [observePayloadCliVersion]), so this is a defensive edge.
+            // Do NOT claim a false connection failure ("Not connected — reconnect"),
+            // which contradicts a connected tray/tree; say what is actually true.
             _cliVersionUpdateState.value =
-                CliVersionUpdateState.Failure("Not connected to the host — reconnect and try again.")
+                CliVersionUpdateState.Failure("No host is selected — reopen the host and try again.")
             return
         }
         hostUpgradeJob?.cancel()
         _cliVersionUpdateState.value = CliVersionUpdateState.Running
         hostUpgradeJob = viewModelScope.launch {
-            val session = awaitWarmSession()
+            // Issue #1157: robustly (re)acquire a live session on demand rather than
+            // dead-ending on a possibly-absent/expired warm lease. The upgrade runs
+            // over the FolderList's warm-lease session, which is SEPARATE from the
+            // live terminal sessions; with 13 live sessions (genuinely connected) but
+            // this screen's warm lease released/expired/not-yet-acquired, the old
+            // `awaitWarmSession() == null` gate surfaced a FALSE "Not connected"
+            // that contradicted the tree + tray. [acquireUpgradeSession] reuses a
+            // live warm session as-is and, when absent, re-acquires from the SHARED
+            // pool — which REUSES the live pooled transport (refcount, no new
+            // connect — D21) and only dials fresh when there is genuinely no live
+            // transport. It returns null ONLY when the host is truly unreachable.
+            val session = acquireUpgradeSession(params)
             if (session == null || bound != params) {
                 _cliVersionUpdateState.value =
-                    CliVersionUpdateState.Failure("Not connected to the host — reconnect and try again.")
+                    CliVersionUpdateState.Failure(
+                        "Couldn't reach the host to run the update — reconnect and try again.",
+                    )
                 return@launch
             }
             when (val result = hostPocketshellUpgrade.run(session)) {
@@ -2085,6 +2103,48 @@ class FolderListViewModel internal constructor(
             warmSessionReady.first { it }
         }
         return if (ready == true) warmLease?.session else null
+    }
+
+    /**
+     * Issue #1157: resolve a LIVE session for the host-CLI upgrade WITHOUT
+     * dead-ending on a possibly-absent/expired warm lease.
+     *
+     * The upgrade banner runs over the FolderList's warm-lease session, which is
+     * SEPARATE from the live terminal sessions. On device the warm lease is
+     * released when the user leaves this screen ([stopPolling] → [scheduleWarmRelease])
+     * and can also go stale on a network handoff — yet the host stays genuinely
+     * connected because the live terminal sessions keep the pooled transport open.
+     * The old path (`awaitWarmSession()`) returned null (no warm lease) or a
+     * DISCONNECTED stale session, so tapping Retry surfaced a FALSE
+     * "Not connected — reconnect and try again." that contradicted the tree
+     * ("13 active") and the tray.
+     *
+     * This resolves a session robustly and D21-cleanly:
+     *  1. A still-live warm session is reused AS-IS — no new connect.
+     *  2. A bind-time warm connect in flight ([warmJob]) is joined rather than
+     *     racing a second dial.
+     *  3. Otherwise [replaceWarmLease] re-acquires from the SHARED
+     *     [sshLeaseManager]. `acquire` REUSES the live pooled transport (the one
+     *     the live terminal sessions hold — refcount, NO new connect) when one
+     *     exists, and only dials fresh when there is genuinely no live transport.
+     *
+     * Returns a connected session, or null ONLY when the host is truly
+     * unreachable — the caller then surfaces a TRUTHFUL "couldn't reach" message,
+     * never a false "not connected" while sessions are live.
+     */
+    private suspend fun acquireUpgradeSession(params: BoundParams): SshSession? {
+        // 1. Reuse a still-live warm session as-is (D21 — no new connect).
+        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
+        // 2. Join a bind-time warm connect already in flight rather than dial twice.
+        warmJob?.takeIf { it.isActive }?.join()
+        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
+        if (bound != params) return null
+        // 3. Warm lease genuinely absent or expired while the host may still be
+        //    connected (live terminal sessions over the shared pool). Re-acquire —
+        //    a live pooled transport is REUSED (refcount, no new connect); only a
+        //    truly poolless host dials fresh, and a truly unreachable one fails.
+        replaceWarmLease(params)
+        return warmLease?.session?.takeIf { it.isConnected }
     }
 
     /**

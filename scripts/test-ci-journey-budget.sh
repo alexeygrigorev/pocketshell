@@ -80,6 +80,23 @@ remaining_slack_secs=$((job_cap_secs - emulator_boot_timeout_secs - default_suit
 [[ "$remaining_slack_secs" -ge 600 ]] \
   || fail "(pre) insufficient post-boot slack: ${job_cap_secs}s job cap - ${emulator_boot_timeout_secs}s boot - ${default_suite_budget_secs}s suite = ${remaining_slack_secs}s (< 600s)"
 
+# (pre) #1056 no-output watchdog: pin the default silence window and require it to
+# sit BELOW the per-class wall cap, so a silent wedge dies on silence (the tight,
+# fast bound) rather than on the coarse wall cap — and never above it (which would
+# make the read timeout a no-op). Both parse the literal shell assignments.
+default_no_output_secs="$(sed -n 's/^JOURNEY_NO_OUTPUT_TIMEOUT_SECS="${JOURNEY_NO_OUTPUT_TIMEOUT_SECS:-\([0-9][0-9]*\)}"$/\1/p' "$REAL_SUITE")"
+default_class_timeout_secs="$(sed -n 's/^JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-\([0-9][0-9]*\)}"$/\1/p' "$REAL_SUITE")"
+[[ "$default_no_output_secs" =~ ^[0-9]+$ ]] \
+  || fail "(pre) could not parse default JOURNEY_NO_OUTPUT_TIMEOUT_SECS from ci-journey-suite.sh"
+[[ "$default_class_timeout_secs" =~ ^[0-9]+$ ]] \
+  || fail "(pre) could not parse default JOURNEY_CLASS_TIMEOUT_SECS from ci-journey-suite.sh"
+[[ "$default_no_output_secs" -lt "$default_class_timeout_secs" ]] \
+  || fail "(pre) default silence window (${default_no_output_secs}s) must be BELOW the per-class wall cap (${default_class_timeout_secs}s) so a silent wedge dies on silence, not the coarse wall cap"
+grep -q 'NO-OUTPUT (silence) watchdog' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh must document the #1056 no-output silence watchdog"
+grep -q 'run_bounded' "$REAL_SUITE" \
+  || fail "(pre) ci-journey-suite.sh must route class attempts through run_bounded (the #1056 silence watchdog wrapper)"
+
 grep -q '95-min job cap (5700s) - worst-case emulator boot (900s) - default suite' "$REAL_SUITE" \
   || fail "(pre) ci-journey-suite.sh budget comment must show the right-sized arithmetic"
 grep -q 'budget (4200s) = 600s' "$REAL_SUITE" \
@@ -450,7 +467,11 @@ if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
   if [[ "$count" -eq 1 ]]; then
     trap '' TERM
     touch "$state_dir/poisoned-lock"
-    sleep 30
+    # Emit keepalive output faster than the silence window so the #1056 no-output
+    # watchdog does NOT preempt — this must exercise the WALL-cap SIGKILL backstop
+    # (rc=137): TERM is trapped/ignored, so `timeout --kill-after` SIGKILLs us.
+    end=$((SECONDS + 30))
+    while (( SECONDS < end )); do echo "PS_KEEPALIVE_1"; sleep 0.2; done
     exit 0
   fi
 
@@ -514,7 +535,12 @@ if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
   printf '%s' "$count" > "$state_dir/app-count"
   trap '' TERM
   touch "$state_dir/poisoned-lock"
-  sleep 30
+  # Emit keepalive output faster than the silence window so the #1056 no-output
+  # watchdog does NOT preempt — this must exercise the WALL-cap SIGKILL backstop
+  # (rc=137) on EVERY attempt: TERM is trapped/ignored, so `timeout --kill-after`
+  # SIGKILLs us each time.
+  end=$((SECONDS + 30))
+  while (( SECONDS < end )); do echo "PS_KEEPALIVE_$count"; sleep 0.2; done
   exit 0
 fi
 
@@ -611,6 +637,138 @@ fi
 [[ -s "$early_kill_stub_dir/stop.log" ]] \
   || fail "(l) immediate SIGKILL still should run Gradle cleanup before retry"
 pass "(l) immediate SIGKILL remains JOURNEY_FAILED even when cleanup spends the budget"
+
+# ---------------------------------------------------------------------------
+# Issue #1056: the NO-OUTPUT (silence) watchdog HARD-KILLS a wedged child.
+#
+# The reopen symptom: a `connectedDebugAndroidTest` child WEDGED and emitted zero
+# output for ~24 min until the job-level 95-min wall CANCELLED the whole step,
+# beating the #835 STEP_TIMEOUT classifier so the verdict was LOST. The watchdog
+# must hard-kill a SILENT child at the small silence bound — WELL BELOW a large
+# wall cap — and still route the class through the STEP_TIMEOUT classifier so a
+# trustworthy timeout-only summary is always written.
+#
+# This models ONE class that wedges SILENTLY (emits NOTHING, hangs 30s) on BOTH
+# attempts, under a LARGE wall cap (30s) and generous budget, with a tiny 2s
+# silence window. If the wall cap (not silence) were the only bound, this run
+# would take ~60s (2 attempts × 30s); the watchdog must cut each attempt at ~2s.
+# `exec sleep` so the watchdog's TERM terminates the wedge immediately (no
+# lingering child). All OTHER classes pass instantly so the run stays fast.
+echo "== #1056 no-output watchdog: a SILENT wedge is hard-killed at the silence bound =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+[[ "${1:-}" == "--stop" ]] && exit 0
+if [[ "$*" == *":app:connectedDebugAndroidTest"* && "$*" == *"DeepLinkSessionSwitchE2eTest"* ]]; then
+  # SILENT wedge: emit NOTHING and hang far past the 2s silence window.
+  exec sleep 30
+fi
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+out_wedge="$SANDBOX/run-no-output-wedge.log"
+wedge_start=$SECONDS
+set +e
+PATH="$STUBBIN:$PATH" \
+  JOURNEY_STEP_BUDGET_SECS=600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=30 \
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=2 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_wedge" 2>&1
+rc_wedge=$?
+set -e
+wedge_elapsed=$((SECONDS - wedge_start))
+
+summary_wedge="$SANDBOX/artifacts/ci-journey/summary.md"
+# (o1) the watchdog fired with the exact silence-window marker (silence path, not
+#      the coarse wall cap).
+grep -q 'JOURNEY_NO_OUTPUT_WATCHDOG: no output for 2s' "$out_wedge" \
+  || { sed -n '1,80p' "$out_wedge"; fail "(o) no-output watchdog did not fire on a silent wedge"; }
+pass "(o1) silence watchdog fired (JOURNEY_NO_OUTPUT_WATCHDOG logged for the 2s window)"
+
+# (o2) the silence watchdog — NOT the 30s wall cap — killed the wedge: each of the
+#      two attempts was cut at ~2s, so the whole run finished far under 2×30s. A
+#      generous ceiling (25s) still proves the watchdog beat the wall cap while
+#      tolerating the instant-pass tail + cleanup.
+[[ "$wedge_elapsed" -lt 25 ]] \
+  || { sed -n '1,80p' "$out_wedge"; fail "(o) run took ${wedge_elapsed}s — the wall cap, not the 2s silence watchdog, bounded the wedge"; }
+pass "(o2) run finished in ${wedge_elapsed}s (< 25s) — the silence watchdog, not the 30s wall cap, killed the wedge"
+
+# (o3) despite the wedge, summary.md was written (the verdict is NEVER lost to a
+#      job-level wall) and carries the STEP_TIMEOUT marker for the wedged class.
+[[ -f "$summary_wedge" ]] \
+  || fail "(o) no-output wedge did not write summary.md — the verdict would be lost to the job wall"
+grep -q 'JOURNEY_STEP_TIMEOUT' "$summary_wedge" \
+  || { cat "$summary_wedge"; fail "(o) no-output wedge summary missing JOURNEY_STEP_TIMEOUT marker"; }
+grep -q 'DeepLinkSessionSwitchE2eTest' "$summary_wedge" \
+  || { cat "$summary_wedge"; fail "(o) no-output wedge summary did not name the wedged class"; }
+# The wedge is a timeout casualty, NOT a genuine twice-failed regression.
+if grep -qE 'Failed BOTH attempts' "$summary_wedge"; then
+  cat "$summary_wedge"
+  fail "(o) no-output wedge was misclassified as a genuine Failed BOTH regression"
+fi
+pass "(o3) summary.md written with a timeout-only STEP_TIMEOUT verdict (verdict never lost)"
+
+# (o4) the suite exited non-zero AND the workflow classifier routes it to a HARD
+#      RED timeout verdict — the whole point of AC1 (the STEP_TIMEOUT classifier
+#      always fires a trustworthy summary, never a lost job-cancel).
+[[ "$rc_wedge" -ne 0 ]] \
+  || fail "(o) no-output wedge exited 0 — the classifier would never inspect the timeout summary"
+wedge_verdict="$(classify "$summary_wedge")"
+[[ "$wedge_verdict" == "FIRST_TIMEOUT_RED" ]] \
+  || fail "(o) no-output wedge routed to '$wedge_verdict', expected FIRST_TIMEOUT_RED"
+verdict_is_red "$wedge_verdict" \
+  || fail "(o) no-output wedge verdict '$wedge_verdict' was classified GREEN"
+pass "(o4) suite exited non-zero (rc=$rc_wedge); classifier routes the wedge to FIRST_TIMEOUT_RED"
+
+# (n) Positive control: a class that STREAMS output steadily inside the silence
+#     window must NOT be killed by the watchdog — every emitted line resets the
+#     silence timer. This proves no false-positive: a slow-but-progressing class
+#     runs to completion, it is only a SILENT wedge that dies.
+echo "== #1056 no-output watchdog: a streaming class is NOT falsely killed =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+[[ "${1:-}" == "--stop" ]] && exit 0
+if [[ "$*" == *":app:connectedDebugAndroidTest"* && "$*" == *"DeepLinkSessionSwitchE2eTest"* ]]; then
+  # Emit a line each second for 4s — longer than the 2s silence window, but every
+  # line resets the timer so the watchdog must NOT fire.
+  for i in 1 2 3 4; do echo "PS_STREAM_LINE_$i"; sleep 1; done
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+out_stream="$SANDBOX/run-no-output-stream.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  JOURNEY_STEP_BUDGET_SECS=600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=30 \
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=2 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_stream" 2>&1
+rc_stream=$?
+set -e
+
+summary_stream="$SANDBOX/artifacts/ci-journey/summary.md"
+if grep -q 'JOURNEY_NO_OUTPUT_WATCHDOG' "$out_stream"; then
+  sed -n '1,80p' "$out_stream"
+  fail "(n) watchdog FALSELY killed a class that streamed output within the window"
+fi
+# The streamed lines were echoed live (proves run_bounded relays output).
+grep -q 'PS_STREAM_LINE_4' "$out_stream" \
+  || { sed -n '1,80p' "$out_stream"; fail "(n) streamed output was not relayed live by run_bounded"; }
+[[ -f "$summary_stream" ]] || fail "(n) streaming control did not write summary.md"
+if grep -q 'JOURNEY_STEP_TIMEOUT' "$summary_stream"; then
+  cat "$summary_stream"
+  fail "(n) streaming class wrongly produced a JOURNEY_STEP_TIMEOUT marker"
+fi
+[[ "$rc_stream" -eq 0 ]] \
+  || { sed -n '1,80p' "$out_stream"; fail "(n) streaming control exited non-zero (rc=$rc_stream)"; }
+pass "(n) a steadily-streaming class is NOT killed (no false positive; output relayed live)"
 
 # ---------------------------------------------------------------------------
 # Negative control: a clean PASS run (generous budget, fast gradle stub) must

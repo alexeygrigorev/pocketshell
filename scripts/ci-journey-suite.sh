@@ -1507,6 +1507,34 @@ JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
 JOURNEY_GRADLE_STOP_TIMEOUT_SECS="${JOURNEY_GRADLE_STOP_TIMEOUT_SECS:-60}"
 JOURNEY_CLASS_KILL_AFTER_SECS="${JOURNEY_CLASS_KILL_AFTER_SECS:-30}"
 
+# ---------------------------------------------------------------------------
+# Issue #1056: NO-OUTPUT (silence) watchdog — hard-kill a WEDGED child.
+#
+# The wall-clock `timeout` cap above bounds the TOTAL duration of a class
+# attempt, but it is a coarse backstop: a `connectedDebugAndroidTest` that WEDGES
+# and emits ZERO output still burns the full `JOURNEY_CLASS_TIMEOUT_SECS` ceiling
+# (and its retry burns it again) before the summary can be written. In run
+# 28307686762 a wedged child that emitted nothing for ~24 min let the job-level
+# 95-min wall CANCEL the whole step — beating the #835 STEP_TIMEOUT classifier so
+# the verdict was LOST (no trustworthy summary.md at all).
+#
+# A wedged instrumentation child is SILENT while it hangs, so silence is the
+# earliest, most reliable wedge signal — far tighter than the wall cap. This
+# watchdog streams every attempt's combined output live AND resets a silence
+# timer on each line; the instant an attempt emits nothing for
+# JOURNEY_NO_OUTPUT_TIMEOUT_SECS it hard-kills the child tree (TERM then a SIGKILL
+# backstop) and reports a uniform `timeout` exit (124). That (a) frees budget
+# faster than the coarse wall cap so more classes reach a verdict, and (b)
+# GUARANTEES the #835 STEP_TIMEOUT classifier always fires a trustworthy summary
+# well before the job-level wall — the verdict is never lost to a job cancel.
+#
+# Default 300s of silence sits BELOW the 420s wall cap (so a silent wedge dies on
+# silence, not on the coarse wall bound) yet comfortably ABOVE any legitimate
+# quiet stretch (APK install + `am instrument` spin-up + the first generous
+# `pocketshellCi=true` E2E wait all emit progress inside ~2 min). The window is
+# always clamped to the wall cap so a tiny cap in the self-test still governs.
+JOURNEY_NO_OUTPUT_TIMEOUT_SECS="${JOURNEY_NO_OUTPUT_TIMEOUT_SECS:-300}"
+
 # budget_remaining — seconds left in the suite-level budget (never negative).
 budget_remaining() {
   local elapsed=$((SECONDS - SUITE_START))
@@ -1553,6 +1581,85 @@ needs_gradle_cleanup_after_class_abort() {
   [[ "$1" -eq 124 || "$1" -eq 137 ]]
 }
 
+# run_bounded <wall_cap_secs> <cmd...> — issue #1056.
+#
+# Runs <cmd> bounded by BOTH a wall-clock cap (the existing #835 `timeout`) AND a
+# NO-OUTPUT (silence) watchdog. The command's combined output is written to a FIFO
+# that this function reads line-by-line with a per-read timeout equal to the
+# silence window; every line is echoed live (so CI logs still stream) and resets
+# the silence timer. If the command emits NOTHING for JOURNEY_NO_OUTPUT_TIMEOUT_SECS
+# while still alive, the wrapping `timeout` process (and thus the wedged child) is
+# hard-killed — TERM, then a SIGKILL backstop — and the function returns 124, the
+# SAME uniform `timeout` exit the wall cap uses, so every downstream caller
+# (LAST_RUN_CLASS_TIMEOUT_HIT, is_timeout_rc, needs_gradle_cleanup_after_class_abort)
+# treats a silence-kill identically to a wall-cap timeout with no extra branching.
+#
+# Return codes:
+#   * 124 — the silence watchdog fired (wedged, no output), OR the wall `timeout`
+#     hit its ceiling (GNU timeout's own 124).
+#   * 137 — the wall `timeout` SIGKILL backstop fired (child ignored TERM).
+#   * <cmd rc> — the command finished on its own.
+#
+# The wall `timeout` still owns the total-duration ceiling; this wrapper only ADDS
+# the tighter silence bound. A command that streams output steadily runs until the
+# wall cap; a command that WEDGES silently dies at the silence bound, well before
+# the wall cap or the job-level 95-min wall.
+run_bounded() {
+  local wall_cap="$1"; shift
+  local no_output="$JOURNEY_NO_OUTPUT_TIMEOUT_SECS"
+  # Clamp the silence window to the wall cap so a tiny cap (self-test) still
+  # governs, and never let a mis-set 0/negative window disable the read timeout.
+  (( no_output <= 0 || no_output > wall_cap )) && no_output="$wall_cap"
+
+  local tmpdir fifo to_pid rc read_rc line rfd killer
+  tmpdir="$(mktemp -d)"
+  fifo="$tmpdir/out"
+  mkfifo "$fifo"
+
+  # Start the command under the wall-clock `timeout` (TERM + SIGKILL backstop),
+  # combined output to the FIFO. Backgrounded: `$!` is the `timeout` pid, which we
+  # signal on a silence breach so `timeout` forwards TERM to the wedged child.
+  timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${wall_cap}s" \
+    "$@" > "$fifo" 2>&1 &
+  to_pid=$!
+
+  # Reader = the silence watchdog. `read -t <window>` returns >128 on a silence
+  # timeout, 1 on EOF (command finished OR the wall `timeout` closed the pipe).
+  # Capture the read's OWN exit code at the break — a bare `read_rc=$?` after the
+  # `while` would capture the WHILE loop's status (0 when the condition is false
+  # on the first eval, i.e. a silence timeout with no body run), silently losing
+  # the >128 timeout code.
+  exec {rfd}<"$fifo"
+  read_rc=0
+  while :; do
+    if IFS= read -r -t "$no_output" -u "$rfd" line; then
+      printf '%s\n' "$line"
+    else
+      read_rc=$?
+      break
+    fi
+  done
+  exec {rfd}<&-
+
+  if (( read_rc > 128 )); then
+    # Silence bound breached while the child is still alive: hard-kill the tree.
+    echo "JOURNEY_NO_OUTPUT_WATCHDOG: no output for ${no_output}s — hard-killing wedged connectedDebugAndroidTest (issue #1056)" >&2
+    kill -TERM "$to_pid" 2>/dev/null || true
+    ( sleep "$JOURNEY_CLASS_KILL_AFTER_SECS"; kill -KILL "$to_pid" 2>/dev/null || true ) &
+    killer=$!
+    wait "$to_pid" 2>/dev/null
+    kill "$killer" 2>/dev/null || true
+    wait "$killer" 2>/dev/null || true
+    rm -rf "$tmpdir"
+    return 124
+  fi
+
+  wait "$to_pid" 2>/dev/null
+  rc=$?
+  rm -rf "$tmpdir"
+  return "$rc"
+}
+
 # run_class <FQCN> — runs ONE journey class as its own gradle connected-test
 # invocation and returns gradle's exit code (0 == that class passed). Running
 # one class per invocation (rather than all classes comma-joined into a single
@@ -1592,7 +1699,10 @@ run_class() {
     return 124
   fi
   attempt_start=$SECONDS
-  timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${cap}s" \
+  # Issue #1056: run_bounded adds a NO-OUTPUT (silence) watchdog on top of the
+  # #835 wall-clock `timeout` cap, so a wedged child that emits nothing is
+  # hard-killed on silence — well before the wall cap or the job-level wall.
+  run_bounded "$cap" \
     "$GRADLEW" :app:connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
@@ -1642,7 +1752,10 @@ run_ct_class() {
     return 124
   fi
   attempt_start=$SECONDS
-  timeout --signal=TERM --kill-after="$JOURNEY_CLASS_KILL_AFTER_SECS" "${cap}s" \
+  # Issue #1056: same NO-OUTPUT (silence) watchdog as the journey path — a wedged
+  # core-terminal proof (e.g. the #796 output-burst-IME proof that hung ~24 min
+  # in run 28307686762) is hard-killed on silence, never a job-cap cancel.
+  run_bounded "$cap" \
     "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace

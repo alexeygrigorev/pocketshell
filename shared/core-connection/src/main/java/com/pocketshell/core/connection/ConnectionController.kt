@@ -296,12 +296,13 @@ class ConnectionController(
 
     companion object {
         /**
-         * Single lease-anchored grace window. Issue #1123 (sanctioned D21 update):
-         * raised 60 s -> 5 min so a background return is seamless for up to five
-         * minutes; beyond it the connection fully tears down (no indefinite hold).
-         * Mirrors `AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS`.
+         * Single lease-anchored grace window. Issue #1159 (maintainer directive
+         * 2026-07-01): lowered 5 min -> **90 s** ("5 minutes is longer than needed");
+         * within the window a background return is seamless, beyond it the connection
+         * fully tears down (no indefinite hold) unless a port-forward pins it always-on
+         * (issue #1159 Part 3). Mirrors `AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS`.
          */
-        const val DEFAULT_GRACE_MS: Long = 5 * 60_000L
+        const val DEFAULT_GRACE_MS: Long = 90_000L
 
         /** Silent reconnect attempts before the only honest error ([Unreachable]). */
         const val DEFAULT_MAX_RECONNECT_ATTEMPTS: Int = 4

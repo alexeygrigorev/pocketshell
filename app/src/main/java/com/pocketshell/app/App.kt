@@ -17,6 +17,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.diagnostics.StrictModeInstaller
+import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingResumeScheduler
 import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.settings.AppSettings
@@ -136,6 +137,15 @@ class App : Application() {
     lateinit var sessionServiceController: SessionServiceController
 
     /**
+     * Issue #1159 (Part 3): read-only source of "is a port-forward active" — the D21
+     * always-on carve-out. When `activeHostCount > 0` the App-level grace teardown is
+     * suppressed (the connection is pinned indefinitely) and the session foreground-service
+     * notification is worded "Port forwarding active" (no count-down). Never mutated here.
+     */
+    @Inject
+    lateinit var forwardingController: ForwardingController
+
+    /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
      * driven by the lifecycle observer. The dispatcher is
      * [Dispatchers.Main.immediate]: each hook posts work back into a
@@ -194,6 +204,12 @@ class App : Application() {
     private val backgroundGraceController = BackgroundGraceController(
         scope = graceLifecycleScope,
         graceMillis = BACKGROUND_GRACE_MILLIS,
+        // Issue #1159 (Part 3): while a port-forward is active the connection is pinned
+        // always-on — the bounded-grace teardown is SUPPRESSED (explicit user intent, the
+        // D21 carve-out). When the forward later stops, [BackgroundGraceController.onPinReleased]
+        // (driven by the forward-count observer in onCreate) resumes the normal teardown if
+        // the app is still backgrounded past the deadline.
+        holdWhilePinned = { forwardingController.flowOfActiveHostCount().value > 0 },
         onGraceElapsed = {
             // Issue #1123 (bounded-grace D21 update): once the grace window elapses the
             // app FULLY tears down — detach the `-CC` control client cleanly (no orphan,
@@ -273,10 +289,13 @@ class App : Application() {
                 )
                 backgroundGraceController.setGraceMillis(terminalGraceMillis)
                 backgroundGraceController.onBackground()
-                // Issue #1123: stamp the wall-clock disconnect deadline so the bounded
-                // session-hold notification renders a live count-down to teardown. Posted
-                // ONCE; the system chronometer does the per-second rendering (no wakeups).
-                sessionServiceController.onBackgroundGraceStarted(
+                // Issue #1159 (Part 1): the app is now backgrounded — start the session
+                // foreground service (if a live session is held) and stamp the wall-clock
+                // disconnect deadline so the bounded notification renders a live count-down
+                // to teardown. Posted ONCE; the system chronometer does the per-second
+                // rendering (no wakeups). In the foreground the FGS never runs (no tray
+                // notification, no Stop-action footgun).
+                sessionServiceController.onAppBackgrounded(
                     System.currentTimeMillis() + terminalGraceMillis.coerceAtLeast(0L),
                 )
             }
@@ -289,10 +308,10 @@ class App : Application() {
                     "trigger" to "on_start",
                 )
                 backgroundGraceController.onForeground()
-                // Issue #1123: returned within grace — clear the disconnect count-down so
-                // the notification reverts to its steady "connected" state. (Beyond grace
-                // the teardown stops the service entirely.)
-                sessionServiceController.onForegroundResumed()
+                // Issue #1159 (Part 1): back in the foreground — the Activity holds the
+                // connection, so stop the session foreground service and clear the
+                // disconnect count-down. Stopping the service never drops the connection.
+                sessionServiceController.onAppForegrounded()
             }
             else -> Unit
         }
@@ -358,16 +377,31 @@ class App : Application() {
         forwardingResumeScheduler.observeProcessLifecycle()
         StartupTiming.mark("forwarding-resume-lifecycle-observed")
 
-        // Issue #977 + #1123: BOUNDED foreground-service hold for live SSH/tmux
-        // sessions. The service runs while a live tmux client is attached so the OS
-        // sees an explicit foreground service + wakelock that keeps the connection
-        // alive through Doze during the (now 5-min, #1123) background grace window. The
-        // hold is BOUNDED, not indefinite: once the grace window elapses the terminal
-        // teardown unregisters the live client, which stops this service (no wake-lock
-        // or hold beyond grace). The old indefinite-hold "preserve past grace" + the
-        // notification-Stop-after-grace teardown plumbing are removed (#1123).
+        // Issue #977 + #1123 + #1159: BOUNDED foreground-service hold for live SSH/tmux
+        // sessions. Issue #1159 (Part 1): the service now runs ONLY while the app is
+        // BACKGROUNDED — in the foreground the Activity holds the connection, so no FGS and
+        // no Stop-able tray notification. The App lifecycle observer drives
+        // onAppBackgrounded/onAppForegrounded (below). The hold is BOUNDED (grace teardown)
+        // unless a port-forward pins it always-on (Part 3, wired next).
         sessionServiceController.observeActiveSessions()
         StartupTiming.mark("session-service-lifecycle-observed")
+
+        // Issue #1159 (Part 3): mirror the active-port-forward count into the session
+        // service (for the "Port forwarding active" notification wording) and, when the
+        // last forward stops while backgrounded, resume the bounded-grace teardown that was
+        // suppressed while the forward pinned the connection always-on. Event-driven read of
+        // a StateFlow — no timer / polling (D21). Foreground-safe: onPinReleased no-ops
+        // unless we are still backgrounded past the deadline.
+        graceLifecycleScope.launch {
+            forwardingController.flowOfActiveHostCount().collect { activeHostCount ->
+                val active = activeHostCount > 0
+                sessionServiceController.setPortForwardActive(active)
+                if (!active) {
+                    backgroundGraceController.onPinReleased()
+                }
+            }
+        }
+        StartupTiming.mark("port-forward-status-observed")
 
         // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
         // background + reattach on foreground, but only after the bounded
@@ -1027,6 +1061,12 @@ internal class BackgroundGraceController(
     private var graceMillis: Long,
     private val onGraceElapsed: suspend () -> Unit,
     private val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
+    // Issue #1159 (Part 3): the port-forward always-on carve-out. When this predicate
+    // returns true at grace-elapse time the teardown is SUPPRESSED (the connection is
+    // pinned indefinitely — explicit user intent, the D21 carve-out) and `teardownFired`
+    // is left false so [onPinReleased] can resume the teardown once the pin drops. Defaults
+    // to `{ false }` so the bounded behaviour is unchanged when no forward is active.
+    private val holdWhilePinned: () -> Boolean = { false },
     // Issue #1080 — production injects `SystemClock.elapsedRealtime()` (counts
     // deep sleep) so the within-grace/beyond-grace window math reflects real
     // elapsed time across a Doze gap. This System.nanoTime default is the
@@ -1055,6 +1095,14 @@ internal class BackgroundGraceController(
     private var teardownFired: Boolean = false
 
     /**
+     * Issue #1159 (Part 3): true once the grace deadline elapsed for this background cycle
+     * but the teardown was SUPPRESSED because a port-forward pinned the connection always-on.
+     * The deadline has passed, so if the forward later stops while still backgrounded,
+     * [onPinReleased] resumes the teardown immediately. Reset on the next [onBackground].
+     */
+    private var pinnedHoldActive: Boolean = false
+
+    /**
      * Update the grace window used by the next [onBackground] call. An
      * already-running timer keeps its original deadline so changing Settings
      * cannot unexpectedly prolong a backgrounded connection.
@@ -1076,6 +1124,7 @@ internal class BackgroundGraceController(
         backgroundDeadlineAtMs = backgroundStartedAtMs + backgroundGraceMillisForCycle
         backgrounded = true
         teardownFired = false
+        pinnedHoldActive = false
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$backgroundGraceMillisForCycle")
         DiagnosticEvents.record(
             "app",
@@ -1132,7 +1181,38 @@ internal class BackgroundGraceController(
 
     private suspend fun dispatchGraceElapsedIfNeeded(source: String, trigger: String): Boolean {
         if (teardownFired) return false
+        // Issue #1159 (Part 3): a port-forward pins the connection always-on — SUPPRESS the
+        // bounded teardown. Leave `teardownFired` false so [onPinReleased] can run the
+        // teardown once the forward stops (the deadline has already passed). Recorded once
+        // per cycle so the diagnostics don't spam if the timer + a lifecycle re-check both hit.
+        if (holdWhilePinned()) {
+            if (!pinnedHoldActive) {
+                pinnedHoldActive = true
+                Log.i(GRACE_LIFECYCLE_TAG, "grace-window-held-by-port-forward (always-on)")
+                DiagnosticEvents.record(
+                    "app",
+                    "background_grace_held_by_port_forward",
+                    "elapsedMs" to elapsedMs(),
+                    "millis" to backgroundGraceMillisForCycle,
+                    "deadlineMs" to backgroundDeadlineAtMs,
+                    "backgroundCycleId" to backgroundCycleId,
+                    "source" to source,
+                    "trigger" to trigger,
+                )
+                ReconnectCauseTrail.record(
+                    stage = "background_grace",
+                    outcome = "held_by_port_forward",
+                    cause = "port_forward_active",
+                    trigger = trigger,
+                    "graceMs" to backgroundGraceMillisForCycle,
+                    "deadlineMs" to backgroundDeadlineAtMs,
+                    "backgroundCycleId" to backgroundCycleId,
+                )
+            }
+            return false
+        }
         teardownFired = true
+        pinnedHoldActive = false
         val now = nowMillis()
         val elapsedMs = elapsedMs(now)
         Log.i(GRACE_LIFECYCLE_TAG, "grace-window-deadline-elapsed")
@@ -1197,9 +1277,29 @@ internal class BackgroundGraceController(
     private fun elapsedMs(now: Long = nowMillis()): Long =
         (now - backgroundStartedAtMs).coerceAtLeast(0L)
 
+    /**
+     * Issue #1159 (Part 3): the port-forward that was pinning the connection stopped. If we
+     * are STILL backgrounded and the grace deadline has already passed (the teardown was
+     * suppressed while the forward was active), resume the bounded teardown now — "when the
+     * port-forward stops (and nothing else pins the connection), normal bounded-grace
+     * applies again". Event-driven (fired by the forward-count observer), NOT a timer, so it
+     * respects D21. A no-op in the foreground or before the deadline.
+     */
+    fun onPinReleased() {
+        if (!backgrounded || teardownFired) return
+        if (holdWhilePinned()) return
+        if (nowMillis() < backgroundDeadlineAtMs) return
+        scope.launch {
+            dispatchGraceElapsedIfNeeded(source = "pin_released", trigger = "port_forward_stopped")
+        }
+    }
+
     /** Test seam: true while the current background cycle is still inside its deadline. */
     internal fun isGracePendingForTest(): Boolean =
         backgrounded && !teardownFired && nowMillis() < backgroundDeadlineAtMs
+
+    /** Test seam: true once the grace deadline elapsed but a port-forward pinned the hold (#1159). */
+    internal fun isPinnedHoldActiveForTest(): Boolean = pinnedHoldActive
 }
 
 internal class SshLeaseLifecycleDispatcher(

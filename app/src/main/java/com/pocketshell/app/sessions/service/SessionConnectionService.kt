@@ -224,18 +224,28 @@ class SessionConnectionService : Service() {
         // chronometer anchored on the wall-clock deadline (`when`) — the app posts the
         // notification ONCE and never schedules a per-second update / wakeup. A
         // contentTextOverride (the initial "Connecting session") never counts down.
+        //
+        // Issue #1159 (Part 3): a port-forward pins the connection always-on — there is no
+        // teardown to count down to, so the snapshot carries a null deadline and the
+        // notification is worded for the forward ("Port forwarding active") instead.
         val countdownDeadline =
-            if (contentTextOverride == null) snapshot.disconnectAtWallClockMillis else null
+            if (contentTextOverride == null && !snapshot.portForwardActive) {
+                snapshot.disconnectAtWallClockMillis
+            } else {
+                null
+            }
+
+        val title = if (snapshot.portForwardActive) "Port forwarding active" else "Session connected"
 
         val detail = contentTextOverride
-            ?: if (countdownDeadline != null) {
-                "Holding $hostLabel — disconnecting in"
-            } else {
-                "Keeping $hostLabel connected in the background"
+            ?: when {
+                snapshot.portForwardActive -> "Keeping $hostLabel connected for port forwarding"
+                countdownDeadline != null -> "Holding $hostLabel — disconnecting in"
+                else -> "Keeping $hostLabel connected in the background"
             }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Session connected")
+            .setContentTitle(title)
             .setContentText(detail)
             .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
             .setSmallIcon(R.drawable.ic_stat_session)

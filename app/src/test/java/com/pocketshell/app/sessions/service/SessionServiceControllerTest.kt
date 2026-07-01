@@ -25,12 +25,16 @@ import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowApplication
 
 /**
- * Issue #1123 (bounded-grace D21 update): the controller is now a simple BOUNDED
- * keepalive — it starts the foreground service on the first live tmux client and stops it
- * when the last live client goes away. The old indefinite-hold gate
- * (`isHoldingSessionConnection` + the foreground-promotion tracking) and the
- * notification-Stop-after-grace event flows are removed, so these tests assert only the
- * start/stop transitions + the snapshot.
+ * Issue #1159 (Part 1 + Part 3): the session foreground-service hold.
+ *
+ * Part 1: the FGS runs ONLY while the app is BACKGROUNDED. A live session in the
+ * foreground does NOT start the service (the Activity holds the connection — no tray
+ * notification, no Stop footgun); backgrounding starts it, foregrounding stops it, and
+ * neither transition touches the connection itself.
+ *
+ * Part 3: while a port-forward is active the emitted snapshot is flagged `portForwardActive`
+ * with NO count-down deadline (the connection is pinned always-on, so there is nothing to
+ * count down to); dropping the forward restores the normal bounded-grace count-down.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -48,33 +52,113 @@ class SessionServiceControllerTest {
     }
 
     @Test
-    fun `first live tmux client starts the session foreground service`() = runTest {
+    fun `live tmux client in the foreground does NOT start the service`() = runTest {
         val activeClients = ActiveTmuxClients()
         val controller = controller(activeClients, testScheduler)
 
         controller.observeActiveSessions()
         runCurrent()
-        activeClients.register(
-            hostId = 1L,
-            hostName = "alpha",
-            hostname = "alpha.example",
-            port = 22,
-            username = "alexey",
-            keyPath = "/tmp/key",
-            client = FakeTmuxClient(),
-        )
+        // Default state is foreground (a cold start opens into a foreground Activity).
+        registerLive(activeClients, "alpha")
         runCurrent()
 
-        val started = shadow.nextStartedService
-        assertNotNull("first live session must start SessionConnectionService", started)
-        assertEquals(SessionConnectionService::class.java.name, started?.component?.className)
-        assertEquals(SessionConnectionService.ACTION_START, started?.action)
-        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
-        assertEquals("alpha", controller.flowOfSnapshot().value.primaryHostName)
+        assertNull(
+            "a foregrounded live session must NOT start the FGS (#1159 Part 1)",
+            shadow.nextStartedService,
+        )
+        assertFalse(
+            "the snapshot must not hold while foregrounded",
+            controller.flowOfSnapshot().value.isHoldingConnection,
+        )
     }
 
     @Test
-    fun `disconnecting the last live tmux client stops the session foreground service`() = runTest {
+    fun `backgrounding a live session starts the service and foregrounding stops it`() = runTest {
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        drainStartedServices()
+
+        val deadline = 1_000L
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = deadline)
+        runCurrent()
+
+        val started = shadow.nextStartedService
+        assertNotNull("backgrounding a live session must start SessionConnectionService", started)
+        assertEquals(SessionConnectionService::class.java.name, started?.component?.className)
+        assertEquals(SessionConnectionService.ACTION_START, started?.action)
+        val bgSnapshot = controller.flowOfSnapshot().value
+        assertTrue(bgSnapshot.isHoldingConnection)
+        assertEquals("alpha", bgSnapshot.primaryHostName)
+        assertEquals(
+            "backgrounded hold must carry the bounded count-down deadline",
+            deadline,
+            bgSnapshot.disconnectAtWallClockMillis,
+        )
+
+        controller.onAppForegrounded()
+        runCurrent()
+
+        val stopped = shadow.nextStartedService
+        assertNotNull("returning to the foreground must stop the FGS", stopped)
+        assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
+        assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+    }
+
+    @Test
+    fun `port-forward active flags the snapshot with no count-down`() = runTest {
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        controller.setPortForwardActive(true)
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
+        runCurrent()
+
+        val snapshot = controller.flowOfSnapshot().value
+        assertTrue("a port-forward-pinned session must still hold", snapshot.isHoldingConnection)
+        assertTrue("port-forward-active must flag the snapshot", snapshot.portForwardActive)
+        assertNull(
+            "a port-forward pins the connection always-on — NO count-down deadline (#1159 Part 3)",
+            snapshot.disconnectAtWallClockMillis,
+        )
+    }
+
+    @Test
+    fun `dropping the port-forward restores the bounded count-down while still backgrounded`() = runTest {
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        controller.setPortForwardActive(true)
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
+        runCurrent()
+        assertTrue(controller.flowOfSnapshot().value.portForwardActive)
+        assertNull(controller.flowOfSnapshot().value.disconnectAtWallClockMillis)
+
+        controller.setPortForwardActive(false)
+        runCurrent()
+
+        val snapshot = controller.flowOfSnapshot().value
+        assertFalse("dropping the forward must clear the flag", snapshot.portForwardActive)
+        assertEquals(
+            "dropping the forward restores the bounded count-down deadline",
+            5_000L,
+            snapshot.disconnectAtWallClockMillis,
+        )
+    }
+
+    @Test
+    fun `disconnecting the last live tmux client stops the backgrounded service`() = runTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
         val controller = controller(activeClients, testScheduler)
@@ -90,6 +174,7 @@ class SessionServiceControllerTest {
             keyPath = "/tmp/key",
             client = client,
         )
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 1_000L)
         runCurrent()
         drainStartedServices()
 
@@ -137,7 +222,7 @@ class SessionServiceControllerTest {
     }
 
     @Test
-    fun `notification stop stops the foreground service for the current live session set`() = runTest {
+    fun `notification stop stops the foreground service for the current backgrounded session`() = runTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
         val controller = controller(activeClients, testScheduler)
@@ -153,6 +238,7 @@ class SessionServiceControllerTest {
             keyPath = "/tmp/key",
             client = client,
         )
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 1_000L)
         runCurrent()
         drainStartedServices()
 
@@ -173,17 +259,6 @@ class SessionServiceControllerTest {
             "duplicate Stop delivery must not re-issue a service intent",
             shadow.nextStartedService,
         )
-
-        // After an all-clear / re-connect transition the bounded hold may start again.
-        client.disconnectedSignal.value = true
-        runCurrent()
-        client.disconnectedSignal.value = false
-        runCurrent()
-
-        val restarted = shadow.nextStartedService
-        assertNotNull("a fresh live-client transition after all-clear may start the hold again", restarted)
-        assertEquals(SessionConnectionService.ACTION_START, restarted?.action)
-        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
     }
 
     @Test
@@ -192,9 +267,23 @@ class SessionServiceControllerTest {
 
         controller.observeActiveSessions()
         runCurrent()
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 1_000L)
+        runCurrent()
 
         assertNull(shadow.nextStartedService)
         assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+    }
+
+    private fun registerLive(activeClients: ActiveTmuxClients, hostName: String) {
+        activeClients.register(
+            hostId = 1L,
+            hostName = hostName,
+            hostname = "$hostName.example",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
     }
 
     private fun controller(

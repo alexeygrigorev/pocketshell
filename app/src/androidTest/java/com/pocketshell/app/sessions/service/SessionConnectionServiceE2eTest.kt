@@ -22,8 +22,6 @@ import dagger.hilt.android.EntryPointAccessors
 import java.io.BufferedReader
 import java.io.FileInputStream
 import java.io.InputStreamReader
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,13 +41,22 @@ import org.junit.runner.RunWith
  * API-35 emulator proof for the session foreground-service envelope.
  *
  * This registers a live entry in the production [ActiveTmuxClients] singleton,
- * so [SessionServiceController] starts the real foreground service exactly as a
+ * so [SessionServiceController] drives the real foreground service exactly as a
  * live session does. The client is an in-process [TmuxClient] double; this
- * on-device test proves the Android surface: notification/channel, partial
- * wakelock, and — issue #1123 (bounded-grace D21 update) — that once the grace
- * window ELAPSES the bounded hold tears down automatically (the teardown hook
- * fires, the notification clears, the wakelock releases) with NO indefinite hold
- * and NO manual Stop required.
+ * on-device test proves the Android surface.
+ *
+ * Issue #1159 (Part 1): the foreground service now runs ONLY while the app is
+ * BACKGROUNDED. In the foreground the Activity holds the connection, so there is
+ * NO "Session connected" tray notification (and no Stop-action footgun). This test
+ * reproduces the maintainer's reported scenario on-device:
+ *   1. Foreground + live session → NO session notification.
+ *   2. Background → the FGS starts, its notification + wakelock appear.
+ *   3. Return to foreground within grace → the FGS stops, notification + wakelock
+ *      clear, and the live connection is NOT dropped (starting/stopping the FGS
+ *      never touches the connection).
+ *
+ * The grace-window teardown math (#1123) and the port-forward always-on hold
+ * (#1159 Part 3) are covered deterministically by the JVM/Robolectric suites.
  */
 @RunWith(AndroidJUnit4::class)
 class SessionConnectionServiceE2eTest {
@@ -81,7 +88,7 @@ class SessionConnectionServiceE2eTest {
     }
 
     @Test
-    fun liveSessionServicePostsWakeLockAndNotification_thenGraceElapsedTearsDown() {
+    fun sessionFgsRunsOnlyWhileBackgrounded_foregroundHasNoNotification_connectionSurvives() {
         assertEquals(
             "API 35 evidence must run on Android 15",
             35,
@@ -89,19 +96,17 @@ class SessionConnectionServiceE2eTest {
         )
         grantNotifications()
         notificationManager.cancelAll()
-        BackgroundGraceTestOverride.setForTest(SHORT_GRACE_MS)
+        // A long grace so the backgrounded FGS stays up long enough to observe, and a
+        // return to the foreground is comfortably WITHIN grace (no teardown).
+        BackgroundGraceTestOverride.setForTest(LONG_GRACE_MS)
         scenario = ActivityScenario.launch(MainActivity::class.java)
 
         val registry = entryPoint().activeTmuxClients()
         val fakeClient = ConnectedTmuxClient()
-        val backgroundTeardown = CountDownLatch(1)
         lifecycleRegistration = registry.registerLifecycleHooks(
             hostId = HOST_ID,
             hooks = ActiveTmuxClients.LifecycleHooks(
-                onBackground = {
-                    fakeClient.markDisconnected()
-                    backgroundTeardown.countDown()
-                },
+                onBackground = {},
                 onForeground = {},
             ),
         )
@@ -115,8 +120,16 @@ class SessionConnectionServiceE2eTest {
             client = fakeClient,
         )
 
+        // Part 1 — FOREGROUND: a live session in the foreground must NOT post the
+        // "Session connected" notification (the Activity holds the connection; a Stop-able
+        // tray status is a footgun). Assert it stays absent through a settle window.
+        assertSessionNotificationAbsentWhileForeground()
+
+        // Part 1 — BACKGROUND: moving to CREATED backgrounds the process
+        // (ProcessLifecycleOwner ON_STOP), which starts the FGS + its notification + wakelock.
+        scenario!!.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
         val posted = waitForSessionNotification()
-        assertNotNull("live registry entry must start the session foreground notification", posted)
+        assertNotNull("backgrounding a live session must start the session foreground notification", posted)
         val notification = posted!!.notification
         assertEquals("pocketshell_session_status_v1", notification.channelId)
         val channel = notificationManager.getNotificationChannel(notification.channelId)
@@ -132,26 +145,32 @@ class SessionConnectionServiceE2eTest {
             "session notification must be non-clearable",
             notification.flags and Notification.FLAG_NO_CLEAR != 0,
         )
-        assertTrue(
-            "session notification must include Stop",
-            notification.actions?.any { it.title?.toString() == "Stop" } == true,
-        )
         waitForWakeLockHeld()
 
-        // Bounded-grace D21 update (#1123): background past the (short) grace window.
-        // The teardown must run AUTOMATICALLY at grace-elapsed — NO manual Stop, NO
-        // indefinite preserve. The fan-out fires the lifecycle `onBackground` hook
-        // (which here marks the fake client disconnected); the controller then stops the
-        // bounded service, clearing the notification + releasing the wakelock.
-        scenario!!.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
-
-        assertTrue(
-            "grace elapsing must fan out the destructive background teardown (no indefinite hold)",
-            backgroundTeardown.await(10, TimeUnit.SECONDS),
-        )
+        // Part 1 — FOREGROUND AGAIN (within grace): returning to the foreground stops the
+        // FGS (notification + wakelock clear) WITHOUT dropping the live connection —
+        // starting/stopping the service never touches the connection itself.
+        scenario!!.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
         waitForSessionNotificationGone()
         waitForWakeLockReleased()
-        assertTrue("test client must be marked disconnected by the teardown hook", fakeClient.disconnected.value)
+        assertFalse(
+            "returning to the foreground must NOT drop the live connection (FGS stop is envelope-only)",
+            fakeClient.disconnected.value,
+        )
+    }
+
+    private fun assertSessionNotificationAbsentWhileForeground() {
+        val deadline = System.currentTimeMillis() + FOREGROUND_SETTLE_MS
+        while (System.currentTimeMillis() < deadline) {
+            assertNull(
+                "a foregrounded live session must NOT post the session notification (#1159 Part 1); " +
+                    "active titles=" + notificationManager.activeNotifications.map {
+                        it.notification.extras.getCharSequence("android.title")
+                    },
+                sessionNotification(),
+            )
+            Thread.sleep(POLL_MS)
+        }
     }
 
     private fun grantNotifications() {
@@ -282,7 +301,11 @@ class SessionConnectionServiceE2eTest {
 
     private companion object {
         const val HOST_ID: Long = 1_021_001L
-        const val SHORT_GRACE_MS: Long = 500L
+        // Long enough that the backgrounded FGS stays up for observation and a return to
+        // the foreground is comfortably within grace (no teardown).
+        const val LONG_GRACE_MS: Long = 120_000L
+        // Settle window over which the foreground must stay notification-free (#1159 Part 1).
+        const val FOREGROUND_SETTLE_MS: Long = 3_000L
         const val POLL_MS: Long = 100L
         const val WAKE_LOCK_TAG: String = "PocketShell:session"
     }

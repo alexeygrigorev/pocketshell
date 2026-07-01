@@ -1363,6 +1363,106 @@ class BackgroundGraceControllerTest {
         assertEquals(true, forwardingActive)
     }
 
+    @Test
+    fun `issue 1159 port-forward pins the connection - grace elapse suppresses the teardown`() = runTest {
+        // Part 3: while a port-forward is active the bounded teardown is SUPPRESSED — the
+        // connection is pinned always-on (explicit user intent, the D21 carve-out). The
+        // grace deadline elapses but onGraceElapsed never runs.
+        val events = mutableListOf<String>()
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            holdWhilePinned = { true },
+            onGraceElapsed = { events += "teardown" },
+            onForeground = { resumedWithinGrace -> events += "foreground:$resumedWithinGrace" },
+            nowMillis = { currentTime },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+
+        assertEquals(
+            "a port-forward pins the connection always-on — the teardown must NOT run",
+            emptyList<String>(),
+            events,
+        )
+        assertTrue(
+            "the pinned-hold state must be active after the suppressed deadline",
+            controller.isPinnedHoldActiveForTest(),
+        )
+        assertFalse("the timer must be complete (deadline passed)", controller.isGracePendingForTest())
+    }
+
+    @Test
+    fun `issue 1159 dropping the port-forward past the deadline resumes the bounded teardown`() = runTest {
+        // Part 3: "when the port-forward stops (and nothing else pins the connection),
+        // normal bounded-grace applies again". The suppressed teardown runs on onPinReleased.
+        val events = mutableListOf<String>()
+        var pinned = true
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            holdWhilePinned = { pinned },
+            onGraceElapsed = { events += "teardown" },
+            onForeground = { resumedWithinGrace -> events += "foreground:$resumedWithinGrace" },
+            nowMillis = { currentTime },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis + 1)
+        runCurrent()
+        assertEquals("held while the forward pinned it", emptyList<String>(), events)
+
+        // The forward stops while still backgrounded, past the deadline.
+        pinned = false
+        controller.onPinReleased()
+        runCurrent()
+
+        assertEquals(
+            "dropping the forward past the deadline must run the suppressed teardown",
+            listOf("teardown"),
+            events,
+        )
+        assertFalse(controller.isPinnedHoldActiveForTest())
+    }
+
+    @Test
+    fun `issue 1159 pin released before the deadline does not tear down early`() = runTest {
+        val events = mutableListOf<String>()
+        var pinned = true
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            holdWhilePinned = { pinned },
+            onGraceElapsed = { events += "teardown" },
+            onForeground = { resumedWithinGrace -> events += "foreground:$resumedWithinGrace" },
+            nowMillis = { currentTime },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis / 2)
+        runCurrent()
+
+        // Forward stops mid-window: this is a no-op (the deadline has not passed); the still
+        // pending timer keeps the ordinary bounded window.
+        pinned = false
+        controller.onPinReleased()
+        runCurrent()
+        assertEquals("pin released before the deadline must not tear down early", emptyList<String>(), events)
+
+        advanceTimeBy(graceMillis)
+        runCurrent()
+        assertEquals(
+            "the ordinary bounded timer still fires the teardown at its deadline",
+            listOf("teardown"),
+            events,
+        )
+    }
+
     private fun kotlinx.coroutines.test.TestScope.controller(
         events: MutableList<String>,
     ): BackgroundGraceController =

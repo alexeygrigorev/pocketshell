@@ -83,6 +83,58 @@ class SessionConnectionServiceTest {
     }
 
     @Test
+    fun `port-forward active notification reads Port forwarding active with no count-down`() {
+        // Issue #1159 (Part 3): a port-forward pins the connection always-on — the snapshot
+        // carries portForwardActive=true and a null deadline, and the notification is worded
+        // for the forward with NO count-down chronometer (there is no teardown to count to).
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = null,
+                portForwardActive = true,
+            ),
+        )
+
+        assertEquals(
+            "Port forwarding active",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "body must be worded for the forward, not a count-down: '$body'",
+            body.contains("port forwarding"),
+        )
+        assertFalse(
+            "a port-forward-pinned hold must NOT show a count-down chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+    }
+
+    @Test
+    fun `port-forward active suppresses the count-down even when a deadline is present`() {
+        // Defensive: even if a stale deadline leaks into the snapshot, port-forward-active
+        // must win and suppress the chronometer (the connection is pinned, not counting down).
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = System.currentTimeMillis() + 90_000L,
+                portForwardActive = true,
+            ),
+        )
+
+        assertFalse(
+            "port-forward-active must suppress the count-down chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertEquals(
+            "Port forwarding active",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+    }
+
+    @Test
     fun `notification collapses multiple hosts`() {
         val notification = buildServiceNotification(
             SessionConnectionSnapshot(liveSessionCount = 3, primaryHostName = "alpha"),

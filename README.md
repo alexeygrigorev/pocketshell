@@ -15,12 +15,10 @@ the app reconnects when you bring it back to the foreground.
 **Active development, dogfooded daily.** This isn't a finished product or a
 planning exercise — PocketShell is the maintainer's primary way of working on a
 dev box from a phone, and every release comes out of that real, constant use.
-The current release is **v0.4.21**
-([releases](https://github.com/alexeygrigorev/pocketshell/releases)); grab the
-debug APK from the latest release to try it. It's Android-only and single-user,
-and it takes hard cuts on breaking changes rather than carrying compatibility
-shims — there is no install base to keep happy (locked decision
-[D22](docs/decisions.md)).
+You can download the latest version from the [releases
+page](https://github.com/alexeygrigorev/pocketshell/releases/latest). It's Android-only and single-user, and it takes hard cuts on breaking
+changes rather than carrying compatibility shims — there is no install base to
+keep happy (locked decision [D22](docs/decisions.md)).
 
 ## What it does
 

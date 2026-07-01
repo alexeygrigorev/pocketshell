@@ -31,6 +31,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -257,6 +258,103 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         Unit
     } }
 
+    /**
+     * Issue #1158 (recurrence of #962/#1057) — a session RECORDED as a non-shell
+     * agent kind (`@ps_agent_kind=codex`) whose conversation SOURCE can't bind
+     * (no cwd-enumerable transcript; Codex needs the `/proc/<pid>/fd` owned-rollout
+     * match the non-systemd fixture can't supply) MUST still show a present +
+     * tappable Terminal/Conversation toggle, and tapping it must route to the
+     * Conversation surface (the loading/placeholder state), NEVER collapse the
+     * whole tab and strand the user on the Terminal.
+     *
+     * This is the SECOND kind in the class (Codex; the masked-Claude sibling above
+     * is the first) and the "source-binding-fails-but-tab-still-present" case. Tab
+     * PRESENCE now follows the RECORDED agent kind
+     * (`tmuxSessionRecordedAgentKind(currentSessionRecordedKind)` →
+     * `tmuxSessionTabState.showsConversationTab`), independent of the fragile live
+     * detection / transcript-source binding — the durable #1158 fix. The
+     * deterministic per-kind red→green (Claude / Codex / glm-Z.AI) lives in the
+     * fast JVM sibling `TmuxSessionScreenTest.tmuxSessionTabStateShowsConversationForRecorded*`;
+     * this is the REAL-path acceptance that the toggle is present, tappable, and
+     * degrades to the Conversation placeholder — not a dead Terminal — when source
+     * binding fails on the maintainer's fleet.
+     *
+     * NOTE (loading state, not loaded content): actually LOADING the Codex/Z.AI
+     * transcript into the surface is the explicit #1158 non-goal (the #820
+     * content-loading class, a separate follow-up). Here the acceptance is the tab
+     * being reachable and reaching the Placeholder/loading surface.
+     */
+    @Test
+    fun conversationTogglePresentForRecordedCodexAgentWhenSourceBindingFails() { runBlocking {
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
+        val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
+
+        attachToSeededSession(hostRowTag, sessionName)
+        waitForTerminalSessionAttached()
+        waitForVisibleTerminalText("issue1158-codex-ready", VISIBLE_TIMEOUT_MS) {
+            "issue1158-codex-ready" in it
+        }
+        stamp("recorded_codex_attached session=$sessionName")
+
+        // STEP 1 — LOAD-BEARING recorded-agent signal: the tree read back
+        // `@ps_agent_kind=codex` for the active session. This is the exact input
+        // the #1158 fix keys on (currentSessionRecordedKind → recordedAgentKind →
+        // showsConversationTab). If this never resolves, the recorded-kind path
+        // isn't exercised and the test would be vacuous — so hard-assert it.
+        val vm = currentViewModel()
+        val recordedCodex = waitForRecordedKind(vm, SessionAgentKind.Codex)
+        assertTrue(
+            "#1158: the active session must read back `@ps_agent_kind=codex` " +
+                "(the recorded-agent signal that drives tab presence). " +
+                "currentSessionRecordedKind=${vm.currentSessionRecordedKind.value}",
+            recordedCodex,
+        )
+        stamp("recorded_codex_kind_resolved")
+
+        // STEP 2 — NO live source binds: the fixture cannot bind a Codex source
+        // (no `/proc` match, no cwd transcript). Detection stays null — proving the
+        // toggle below is NOT coming from live detection but from the recorded
+        // kind. (Best-effort observation; the load-bearing gate is STEP 3.)
+        SystemClock.sleep(SHELL_NO_TOGGLE_SETTLE_MS)
+        val detectionBound = vm.agentConversations.value.values.any { it.detection != null }
+        stamp("recorded_codex_detection_bound=$detectionBound")
+
+        // STEP 3 — DURABLE UI: the Terminal/Conversation toggle is present with a
+        // "Conversation" segment, driven purely by the recorded Codex kind.
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertExists()
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithText("Conversation", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Conversation", useUnmergedTree = true).assertExists()
+        captureFullFrame("issue1158-recorded-codex-toggle-present")
+        stamp("recorded_codex_toggle_present_ok")
+
+        // STEP 4 — POINT 2 (never collapse the tab on a source-binding hiccup):
+        // tapping Conversation routes to the Conversation surface (the loading /
+        // placeholder state), NOT stranding the user on the Terminal. Assert the
+        // production placeholder [TMUX_CONVERSATION_DETECTING_TAG] appears.
+        clickRobustly {
+            compose.onNodeWithText("Conversation", useUnmergedTree = true).performClick()
+        }
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_CONVERSATION_DETECTING_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_CONVERSATION_DETECTING_TAG, useUnmergedTree = true)
+            .assertExists()
+        captureFullFrame("issue1158-recorded-codex-conversation-placeholder")
+        stamp("recorded_codex_conversation_placeholder_ok")
+        Unit
+    } }
+
     // -------------------------------------------------------------- seed-before-launch
 
     /**
@@ -275,6 +373,8 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
                 seedMaskedLiveClaudeSession(key)
             "plainShellRecordedSessionShowsNoConversationToggle" ->
                 seedPlainShellSession(key)
+            "conversationTogglePresentForRecordedCodexAgentWhenSourceBindingFails" ->
+                seedRecordedCodexNoTranscriptSession(key)
             else -> error("unexpected test method $methodName")
         }
         seededSessionName = sessionName
@@ -346,7 +446,53 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         return sessionName
     }
 
+    /**
+     * Issue #1158: a session RECORDED as an agent kind (`@ps_agent_kind=codex`)
+     * with NO bindable conversation source — no cwd-enumerable transcript, and the
+     * fixture cannot supply the Codex `/proc/<pid>/fd` owned-rollout match — so live
+     * detection / transcript-source binding fails for the life of the session,
+     * exactly the maintainer's Codex fleet. The recorded Codex kind is the durable
+     * signal that keeps the Conversation toggle present regardless.
+     */
+    private suspend fun seedRecordedCodexNoTranscriptSession(key: String): String {
+        val suffix = unique()
+        val sessionName = "issue1158-codex-$suffix"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
+                        "\"printf 'issue1158-codex-ready\\r\\n'; exec sh\"",
+                )
+                // Record it as a Codex agent (the durable `@ps_agent_kind` the
+                // `pocketshell agent codex` wrapper writes). NO transcript is seeded,
+                // so the conversation source cannot bind.
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind codex")
+                appendLine("sleep 1")
+            },
+        )
+        return sessionName
+    }
+
     // ----------------------------------------------------------------- helpers
+
+    /**
+     * Issue #1158: poll until the active session's recorded `@ps_agent_kind`
+     * resolves to [expected] (read over the warm session by
+     * `refreshCurrentSessionRecordedKind`, which the screen fires on connect). This
+     * is the load-bearing recorded-agent signal the tab-presence fix keys on.
+     */
+    private fun waitForRecordedKind(vm: TmuxSessionViewModel, expected: SessionAgentKind): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + VERDICT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (vm.currentSessionRecordedKind.value == expected) return true
+            SystemClock.sleep(100)
+        }
+        return vm.currentSessionRecordedKind.value == expected
+    }
 
     private suspend fun persistHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext

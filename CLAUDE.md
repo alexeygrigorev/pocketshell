@@ -2,7 +2,7 @@
 
 Voice-first, tmux-native, agent-aware Android SSH client.
 
-Conceptual planning is complete. Implementation in progress, tracked as GitHub issues across phases 0–4. Visual spec is HTML mockups in `docs/mockups/` (Pixel 7 viewport). Locked design decisions are in `docs/decisions.md`.
+In active development and daily use — the maintainer's primary way of working on a dev box from a phone, with each release coming out of that real, constant use. Tracked as GitHub issues across phases 0–4. Visual spec is HTML mockups in `docs/mockups/` (Pixel 7 viewport). Locked design decisions are in `docs/decisions.md`.
 
 ## Key docs
 

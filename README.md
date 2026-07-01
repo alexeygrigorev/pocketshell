@@ -10,6 +10,18 @@ It is built for one job: keep working on your dev box from your phone. Long-live
 state lives on the dev box in tmux and a small server-side `pocketshell` helper;
 the app reconnects when you bring it back to the foreground.
 
+## Status
+
+**Active development, dogfooded daily.** This isn't a finished product or a
+planning exercise — PocketShell is the maintainer's primary way of working on a
+dev box from a phone, and every release comes out of that real, constant use.
+The current release is **v0.4.21**
+([releases](https://github.com/alexeygrigorev/pocketshell/releases)); grab the
+debug APK from the latest release to try it. It's Android-only and single-user,
+and it takes hard cuts on breaking changes rather than carrying compatibility
+shims — there is no install base to keep happy (locked decision
+[D22](docs/decisions.md)).
+
 ## What it does
 
 - **tmux-native sessions.** Attaches with `tmux -CC` control mode and renders one
@@ -223,6 +235,7 @@ orchestrator/reviewer process and release flow are in
 - `shared/core-tmux/` — tmux control-mode parsing and client behavior.
 - `shared/core-terminal/` — vendored Termux terminal emulator + Compose adapter.
 - `shared/core-agents/` — Claude Code, Codex, and OpenCode detection/parsers.
+- `shared/core-assistant/` — in-app LLM assistant (Anthropic + OpenAI clients, config store).
 - `shared/core-usage/` — normalized usage/quota parsing.
 - `shared/core-storage/` — Room entities, DAOs, migrations.
 - `shared/core-voice/` — Whisper and speech input.

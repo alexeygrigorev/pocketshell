@@ -72,6 +72,15 @@ NETWORK_FAULT_CLASSES=(
   "$FQCN_PREFIX.DisconnectBlackholeE2eTest"
   "$FQCN_PREFIX.NetworkLatencyModelE2eTest"
   "$FQCN_PREFIX.PacketLossNetworkFaultE2eTest"
+  # Issue #1064 (R4 / #843 round-2 T10/C4): slow COLD-DIAL robustness. A
+  # NetworkFaultProofBase toxiproxy proof that applies jitter-latency +
+  # bandwidth-limit (and, in the class-coverage variant, a half-open blackhole)
+  # BEFORE the app's first connect, so the cold handshake itself rides the
+  # degraded link. It self-skips on per-PR CI (assumeNetworkFaultProofsEnabled ->
+  # tests.yml leaves network-fault-proxy:2228 + toxiproxy:8474 down), so wiring it
+  # into ci-journey-suite.sh would only ALL-SKIP (the G3 vacuous-pass trap). The
+  # durable gate is here, alongside its sibling NetworkFaultProofBase proofs.
+  "$FQCN_PREFIX.ColdDialUnderBandwidthLimitE2eTest"
   # Issue #741 (#657 Gap B): connects a real SshSession through the toxiproxy
   # forward, blackholes the link, and asserts keep-alive surfaces the dead peer
   # (isConnected flips false) within the 60s configured window instead of

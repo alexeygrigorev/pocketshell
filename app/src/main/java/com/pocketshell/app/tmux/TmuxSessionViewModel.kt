@@ -3698,13 +3698,90 @@ public class TmuxSessionViewModel @Inject constructor(
         // teardown always ran, so there is always a pendingReattach/pausedAutoReconnect
         // to replay through the normal foreground arm below.
         connectionManager.observeForeground()
-        dispatchPostGraceForegroundArmIfPending()
+        val armed = dispatchPostGraceForegroundArmIfPending()
+        if (!armed) {
+            // Issue #1181: the beyond-grace foreground-resume onto a STILL-LIVE connection
+            // with NOTHING pending to replay. This is the port-forward-pinned "always-on"
+            // case (#1159 Part 3): the pin SUPPRESSED the bounded-grace teardown, so
+            // `dispatchTmuxBackground()` never ran, `detachForBackground()` never set
+            // `pendingReattach`, and the `-CC` control client stayed live across the
+            // background. On a notification-tap foreground return beyond the grace deadline
+            // `resumedWithinGrace` is false (the within-grace reseed fast paths above
+            // declined) and the arm dispatch did NOTHING — so no code path drove a repaint.
+            // The Termux surface may have been released while backgrounded (a surface-layer
+            // black over an INTACT emulator model), and the stale-render heal oracle cannot
+            // rescue it — it compares the model grid vs tmux and a surface-only black leaves
+            // model == tmux. Force ONE unconditional full-viewport reseed of the active pane
+            // over the warm client — the single repaint that was missing on this branch.
+            reseedActivePaneOnLivePinnedForeground()
+        }
         // The controller's single grace predicate decided reattach-vs-reconnect:
         // within grace (warm lease) it is Reattaching and the active-pane reseed will
         // land it back to Live → Connected (the approved #685 Bug-A divergence — NO
         // probe churn); beyond grace it is Reconnecting (matches inline). Re-project
         // after the driver-fired effects ran.
         projectStatusFromController()
+    }
+
+    /**
+     * Issue #1181: heal the black terminal seen on a notification-tap foreground-resume onto
+     * a STILL-LIVE (port-forward-pinned, #1159 Part 3) connection with no `pendingReattach`.
+     *
+     * This is the SOLE beyond-grace foreground path in the codebase that otherwise drives
+     * ZERO repaint (see [onAppForegrounded]): within-grace reseeds via [graceEffects], and a
+     * beyond-grace NON-pinned resume ran the teardown so [dispatchPostGraceForegroundArmIfPending]
+     * replays `pendingReattach`/`pausedAutoReconnect`. Only the pinned beyond-grace resume
+     * arrives here with a live client and nothing to arm — and the surface may be black over
+     * an intact model, which no other mechanism repaints.
+     *
+     * We force ONE unconditional full-viewport reseed over the WARM `-CC` client, REUSING the
+     * exact #553/#721/#892 reseed chokepoint ([reseedActivePaneForReattach] →
+     * [seedPaneFromCapture] → `_fullRepaintRequests` full clear+repaint) that manual Redraw
+     * and the within-grace reattach already use. `skipWhenFreshlySeeded = false` FORCES the
+     * recapture even though the pane is still in [panesSeededThisAttach] from the original
+     * attach (the live client never re-attached) — otherwise the model-intact "already seeded,
+     * not blank" state would skip and the surface would stay black. The [RuntimeRefreshGuard]
+     * drops a late seed for a switched-away/superseded runtime.
+     *
+     * D21/D28 contract: NO reconnect, NO new lease, NO `connectGeneration` bump, NO
+     * `_switchHidesTerminal` "Attaching…" overlay, and NO new polling/timer (#1164) — a single
+     * reseed on this one no-op branch, at most one `capture-pane` per pinned foreground return.
+     * A no-op when nothing is attached / the client is gone (the beyond-grace non-pinned resume
+     * that DID tear down never reaches here — it always has an arm to dispatch above).
+     */
+    private fun reseedActivePaneOnLivePinnedForeground() {
+        val client = clientRef ?: return
+        if (client.disconnected.value) return
+        val target = activeTarget ?: return
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-foreground-live-pinned-reseed generation=$connectGeneration " +
+                "session=${target.sessionName} status=${_connectionStatus.value}",
+        )
+        ReconnectCauseTrail.record(
+            stage = "foreground_live_pinned",
+            outcome = "reseed_only",
+            cause = "post_grace_live_no_pending_foreground",
+            trigger = TmuxConnectTrigger.LifecycleReattach.logValue,
+            "hostId" to target.hostId,
+            "generation" to connectGeneration,
+            "clientHash" to System.identityHashCode(client),
+        )
+        // Issue #935 R1: contained — the reseed runs `capture-pane` IO against the warm
+        // client; a teardown race here must not crash.
+        launchContainedTeardown {
+            if (client.disconnected.value) return@launchContainedTeardown
+            val guard = RuntimeRefreshGuard(
+                generation = connectGeneration,
+                target = target,
+                client = client,
+            )
+            // UNCONDITIONAL full-viewport restore of the active pane over the warm client.
+            // skipWhenFreshlySeeded=false forces the recapture even for a pane already seeded
+            // this attach — the live client never re-attached, so the pane stays in
+            // panesSeededThisAttach and a skip would leave the surface black (#1181).
+            reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+        }
     }
 
     /**
@@ -3716,10 +3793,15 @@ public class TmuxSessionViewModel @Inject constructor(
      * replay/resume arm is dispatched from this lifecycle hook before it returns. If the
      * driver observes a Reconnecting edge too, [replayPendingReattach] has already consumed
      * [pendingReattach] and the duplicate callback is a no-op.
+     *
+     * Returns whether an arm was dispatched. Issue #1181: the caller reseeds the active pane
+     * over the still-live client when this returns `false` (nothing pending) — the
+     * port-forward-pinned beyond-grace resume that otherwise drives zero repaint.
      */
-    private fun dispatchPostGraceForegroundArmIfPending() {
-        if (pendingReattach == null && pausedAutoReconnect == null) return
+    private fun dispatchPostGraceForegroundArmIfPending(): Boolean {
+        if (pendingReattach == null && pausedAutoReconnect == null) return false
         onControllerForegrounded()
+        return true
     }
 
     /**

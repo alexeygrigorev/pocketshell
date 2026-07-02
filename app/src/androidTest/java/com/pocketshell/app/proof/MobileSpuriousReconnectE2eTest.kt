@@ -212,9 +212,15 @@ class MobileSpuriousReconnectE2eTest {
                 "not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
             rideThrough.isNotEmpty(),
         )
+        // Issue #1193: the passive-timestamp ride-through fast-path (cause
+        // "transport_proven_alive") is DELETED — EVERY restore ride-through now goes
+        // through the bounded ACTIVE probe. On a surviving (live) socket the probe
+        // answers fast, so it still rides through with NO redial, but attributed to
+        // the probe answering ("probe_answered"), not the passive keepalive alone.
         assertEquals(
-            "arm 1: the ride-through is attributed to the proven-alive keepalive",
-            "transport_proven_alive",
+            "the surviving-socket ride-through is attributed to the bounded probe answering " +
+                "(the #1193 always-probe restore arm)",
+            "probe_answered",
             rideThrough.first().fields["cause"],
         )
 

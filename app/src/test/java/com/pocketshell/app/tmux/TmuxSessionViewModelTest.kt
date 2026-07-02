@@ -4517,6 +4517,179 @@ class TmuxSessionViewModelTest {
         }
     }
 
+    @Test
+    fun issue1193NetworkRestoreFreshKeepaliveButDeadSocketRedialsViaProbeNotPassiveRideThrough() =
+        runTest(scheduler) {
+            // Issue #1193 REPRODUCE-FIRST (D33/G10): the maintainer's 2026-07-02
+            // cellular spurious drop. On a WiFi→cellular restore the OLD socket is
+            // silently dead (the new radio's IP/NAT invalidates the 4-tuple) but the
+            // PASSIVE keepalive TIMESTAMP is still fresh (< 90s). Pre-#1193 branch 1 of
+            // scheduleNetworkReconnectOnRestore rode through on that timestamp ALONE
+            // (isTransportKeepAliveProvenAliveRecently — a pure clock comparison, NO
+            // round-trip) → committed to the dead transport, flipped back to Live, and
+            // the `-CC` reader threw ~157ms later → passive_disconnect + reconnect
+            // churn. This pins BOTH the fresh keepalive (forceTransportProvenAliveForTest
+            // = true, the maintainer's EXACT state) AND a genuinely dead socket
+            // (forceLivenessProbeDeadForTest = true — the bounded probe won't answer).
+            //
+            // RED (branch 1 present): records a network_restore_ride_through
+            //   cause=transport_proven_alive and does NOT redial (connectCount == 0) —
+            //   the app commits to the dead transport.
+            // GREEN (#1193, branch 1 deleted → all restores go through the bounded
+            //   probe): the probe requires an answered round-trip, finds the socket
+            //   dead, and cleanly redials — network_restore_reconnect_start fires,
+            //   connectCount == 1, and there is NO network_restore_ride_through.
+            TMUX_CONNECT_ATTEMPTS.set(0)
+            val registry = ActiveTmuxClients()
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            )
+            vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+            vm.setAutoReconnectDelaysForTest(listOf(0L))
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = FakeTmuxClient(),
+            )
+            runCurrent()
+
+            // The maintainer's exact cellular state: keepalive timestamp FRESH (the
+            // passive check would say "proven alive") but the post-handoff socket
+            // GENUINELY DEAD (the bounded probe cannot round-trip).
+            vm.forceTransportProvenAliveForTest = true
+            vm.forceLivenessProbeDeadForTest = true
+
+            val diagnostics = installRecordingDiagnosticSink()
+            try {
+                registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+                runCurrent()
+                registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+                advanceUntilIdle()
+
+                // GREEN load-bearing #1: the restore must NOT ride through onto the
+                // dead transport on a fresh-keepalive timestamp — that passive
+                // ride-through is the #1193 bug.
+                assertTrue(
+                    "a fresh-keepalive-but-DEAD-socket restore must NOT ride through the dead " +
+                        "transport on the passive timestamp (the #1193 cellular spurious drop); " +
+                        "events=${diagnostics.events.map { it.name }}",
+                    diagnostics.eventsNamed("network_restore_ride_through").isEmpty(),
+                )
+                // GREEN load-bearing #2: the bounded probe detected the dead socket and
+                // cleanly redialled via the #997 fresh lease.
+                assertEquals(
+                    "the dead-socket restore must redial via the bounded-probe fresh lease",
+                    1,
+                    connector.connectCount,
+                )
+                assertEquals(
+                    "the redial fires with the network-reconnect trigger",
+                    TmuxConnectTrigger.NetworkReconnect,
+                    vm.latestRestoreIntentSnapshot()?.trigger,
+                )
+                assertTrue(
+                    "the redial records the fast restore signal (not a vacuous pass); " +
+                        "events=${diagnostics.events.map { it.name }}",
+                    diagnostics.eventsNamed("network_restore_reconnect_start").isNotEmpty(),
+                )
+            } finally {
+                diagnostics.close()
+                vm.forceTransportProvenAliveForTest = null
+            }
+        }
+
+    @Test
+    fun issue1193NetworkRestoreFreshKeepaliveAndAliveSocketStillRidesThroughViaProbe() =
+        runTest(scheduler) {
+            // Issue #1193 NO-REGRESSION (G2 class coverage): the genuine happy cellular
+            // dip — a fresh keepalive timestamp AND a truly-alive socket. With the
+            // passive fast-path deleted the restore now proves liveness with the bounded
+            // ACTIVE probe; on a live socket the probe ANSWERS fast (well inside the 2s
+            // budget) so the session still RIDES THROUGH with no redial — the
+            // #974/#981/#1042 spurious-drop-suppression win is preserved. The
+            // distinguishing assertion is cause == "probe_answered" (NOT
+            // "transport_proven_alive"): even with a fresh keepalive the decision now
+            // runs through the probe, never the deleted passive gate.
+            TMUX_CONNECT_ATTEMPTS.set(0)
+            val registry = ActiveTmuxClients()
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            )
+            vm.setTmuxClientFactoryForTest { _, _, _ -> reconnectClient }
+            vm.setAutoReconnectDelaysForTest(listOf(0L))
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = FakeTmuxClient(),
+            )
+            runCurrent()
+
+            // Fresh keepalive timestamp AND a live socket (probe-dead seam OFF, so the
+            // FakeTmuxClient's refresh-client round-trip answers).
+            vm.forceTransportProvenAliveForTest = true
+            vm.forceLivenessProbeDeadForTest = false
+
+            val diagnostics = installRecordingDiagnosticSink()
+            try {
+                registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+                runCurrent()
+                registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkRestore())
+                advanceUntilIdle()
+
+                assertEquals(
+                    "a fresh-keepalive + ALIVE-socket restore must still ride through (no redial)",
+                    0,
+                    connector.connectCount,
+                )
+                assertNull(
+                    "a ride-through restore must not schedule a network-reconnect redial",
+                    vm.latestRestoreIntentSnapshot(),
+                )
+                assertTrue(
+                    "the ride-through clears the loss-hold band back to Connected",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertTrue(
+                    "no redial diagnostic may fire on the alive-socket ride-through; events=" +
+                        diagnostics.events.map { it.name },
+                    diagnostics.eventsNamed("network_restore_reconnect_start").isEmpty() &&
+                        diagnostics.eventsNamed("reconnect_start").isEmpty(),
+                )
+                val rideThrough = diagnostics.eventsNamed("network_restore_ride_through")
+                assertTrue(
+                    "expected a network_restore_ride_through (proves the ride-through fired, " +
+                        "not a vacuous pass); events=${diagnostics.events.map { it.name }}",
+                    rideThrough.isNotEmpty(),
+                )
+                assertEquals(
+                    "even with a fresh keepalive the restore now rides through via the bounded " +
+                        "PROBE (cause=probe_answered), NOT the deleted passive transport_proven_alive " +
+                        "fast-path — this is the #1193 behavior change",
+                    "probe_answered",
+                    rideThrough.single().fields["cause"],
+                )
+            } finally {
+                diagnostics.close()
+                vm.forceTransportProvenAliveForTest = null
+            }
+        }
+
     // ---- Issue #1080: Doze/app-standby wake must NOT ride through a dead socket ----
     //
     // Android deep Doze suspends the network so the keepalive cannot keep the NAT

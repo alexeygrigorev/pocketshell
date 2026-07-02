@@ -316,18 +316,39 @@ public interface TmuxClient : AutoCloseable {
      * control command with a small reply, already on tmux's best-effort
      * allow-list) and returns whether a non-error response came back, falling back
      * to the recent-reader-activity evidence when the reply did not arrive.
+     *
+     * Issue #1193 — [requireAnsweredRoundTrip] hardens the probe for a
+     * NETWORK-TRANSITION call site (a WiFi↔cellular restore / handoff). On a
+     * transition the recent reader bytes crossed the OLD socket's 4-tuple, so they
+     * do NOT prove the NEW default network's path is alive — the #927
+     * reader-activity fallback would let a silently-dead post-handoff socket pass as
+     * "alive" (the maintainer's cellular spurious drop, where a fresh keepalive
+     * timestamp masked a dead socket until the reader threw ~157ms later). When
+     * `true`, the probe requires an actual ANSWERED round-trip over the (possibly
+     * new) path and ignores the reader-activity fallback, so a dead cellular socket
+     * is detected UP-FRONT before the restore arm rides through onto it. The
+     * steady-state periodic drop probe keeps the default `false` (the #927
+     * busy-vs-dead tolerance a live-but-slow link needs).
      */
-    public suspend fun probeLiveness(): Boolean =
+    public suspend fun probeLiveness(requireAnsweredRoundTrip: Boolean = false): Boolean =
         if (disconnected.value) {
             false
         } else {
             val answered = runCatching { sendBestEffortCommand("refresh-client") }
                 .map { !it.isError }
                 .getOrDefault(false)
-            // Busy ≠ dead (#927): a parked/failed reply over a channel that is
-            // STILL delivering `%output` (or any control block) is alive, not a
-            // miss. A dead half-open link parses nothing, so this stays false.
-            answered || millisSinceLastReaderActivity() <= readerActivityLivenessWindowMs
+            if (requireAnsweredRoundTrip) {
+                // Issue #1193: a network-transition probe demands proof the NEW path
+                // round-trips. Recent reader bytes crossed the OLD socket, so they are
+                // NOT evidence of the new path's liveness — require an answered
+                // round-trip only.
+                answered
+            } else {
+                // Busy ≠ dead (#927): a parked/failed reply over a channel that is
+                // STILL delivering `%output` (or any control block) is alive, not a
+                // miss. A dead half-open link parses nothing, so this stays false.
+                answered || millisSinceLastReaderActivity() <= readerActivityLivenessWindowMs
+            }
         }
 
     /**

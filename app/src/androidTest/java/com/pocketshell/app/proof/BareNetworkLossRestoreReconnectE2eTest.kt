@@ -410,6 +410,124 @@ class BareNetworkLossRestoreReconnectE2eTest {
         writeTimings()
     } }
 
+    /**
+     * ISSUE #1193 — the FRESH-KEEPALIVE + DEAD-SOCKET restore, the gap the #928 spike
+     * identified. The two tests above cover keepalive-AGED-OUT (branch 2 / probe).
+     * This one covers the maintainer's ACTUAL cellular spurious drop: on a
+     * WiFi→cellular restore the OLD socket is silently dead (the new radio's IP/NAT
+     * invalidated the 4-tuple) but the PASSIVE keepalive TIMESTAMP is still fresh
+     * (< 90s). Pre-#1193 `scheduleNetworkReconnectOnRestore` branch 1 rode through on
+     * that timestamp ALONE (a pure clock comparison, NO round-trip) → committed to the
+     * dead transport, flipped back to Live, and the `-CC` reader threw ~157ms later →
+     * `passive_disconnect` + reconnect churn.
+     *
+     * The two seams reproduce that exact state SYNTHETICALLY (the #780 hard-inject
+     * model this file already uses — deterministic on the plain `agents:2222` fixture,
+     * no toxiproxy / workflow change; the seams pin precisely what a real WiFi→cellular
+     * handoff produces — a fresh last-inbound-byte watermark over a dead socket):
+     *   - `forceTransportProvenAliveForTest = true`  → the fresh keepalive TIMESTAMP
+     *     (the maintainer's exact state; pre-#1193 this alone armed branch 1).
+     *   - `forceLivenessProbeDeadForTest = true`     → the post-handoff socket is
+     *     GENUINELY DEAD, so the bounded active probe cannot round-trip.
+     *
+     * RED (branch 1 present): the restore records a `network_restore_ride_through`
+     * (cause `transport_proven_alive`) and does NOT redial — it commits to the dead
+     * transport (the spurious drop the maintainer sees). GREEN (#1193, branch 1
+     * deleted → every restore goes through the bounded probe requiring an answered
+     * round-trip): NO `network_restore_ride_through`; a clean
+     * `network_restore_reconnect_start` fires and the session recovers Connected.
+     */
+    @Test
+    fun freshKeepaliveButDeadSocketRestoreRedialsViaProbeNotPassiveRideThrough() { runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForNoSwitchingOverlay("pre-loss attach settle")
+        captureViewport("issue1193-01-attached")
+
+        val vm = currentViewModel()
+        val observer = terminalNetworkObserver()
+        observer.ignoreRealNetworkCallbacksForTest = true
+
+        // Baseline validated WIFI identity (proven-alive pinned so the baseline
+        // transition never tears the session before the load-bearing chain).
+        vm.forceTransportProvenAliveForTest = true
+        observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1193-baseline-wifi",
+        )
+        waitForConnected("post-baseline wifi")
+        waitForNoSwitchingOverlay("post-baseline wifi settle")
+        diagnostics!!.clear()
+
+        // THE LOSS: a bare NoValidatedNetwork — the WiFi→cellular dip begins.
+        val lost = observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.NoValidatedNetwork,
+            reason = "issue1193-bare-network-loss",
+        )
+        assertEquals(
+            "the surfaced change must be a NetworkLost",
+            TerminalNetworkChangeKind.NetworkLost,
+            lost!!.kind,
+        )
+        awaitNetworkLossHold("after the bare loss")
+        watchNoRedialDiagnostics("during the loss window", WATCH_NO_CHURN_MS)
+        captureViewport("issue1193-02-loss-held")
+
+        // THE MAINTAINER'S EXACT CELLULAR STATE across the restore: the passive
+        // keepalive timestamp is FRESH (proven-alive pinned) BUT the post-handoff
+        // socket is GENUINELY DEAD (the bounded probe cannot answer). Pre-#1193 this
+        // rode through onto the dead transport; #1193 must probe, detect death, and
+        // cleanly redial.
+        vm.forceTransportProvenAliveForTest = true
+        vm.forceLivenessProbeDeadForTest = true
+        diagnostics!!.clear()
+
+        // THE RESTORE: validation returns to the SAME WIFI identity.
+        val restored = observer.emitSyntheticSnapshotForTest(
+            TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI")),
+            reason = "issue1193-network-restored",
+        )
+        assertEquals(
+            "the surfaced change must be a NetworkRestored",
+            TerminalNetworkChangeKind.NetworkRestored,
+            restored!!.kind,
+        )
+
+        // LOAD-BEARING (GREEN with #1193): the bounded probe found the dead socket, so
+        // the restore redials via the fresh lease — network_restore_reconnect_start fires.
+        compose.waitUntil(timeoutMillis = RESTORE_RECONNECT_TIMEOUT_MS) {
+            diagnostics!!.eventsNamed("network_restore_reconnect_start").isNotEmpty()
+        }
+        assertTrue(
+            "expected the dead-socket restore to redial via network_restore_reconnect_start " +
+                "(proves the bounded probe redialled, not a vacuous pass); " +
+                "events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_restore_reconnect_start").isNotEmpty(),
+        )
+        // THE #1193 distinction: a fresh-keepalive + dead-socket restore must NOT ride
+        // through on the passive timestamp (that would mean the deleted branch 1 fired
+        // and committed to the dead transport — the maintainer's spurious drop).
+        assertTrue(
+            "a fresh-keepalive-but-DEAD-socket restore must NOT ride through on the passive " +
+                "timestamp (the #1193 bug); events=${diagnostics!!.events.map { it.name }}",
+            diagnostics!!.eventsNamed("network_restore_ride_through").isEmpty(),
+        )
+
+        // Release the synthetic dead-probe seam so the freshly-redialled (real, healthy)
+        // transport is not immediately re-declared dead by the periodic probe loop.
+        vm.forceLivenessProbeDeadForTest = false
+
+        // Recovered: Connected, no overlay, viewport painted.
+        waitForConnected("after dead-socket restore redial")
+        waitForNoSwitchingOverlay("after dead-socket restore redial settle")
+        waitForVisibleTerminal("after dead-socket restore terminal") { it.contains(READY_MARKER) }
+        captureViewport("issue1193-03-redialled")
+
+        writeTimings()
+    } }
+
     private fun currentViewModel(): TmuxSessionViewModel {
         lateinit var vm: TmuxSessionViewModel
         compose.activityRule.scenario.onActivity { activity ->

@@ -19,9 +19,11 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +84,12 @@ fun SessionTypePickerSheet(
     // (shell-vs-agent toggle, agent CLI sub-picker, profiles, skip-permissions)
     // is reused verbatim. Defaults to "New session" for the folder flow.
     title: String = "New session",
+    // Issue #1184: derive the DEFAULT session label to prefill the editable
+    // "Session name" field from the currently-chosen start folder. The caller
+    // wires in the host's `$HOME` so the default matches the directory-derived
+    // convention (#429/#642). Defaults to the folder's trailing segment when a
+    // caller doesn't supply the deriver.
+    deriveDefaultName: (startDirectory: String) -> String = { it.trimEnd('/').substringAfterLast('/') },
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
@@ -101,6 +109,7 @@ fun SessionTypePickerSheet(
             codexProfiles = codexProfiles,
             creating = creating,
             title = title,
+            deriveDefaultName = deriveDefaultName,
         )
     }
 }
@@ -121,6 +130,7 @@ internal fun SessionTypePickerContent(
     codexProfiles: List<CodexProfile> = emptyList(),
     creating: Boolean = false,
     title: String = "New session",
+    deriveDefaultName: (startDirectory: String) -> String = { it.trimEnd('/').substringAfterLast('/') },
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
     var agentKind by remember { mutableStateOf(AgentCli.Claude) }
@@ -128,6 +138,17 @@ internal fun SessionTypePickerContent(
     // agent launched without per-action approval prompts.
     var skipPermissions by remember { mutableStateOf(true) }
     var startDirectory by remember { mutableStateOf(folderPath) }
+    // Issue #1184: editable custom session label, prefilled with the
+    // directory-derived default so the common case stays one tap. Until the
+    // user types their own label ([nameManuallyEdited]), the field tracks the
+    // chosen start folder; once edited, it is left alone.
+    var sessionName by remember { mutableStateOf(deriveDefaultName(folderPath)) }
+    var nameManuallyEdited by remember { mutableStateOf(false) }
+    LaunchedEffect(startDirectory) {
+        if (!nameManuallyEdited) {
+            sessionName = deriveDefaultName(startDirectory)
+        }
+    }
     // Issue #627: selected Claude profile. null = default (no config dir override).
     var claudeProfile by remember { mutableStateOf<String?>(null) }
     // Issue #631: selected Codex profile. null = default (no config dir override).
@@ -156,6 +177,26 @@ internal fun SessionTypePickerContent(
                 subtitle = "in $folderLabel",
                 subtitleStyle = PocketShellType.bodyMono,
             )
+
+            // Session name — editable custom label (issue #1184), prefilled
+            // with the directory-derived default. Accepting it unchanged
+            // reproduces the derived-name behaviour; a blank field falls back
+            // to the derived default at create time.
+            Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
+                SectionHeader(label = "Session name")
+                OutlinedTextField(
+                    value = sessionName,
+                    onValueChange = {
+                        sessionName = it
+                        nameManuallyEdited = true
+                    },
+                    singleLine = true,
+                    placeholder = { Text(deriveDefaultName(startDirectory)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(SESSION_TYPE_PICKER_NAME_TAG),
+                )
+            }
 
             // Start folder — pre-filled, editable. Keep this inside the
             // scrollable sheet body so the autocomplete can request enough
@@ -320,6 +361,10 @@ internal fun SessionTypePickerContent(
                                 } else {
                                     null
                                 },
+                                // Issue #1184: carry the user's custom label.
+                                // Blank falls back to the derived default at
+                                // create time (SessionNameDerivation).
+                                customName = sessionName.trim().ifBlank { null },
                             ),
                         )
                     }
@@ -393,6 +438,14 @@ data class SessionTypeChoice(
      * sessions.
      */
     val codexProfileName: String? = null,
+    /**
+     * The user-entered custom session label (issue #1184). `null`/blank means
+     * "use the directory-derived default" (#429/#642). When present it is
+     * sanitised to a tmux-safe name and disambiguated against the known
+     * session names by [SessionNameDerivation.resolveSessionName] at create
+     * time — it never bypasses collision handling.
+     */
+    val customName: String? = null,
 ) {
     /**
      * The start command to invoke inside the new tmux pane after
@@ -567,6 +620,7 @@ const val SESSION_TYPE_PICKER_AGENT_CODEX_TAG: String = "session-type-picker:age
 const val SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG: String = "session-type-picker:agent:opencode"
 const val SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG: String = "session-type-picker:skip-permissions"
 const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
+const val SESSION_TYPE_PICKER_NAME_TAG: String = "session-type-picker:name"
 const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
 const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"

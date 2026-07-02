@@ -482,6 +482,11 @@ fun FolderListScreen(
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             creating = (state as? FolderListUiState.Ready)?.isCreatingSession == true,
+            // Issue #1184: prefill the editable "Session name" field with the
+            // directory-derived default for the chosen start folder.
+            deriveDefaultName = { dir ->
+                defaultSessionBaseName(dir, conventionalRemoteHome(username))
+            },
             onCreate = { choice ->
                 val newName = derivedSessionName(
                     choice = choice,
@@ -713,15 +718,27 @@ internal fun derivedSessionName(
     choice: SessionTypeChoice,
     homeDirectory: String? = null,
     existingNames: Set<String> = emptySet(),
-): String = SessionNameDerivation.derive(
+): String = SessionNameDerivation.resolveSessionName(
+    // Issue #1184: honour a user-entered custom label when present; a blank
+    // custom name falls back to the directory-derived default (#429/#642),
+    // and either base is disambiguated against [existingNames].
+    customName = choice.customName,
     startDirectory = choice.startDirectory,
     homeDirectory = homeDirectory,
-    agentCommand = when (choice.type) {
-        SessionType.Shell -> null
-        SessionType.Agent -> choice.agent?.command
-    },
     existingNames = existingNames,
 )
+
+/**
+ * The directory-derived DEFAULT session name (no collision suffix) used to
+ * prefill the "Session name" field in the new-session picker — issue #1184.
+ * The picker keeps this in sync with the chosen start folder until the user
+ * types their own label; the final collision `disambiguate` still runs at
+ * create time in [derivedSessionName].
+ */
+internal fun defaultSessionBaseName(
+    startDirectory: String,
+    homeDirectory: String?,
+): String = SessionNameDerivation.baseName(startDirectory, homeDirectory)
 
 /**
  * Conventional remote `$HOME` inferred from the SSH [username] — issue

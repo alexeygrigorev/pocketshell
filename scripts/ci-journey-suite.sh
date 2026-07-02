@@ -1246,6 +1246,13 @@ JOURNEY_CLASSES=(
   # so they carry their fully-qualified names directly.
   "com.pocketshell.app.projects.FolderListScreenE2eTest#profiledSessionsShowProfileChipDefaultSessionsDoNot"
   "com.pocketshell.app.projects.SessionKindPickerUiTest"
+  # ADDED (#1184, D32 G9): the new-session picker's editable "Session name"
+  # field — prefilled with the directory-derived default, threads a typed
+  # custom label onto SessionTypeChoice.customName, and emits null when blank
+  # so the caller falls back to the derived default. Component test (drives
+  # SessionTypePickerContent directly, no SSH), so its FQCN is listed here to
+  # run in the emulator-journey gate.
+  "com.pocketshell.app.projects.SessionTypePickerNameFieldUiTest"
   # ADDED (#863, D32 G9): per-criterion gate for the residual-TextButton sweep.
   # #863 migrated raw Material TextButtons (+ a private AppBarTextButton wrapper)
   # in FileExplorerScreen, FileViewerScreen, SnippetPickerSheet, FolderListScreen

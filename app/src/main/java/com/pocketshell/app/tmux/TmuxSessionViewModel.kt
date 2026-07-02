@@ -2252,6 +2252,15 @@ public class TmuxSessionViewModel @Inject constructor(
     // `Resolved(null)` branch. A genuinely-exited agent stops emitting output, so
     // its empty grep arrives with NO recent activity and tears down correctly.
     private val paneLastOutputAtMs: MutableMap<String, Long> = ConcurrentHashMap()
+    // Issue #1175: the wall-clock (elapsedRealtime) of the last time a `capture-pane`
+    // seed successfully LANDED into this pane's emulator (stamped in
+    // [seedPaneFromCaptureOnce] at the same point [panesSeededThisAttach] records the
+    // seed). An ABSENT entry means "no seed has ever landed for this pane" — the
+    // discriminator between the `never_seeded` and `capture_empty` black-frame classes —
+    // and its age (now - stamp) is the `msSinceLastSeed` fingerprint field on the
+    // `black_frame_observed` diagnostic. Diagnostic accounting only; it never gates a
+    // heal decision.
+    private val paneLastSeedAtMs: MutableMap<String, Long> = ConcurrentHashMap()
     // Issue #793: per-pane conversation-load watchdog. Flips a never-completing
     // "Loading conversation…" state to Failed so the tab can't spin forever.
     private val conversationLoadWatchdogJobs: MutableMap<String, Job> = ConcurrentHashMap()
@@ -5514,6 +5523,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
         paneLastOutputAtMs.clear()
+        paneLastSeedAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -5639,6 +5649,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
         paneLastOutputAtMs.clear()
+        paneLastSeedAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -9639,6 +9650,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentInputs.remove(paneId)
             paneAgentNullDetections.remove(paneId)
             paneLastOutputAtMs.remove(paneId)
+            paneLastSeedAtMs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
@@ -10560,6 +10572,16 @@ public class TmuxSessionViewModel @Inject constructor(
                         "after=$attempt session=${activeTarget?.sessionName} " +
                         "-> reveal deferred to blank watchdog",
                 )
+                // Issue #1175: the single most user-visible black screen — the reveal
+                // gate exhausted its bounded reseed retries and the active pane is STILL
+                // blank as it hands off to the blank watchdog. Previously logcat-only
+                // (unretrievable on-device); fingerprint it into the exportable JSONL.
+                // This rides the existing reveal-gate path — no new poll.
+                recordBlackFrameObserved(
+                    activePane,
+                    BLACK_FRAME_CLASS_REVEAL_GATE_GAVE_UP,
+                    captureText = null,
+                )
                 return false
             }
             delay(ACTIVE_PANE_REVEAL_SEED_DELAY_MS)
@@ -11075,6 +11097,60 @@ public class TmuxSessionViewModel @Inject constructor(
      * `capture-pane` round-trip is paid ONLY on the watchdog cadence (the caller
      * gates frequency), never per frame, so steady-state rendering is untouched.
      */
+    /**
+     * Issue #1175 — fingerprint a degenerate (black / partial-black) frame into the
+     * EXPORTABLE diagnostics JSONL (the same ring the Settings → Diagnostics "Share
+     * log" export reads), so a maintainer who hits a black screen can SHARE the log and
+     * we can tell WHICH class of black screen it was.
+     *
+     * This is emitted ONLY from points the heal/reveal path ALREADY reaches on the
+     * existing gated, backed-off stale-render watchdog tick and the connect/switch
+     * reveal gate — it adds NO new timer/poll/coroutine loop (the deliberate contrast
+     * with the #1164 heat regression). It rides the same `capture-pane` round-trip the
+     * heal already pays; it never issues its own.
+     *
+     * Additive on the OBSERVE side: the successful-heal event (`stale_render_heal`)
+     * still fires from [healActivePaneIfStaleRender]; this fingerprints the frame that
+     * was observed degenerate regardless of whether a heal follows.
+     *
+     * The `class` discriminator is computed at each call site (deterministic per site,
+     * so a unit test can drive every class); this builder just attaches the shared
+     * geometry / lifecycle field set — all redacted by [DiagnosticRedactor] before it
+     * reaches disk (only `session` is host-identifying, as it already is on
+     * `stale_render_heal`).
+     */
+    private fun recordBlackFrameObserved(
+        pane: TmuxPaneState,
+        blackClass: String,
+        captureText: String?,
+    ) {
+        val nowMs = SystemClock.elapsedRealtime()
+        val lastSeedAtMs = paneLastSeedAtMs[pane.paneId]
+        val lastOutputAtMs = paneLastOutputAtMs[pane.paneId]
+        val state = pane.terminalState
+        DiagnosticEvents.record(
+            "terminal",
+            BLACK_FRAME_OBSERVED_EVENT,
+            "class" to blackClass,
+            "paneId" to pane.paneId,
+            "windowId" to pane.windowId,
+            "session" to activeTarget?.sessionName,
+            "renderedChars" to state.renderedNonBlankCharCount(),
+            // Byte count of the authoritative capture this observation was judged
+            // against; 0 when the capture was empty/errored (the capture_empty /
+            // never_seeded classes) or unavailable at the site (the reveal gate).
+            "captureBytes" to (captureText?.length ?: 0),
+            "visibleRows" to state.visibleRowCount(),
+            // -1 means the field is unavailable (never seeded / never streamed output).
+            "msSinceLastSeed" to (lastSeedAtMs?.let { nowMs - it } ?: -1L),
+            "msSinceLastOutput" to (lastOutputAtMs?.let { nowMs - it } ?: -1L),
+            "connectionStatus" to (_connectionStatus.value::class.simpleName ?: "unknown"),
+            "foreground" to isProcessForegroundForCleared(),
+            "screenOn" to isScreenInteractive(),
+            "partialBlank" to state.visibleScreenIsPartiallyBlank(),
+        )
+    }
+
     private suspend fun healActivePaneIfStaleRender(
         client: TmuxClient,
         pane: TmuxPaneState,
@@ -11102,6 +11178,23 @@ public class TmuxSessionViewModel @Inject constructor(
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
         val captureResponse = combined?.capture
         if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+            // Issue #1175: capture-pane came back empty/errored on a LIVE transport.
+            // Fingerprint it ONLY when the render is actually degenerate (a healthy
+            // pane whose capture momentarily failed is NOT a black screen — stay
+            // silent so healthy ticks never record). A never-seeded pane (no seed has
+            // ever landed) is the distinct `never_seeded` class; otherwise this is the
+            // server-side `capture_empty` class. Rides the heal's existing capture — no
+            // new round-trip, no new poll.
+            if (pane.terminalState.renderedNonBlankCharCount() == 0 ||
+                pane.terminalState.visibleScreenIsBlankOrPartiallyBlank()
+            ) {
+                val blackClass = if (paneLastSeedAtMs[pane.paneId] == null) {
+                    BLACK_FRAME_CLASS_NEVER_SEEDED
+                } else {
+                    BLACK_FRAME_CLASS_CAPTURE_EMPTY
+                }
+                recordBlackFrameObserved(pane, blackClass, captureText = null)
+            }
             return false
         }
         val captureText = captureResponse.output.joinToString(separator = "\n")
@@ -11117,6 +11210,19 @@ public class TmuxSessionViewModel @Inject constructor(
         // also heals a partial-black pane when tmux's grid holds materially more (anti-thrash
         // guarded), restoring the FULL viewport from tmux's authoritative capture.
         if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) return false
+        // Issue #1175: the render LOST tmux's frame (capture carries materially more
+        // than the render). Fingerprint the observed black frame BEFORE the heal
+        // repaints it. A render with SOME surviving live content is the partial/half-
+        // black class; a fully-blank render (renderedChars == 0) that was previously
+        // painted is `lost_after_paint`. This rides the heal's already-paid capture —
+        // no new poll, and it is additive to `stale_render_heal` below (which still
+        // fires on the successful heal).
+        val observedClass = if (pane.terminalState.renderedNonBlankCharCount() > 0) {
+            BLACK_FRAME_CLASS_PARTIAL_BLANK
+        } else {
+            BLACK_FRAME_CLASS_LOST_AFTER_PAINT
+        }
+        recordBlackFrameObserved(pane, observedClass, captureText)
         val cursor = parseTmuxPaneCursor(combined.cursorReply)
         Log.i(
             ISSUE_145_RECONNECT_TAG,
@@ -11248,6 +11354,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // attach so the post-attach reveal can skip the redundant second full
         // reseed for panes already painted in this pass.
         panesSeededThisAttach.add(pane.paneId)
+        // Issue #1175: stamp the successful seed landing (same point the attach set
+        // records it) so the `black_frame_observed` diagnostic can report
+        // `msSinceLastSeed`, and so an ABSENT stamp cleanly discriminates the
+        // `never_seeded` black-frame class from `capture_empty`. Diagnostic accounting
+        // only — no write-path control-flow change.
+        paneLastSeedAtMs[pane.paneId] = SystemClock.elapsedRealtime()
         // EPIC #792 Slice E: feed the AUTHORITATIVE controller the REAL "seed/capture
         // landed" signal at the EXISTING point a capture-pane lands for a pane — placed
         // AFTER the panesSeededThisAttach write above, so it adds no write-path control
@@ -14278,6 +14390,25 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1175 test seam: synthetically inject the "no seed has ever landed"
+     * state for a pane by dropping its seed stamp, so a JVM test can drive the
+     * `never_seeded` black-frame class deterministically (the connect flow otherwise
+     * stamps a seed). Diagnostic accounting only — never touches render/heal state.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun clearPaneSeedStampForTest(paneId: String) {
+        paneLastSeedAtMs.remove(paneId)
+    }
+
+    /**
+     * Issue #1175 test seam: the recorded last-seed stamp for a pane, or null when no
+     * seed has landed. Lets a test assert the successful-seed stamp is set (so
+     * `msSinceLastSeed` is a real age, not the never-seeded -1 sentinel).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun paneLastSeedAtMsForTest(paneId: String): Long? = paneLastSeedAtMs[paneId]
+
+    /**
      * Issue #942 test seam: true when [paneId]'s channel currently reads as
      * wedged-but-alive (recent `%output`). Lets a JVM test assert the signal
      * itself flips with activity vs idleness, independent of the routing.
@@ -16336,6 +16467,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
         paneLastOutputAtMs.clear()
+        paneLastSeedAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -16494,6 +16626,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
         paneLastOutputAtMs.clear()
+        paneLastSeedAtMs.clear()
         paneConversationOpenStartedAtMs.clear()
         sessionRecordedKindCache.clear()
         sessionForeignKindGuessCache.clear()
@@ -17830,6 +17963,30 @@ internal const val REDRAW_UNAVAILABLE_MESSAGE: String = "Can't redraw — reconn
  * Connected pane.
  */
 internal const val ACTIVE_PANE_REVEAL_SEED_ATTEMPTS: Int = 5
+
+/**
+ * Issue #1175 — the exportable `black_frame_observed` diagnostic event name and its
+ * `class` discriminator values. The event fingerprints every class of degenerate
+ * (black / partial-black) frame into the JSONL ring the Settings → Diagnostics
+ * "Share log" export reads, riding the existing gated stale-render watchdog / reveal-
+ * gate accounting (NO new poll). Exposed for the JVM unit tests that drive each class.
+ */
+internal const val BLACK_FRAME_OBSERVED_EVENT: String = "black_frame_observed"
+
+/** Server-side black: capture-pane also empty/errored while the render is degenerate. */
+internal const val BLACK_FRAME_CLASS_CAPTURE_EMPTY: String = "capture_empty"
+
+/** No seed has ever landed for this pane (an empty capture with no prior seed stamp). */
+internal const val BLACK_FRAME_CLASS_NEVER_SEEDED: String = "never_seeded"
+
+/** Was painted, then the visible frame went fully degenerate while tmux still holds it. */
+internal const val BLACK_FRAME_CLASS_LOST_AFTER_PAINT: String = "lost_after_paint"
+
+/** The reveal gate exhausted its bounded reseed retries and the pane is STILL blank. */
+internal const val BLACK_FRAME_CLASS_REVEAL_GATE_GAVE_UP: String = "reveal_gate_gave_up_still_blank"
+
+/** Some live content survives but the majority of the viewport is black (partial/half-black). */
+internal const val BLACK_FRAME_CLASS_PARTIAL_BLANK: String = "partial_blank"
 
 /**
  * Issue #693/#661: backoff between active-pane reveal-gate seed retries.

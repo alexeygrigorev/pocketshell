@@ -582,6 +582,26 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #1175 — the number of VISIBLE viewport rows the emulator's grid holds
+     * (the pane's on-screen height). NOT a black/blank predicate: a plain geometry
+     * read of the same `emulator.screen.visibleScreenRows` the divergence/lost-frame
+     * predicates already use, exposed so the `black_frame_observed` diagnostic can
+     * carry the pane geometry that distinguishes a tall-grid black pane (#807) from a
+     * short one. Reuses the existing emulator read; adds no new black/blank predicate.
+     *
+     * Returns 0 when no emulator is attached or the emulator throws mid-resize
+     * ("unknown" → 0), matching the defensive contract of the predicates above.
+     */
+    fun visibleRowCount(): Int {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return 0
+        return try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    /**
      * Issue #966/#967 — the "mostly-black / stale render on a LIVE transport"
      * oracle. The v0.4.17 black-screen heal ([visibleScreenIsBlank] /
      * [visibleScreenIsPartiallyBlank]) only engages when the pane is FULLY blank

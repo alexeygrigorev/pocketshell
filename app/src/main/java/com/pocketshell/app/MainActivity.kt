@@ -1200,6 +1200,10 @@ private fun AppNavigator(
                         startDirectory = startDirectory,
                         tmuxSessionId = tmuxSessionId,
                         sessionCreated = sessionCreated,
+                        // Issue #1155 (Part B): a tap of a PERSISTED session row →
+                        // OpenExisting so a genuine cold open preflights and, when
+                        // gone, shows the recreate prompt (not a silent shell).
+                        openExisting = true,
                     ),
                 )
             },
@@ -1218,6 +1222,9 @@ private fun AppNavigator(
                         initialWindowIndex = windowIndex,
                         tmuxSessionId = tmuxSessionId,
                         sessionCreated = sessionCreated,
+                        // Issue #1155 (Part B): opening a window of a persisted
+                        // session is also an OpenExisting tap.
+                        openExisting = true,
                     ),
                 )
             },
@@ -1665,10 +1672,14 @@ private fun AppNavigator(
                     typedPrefix = prefix,
                 )
             },
-            connectTrigger = if (dest == restoredTmuxDestination) {
-                TmuxConnectTrigger.ColdRestore
-            } else {
-                TmuxConnectTrigger.UserTap
+            connectTrigger = when {
+                dest == restoredTmuxDestination -> TmuxConnectTrigger.ColdRestore
+                // Issue #1155 (Part B): a NORMAL tap of a persisted session row
+                // preflights `tmux has-session` and, when the session is confirmed
+                // gone, shows the "create a new session in this folder?" prompt
+                // instead of silently recreating a fresh shell via `new-session -A`.
+                dest.openExisting -> TmuxConnectTrigger.OpenExisting
+                else -> TmuxConnectTrigger.UserTap
             },
         )
     }

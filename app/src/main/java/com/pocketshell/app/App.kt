@@ -106,6 +106,19 @@ class App : Application() {
     lateinit var settingsRepository: SettingsRepository
 
     /**
+     * Issue #1155 (Part A): the per-host persisted folder-tree cache. Warmed into
+     * its in-memory PARSED snapshot at process startup (off Main) so the FIRST
+     * host the user opens after a cold launch — including the maintainer's common
+     * deep-link-to-a-session-then-back-to-the-tree path, where a per-VM warm would
+     * lose the race with `bind` — paints the persisted tree INSTANTLY via
+     * [com.pocketshell.app.projects.TreeClientCache.peek] instead of flashing the
+     * "Loading workspace tree" spinner. This runs many frames ahead of any
+     * navigation, so the parse normally completes well before the first `bind`.
+     */
+    @Inject
+    lateinit var treeClientCache: com.pocketshell.app.projects.TreeClientCache
+
+    /**
      * Issue #698: fires the GitHub-Releases update check on process
      * foreground resume (and host-open, from MainActivity), throttled, so
      * the maintainer — who deep-links straight into a host and almost
@@ -346,6 +359,19 @@ class App : Application() {
         DiagnosticEvents.record("app", "created")
         CrashReporter.install(this)
         StartupTiming.mark("app-crash-reporter-installed")
+
+        // Issue #1155 (Part A): warm the persisted folder-tree cache into memory
+        // OFF Main at process startup, so the FIRST host opened after a cold launch
+        // paints the persisted tree instantly (no "Loading workspace tree" spinner
+        // flash) rather than losing the warm-vs-`bind` race a per-VM warm hits on
+        // the maintainer's deep-link-then-back-to-the-tree path. Best-effort; a
+        // missing/corrupt cache just stays a cold miss (the brief Loading + off-Main
+        // read, exactly as before). Off Main so StrictMode's disk-read tripwire and
+        // the #965 ANR budget are untouched.
+        sshLifecycleScope.launch {
+            runCatching { treeClientCache.warmAll() }
+        }
+        StartupTiming.mark("tree-cache-warmed")
         // No-background-work hook-up (issue #161 / D21). Attach the
         // ProcessLifecycleOwner observer before starting the loop so
         // the loop's `processStarted.first { it }` gate sees the

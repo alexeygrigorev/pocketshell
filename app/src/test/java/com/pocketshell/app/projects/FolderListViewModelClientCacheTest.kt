@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
@@ -30,11 +32,13 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Issue #867: session-tree stale-while-revalidate — render the last-known tree
@@ -60,9 +64,24 @@ class FolderListViewModelClientCacheTest {
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey: Int = 0
 
+    // Issue #1155 (blocker 1): a PER-TEST isolated on-disk cache directory so the
+    // client-cache tests never share `filesDir`/`tree-cache` state across methods.
+    // The prior suite read + wrote one shared `ApplicationProvider` filesDir, which
+    // (together with the now-removed per-VM real-`Dispatchers.IO` warm) let one
+    // test's on-disk snapshot + a racing warm flip a sibling's cold-miss assertion.
+    // Every `newCache()` in a test targets this dir; `@After` wipes it.
+    private lateinit var testCacheFilesDir: File
+
+    @Before
+    fun setUpIsolatedCacheDir() {
+        testCacheFilesDir =
+            java.nio.file.Files.createTempDirectory("tree-client-cache-test").toFile()
+    }
+
     @After
     fun tearDown() {
         viewModelStore.clear()
+        testCacheFilesDir.deleteRecursively()
     }
 
     // ---- RED reproduction: with NO cache, cold start flashes Loading ---------
@@ -225,6 +244,104 @@ class FolderListViewModelClientCacheTest {
         assertEquals(
             listOf("gamma"),
             (ready as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+        )
+    }
+
+    // ---- Issue #1155 (Part A): the PROCESS-START warm makes cold connect instant ----
+    //
+    // The maintainer's recurring #867/#1109 symptom: a cold process (the parsed
+    // map is empty; the tree file is on disk from the previous run) where they
+    // deep-link into a session and then go BACK to the tree. The VM is constructed
+    // and `bind` runs in the SAME instant, so a per-VM warm (removed in this
+    // change) loses the race and [TreeClientCache.peek] MISSES → the "Loading
+    // workspace tree" spinner flashes. The fix warms the parsed snapshot ONCE at
+    // process startup ([com.pocketshell.app.App.onCreate] → [TreeClientCache.warmAll],
+    // MANY frames ahead of any navigation) — the SINGLE warm path — so `peek` HITS
+    // synchronously inside `bind` and the FIRST painted frame is the persisted
+    // Ready tree.
+    //
+    // These two tests pivot on that process-start warm: the ONLY difference is
+    // whether [TreeClientCache.warmAll] (exactly what App.onCreate calls) ran
+    // before `bind`. With the per-VM warm GONE, warmAll is the load-bearing
+    // mechanism, and both assertions are deterministic (no real-`Dispatchers.IO`
+    // warm racing the synchronous peek). Reverting the App.onCreate warm turns
+    // every first cold open into the RED case below — which the CI-wired on-device
+    // `ColdRestoreGoneSessionNoResurrectE2eTest` deep-link-back journey catches.
+
+    /**
+     * Issue #1155 (Part A) RED — the "App.onCreate warm reverted / not yet run"
+     * state. A cold-memory cache (file on disk, parsed map cold) with NO
+     * process-start warm: `bind` MISSES [TreeClientCache.peek], so the FIRST frame
+     * is the "Loading workspace tree" flash (then the OFF-Main read paints the held
+     * tree — never a Main-thread read). Deterministic now that the per-VM
+     * real-`Dispatchers.IO` warm is removed.
+     */
+    @Test
+    fun coldStartWithoutProcessStartWarm_flashesLoadingThenPaintsOffMain_RED() = runTest {
+        newCache().write(
+            HOST.name,
+            TreeClientCache.CachedTree(nodes = listOf(node("alpha", 0, folderPath("alpha")))),
+        )
+        val coldCache = newCache() // fresh process: file on disk, parsed map cold.
+        // NB: no `coldCache.warmAll()` — this is the App.onCreate-warm-absent case.
+        val gateway = StubGateway(listOf(sessionRow("alpha")))
+        val vm = newViewModel(gateway, coldCache)
+
+        bind(vm)
+        assertTrue(
+            "without the process-start warm the cold `bind` MISSES peek and flashes " +
+                "Loading — got ${vm.state.value}",
+            vm.state.value is FolderListUiState.Loading,
+        )
+        // The off-Main fallback still paints the held tree (no Main-thread read).
+        runCurrent()
+        val painted = vm.state.value
+        assertTrue(
+            "the OFF-Main cold-miss read must still paint the held tree — got $painted",
+            painted is FolderListUiState.Ready,
+        )
+        assertEquals(
+            listOf("alpha"),
+            (painted as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+        )
+    }
+
+    /**
+     * Issue #1155 (Part A) GREEN — the fix. The process-start warm
+     * ([TreeClientCache.warmAll], exactly what [com.pocketshell.app.App.onCreate]
+     * runs off Main, many frames ahead of navigation) parses the on-disk snapshot
+     * into the process-wide in-memory map BEFORE the user navigates in. So the SAME
+     * cold-memory cache, once warmed, makes the first `bind` [peek] HIT — the FIRST
+     * state read (before any coroutine runs) is already the persisted Ready tree,
+     * NO Loading spinner flash. Load-bearing proof that the startup warm (the ONLY
+     * warm path now the per-VM warm is removed) kills the disruptive loading on the
+     * maintainer's deep-link-then-back path.
+     */
+    @Test
+    fun coldStartAfterProcessStartWarm_rendersInstantlyNoLoadingFlash_GREEN() = runTest {
+        newCache().write(
+            HOST.name,
+            TreeClientCache.CachedTree(nodes = listOf(node("alpha", 0, folderPath("alpha")))),
+        )
+        val coldCache = newCache() // fresh process: file on disk, parsed map cold.
+        // The App.onCreate process-start warm (issue #1155 Part A): parse the
+        // on-disk snapshot into memory BEFORE navigation. This one call is the
+        // WHOLE difference from the RED test above.
+        coldCache.warmAll()
+
+        val gateway = StubGateway(listOf(sessionRow("alpha")))
+        val vm = newViewModel(gateway, coldCache)
+
+        bind(vm)
+        val first = vm.state.value
+        assertTrue(
+            "after the process-start warm the cold connect must render the persisted tree " +
+                "INSTANTLY (Ready, no Loading flash) — got $first",
+            first is FolderListUiState.Ready,
+        )
+        assertEquals(
+            listOf("alpha"),
+            (first as FolderListUiState.Ready).flatSessions.map { it.sessionName },
         )
     }
 
@@ -553,7 +670,17 @@ class FolderListViewModelClientCacheTest {
         )
 
     private fun newCache(): TreeClientCache =
-        TreeClientCache(ApplicationProvider.getApplicationContext())
+        TreeClientCache(isolatedCacheContext())
+
+    /**
+     * A [Context] whose `filesDir` is this test's own temp dir, so the
+     * [TreeClientCache] writes/reads under an isolated `tree-cache/` folder and no
+     * on-disk snapshot leaks across test methods (blocker 1 hermeticity).
+     */
+    private fun isolatedCacheContext(): Context =
+        object : ContextWrapper(ApplicationProvider.getApplicationContext()) {
+            override fun getFilesDir(): File = testCacheFilesDir
+        }
 
     private fun TestScope.newViewModel(
         gateway: FolderListGateway,

@@ -236,6 +236,10 @@ fun FolderListScreen(
     }
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
+    // Issue #1155 (Part B): a persisted session the user tried to open was
+    // confirmed genuinely gone on attach — surface the "create a new session in
+    // this folder?" recovery prompt (not a blank list).
+    val staleSessionPrompt by viewModel.staleSessionPrompt.collectAsState()
     // Issue #885: passive host-CLI-version mismatch, detected from the regular
     // `pocketshell tree` payload on every host open — surfaced as a dismissible
     // update prompt (NOT a slow blocking on-open `--version` wait).
@@ -620,6 +624,23 @@ fun FolderListScreen(
             onConfirm = { newName ->
                 renameSessionTarget = null
                 viewModel.renameSession(sessionName, newName)
+            },
+        )
+    }
+
+    // Issue #1155 (Part B): a persisted session the user opened was confirmed
+    // genuinely gone on attach — offer to recreate it in the SAME folder in one
+    // tap instead of leaving the user on a blank list.
+    staleSessionPrompt?.let { prompt ->
+        StaleSessionRecreateDialog(
+            prompt = prompt,
+            onDismiss = { viewModel.dismissStaleSessionPrompt() },
+            onConfirm = {
+                viewModel.confirmRecreateStaleSession(
+                    onResolved = { resolved ->
+                        onSessionCreated(resolved, prompt.folderPath ?: "~")
+                    },
+                )
             },
         )
     }
@@ -2983,6 +3004,34 @@ private fun StopSessionDialog(
     )
 }
 
+/**
+ * Issue #1155 (Part B): the "this session no longer exists — create a new
+ * session in this folder?" recovery dialog. Shown when a persisted session the
+ * user opened was confirmed genuinely gone on attach. Confirming recreates a
+ * session in the SAME folder ([FolderListViewModel.confirmRecreateStaleSession]);
+ * dismissing leaves the (accurate) tree list in place. NOT destructive — it is a
+ * one-tap recovery, so the confirm is the primary action.
+ */
+@Composable
+private fun StaleSessionRecreateDialog(
+    prompt: StaleSessionRecreatePrompt,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    ConfirmDialog(
+        title = "This session no longer exists",
+        message = "The session “${prompt.sessionName}” is gone on the host. " +
+            "Create a new session in “${prompt.folderLabel}”?",
+        confirmLabel = "Create session",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+        destructive = false,
+        modifier = Modifier.testTag(STALE_SESSION_DIALOG_TAG),
+        confirmTestTag = STALE_SESSION_CONFIRM_TAG,
+        dismissTestTag = STALE_SESSION_CANCEL_TAG,
+    )
+}
+
 private val FolderListBottomContentPadding = 12.dp
 
 // Test tags exposed for the unit / connected E2E suite.
@@ -3047,6 +3096,12 @@ const val RENAME_SESSION_DIALOG_TAG: String = "folder-list:rename-session:dialog
 const val RENAME_SESSION_FIELD_TAG: String = "folder-list:rename-session:field"
 const val RENAME_SESSION_CONFIRM_TAG: String = "folder-list:rename-session:confirm"
 const val RENAME_SESSION_CANCEL_TAG: String = "folder-list:rename-session:cancel"
+
+// Issue #1155 (Part B) — "this session no longer exists, create a new one in
+// this folder?" recovery prompt.
+const val STALE_SESSION_DIALOG_TAG: String = "folder-list:stale-session:dialog"
+const val STALE_SESSION_CONFIRM_TAG: String = "folder-list:stale-session:confirm"
+const val STALE_SESSION_CANCEL_TAG: String = "folder-list:stale-session:cancel"
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderClickTestTag(path: String): String = "folder-list:header-click:$path"

@@ -352,6 +352,18 @@ JOURNEY_CLASSES=(
   # regression cannot silently return. It lives under com.pocketshell.app.composer,
   # not the proof prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerDiscardE2eTest"
+  # ADDED (#1152): the recording-not-locked composer bottom row overflowed its
+  # width and CLIPPED `Send` off the right edge (the cyan "S/e" sliver — audit
+  # D1). This proof composes the production SheetContent in the recording state
+  # (NOT-LOCKED and LOCKED), keyboard-UP via the #780 synthetic-inset model,
+  # pinned to a fixed phone-width band, at font scale 1.0 AND 1.3, and HARD-asserts
+  # every recording-row pill (Discard/Lock/Insert/Send) + the still-mounted
+  # editing-tools group is fully CONTAINED within the band (band-relative, not a
+  # bare assertIsDisplayed() a clipped pill still passes — #657/F1). RED on the
+  # unfixed single-row layout (Send spills off the band); GREEN with the two-row
+  # fit. No Docker fixture, no self-skip. Lives under com.pocketshell.app.composer,
+  # not the proof prefix, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.PromptComposerRecordingRowFitProofTest"
   # ADDED (#585): Telegram-style hold-and-pull-up on the composer mic must start
   # recording and lock it hands-free in one gesture, with the real
   # ModalBottomSheet still mounted so the mic detector competes with the sheet

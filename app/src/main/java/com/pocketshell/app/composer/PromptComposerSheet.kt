@@ -924,7 +924,6 @@ internal fun SheetContent(
                         // newest words always stay visible.
                         liveTranscript = state.liveTranscript,
                         locked = state.recordingLocked,
-                        onCancel = onCancelRecording,
                     )
                 }
 
@@ -1186,6 +1185,20 @@ internal fun SheetContent(
         //  - Right, Transcribing: Cancel + "Send" (arms the queued send for
         //    the in-flight round-trip).
         val attachmentBusy = attachmentUploading != null
+        // Issue #1152: the maintainer's directive is FIT EVERYTHING — never hide a
+        // control to make room. The old single row packed the tools group + Lock +
+        // Insert + Send onto one line, overflowed the usable width, and clipped
+        // `Send` off the right edge (the cyan "S/e" sliver — audit D1).
+        //
+        // The fix keeps this STABLE outer row (it carries the mic
+        // swipe-up-to-lock pointerInput, which MUST survive the Idle→Recording
+        // recompose — the finger is held continuously through the transition, so
+        // the gesture node cannot be replaced) with the editing-tools group +
+        // weighted gap, and makes only the RIGHT CLUSTER state-driven. The editing
+        // tools (📎 attach · {} snippets · / command) therefore stay MOUNTED in
+        // every state. During Recording the right cluster stacks the four pills as
+        // TWO rows ([Discard · Lock] over [Insert · Send]) so all controls fit —
+        // nothing is clipped or hidden — at font scale 1.0 and 1.3, locked and not.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1201,75 +1214,25 @@ internal fun SheetContent(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Issue #701: the left tools — 📎 attach + `{}` snippets — sit in a
-            // single rounded `SurfaceElev` group rather than as two bare ghost
-            // icons floating at the far edge. The earlier layout left the row
-            // looking unbalanced: two lonely icons hard-left, a weak Send
-            // hard-right, and a wide dead gap between them (the maintainer's
-            // "big empty gap" complaint). Grouping the secondary tools into one
-            // pill gives the row a deliberate left anchor that visually balances
-            // the filled Send + mic cluster on the right; the `weight(1f)` space
-            // between them now reads as intentional breathing room. Attachment
-            // picking stays single-flight while a batch is uploading, but
-            // typing, editing, dictation, and text-only Send remain live.
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                AttachIconButton(
-                    onClick = { onAttachFiles?.invoke() },
-                    enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
-                    modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
-                )
-                SnippetsIconButton(
-                    onClick = { onSnippets?.invoke() },
-                    enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
-                    modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
-                )
-                // Issue #787: the single consolidated `/` slash-command entry.
-                // Disabled on shell panes (`agentKind == null` → empty catalog,
-                // nothing to show), matching the prior key-bar / chip gating.
-                SlashIconButton(
-                    onClick = onSlashTap,
-                    enabled = !isTranscribing && !attachmentBusy && agentKind != null,
-                    modifier = Modifier.testTag(COMPOSER_SLASH_TAG),
-                )
-            }
-            // Issue #453: the separate keyboard icon is removed from the Idle
-            // row — it is not in the mockup and cluttered the clean idle. The
-            // editable draft field itself raises the soft IME the moment it is
-            // tapped/focused (ComposerDraftField), so there is a single,
-            // obvious way to bring up the keyboard: tap the input. The
-            // [draftFocusRequester] is still used to focus the field after a
-            // dictation transcript lands.
-
+            ComposerEditingToolsGroup(
+                isTranscribing = isTranscribing,
+                attachmentBusy = attachmentBusy,
+                agentKind = agentKind,
+                onAttachFiles = onAttachFiles,
+                onSnippets = onSnippets,
+                onSlashTap = onSlashTap,
+            )
             Spacer(modifier = Modifier.weight(1f))
 
-            // Right cluster is state-driven.
             when (state.recording) {
                 PromptComposerViewModel.RecordingState.Idle -> {
-                    // Issue #453: match the mockup's compact toolbar order —
-                    // `Send` (text + arrow) FIRST, then a small mic disc at the
-                    // far right, both sitting tight together. The old order
-                    // (mic-then-Send) was reversed versus the mockup.
-                    //
-                    // Issue #491: gate on the LIVE editor text, not the
-                    // (possibly stale) ViewModel draft — the IME composing
-                    // region lands in `draftFieldValue.text` immediately, so
-                    // a short typed prompt enables Send without waiting for an
-                    // IME commit. Staged attachment chips also enable Send
-                    // for attachment-only prompts. [commitAndSend] flushes
-                    // the live text into the ViewModel before dispatching, so
-                    // the tap always delivers.
+                    // Issue #453/#701: single primary Send pill + the mic disc.
+                    // Issue #491: gate Send on the LIVE editor text (or staged
+                    // attachments), not the possibly-stale ViewModel draft, and
+                    // disable while a send is in flight (#745). [commitAndSend]
+                    // flushes the live text before dispatching so the tap delivers.
                     val sendEnabled =
                         (draftFieldValue.text.isNotEmpty() || state.attachments.isNotEmpty()) &&
-                            // Issue #745: while a send is in flight the button is
-                            // disabled and shows "Sending…" — a second tap can't
-                            // queue another request on top of the one resolving.
                             !state.sendInFlight
                     SendButton(
                         onClick = commitAndSend,
@@ -1278,8 +1241,9 @@ internal fun SheetContent(
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    // Small cyan mic disc at the far right (the mockup's mic).
-                    // Sits AFTER Send so the row reads "type + send, or dictate".
+                    // Small cyan mic disc at the far right (the mockup's mic). Its
+                    // bounds (relative to THIS outer row — the gesture node) are the
+                    // swipe-up gesture's press-start target.
                     MicTriggerButton(
                         onClick = onMicTap,
                         enabled = true,
@@ -1292,59 +1256,53 @@ internal fun SheetContent(
                 }
 
                 PromptComposerViewModel.RecordingState.Recording -> {
-                    // Issue #508: two explicit stop actions replace the old
-                    // persistent Auto-send toggle. The choice is made
-                    // per-recording, at the moment of stopping:
-                    //  - "Insert": stop + transcribe, drop the text into the
-                    //    editable composer field (nothing sent). The user can
-                    //    then attach a screenshot / edit before sending. This
-                    //    is the historic [onMicTap] stop path — the transcript
-                    //    appends to the draft and the FSM lands back in Idle.
-                    //  - "Send": stop + transcribe + send immediately. Routes
-                    //    through [onSend(true)] which (while Recording) queues
-                    //    the send and stops the recorder; the queued send fires
-                    //    once Whisper returns with the combined transcript.
-                    // The non-transcribing discard action is intentionally in
-                    // the recording panel itself, not this row, so it cannot be
-                    // confused with either stop+transcribe choice.
-                    //
-                    // Issue #585: a DETERMINISTIC hands-free lock affordance.
-                    // The Telegram-style swipe-up-to-lock gesture (below) is the
-                    // one-gesture path, but it competes with the
-                    // ModalBottomSheet's drag-to-dismiss and that velocity-driven
-                    // arbitration repeatedly failed on the maintainer's real
-                    // device while passing every emulator round (this issue's 5
-                    // reopens). A single-tap Lock button cannot be stolen by the
-                    // sheet drag — it is the device-independent way to "release
-                    // the finger and keep recording". It shows only BEFORE the
-                    // recording is locked (once locked, the recording panel shows
-                    // the persistent lock indicator instead).
-                    if (!state.recordingLocked) {
-                        LockRecordingButton(
-                            onClick = onLockRecording,
-                            modifier = Modifier.testTag(COMPOSER_LOCK_RECORDING_TAG),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    // Issue #1152: the four recording pills stack as two right-
+                    // aligned rows so they all fit next to the mounted tools group.
+                    //  - [Discard · Lock]: Discard (drop this audio — pulled OUT of
+                    //    the waveform surface into a proper outlined secondary pill
+                    //    so it no longer collides with the bars / reads disabled,
+                    //    audit B/D2/D3) and, until locked, Lock (#585 hands-free).
+                    //  - [Insert · Send]: the two "how do you want to end this
+                    //    dictation" stop actions. Every pill shares one 48dp
+                    //    baseline (audit D4).
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            DiscardRecordingButton(
+                                onClick = onCancelRecording,
+                                modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
+                            )
+                            if (!state.recordingLocked) {
+                                LockRecordingButton(
+                                    onClick = onLockRecording,
+                                    modifier = Modifier.testTag(COMPOSER_LOCK_RECORDING_TAG),
+                                )
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            ToFieldButton(
+                                onClick = onMicTap,
+                                modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
+                            )
+                            StopSendButton(
+                                onClick = { onSend(true) },
+                                modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
+                            )
+                        }
                     }
-                    ToFieldButton(
-                        onClick = onMicTap,
-                        modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    StopSendButton(
-                        onClick = { onSend(true) },
-                        modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
-                    )
                 }
 
                 PromptComposerViewModel.RecordingState.Transcribing -> {
-                    // Issue #508: the audio is already captured and the Whisper
-                    // round-trip is in flight, but the user can still pick where
-                    // the transcript lands once it returns. "Insert" is a
-                    // no-op on the in-flight request — the transcript appends to
-                    // the draft by default — so the only extra action surfaced
-                    // here is "Send" (arms the queued send) plus Cancel (aborts
-                    // the round-trip). No persistent Auto-send toggle.
+                    // Issue #508: Cancel aborts the in-flight round-trip; Send arms
+                    // the queued send. These two fit on one line next to the tools.
                     GhostButton(
                         label = "Cancel",
                         onClick = onCancelTranscription,
@@ -1532,7 +1490,6 @@ private fun RecordingSurface(
     elapsedLabel: String,
     liveTranscript: String?,
     locked: Boolean,
-    onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1561,10 +1518,13 @@ private fun RecordingSurface(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Issue #1152: the elapsed timer is the primary "how long have I been
+            // recording" signal, so bump it to 15sp SemiBold — it was the smallest
+            // element next to the 32dp waveform (audit D6).
             Text(
                 text = elapsedLabel,
                 color = PocketShellColors.Accent,
-                fontSize = 13.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
             )
@@ -1579,12 +1539,17 @@ private fun RecordingSurface(
                         .semantics { contentDescription = "Recording locked" },
                 )
             }
+            // Issue #1152: Discard moved OUT of this surface into the bottom action
+            // row (an outlined secondary pill), so the surface is now just
+            // [timer · (lock?) · waveform]. A small end inset keeps the amplitude
+            // bars from kissing the surface edge (audit C/D2).
             Waveform(
                 amplitude = amplitude,
                 active = capturing,
                 modifier = Modifier
                     .weight(1f)
                     .height(32.dp)
+                    .padding(end = 4.dp)
                     .testTag(COMPOSER_WAVEFORM_TAG)
                     .semantics {
                         contentDescription = if (capturing) {
@@ -1594,7 +1559,6 @@ private fun RecordingSurface(
                         }
                     },
             )
-            DiscardRecordingButton(onClick = onCancel)
         }
         // Issue #585: until the recording is locked, surface a one-line hint so
         // the user knows the hands-free path exists and how to reach it — "tap
@@ -1772,10 +1736,16 @@ private fun TranscribingSurface(
 }
 
 /**
- * Issue #174: explicit recording-only discard control. It lives inside the
- * active recording panel, next to the waveform, so it reads as "discard this
- * captured audio" rather than the header close `×` that dismisses the whole
- * composer. Tapping it stops the mic/recognizer and drops the live buffer.
+ * Issue #174 / #1152: explicit recording-only discard control. It stops the
+ * mic/recognizer and drops the live buffer, distinct from the header close `×`
+ * that dismisses the whole composer.
+ *
+ * Issue #1152: pulled OUT of the waveform surface (where its bare muted text
+ * collided with the amplitude bars and read as disabled — audit D2/D3) into the
+ * bottom action row as a proper OUTLINED secondary pill on the shared recording
+ * pill baseline (44dp visual / 48dp touch). The `testTag` is now supplied by the
+ * caller via [modifier] (it moved from the surface to the row), so the tap-target
+ * node measured by tests includes the touch inset.
  */
 @Composable
 private fun DiscardRecordingButton(
@@ -1784,11 +1754,13 @@ private fun DiscardRecordingButton(
 ) {
     Row(
         modifier = modifier
-            .heightIn(min = 48.dp)
+            .height(ComposerActionPillHeight)
+            .clip(ComposerActionPillShape)
+            .background(PocketShellColors.SurfaceElev, ComposerActionPillShape)
+            .border(1.dp, PocketShellColors.Border, ComposerActionPillShape)
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Discard recording without transcribing" }
-            .testTag(COMPOSER_CANCEL_RECORDING_TAG)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -1809,6 +1781,60 @@ private fun DiscardRecordingButton(
 private val ComposerActionPillRadius = 22.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
 
+// Issue #1152: one baseline HEIGHT for EVERY recording-row pill (Discard / Lock /
+// Insert / Send) so the row reads as a single deliberate control ladder instead
+// of the old 40/44/48dp mix (audit D4). 48dp is the design-system tapTargetMin,
+// so a single 48dp pill is both the visual baseline and a full touch target —
+// simpler and more robust than a 44dp fill + touch-inset padding (the inset is
+// not reflected in the tagged node's measured bounds, so it under-reports the
+// touch target below 48dp — the PromptComposerCancelRecordingTest ≥48dp guard).
+private val ComposerActionPillHeight = 48.dp
+
+/**
+ * Issue #1152: the editing tools group (📎 attach · {} snippets · / command) as a
+ * single rounded `SurfaceElev` pill. It stays MOUNTED in every composer state
+ * (Idle, Recording, Transcribing) — the maintainer's directive is to fit all
+ * controls, never hide them — so it is factored out here and rendered from each
+ * state branch of the bottom controls. Attachment picking stays single-flight
+ * while a batch is uploading; the slash entry is disabled on shell panes
+ * (`agentKind == null`, #787) and everything is disabled during transcription.
+ */
+@Composable
+private fun ComposerEditingToolsGroup(
+    isTranscribing: Boolean,
+    attachmentBusy: Boolean,
+    agentKind: AgentKind?,
+    onAttachFiles: (() -> Unit)?,
+    onSnippets: (() -> Unit)?,
+    onSlashTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(22.dp))
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+            .padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        AttachIconButton(
+            onClick = { onAttachFiles?.invoke() },
+            enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
+            modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
+        )
+        SnippetsIconButton(
+            onClick = { onSnippets?.invoke() },
+            enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
+            modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
+        )
+        SlashIconButton(
+            onClick = onSlashTap,
+            enabled = !isTranscribing && !attachmentBusy && agentKind != null,
+            modifier = Modifier.testTag(COMPOSER_SLASH_TAG),
+        )
+    }
+}
+
 /**
  * Issue #585: the deterministic hands-free LOCK affordance shown while
  * Recording but not yet locked. A single tap calls [onLockRecording] so the
@@ -1827,7 +1853,9 @@ private fun LockRecordingButton(
 ) {
     Row(
         modifier = modifier
-            .heightIn(min = 48.dp)
+            // Issue #1152: shared 48dp recording pill baseline so Lock lines up
+            // with Discard / Insert / Send (audit D4).
+            .height(ComposerActionPillHeight)
             .clip(ComposerActionPillShape)
             .background(
                 color = PocketShellColors.SurfaceElev,
@@ -1947,15 +1975,16 @@ private fun ToFieldButton(
 ) {
     Row(
         modifier = modifier
-            .height(44.dp)
+            // Issue #1152: shared 48dp recording pill baseline.
+            .height(ComposerActionPillHeight)
             .background(
                 color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(22.dp),
+                shape = ComposerActionPillShape,
             )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.Border,
-                shape = RoundedCornerShape(22.dp),
+                shape = ComposerActionPillShape,
             )
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Insert transcript into prompt" }
@@ -1985,10 +2014,11 @@ private fun StopSendButton(
 ) {
     Row(
         modifier = modifier
-            .height(44.dp)
+            // Issue #1152: shared 48dp recording pill baseline.
+            .height(ComposerActionPillHeight)
             .background(
                 color = PocketShellColors.Accent,
-                shape = RoundedCornerShape(22.dp),
+                shape = ComposerActionPillShape,
             )
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Stop and send the transcript" }

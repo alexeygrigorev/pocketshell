@@ -2055,6 +2055,178 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1152: static mirror of the redesigned VOICE-RECORDING (not-locked)
+     * composer bottom area. The old single row overflowed and clipped `Send` off
+     * the right edge (audit D1); the maintainer directive is FIT EVERYTHING — keep
+     * the editing tools mounted, hide nothing. This mirrors the fix:
+     *  - recording surface: [00:14 timer · waveform] (Discard pulled out of it);
+     *  - bottom row: the mounted [📎 {} /] tools group anchors the left, then a
+     *    weighted gap, then the four pills stacked as two right-aligned rows —
+     *    [Discard (outlined) · Lock (accent-outlined)] over [Insert · Send].
+     *
+     * Caveat (#555): the real recording row lives in the `app` module's
+     * `SheetContent`, which the ui-kit harness can't import, so this mirrors its
+     * layout with the same tokens. It is the fast first design check for the
+     * fit/regroup; the acceptance is the full-device emulator screenshot in the
+     * recording-not-locked state.
+     */
+    @Test
+    fun composerRecordingControlsRow() = render("composer-recording-controls-row") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+                .padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Recording surface: timer + waveform (Discard no longer lives here).
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                    .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "00:14",
+                    color = PocketShellColors.Accent,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(32.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "▁▂▄▆█▆▄▂▁▂▄▆█▆▄▂▁▂▄▆",
+                        color = PocketShellColors.Accent,
+                        fontSize = 16.sp,
+                    )
+                }
+            }
+            // Bottom row: mounted tools group (left) + weighted gap + the four
+            // pills stacked as two right-aligned rows.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "{ }",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "/",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // Discard — outlined secondary pill (48dp).
+                        Box(
+                            modifier = Modifier
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                                .padding(horizontal = 14.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "Discard",
+                                color = PocketShellColors.TextSecondary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        // Lock — accent-outlined pill (48dp).
+                        Row(
+                            modifier = Modifier
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                                .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(text = "🔒", fontSize = 13.sp)
+                            Text(
+                                text = "Lock",
+                                color = PocketShellColors.Accent,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                                .padding(horizontal = 16.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "Insert",
+                                color = PocketShellColors.Text,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .height(48.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = "Send",
+                                color = PocketShellColors.OnAccent,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Issue #765: the LONG-draft, keyboard-up composer. The maintainer reported
      * that with a long multi-line message and the soft keyboard up the draft
      * text gets "cut off" and the caret / last line being typed is not visible.

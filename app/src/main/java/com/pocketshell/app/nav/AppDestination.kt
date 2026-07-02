@@ -167,6 +167,13 @@ sealed interface AppDestination {
         val initialWindowIndex: Int? = null,
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
+        // Issue #1155 (Part B): true when this destination came from a NORMAL tap
+        // of a PERSISTED session row in the folder tree (vs a create-new-session
+        // navigate, which leaves this false). Drives the [OpenExisting] connect
+        // trigger so a genuine cold open preflights `tmux has-session` and, when
+        // the session is confirmed gone, shows the "create a new session in this
+        // folder?" recreate prompt instead of silently recreating a fresh shell.
+        val openExisting: Boolean = false,
     ) : AppDestination
 
     /**

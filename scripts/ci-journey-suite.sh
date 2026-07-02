@@ -439,6 +439,21 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#1181 — BLACK terminal on tapping the connection notification / background→
+  # foreground resume while the FGS keeps the connection ALIVE): a port-forward pin (#1159
+  # Part 3) SUPPRESSES the bounded-grace teardown, so the VM never stashes a pendingReattach
+  # and the `-CC` client stays live across the background. On the notification-tap foreground
+  # return beyond grace, `onAppForegrounded(false)` finds nothing pending and drove ZERO
+  # repaint — the only live-connection foreground path that repaints nothing → permanent black.
+  # This journey attaches a full-viewport banner pane, PINS a port-forward, wipes the LIVE
+  # emulator to that black state (local `CSI 2J`+`CSI H`; the REMOTE tmux grid still holds the
+  # banner), backgrounds PAST a short grace (assert the pin HELD and NO teardown ran), delivers
+  # the REAL session-notification contentIntent and foregrounds. RED on base (the resume fires
+  # no reseed → no capture-pane → banner stays black); GREEN with the fix (the SAME #553/#892
+  # `reseedActivePaneForReattach` full-viewport reseed restores the banner, staying Connected,
+  # no reconnect band). Two tests cover a shell pane AND an idle alt-screen agent pane (D32 G2).
+  # Deterministic agents:2222 only, no toxiproxy, no self-skip — belongs in this per-push subset.
+  "$FQCN_PREFIX.NotificationTapLivePinnedForegroundReseedJourneyE2eTest"
   # ADDED (#989 — Redraw must NEVER clear-to-black on a NEAR-BLANK remote capture): the
   # #892 sibling above wipes the LOCAL emulator while the REMOTE tmux grid still holds the
   # full banner, so its capture-pane returns CONTENT-RICH — it never exercises the #989 root

@@ -10513,7 +10513,21 @@ public class TmuxSessionViewModel @Inject constructor(
             val activePane = activeVisiblePane() ?: return true
             val blank = activePane.terminalState.visibleScreenIsBlank()
             val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
-            if (!blank && !partialBlank) return true
+            if (!blank && !partialBlank) {
+                // Issue #1176 (GAP C): a >3-line half-black BAND (the GAP-A dead-zone) reads
+                // NON-blank AND NON-partial-black locally, yet it lost most of the frame tmux
+                // still holds. The pre-#1176 gate revealed it UNHEALED — the black band only
+                // recovered ~4s later at the steady watchdog (or never, in the dead-zone). Route
+                // the reveal through the unified capture-diff oracle so a fast switch reveals a
+                // HEALED pane. Cheap local pre-check first (no capture on a confidently-full
+                // pane); [healActivePaneIfStaleRender] then confirms against tmux's authoritative
+                // capture with [TerminalSurfaceState.visibleRenderLostFrameVsCapture] and heals
+                // ONLY if the frame is truly lost — bounded to ONE capture, no reveal thrash.
+                if (activePane.terminalState.visibleRenderMayHaveLostFrame()) {
+                    healActivePaneIfStaleRender(client, activePane, refreshGuard)
+                }
+                return true
+            }
             // Issue #941 (black-screen B1): a plain session switch can reveal a
             // PARTIAL-black pane (one live line, the rest of the prior viewport
             // gone). That reads "not blank", so the pre-#941 gate passed it and the
@@ -15352,12 +15366,18 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun maybeHealActivePaneOnNoOpResize(client: TmuxClient, target: ConnectionTarget) {
         if (client.disconnected.value) return
         val activePane = activeVisiblePane() ?: return
-        // Only pay for a capture when the active pane looks lost (fully blank or
-        // the "one live line, rest blank" partial-blank). A normally-painted pane
-        // needs no heal — this keeps the no-op resize cheap.
+        // Only pay for a capture when the active pane looks lost. A normally-painted pane needs
+        // no heal — this keeps the no-op resize cheap.
         val blank = activePane.terminalState.visibleScreenIsBlank()
         val partialBlank = activePane.terminalState.visibleScreenIsPartiallyBlank()
-        if (!blank && !partialBlank) return
+        // Issue #1176 (GAP C): a keyboard/resize toggle can leave the idle agent's redraw as a
+        // >3-line half-black BAND (the GAP-A dead-zone) that reads NON-blank and NON-partial-black
+        // locally — the pre-#1176 gate SKIPPED it and left the band until the ~4s watchdog. Widen
+        // the local capture-gate to [visibleRenderMayHaveLostFrame] (a superset of blank/partial
+        // that also catches the band), then route the non-blank band through the unified
+        // capture-diff oracle so a correct-but-sparse pane never flickers.
+        val mayHaveLostFrame = activePane.terminalState.visibleRenderMayHaveLostFrame()
+        if (!mayHaveLostFrame) return
         val attachGeneration = connectGeneration
         Log.i(
             ISSUE_145_RECONNECT_TAG,
@@ -15367,13 +15387,21 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         bridgeScope.launch {
             if (clientRef !== client) return@launch
-            reseedActivePaneForReattach(
-                RuntimeRefreshGuard(
-                    generation = attachGeneration,
-                    target = target,
-                    client = client,
-                ),
+            val guard = RuntimeRefreshGuard(
+                generation = attachGeneration,
+                target = target,
+                client = client,
             )
+            if (blank || partialBlank) {
+                // Fully-blank / ≤3-line partial-black: the existing UNCONDITIONAL full-viewport
+                // restore (forces a `C-l` repaint, then re-captures tmux's authoritative grid).
+                reseedActivePaneForReattach(guard)
+            } else {
+                // Dead-zone half-black BAND: confirm against tmux's capture with the unified
+                // oracle and heal ONLY if the frame is truly lost — no clear-to-repaint flicker
+                // on a legitimately-sparse-but-correct pane (capture ≈ render → no heal).
+                healActivePaneIfStaleRender(client, activePane, guard)
+            }
         }
     }
 

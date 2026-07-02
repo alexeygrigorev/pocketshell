@@ -726,41 +726,46 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Issue #1138 — the steady-state stale-render watchdog's "the live render LOST the
-     * frame" predicate. It is the UNION of two miss cases against tmux's authoritative
-     * `capture-pane`:
+     * Issue #1176 (unifies #966/#1138/#1153) — the SINGLE coherent "the live render LOST the
+     * frame" oracle. It answers ONE question against tmux's authoritative `capture-pane`: **how
+     * much of the visible content tmux holds for this pane is actually on screen?** The render
+     * has lost the frame when it reproduces at most [LOST_FRAME_MAX_RENDERED_FRACTION] of tmux's
+     * visible non-blank content while tmux holds materially more.
      *
-     *  (a) a DRAMATICALLY-stale render — [visibleScreenDivergesFromCapture] (the #966
-     *      scattered-fragment / mostly-black-on-a-dense-frame case), AND
+     * ## Why one metric (the #1176 dead-zone this closes)
      *
-     *  (b) a PARTIAL-BLACK render — [visibleScreenIsPartiallyBlank] — whose surviving live
-     *      band happens to exceed 25% of tmux's frame, so (a)'s
-     *      [STALE_RENDER_MAX_RENDERED_FRACTION] ceiling reads it "healthy" and skips it.
-     *      This is the maintainer's live-streaming ALT-SCREEN agent pane (Codex + Claude,
-     *      v0.4.19 dogfood #1138): the agent redraws with cursor-addressed writes, so only
-     *      its live status line repaints locally while the upper alt-screen rows stay black.
-     *      An alt-screen agent frame is SPARSE (header + a big blank conversation area +
-     *      an input/status line), so its non-blank content is small and the lone status
-     *      line is a LARGE fraction of it — the #966 divergence oracle therefore never
-     *      fires, and the steady-state watchdog (whose ONLY predicate was that oracle) left
-     *      the pane stuck mostly-black on a live transport.
+     * The pre-#1176 oracle UNIONED two ceilings on DIFFERENT metrics that do not compose:
+     *  - a 25%-**char** ceiling (the #966 [visibleScreenDivergesFromCapture]), and
+     *  - a 50%-**line** ceiling (the #1153 half-black band).
      *
-     * For case (b) the heal fires ONLY when tmux's capture carries MATERIALLY MORE visible
-     * non-blank content than the render (its visible tail has ≥ [STALE_RENDER_MIN_CAPTURE_CHARS]
-     * AND at least [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] more than the render). That gap is the
-     * anti-thrash / distinguish-from-by-design guard:
-     *  - a legitimately-short prompt (tmux ALSO holds only those few lines → capture ≈ render)
-     *    never re-heals — no reseed-thrash on every watchdog tick; and
-     *  - the #807 by-design alt-screen void (the agent's OWN intentionally-empty frame → tmux
-     *    capture ≈ render, near-nothing to restore) is correctly left alone.
-     * Only a genuine unrepainted frame — tmux holds the full frame while the render shows the
-     * band — heals, restoring the FULL viewport from tmux's authoritative grid.
+     * A render carrying >25% of tmux's chars spread across >50% of the rows — a black BAND
+     * covering ~a third-to-a-half of the screen — cleared BOTH ceilings and was judged HEALTHY,
+     * so it was NEVER healed on any path. That was the residual black screen the maintainer kept
+     * hitting on the latest release (spike #874). A char-fraction and a line-fraction ceiling can
+     * each be "just above threshold" while the pane is plainly half-black. Collapsing them into
+     * a SINGLE content-coverage judgment removes the dead-zone: a black band loses chars (fewer
+     * non-blank cells) regardless of whether the loss reads as scattered sparsity (#966), a lone
+     * surviving status line (#1138), or a contiguous band (#1153) — so one char-coverage ceiling
+     * subsumes all three cases with no gap between them.
+     *
+     * ## The anti-thrash / distinguish-by-design gates (preserved from #1138)
+     *
+     *  1. tmux's visible tail must carry ≥ [STALE_RENDER_MIN_CAPTURE_CHARS] non-blank chars —
+     *     there is a REAL frame to restore, not the #807 by-design near-empty alt-screen void; AND
+     *  2. tmux must carry at least [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] MORE non-blank chars than
+     *     the render — a genuine unrepainted frame, not a legitimately-short prompt whose capture
+     *     ≈ render (no reseed-thrash on every watchdog tick).
+     *
+     * Only then does the coverage ceiling decide. A DENSE, correctly-painted pane reproduces
+     * ~all of tmux's visible content (its coverage sits ABOVE the ceiling) and never heals; a
+     * pane that is merely a few rows behind a streaming agent (capture holds slightly more) sits
+     * above the ceiling too and is left alone — no clear-to-repaint flicker on a lagging-but-fine
+     * pane. Re-seeding is idempotent (a full clear+repaint of tmux's authoritative grid), so the
+     * heal only ever swaps TOWARD more content.
      *
      * Returns false when no emulator is attached (nothing rendered to judge).
      */
     fun visibleRenderLostFrameVsCapture(captureText: String): Boolean {
-        // (a) The #966 dramatic-divergence case (unchanged oracle).
-        if (visibleScreenDivergesFromCapture(captureText)) return true
         val emulator = bridge?.emulator ?: _session?.emulator ?: return false
         val visibleRows = try {
             emulator.screen.visibleScreenRows
@@ -773,34 +778,61 @@ class TerminalSurfaceState(
             .filter { it.isNotBlank() }
             .takeLast(visibleRows)
             .sumOf { line -> line.count { !it.isWhitespace() } }
-        // tmux has (near) nothing for this pane → no real frame to restore (the #807
-        // alt-screen void). Defer — do NOT heal a genuinely-empty pane to itself.
+        // Gate 1 — the #807 by-design void: tmux has (near) nothing for this pane, so there is no
+        // real frame to restore. Defer; do NOT heal a genuinely-empty pane to itself.
         if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
         val renderedNonBlank = renderedNonBlankCharCount()
-        // tmux carries MATERIALLY MORE than the render → the frame the render lost is still in
-        // tmux's grid; re-seed to restore it. A near-equal capture (short prompt / by-design
-        // void) sits under the gap and is left alone — the anti-thrash / distinguish-by-design
-        // guard shared by both partial-black branches below.
+        // Gate 2 — anti-thrash / distinguish-by-design: tmux must carry MATERIALLY MORE visible
+        // content than the render (a legitimately-short prompt or the agent's own clear has
+        // capture ≈ render and sits under this gap — left alone).
         if (captureVisibleNonBlank - renderedNonBlank < PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS) return false
-        // (b) The #1138 partial-black render (≤3 live lines): an alt-screen agent's surviving
-        //     status line, the upper rows black.
-        if (visibleScreenIsPartiallyBlank()) return true
-        // (c) Issue #1153 — the >3-live-line HALF-BLACK render. A composer Send whose multi-line
-        //     payload (a with-attachment send is ALWAYS multi-line — it appends an "Attached
-        //     files:" block) takes the bracketed-paste + submit branch; the alt-screen agent then
-        //     clear+cursor-address-redraws its WHOLE viewport, and the overpaint blanks the grid
-        //     while the agent only PARTIALLY repaints — leaving a large black BAND above a
-        //     surviving input box + a few conversation lines + status. That band carries MORE
-        //     than the ≤3 live lines the partial-black heuristic (b) caps at (so (b) misses it),
-        //     yet its live share of the visible rows is still materially below a fully-painted
-        //     frame. Combined with the "tmux holds materially more" gate already passed above,
-        //     heal it too — the maintainer's "partly redrew but still too black" send state
-        //     (#1153). The fraction ceiling keeps a DENSE healthy pane (its live rows sit ABOVE
-        //     the ceiling) from firing; the capture-diff gate already excluded a legitimately
-        //     sparse-but-correct pane (capture ≈ render).
-        val renderedLiveLines = renderedVisibleNonBlankLineCount()
-        if (renderedLiveLines <= 0) return false
-        return renderedLiveLines.toDouble() / visibleRows.toDouble() <= LOST_FRAME_MAX_LIVE_FRACTION
+        // THE unified judgment: the render reproduces at most [LOST_FRAME_MAX_RENDERED_FRACTION]
+        // of tmux's visible non-blank content → a black band / mostly-black / scattered render
+        // that lost the frame tmux still holds. A fully-painted or only-slightly-behind pane sits
+        // above the ceiling and is not healed.
+        return renderedNonBlank.toDouble() <=
+            captureVisibleNonBlank.toDouble() * LOST_FRAME_MAX_RENDERED_FRACTION
+    }
+
+    /**
+     * Issue #1176 (GAP C) — the CHEAP, LOCAL-ONLY capture-gate the switch-reveal
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.awaitActivePaneSeededOrLoading]) and the
+     * no-op-resize heal ([com.pocketshell.app.tmux.TmuxSessionViewModel.maybeHealActivePaneOnNoOpResize])
+     * run to decide whether paying for an authoritative `capture-pane` diff (the unified
+     * [visibleRenderLostFrameVsCapture] oracle) is worthwhile before revealing / after a keyboard
+     * toggle. It is TRUE when the rendered viewport is sparse/banded enough to POSSIBLY be a lost
+     * frame: fully blank, the ≤3-line partial-black, OR a black BAND whose live share of the
+     * visible rows is at most [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION].
+     *
+     * It fires for the SAME two states the pre-#1176 gates already captured for — fully blank OR
+     * the ≤3-line partial-black — PLUS the exact GAP the dead-zone left: a >3-line black BAND with
+     * MORE than half the visible rows live (so the pre-#1176 gates read it "painted") but still up
+     * to [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] of them — the band between the old 50%-line ceiling
+     * and a confidently-dense pane. A genuinely-sparse-but-correct SMALL pane (≤ half the rows live
+     * — a short prompt) is deliberately NOT flagged: the pre-#1176 no-op-resize contract pays
+     * nothing for it, and the steady-state watchdog remains its net. It does NOT confirm a lost
+     * frame — only the `capture-pane` diff can, since a sparse-but-correct pane looks identical
+     * locally — so a confidently-full pane (live rows ABOVE the ceiling) skips the capture entirely,
+     * and every flagged pane is confirmed against tmux by the unified oracle before any heal fires.
+     */
+    fun visibleRenderMayHaveLostFrame(): Boolean {
+        if (visibleScreenIsBlankOrPartiallyBlank()) return true
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        val visibleRows = try {
+            emulator.screen.visibleScreenRows
+        } catch (_: Throwable) {
+            return false
+        }
+        if (visibleRows <= 0) return false
+        val liveLines = renderedVisibleNonBlankLineCount()
+        if (liveLines <= 0) return true
+        val liveFraction = liveLines.toDouble() / visibleRows.toDouble()
+        // The #1176 dead-zone the pre-#1176 gates MISSED: MORE than half the rows live yet not
+        // confidently dense. Below the lower bound the pane is genuinely sparse (the pre-#1176
+        // no-op contract skips it — the "cheap no-op" for a short correct prompt); above the upper
+        // bound it is confidently full.
+        return liveFraction > MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION &&
+            liveFraction <= MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION
     }
 
     /**
@@ -1159,10 +1191,9 @@ class TerminalSurfaceState(
 
         /**
          * Issue #1153: the upper bound on the rendered live-line FRACTION of the visible rows for
-         * [visibleRenderLostFrameVsCapture]'s >3-live-line HALF-BLACK branch (and the cheap
-         * send-heal pre-check [visibleScreenLooksSparseForSendHeal]). The maintainer's composer
-         * Send (with-attachment, so multi-line → bracketed-paste + submit) left the alt-screen
-         * agent pane "partly redrew but still too black": a surviving input box + a few
+         * the cheap send-heal pre-check [visibleScreenLooksSparseForSendHeal]. The maintainer's
+         * composer Send (with-attachment, so multi-line → bracketed-paste + submit) left the
+         * alt-screen agent pane "partly redrew but still too black": a surviving input box + a few
          * conversation lines + status (MORE than the ≤3 live lines
          * [PARTIAL_BLANK_MAX_LIVE_LINES] caps at) over a large black BAND. Half-or-more of the
          * visible rows black is "materially black"; a DENSE, normally-painted response paints
@@ -1171,8 +1202,56 @@ class TerminalSurfaceState(
          * narrow partial-black heuristic misses, and the capture-diff gate
          * ([PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS]) still guards against healing a sparse-but-correct
          * pane where tmux holds no more content than the render.
+         *
+         * NOTE (#1176): this is now ONLY the send-heal LOCAL cost-gate. The authoritative
+         * capture-vs-render decision moved to the unified [LOST_FRAME_MAX_RENDERED_FRACTION]
+         * char-coverage ceiling in [visibleRenderLostFrameVsCapture]; this 0.5 line-fraction no
+         * longer bounds that oracle.
          */
         private const val LOST_FRAME_MAX_LIVE_FRACTION = 0.5
+
+        /**
+         * Issue #1176 — the SINGLE char-coverage ceiling of the unified
+         * [visibleRenderLostFrameVsCapture] oracle: the render has LOST the frame when its
+         * visible non-blank char count is at most this FRACTION of tmux's authoritative visible
+         * content (with the [STALE_RENDER_MIN_CAPTURE_CHARS] real-frame floor and the
+         * [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] materially-more gate both passed first).
+         *
+         * It REPLACES the pre-#1176 two-cliff union (a 25%-char ceiling OR a 50%-line ceiling)
+         * with one coherent judgment, closing the dead-zone where a black BAND carrying >25% of
+         * tmux's chars across >50% of the rows cleared BOTH old ceilings and was never healed.
+         * At 0.75 it heals a pane missing a quarter or more of tmux's visible content — the whole
+         * "half-to-two-thirds black band" the maintainer kept hitting (spike #874) — while a
+         * DENSE, correct pane (coverage ≈ 1.0) and a merely-a-few-rows-behind streaming pane
+         * (coverage ~0.84+, measured) both sit above the ceiling and are left alone (no
+         * clear-to-repaint flicker on a lagging-but-fine pane).
+         */
+        private const val LOST_FRAME_MAX_RENDERED_FRACTION = 0.75
+
+        /**
+         * Issue #1176 (GAP C) — the live-line FRACTION ceiling of the LOCAL capture-gate
+         * [visibleRenderMayHaveLostFrame] used by the switch-reveal and no-op-resize heals. It is
+         * aligned with the unified oracle's [LOST_FRAME_MAX_RENDERED_FRACTION] (0.75) so a
+         * confidently-full pane (live rows above the ceiling) skips the authoritative
+         * `capture-pane` diff while ANY pane that could be a dead-zone black band (live rows below
+         * it) is confirmed against tmux by [visibleRenderLostFrameVsCapture] before any heal. It
+         * is deliberately HIGHER than the send-heal cost-gate's [LOST_FRAME_MAX_LIVE_FRACTION]
+         * (0.5) so the reveal/resize gates never MISS the #1176 dead-zone band the way the narrow
+         * pre-check did.
+         */
+        private const val MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION = 0.75
+
+        /**
+         * Issue #1176 (GAP C) — the LOWER bound of the [visibleRenderMayHaveLostFrame] band
+         * trigger. A >3-line pane with at most this live-fraction is genuinely SPARSE (a short
+         * correct prompt), NOT the dead-zone band the pre-#1176 no-op-resize gate missed — flagging
+         * it would break the "cheap no-op" contract (capturing a correct small pane on routine
+         * layout churn). The dead-zone is specifically the band with MORE than half the rows live
+         * (spike #874: >50% rows + >25% chars), so the local capture-gate only opens ABOVE this
+         * 0.5 boundary; the genuinely-sparse pane's net stays the steady-state watchdog + the
+         * send-heal path (whose own cost-gate is [LOST_FRAME_MAX_LIVE_FRACTION] = 0.5).
+         */
+        private const val MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION = 0.5
     }
 }
 

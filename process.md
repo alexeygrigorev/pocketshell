@@ -1338,6 +1338,29 @@ Release build steps:
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
 10. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
 
+Two operational gotchas learned cutting v0.4.22 on the dev box:
+
+- **Reclaim disk BEFORE the release gate.** A long dogfood session leaves dozens
+  of `.claude/worktrees/agent-*` full-repo copies plus a multi-GB `build/`; these
+  filled the disk to 100% mid-run and the confidence gate's rsync failed with
+  `No space left on device` (and it starved the emulator into a "failed to
+  complete startup" ANR that then fails the artifact pull). Before starting the
+  gate, when no sub-agents are in flight, `git worktree list | grep agent- |
+  awk '{print $1}' | xargs -r -n1 git worktree remove --force`, `git worktree
+  prune`, and `rm -rf build` (regenerable) to free space. A "Process crashed" /
+  startup-ANR at the setup-detection artifact-pull stage is almost always this
+  resource starvation, not a product bug — clean up and re-run (G5).
+- **Run the ~30-60 min gate detached, not as a plain background shell.** The
+  session harness kills long-running background bash (even trivial sleep
+  waiters). Launch the gate as a transient user service that survives:
+  `systemd-run --user --unit=ps-release -p MemoryMax=44G
+  --setenv=NIGHTLY_FAULT_GATE_DISABLED=1 --setenv=RUN_ID=<id>
+  scripts/release-emulator-validation.sh` and delegate the "block until it
+  exits" watch to an on-call agent (its process outlives the main-thread
+  background-kill), which reports PASS/FAIL so the orchestrator tags. The tag
+  helper requires `main` to stay pinned at the validated commit — hold all
+  non-release merges (release freeze) until after the tag is pushed.
+
 Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:
 

@@ -51,6 +51,30 @@ data class ClosedWindow(
 )
 
 /**
+ * Issue #1155 (Part B): a persisted session the user tried to open turned out
+ * to be GENUINELY GONE on the host — the attach failed because the tmux session
+ * is absent ([com.pocketshell.core.tmux.TmuxSessionNotFoundException]), NOT a
+ * transient reconnect blip (those go through the reconnect ladder and never
+ * emit this). The maintainer's persistent tree is usually accurate (sessions
+ * are created/removed through the app), so this is the RARE case (external
+ * removal / a sync we skipped). Rather than dropping to a blank list the folder
+ * tree offers "This session no longer exists — create a new session in this
+ * folder?" so the user recovers in one tap.
+ *
+ * @property hostId the host the gone session belonged to (the tree filters on it).
+ * @property sessionName the tmux session name that was confirmed absent.
+ * @property folderPath the session's working directory (its folder) so the
+ *   recreate reuses the SAME folder's create-session path. `null` when the gone
+ *   session carried no known start directory (the prompt then falls back to the
+ *   home directory create path, never a blank/error).
+ */
+data class StaleSession(
+    val hostId: Long,
+    val sessionName: String,
+    val folderPath: String?,
+)
+
+/**
  * Process-scoped fan-out of tmux-session lifecycle signals — issue #464.
  *
  * Today it carries exactly one event: a confirmed session kill. The kill
@@ -95,6 +119,27 @@ class SessionLifecycleSignals @Inject constructor(
      */
     val closedWindows: SharedFlow<ClosedWindow> = _closedWindows.asSharedFlow()
 
+    // Issue #1155 (Part B): a persisted session confirmed GENUINELY GONE on
+    // attach (absent tmux session, not a transient reconnect). No replay — the
+    // same safe convention as [killedSessions]: the folder tree is ALIVE and
+    // bound to the host while the user is in the session screen (its `bound` +
+    // collector survive `stopPolling`), so it catches the emit at attach-fail
+    // time and shows the prompt on the `back()` that follows. A no-replay buffer
+    // avoids a stale recreate prompt resurrecting on a much later same-host
+    // re-bind.
+    private val _staleSessions = MutableSharedFlow<StaleSession>(
+        replay = 0,
+        extraBufferCapacity = 4,
+    )
+
+    /**
+     * Issue #1155 (Part B): hot stream of persisted-but-genuinely-gone sessions.
+     * The folder tree ([com.pocketshell.app.projects.FolderListViewModel]) filters
+     * on the bound host and raises the "create a new session in this folder?"
+     * recreate prompt.
+     */
+    val staleSessions: SharedFlow<StaleSession> = _staleSessions.asSharedFlow()
+
     /** Broadcast a confirmed kill of [sessionName] on [hostId]. */
     fun emitKilled(hostId: Long, sessionName: String) {
         val trimmed = sessionName.trim()
@@ -115,5 +160,29 @@ class SessionLifecycleSignals @Inject constructor(
         val trimmed = windowId.trim()
         if (trimmed.isEmpty()) return
         _closedWindows.tryEmit(ClosedWindow(hostId = hostId, windowId = trimmed))
+    }
+
+    /**
+     * Issue #1155 (Part B): broadcast that the persisted session [sessionName] on
+     * [hostId] was confirmed GENUINELY GONE on attach (an absent tmux session —
+     * `TmuxSessionNotFoundException` — NOT a transient reconnect blip). [folderPath]
+     * is the session's working directory so the tree can offer "create a new session
+     * in this folder?". Also forgets the dead session's per-host memory/runtime like
+     * [emitKilled], since it is confirmed gone.
+     */
+    fun emitStaleSession(hostId: Long, sessionName: String, folderPath: String?) {
+        val trimmed = sessionName.trim()
+        if (trimmed.isEmpty()) return
+        agentSessionMemory?.forgetSession(hostId = hostId, sessionName = trimmed)
+        runtimeCache?.removeSession(hostId = hostId, sessionName = trimmed)?.forEach { runtime ->
+            cleanupScope.launch { runtime.closeCachedRuntime() }
+        }
+        _staleSessions.tryEmit(
+            StaleSession(
+                hostId = hostId,
+                sessionName = trimmed,
+                folderPath = folderPath?.trim()?.takeIf { it.isNotEmpty() },
+            ),
+        )
     }
 }

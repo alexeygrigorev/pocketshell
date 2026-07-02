@@ -102,6 +102,7 @@ import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnectCoalescedCancelException
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -2060,6 +2061,16 @@ public class TmuxSessionViewModel @Inject constructor(
     // host cannot loop forever. Reset to 0 on a successful attach.
     private var staleLeaseAutoRecoverAttempts: Int = 0
 
+    // Issue #1185: how many times the SELECTED session has transparently
+    // re-dialled after its lease acquire was woken with a coalesced-connect
+    // cancel (the create-then-switch supersede). The pool slot is already
+    // cleared, so a re-dial normally becomes a fresh owner and connects on the
+    // first retry; the cap only stops a pathological repeat (a host that keeps
+    // getting its in-flight connect cancelled) from looping forever, at which
+    // point the honest terminal error + working Retry surfaces. Reset to 0 on a
+    // successful attach (alongside [staleLeaseAutoRecoverAttempts]).
+    private var coalescedCancelRedialAttempts: Int = 0
+
     // Issue #145: whether [reconnect] would result in a new connect
     // attempt. The screen surfaces a Reconnect button only when this is
     // true; without a known target (e.g. the ViewModel was never opened)
@@ -3061,6 +3072,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // stale-lease heal worked (or was never needed), so the budget resets
         // for the next connect chain.
         staleLeaseAutoRecoverAttempts = 0
+        coalescedCancelRedialAttempts = 0
         lifecycleReattachNetworkCoalesce =
             if (trigger == TmuxConnectTrigger.LifecycleReattach) {
                 LifecycleReattachNetworkCoalesce(
@@ -6959,6 +6971,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // NEXT acquire opens a fresh transport that can open the channel, and
         // force-preserve the reconnect target so the Reconnect affordance has
         // something to retry even when this was the very first connect.
+        // Issue #1185: the acquire that failed here may not be a genuine
+        // unreachable at all — the SELECTED session's lease acquire may have
+        // COALESCED (#620) onto an in-flight connect owned by a just-superseded
+        // create/attach flow on the same host, and the user's own navigation
+        // (create-new → immediately select an existing session) cancelled that
+        // owner. The lease wakes the awaiter with a TYPED
+        // [SshLeaseConnectCoalescedCancelException] (NOT a bare
+        // CancellationException) precisely so this consumer can tell it apart
+        // from an unreachable host and re-dial the selected session's OWN fresh
+        // connect instead of stranding it on a Disconnected pill + "Attaching…"
+        // spinner with no recovery.
+        val coalescedCancel = isCoalescedConnectCancel(cause)
         val staleChannelSymptom = isStaleChannelSymptom(cause)
         if (staleChannelSymptom) {
             withContext(NonCancellable) {
@@ -7019,6 +7043,73 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         activeAttachMilestone = null
         activeTarget = null
+
+        // Issue #1185: a coalesced-connect cancel of the selected session's
+        // superseded owner is NOT a terminal failure. The pool slot is already
+        // cleared, so re-dial the SELECTED session's own fresh connect (which
+        // becomes a new owner and dials cleanly) transparently — the user asked
+        // for THIS session; a supersede of an unrelated flow's connect must never
+        // strand it. Guarded so we never re-dial a session the user has since
+        // navigated away from, and bounded so a pathological repeat cannot loop
+        // forever (then the honest terminal error + working Retry surfaces).
+        if (shouldRedialAfterCoalescedCancel(coalescedCancel, target)) {
+            coalescedCancelRedialAttempts += 1
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-coalesced-cancel-redial selected session re-dials own connect after " +
+                    "superseded-owner cancel; " +
+                    "attempt=$coalescedCancelRedialAttempts/$COALESCED_CANCEL_REDIAL_MAX " +
+                    "trigger=${trigger.logValue} ${targetLogFields(target)}",
+            )
+            ReconnectCauseTrail.record(
+                stage = "coalesced_cancel_redial",
+                outcome = "transparent_redial",
+                cause = "connect_cancelled",
+                trigger = trigger.logValue,
+                "attempt" to coalescedCancelRedialAttempts,
+                "maxAttempts" to COALESCED_CANCEL_REDIAL_MAX,
+                "hostId" to target.hostId,
+                "failureClass" to cause.javaClass.simpleName,
+            )
+            // Show a calm Reattaching band immediately so the surface is never a
+            // Disconnected/Failed band (and never a stranded "Attaching…" spinner)
+            // for the brief window before the fresh re-dial coroutine is
+            // dispatched. Leave [connectingTarget] null so the recovery's
+            // [connect] is not swallowed by its in-flight early-return guard while
+            // this failing job unwinds.
+            connectingTarget = null
+            refreshReconnectAvailability()
+            setConnectionState(
+                ConnectionState.Reattaching(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    attempt = 1,
+                    maxAttempts = 1,
+                    retryDelayMs = 0L,
+                    reason = "Reattaching ${target.user}@${target.host}:${target.port}.",
+                ),
+            )
+            val recoverTarget = target
+            connectJob = null
+            launchContainedTeardown {
+                connect(
+                    hostId = recoverTarget.hostId,
+                    hostName = recoverTarget.hostName,
+                    host = recoverTarget.host,
+                    port = recoverTarget.port,
+                    user = recoverTarget.user,
+                    keyPath = recoverTarget.keyPath,
+                    passphrase = recoverTarget.passphrase,
+                    sessionName = recoverTarget.sessionName,
+                    startDirectory = recoverTarget.startDirectory,
+                    tmuxSessionId = recoverTarget.tmuxSessionId,
+                    sessionCreated = recoverTarget.sessionCreated,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                )
+            }
+            return
+        }
 
         // Issue #621 / #634 / #636 (Slice 4): an open/switch attach that EOFs
         // on a silently-dead warm lease (`tmux -CC` open or `list-panes`) must
@@ -7113,12 +7204,28 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
 
-        connectingTarget = if (preserveReconnectTarget || staleChannelSymptom) target else null
+        // Issue #1185: a coalesced-connect cancel that reached the terminal
+        // fallback (its bounded re-dial budget was exhausted) must still leave a
+        // WORKING Retry — preserve the reconnect target so [canReconnect] is true
+        // and the user is never dead-ended on a Disconnected pill with no
+        // Reconnect affordance.
+        connectingTarget =
+            if (preserveReconnectTarget || staleChannelSymptom || coalescedCancel) target else null
         refreshReconnectAvailability()
         // Issue #661: a failed switch must drop the cross-session "hide terminal"
         // gate so the Failed band is shown (not the loading placeholder).
         _switchHidesTerminal.value = false
         setConnectionState(ConnectionState.Unreachable(message))
+        // Issue #1185 (two-holder safety net): drive the reveal machine DIRECTLY
+        // to a terminal error for THIS exact target instead of relying solely on
+        // the ConnectionController's synthetic drop→Unreachable ladder to deliver a
+        // matching-id edge to the reveal collector. This guarantees the reveal
+        // surface ("Attaching…"/Seeding) and the status pill (Disconnected) can
+        // never disagree — a terminal connect failure moves BOTH holders to an
+        // honest error in lockstep, closing the #1185 contradictory Disconnected +
+        // live-spinner surface. Drop-by-id inside the machine makes this a no-op if
+        // the user has since navigated to another session.
+        driveRevealTerminalError(target)
     }
 
     /**
@@ -7147,6 +7254,67 @@ public class TmuxSessionViewModel @Inject constructor(
             autoReconnectDelaysMs.isNotEmpty() &&
             !trigger.isReconnectTrigger &&
             staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
+
+    /**
+     * Issue #1185: decide whether to transparently re-dial the SELECTED session's
+     * own connect after its lease acquire was woken with a coalesced-connect
+     * cancel (a superseded owner on the same host was cancelled by the user's
+     * create-new → immediately-select navigation).
+     *
+     * Conditions:
+     *  - the failure is the typed [SshLeaseConnectCoalescedCancelException]
+     *    ([coalescedCancel]) — never a genuine unreachable/auth/DNS error, which
+     *    must still surface the honest terminal error (no infinite re-dial);
+     *  - the app is foregrounded (a backgrounded app must not burn re-dials);
+     *  - auto-reconnect is enabled (the user hasn't disabled it / a test hasn't
+     *    cleared the delays);
+     *  - the per-chain budget has not been exhausted, so a host whose in-flight
+     *    connect keeps getting cancelled cannot loop forever;
+     *  - the selected session is STILL the latest connect intent — if the user
+     *    navigated away from it, a newer intent supersedes it and we must NOT
+     *    re-dial a session the user abandoned (the top-2 risk the spike flagged).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun shouldRedialAfterCoalescedCancel(
+        coalescedCancel: Boolean,
+        target: ConnectionTarget,
+    ): Boolean =
+        coalescedCancel &&
+            appActive &&
+            autoReconnectDelaysMs.isNotEmpty() &&
+            coalescedCancelRedialAttempts < COALESCED_CANCEL_REDIAL_MAX &&
+            latestConnectIntent?.let { sameSessionIdentity(it.target, target) } == true
+
+    /**
+     * Issue #1185: true when [cause] is the typed coalesced-connect cancel the
+     * lease raises when the awaiter's superseded owner was cancelled (#620
+     * coalescing cleanup). Distinct from every [isStaleChannelSymptom] shape and
+     * from a genuine unreachable, so the consumer re-dials the selected session
+     * rather than misclassifying a user-supersede as a terminal failure.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isCoalescedConnectCancel(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        var guard = 0
+        while (current != null && guard < 12) {
+            if (current is SshLeaseConnectCoalescedCancelException) return true
+            current = current.cause
+            guard += 1
+        }
+        return false
+    }
+
+    /**
+     * Issue #1185 (two-holder safety net): drive the [RevealStateMachine] to a
+     * terminal honest error for [target] directly, so the reveal surface and the
+     * status pill never disagree on a terminal connect failure. Drop-by-id inside
+     * the machine makes this a no-op when the user has navigated to another
+     * session.
+     */
+    private fun driveRevealTerminalError(target: ConnectionTarget) {
+        revealStateMachine.onTerminalError(controllerSessionId(target))
+        _revealState.value = revealStateMachine.state.value
+    }
 
     @androidx.annotation.VisibleForTesting
     internal fun isStaleChannelSymptom(cause: Throwable?): Boolean =
@@ -18635,6 +18803,16 @@ private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_
  * looping forever (each fresh transport also EOFing).
  */
 private const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
+
+/**
+ * Issue #1185: how many times the selected session may transparently re-dial its
+ * OWN connect after its lease acquire was woken with a coalesced-connect cancel
+ * (the create-then-switch supersede). A re-dial becomes a fresh pool owner and
+ * connects on the first retry in the normal case; the cap only bounds a
+ * pathological repeat so the honest terminal error + working Retry eventually
+ * surfaces instead of an unbounded re-dial loop.
+ */
+private const val COALESCED_CANCEL_REDIAL_MAX: Int = 2
 
 /**
  * Issue #440: simple class names of connect-failure causes that retrying

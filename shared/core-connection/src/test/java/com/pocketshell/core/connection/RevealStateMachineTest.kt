@@ -366,4 +366,46 @@ class RevealStateMachineTest {
         // The reveal itself (content) is preserved.
         assertTrue(live.panes.isNotEmpty())
     }
+
+    // --- Issue #1185: the direct terminal-error drive (two-holder safety net) ---
+
+    @Test
+    fun `onTerminalError drives a seeding surface to a terminal error (never left Attaching)`() {
+        // The #1185 contradiction: a terminal connect failure surfaces the red
+        // "Disconnected" pill while the reveal surface stays in Seeding
+        // ("Attaching…"). onTerminalError drives THIS holder to Error directly so
+        // the two can never disagree.
+        val m = RevealStateMachine()
+        m.navigate(a, "git-rds-export")
+        m.onConnectionState(ConnectionState.Attaching(host, a))
+        assertEquals(RevealState.Seeding(a, "git-rds-export"), m.state.value)
+
+        m.onTerminalError(a)
+
+        assertEquals(
+            "a terminal connect failure must move the reveal off Seeding to an honest Error",
+            RevealState.Error(a, "git-rds-export", retrying = false),
+            m.state.value,
+        )
+    }
+
+    @Test
+    fun `onTerminalError for a non-current target is dropped (drop-by-id)`() {
+        // The user navigated away to B; a late terminal-error for the abandoned A
+        // must never overwrite B's live surface.
+        val m = RevealStateMachine()
+        m.bringLive(b, "session-B")
+        val before = m.state.value
+
+        m.onTerminalError(a)
+
+        assertEquals("a terminal error for a superseded id is dropped", before, m.state.value)
+    }
+
+    @Test
+    fun `onTerminalError before any navigation is a no-op`() {
+        val m = RevealStateMachine()
+        m.onTerminalError(a)
+        assertEquals(RevealState.Idle, m.state.value)
+    }
 }

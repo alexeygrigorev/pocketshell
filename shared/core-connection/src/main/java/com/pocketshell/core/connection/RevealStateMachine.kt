@@ -220,6 +220,34 @@ class RevealStateMachine {
     }
 
     /**
+     * Issue #1185: drive the reveal to a terminal honest [RevealState.Error] for
+     * [targetId] DIRECTLY from the VM's connect-failure path, without relying on
+     * the [ConnectionController]'s synthetic drop→[ConnectionState.Unreachable]
+     * ladder to deliver the matching-id edge through [onConnectionState]. Dropped
+     * (no-op) for a non-current target so a superseded switch's failure never
+     * overwrites the live target's surface.
+     *
+     * This closes the two-holder divergence the maintainer hit (create-new →
+     * immediately-select an existing session on the same host): the status pill
+     * read "Disconnected" while this machine stayed in [RevealState.Seeding]
+     * ("Attaching…") because the indirect controller drive never delivered an
+     * [ConnectionState.Unreachable] for the exact id. A terminal connect failure
+     * now moves BOTH holders to an honest error in lockstep — never a red pill
+     * over a live "Attaching…" spinner.
+     */
+    fun onTerminalError(targetId: SessionId) {
+        val target = currentTargetId ?: return
+        if (targetId != target) {
+            return
+        }
+        val targetName = _state.value.targetNameOrNull() ?: return
+        val next = RevealState.Error(target, targetName, retrying = false)
+        if (next != _state.value) {
+            _state.value = next
+        }
+    }
+
+    /**
      * Set the agent display name for the current target's active pane. Only honored
      * in [RevealState.Live] (the spec: agentName overrides the leaf label ONLY once
      * content is live for this id). Dropped for a non-target id.

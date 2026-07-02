@@ -24,6 +24,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.proof.signals.MainThreadResponsivenessProbe
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
@@ -223,6 +224,93 @@ class MobileSpuriousReconnectE2eTest {
         waitForVisibleTerminal("after ride-through terminal") { it.contains(READY_MARKER) }
         captureViewport("issue1042a-02-rode-through")
         writeTimings("issue1042a")
+    } }
+
+    /**
+     * Issue #1084 — the cellular NETWORK-FLAP STORM main-thread responsiveness
+     * guard (Vector 4, the maintainer's cellular case). This is the flap-journey
+     * arm of wiring [MainThreadResponsivenessProbe] into the load-bearing
+     * connection journeys: a REPEATED loss->restore storm drives the production
+     * [TmuxSessionViewModel.onNetworkChanged] reducer ON the main thread over and
+     * over while the direct Main-stall probe measures inter-heartbeat gaps. If any
+     * network-change step parks Dispatchers.Main beyond budget (the #895/#928
+     * freeze class), the probe balloons a gap -> RED. HARD-asserts (no self-skip).
+     *
+     * The storm is pinned proven-alive so each restore rides through (no Docker
+     * redial churn) — the point is that the reducer runs repeatedly on Main and
+     * must never park it, not to exercise the redial path (covered by the
+     * dedicated redial journeys). Uses only the deterministic `agents:2222`
+     * fixture (no toxiproxy), so it slots into the per-push journey gate.
+     */
+    @Test
+    fun networkFlapStormKeepsMainThreadResponsive() { runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
+        waitForConnected("initial attach")
+        waitForNoSwitchingOverlay("pre-storm attach settle")
+        captureViewport("issue1084-flap-01-attached")
+
+        val vm = currentViewModel()
+        // Keep the storm a deterministic pure ride-through flap (proven-alive) so it
+        // does not churn Docker reconnects; the property under test is that the
+        // repeatedly-driven network reducer never parks Main.
+        vm.forceTransportProvenAliveForTest = true
+        diagnostics!!.clear()
+
+        val baseline = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI"))
+        val probe = MainThreadResponsivenessProbe(
+            intervalMs = MAIN_PROBE_INTERVAL_MS,
+            budgetMs = MAIN_STALL_BUDGET_MS,
+        )
+        val stormStart = SystemClock.elapsedRealtime()
+        probe.start()
+        var seq = 0L
+        repeat(FLAP_STORM_ITERATIONS) { i ->
+            val loss = TerminalNetworkChange(
+                previous = baseline,
+                current = TerminalNetworkSnapshot.NoValidatedNetwork,
+                previousValidated = baseline,
+                reason = "issue1084-flap-loss-$i",
+                sequence = ++seq,
+                kind = TerminalNetworkChangeKind.NetworkLost,
+            )
+            val restore = TerminalNetworkChange(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                current = baseline,
+                previousValidated = baseline,
+                reason = "issue1084-flap-restore-$i",
+                sequence = ++seq,
+                kind = TerminalNetworkChangeKind.NetworkRestored,
+            )
+            // onActivity runs the lambda ON the main thread — the production
+            // reducer is exercised on Main, exactly like a real network callback.
+            compose.activityRule.scenario.onActivity {
+                vm.onNetworkChanged(loss)
+                vm.onNetworkChanged(restore)
+            }
+            SystemClock.sleep(FLAP_STORM_STEP_MS)
+        }
+        val result = probe.stop(minExpectedSamples = MAIN_PROBE_MIN_SAMPLES)
+        timings += "flap_storm_ms=${SystemClock.elapsedRealtime() - stormStart}"
+        timings += "flap_storm_iterations=$FLAP_STORM_ITERATIONS"
+        timings += "main_max_stall_ms=${result.maxGapMs}"
+        timings += "main_probe_samples=${result.sampleCount}"
+        writeText("main-thread-flap-probe.txt", result.message)
+        captureViewport("issue1084-flap-02-after-storm")
+
+        // The session must still be connected after the storm (a torn-down screen
+        // would be a crash, not the freeze under test).
+        waitForConnected("after flap storm")
+
+        assertTrue(
+            "MAIN-THREAD FREEZE during the cellular network-flap storm (Vector 4): " +
+                "${result.message}. maxStall=${result.maxGapMs}ms exceeds the " +
+                "${MAIN_STALL_BUDGET_MS}ms budget — a network-change step parked " +
+                "Dispatchers.Main (the #895/#928 freeze class this gate guards).",
+            result.responsive,
+        )
+        writeTimings("issue1084-flap")
     } }
 
     // (b2) cause #1 ARM 2 — keepalive aged out but the bounded probe ANSWERS over the
@@ -815,6 +903,19 @@ class MobileSpuriousReconnectE2eTest {
         const val READY_MARKER: String = "ISSUE1042-SPURIOUS-READY"
 
         const val WATCH_NO_REDIAL_AFTER_RESTORE_MS: Long = 3_000L
+
+        // Issue #1084 — main-thread responsiveness probe wiring for the flap storm.
+        // See MultiSessionSwitchJourneyE2eTest for the budget rationale: the freeze
+        // class parks Main for SECONDS, so a budget above legitimate reducer/frame
+        // jank avoids per-push flake while still catching a multi-second block.
+        const val MAIN_PROBE_INTERVAL_MS: Long = 100L
+        const val MAIN_PROBE_MIN_SAMPLES: Int = 10
+        val MAIN_STALL_BUDGET_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 2_000L else 1_200L
+        // A short, bounded flap STORM: enough loss/restore cycles to be a genuine
+        // storm while keeping the connected journey affordable for the per-push gate.
+        const val FLAP_STORM_ITERATIONS: Int = 12
+        const val FLAP_STORM_STEP_MS: Long = 150L
 
         // Issue #1065 (R5): the modelled long idle outage held across the loss window.
         // Bounded so the connected journey stays affordable; long enough to be a

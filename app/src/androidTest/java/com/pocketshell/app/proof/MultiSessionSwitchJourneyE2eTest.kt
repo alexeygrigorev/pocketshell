@@ -24,6 +24,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
+import com.pocketshell.app.proof.signals.MainThreadResponsivenessProbe
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
@@ -253,6 +254,22 @@ class MultiSessionSwitchJourneyE2eTest {
         // racing the lease lifecycle.
         val ring = listOf(SESSION_B, SESSION_C, SESSION_A)
 
+        // Issue #1084: wire the direct main-thread responsiveness probe around the
+        // WHOLE A->B->C->A switch ring. A switch that parks Dispatchers.Main (the
+        // #895 black->disconnect->freeze cascade class, or an unbounded
+        // runBlocking / parked mutex on the attach/reattach path) would balloon a
+        // heartbeat inter-arrival gap past budget -> RED. This HARD-asserts Main
+        // responsiveness through the rapid-switch journey (no assumeTrue/assumeFalse
+        // self-skip on the load-bearing assertion). The reproduce-first, non-vacuous
+        // proof that this probe actually fires on this path lives in
+        // [mainThreadProbeDetectsInjectedMainBlockDuringSwitch].
+        val mainProbe = MainThreadResponsivenessProbe(
+            intervalMs = MAIN_PROBE_INTERVAL_MS,
+            budgetMs = MAIN_STALL_BUDGET_MS,
+        )
+        val ringStart = SystemClock.elapsedRealtime()
+        mainProbe.start()
+
         ring.forEachIndexed { index, target ->
             switchAndAssert(
                 step = index + 1,
@@ -261,6 +278,18 @@ class MultiSessionSwitchJourneyE2eTest {
             )
             previousSession = target
         }
+
+        val mainResult = mainProbe.stop(minExpectedSamples = MAIN_PROBE_MIN_SAMPLES)
+        recordTiming("switch_ring_ms", SystemClock.elapsedRealtime() - ringStart)
+        recordTiming("main_max_stall_ms", mainResult.maxGapMs)
+        recordTiming("main_probe_samples", mainResult.sampleCount.toLong())
+        writeText("main-thread-probe.txt", mainResult.message)
+        assertTrue(
+            "MAIN-THREAD FREEZE during the A->B->C->A switch ring: ${mainResult.message}. " +
+                "maxStall=${mainResult.maxGapMs}ms exceeds the ${MAIN_STALL_BUDGET_MS}ms budget — a " +
+                "switch parked Dispatchers.Main (the #895/#928 freeze class this gate guards).",
+            mainResult.responsive,
+        )
 
         writeSummary(
             lines = listOf(
@@ -272,6 +301,84 @@ class MultiSessionSwitchJourneyE2eTest {
             ),
         )
         writeTimings()
+        Unit
+    } }
+
+    /**
+     * Issue #1084 (reproduce-first, G6/G10) — the NON-VACUOUS proof that the
+     * [MainThreadResponsivenessProbe] wired into
+     * [rapidMultiSessionSwitchAlwaysShowsCorrectSessionWithoutSpuriousReconnect]
+     * actually FIRES when Dispatchers.Main is blocked ON the real switch path. A
+     * probe that can never go red proves nothing (the #635 vacuous-pass trap), so
+     * this test injects a deliberate synthetic main-thread block DURING a real
+     * session switch and asserts the probe DETECTS it (RED), then confirms a clean
+     * switch stays responsive (GREEN). Together with the green assertion in the
+     * ring journey this is the durable red->green pair on the real path.
+     *
+     * The injected block (a [SystemClock.sleep] parking Main via `runOnMainSync`)
+     * is exactly what an unbounded `runBlocking` disk read / parked mutex on the
+     * attach/reattach path would do — the regression class this whole gate guards.
+     * Runs on the plain Docker `agents` fixture, no toxiproxy, no self-skip.
+     */
+    @Test
+    fun mainThreadProbeDetectsInjectedMainBlockDuringSwitch() { runBlocking {
+        // Seeded (three sessions + host row + flat mode) BEFORE launch by the rule
+        // chain — the same seed the ring journey uses (the `else` branch of
+        // [seedForCurrentTest]).
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady(hostRowTag)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "injection-proof attach to A")
+
+        expectedMarker[SESSION_A] = SESSION_A_MARKER
+        expectedMarker[SESSION_B] = SESSION_B_MARKER
+        expectedMarker[SESSION_C] = SESSION_C_MARKER
+        assertInputRoutesToShownSession(SESSION_A, "injection-proof initial")
+
+        // GREEN: a clean switch A->B keeps Main responsive under a TIGHT budget.
+        val cleanProbe = MainThreadResponsivenessProbe(
+            intervalMs = MAIN_PROBE_INTERVAL_MS,
+            budgetMs = INJECTION_PROBE_BUDGET_MS,
+        )
+        cleanProbe.start()
+        switchAndAssert(step = 1, fromSession = SESSION_A, toSession = SESSION_B)
+        val clean = cleanProbe.stop(minExpectedSamples = MAIN_PROBE_MIN_SAMPLES)
+        writeText("main-thread-injection-clean.txt", clean.message)
+        assertTrue(
+            "control: a clean switch must keep Main responsive under the tight " +
+                "${INJECTION_PROBE_BUDGET_MS}ms budget: ${clean.message}",
+            clean.responsive,
+        )
+
+        // RED: the SAME switch path (B->A), but park Main for a large synthetic
+        // block INSIDE the probe window. The probe MUST detect the stall — proving
+        // it is non-vacuous on the real switch path (it would catch a genuine
+        // Main-blocking regression here).
+        val redProbe = MainThreadResponsivenessProbe(
+            intervalMs = MAIN_PROBE_INTERVAL_MS,
+            budgetMs = INJECTION_PROBE_BUDGET_MS,
+        )
+        redProbe.start()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            SystemClock.sleep(INJECTED_MAIN_BLOCK_MS)
+        }
+        switchAndAssert(step = 2, fromSession = SESSION_B, toSession = SESSION_A)
+        val red = redProbe.stop(minExpectedSamples = MAIN_PROBE_MIN_SAMPLES)
+        writeText("main-thread-injection-red.txt", red.message)
+        assertFalse(
+            "an injected ${INJECTED_MAIN_BLOCK_MS}ms Main block during the switch MUST be " +
+                "detected as a stall — the wired probe is non-vacuous on the real switch " +
+                "path: ${red.message}",
+            red.responsive,
+        )
+        assertTrue(
+            "the detected gap (${red.maxGapMs}ms) must exceed the ${INJECTION_PROBE_BUDGET_MS}ms budget",
+            red.maxGapMs > INJECTION_PROBE_BUDGET_MS,
+        )
         Unit
     } }
 
@@ -1607,6 +1714,25 @@ class MultiSessionSwitchJourneyE2eTest {
             "network-reconnect",
             "lifecycle-reattach",
         )
+
+        // Issue #1084 — main-thread responsiveness probe wiring.
+        // Heartbeat post interval (ms) for the direct Main-stall detector.
+        const val MAIN_PROBE_INTERVAL_MS: Long = 100L
+        // Floor on heartbeats the window must have produced — guards the G3
+        // vacuous "0 samples = pass" trap; a Main wedged the whole window
+        // produces far fewer and fails.
+        const val MAIN_PROBE_MIN_SAMPLES: Int = 10
+        // Generous stall budget for the per-push swiftshader gate. The freeze
+        // class this guards (the #895 black->disconnect->freeze cascade) parks
+        // Main for SECONDS; a budget well above legitimate heavy-switch frame
+        // jank avoids per-push flake while still catching a multi-second block.
+        // Tighten as the journey proves stable (analyzer docstring guidance).
+        val MAIN_STALL_BUDGET_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 2_000L else 1_200L
+        // The reproduce-first injection proof uses a TIGHT budget + a large
+        // block so detection is unambiguous.
+        const val INJECTION_PROBE_BUDGET_MS: Long = 700L
+        const val INJECTED_MAIN_BLOCK_MS: Long = 2_000L
 
         // Strings the Disconnected/broken-transport path surfaces. None must
         // appear in the visible transcript on a healthy switch.

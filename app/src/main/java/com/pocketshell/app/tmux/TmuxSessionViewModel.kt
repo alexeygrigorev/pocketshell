@@ -2513,10 +2513,10 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
-        // Issue #666: internal guard so the ColdRestore preflight (below) can
+        // Issue #666 / #1155: internal guard so the existence preflight (below) can
         // re-enter [connect] once it has confirmed the session is still alive
         // without preflighting a second time. Never set by external callers.
-        skipColdRestorePreflight: Boolean = false,
+        skipExistencePreflight: Boolean = false,
     ) {
         // Issue #666: a foreground cold-restore must NOT resurrect a session
         // killed elsewhere while the app was backgrounded. Before we attach —
@@ -2524,11 +2524,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // whose `-CC` channel would EOF and trigger an auto-reconnect that
         // recreates the session via `new-session -A` — probe `tmux has-session`
         // over the pooled transport. If the session is gone, drop to the list
-        // instead of attaching anything. We only do this for ColdRestore (the
-        // genuine resume-from-persisted-last-session path); every other trigger
-        // is unchanged.
-        if (trigger == TmuxConnectTrigger.ColdRestore && !skipColdRestorePreflight) {
-            preflightColdRestore(
+        // (and broadcast the stale-session recreate prompt, #1155) instead of
+        // attaching anything. ColdRestore always preflights (the genuine
+        // resume-from-persisted-last-session path); [OpenExisting] preflights too,
+        // but only for a genuine COLD open (handled below, after the warm-path
+        // determination).
+        if (trigger == TmuxConnectTrigger.ColdRestore && !skipExistencePreflight) {
+            preflightSessionExistence(
                 hostId = hostId,
                 hostName = hostName,
                 host = host,
@@ -2540,6 +2542,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 startDirectory = startDirectory,
                 tmuxSessionId = tmuxSessionId,
                 sessionCreated = sessionCreated,
+                originalTrigger = TmuxConnectTrigger.ColdRestore,
             )
             return
         }
@@ -2594,6 +2597,37 @@ public class TmuxSessionViewModel @Inject constructor(
             isSameHost(previousActiveTarget, target) &&
             previousActiveTarget.sessionName != target.sessionName
         val effectiveTrigger = if (willFastSwitch) TmuxConnectTrigger.FastSwitch else trigger
+        // Issue #1155 (Part B): a NORMAL tap of a persisted session row
+        // ([OpenExisting]) that is a genuine COLD open — NOT a fast-switch and with
+        // NO warm cached runtime (either would already prove the session is alive)
+        // — preflights `tmux has-session` before attaching. If the session is
+        // CONFIRMED GONE, [preflightSessionExistence] routes to [failSessionEnded]
+        // → the "create a new session in this folder?" recreate prompt instead of
+        // silently resurrecting a fresh shell via `new-session -A`. A warm/fast open
+        // skips the probe (no added latency to the maintainer's instant switch), and
+        // any AMBIGUOUS probe (no lease / exec error) FAILS OPEN to the normal
+        // attach — so a transient reconnect blip never triggers the prompt.
+        if (trigger == TmuxConnectTrigger.OpenExisting &&
+            !skipExistencePreflight &&
+            !willFastSwitch &&
+            !runtimeCache.contains(target.toRuntimeKey())
+        ) {
+            preflightSessionExistence(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                keyPath = target.keyPath,
+                passphrase = target.passphrase,
+                sessionName = target.sessionName,
+                startDirectory = target.startDirectory,
+                tmuxSessionId = target.tmuxSessionId,
+                sessionCreated = target.sessionCreated,
+                originalTrigger = TmuxConnectTrigger.OpenExisting,
+            )
+            return
+        }
         val generation = nextConnectGeneration()
         latestConnectIntent = ConnectIntent(
             target = target,
@@ -6344,6 +6378,17 @@ public class TmuxSessionViewModel @Inject constructor(
         setConnectionState(
             ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
         )
+        // Issue #1155 (Part B): this is the GENUINELY-GONE path — the attach failed
+        // with a [TmuxSessionNotFoundException] (an absent tmux session), NOT a
+        // transient reconnect blip (those go through [failConnectAttempt] and the
+        // reconnect ladder, which never reach here). Broadcast the gone session +
+        // its folder so the folder tree offers "create a new session in this
+        // folder?" instead of a blank drop-to-list.
+        sessionLifecycleSignals?.emitStaleSession(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            folderPath = target.startDirectory,
+        )
         _sessionEnded.tryEmit(target.sessionName)
     }
 
@@ -6403,30 +6448,34 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #666: cold-restore liveness gate. Runs as the [connectJob] for a
-     * [TmuxConnectTrigger.ColdRestore] connect and probes `tmux has-session`
-     * over the pooled SSH transport BEFORE any attach or warm/cached-runtime
-     * activation.
+     * Issue #666 / #1155: session-existence liveness gate. Runs as the
+     * [connectJob] for a [TmuxConnectTrigger.ColdRestore] resume OR a genuine
+     * COLD [TmuxConnectTrigger.OpenExisting] tree-row tap, and probes `tmux
+     * has-session` over the pooled SSH transport BEFORE any attach or
+     * warm/cached-runtime activation.
      *
      * Why up front, not just in [runConnect]: the resurrection the maintainer
-     * hit happens when the restore activates a STALE warm/cached runtime whose
+     * hit happens when the attach activates a STALE warm/cached runtime whose
      * `-CC` channel then EOFs (the session was killed), which kicks the
      * auto-reconnect path — and that path re-attaches with `new-session -A`,
-     * recreating the session. Probing here, before we touch any cached runtime,
-     * catches the gone session regardless of which attach path would follow.
+     * recreating the session (as a bare shell). Probing here, before we touch
+     * any cached runtime, catches the gone session regardless of which attach
+     * path would follow.
      *
      * - Session GONE (`has-session` exits non-zero): surface "that session
-     *   ended" and drop to the list via [failSessionEnded] — never attach,
-     *   never recreate.
+     *   ended" and drop to the list via [failSessionEnded] — which also
+     *   broadcasts the #1155 stale-session recreate prompt — never attach,
+     *   never silently recreate.
      * - Session ALIVE (`has-session` exits 0): re-enter [connect] with
-     *   `skipColdRestorePreflight = true` so the normal (warm/cached or cold)
-     *   ColdRestore attach proceeds unchanged — no #634/#177 regression.
+     *   `originalTrigger` + `skipExistencePreflight = true` so the normal
+     *   (warm/cached or cold) attach proceeds unchanged — no #634/#177
+     *   regression, and a normal OpenExisting tap attaches as before.
      * - Probe could not run (no lease / exec error): fail OPEN — fall through
      *   to the normal attach so a transient transport hiccup never masquerades
-     *   as "session ended". The attach-only [runConnect] preflight is the
-     *   second line of defence there.
+     *   as "session ended" (no spurious recreate prompt). The attach-only
+     *   [runConnect] preflight is the second line of defence there.
      */
-    private fun preflightColdRestore(
+    private fun preflightSessionExistence(
         hostId: Long,
         hostName: String,
         host: String,
@@ -6438,6 +6487,12 @@ public class TmuxSessionViewModel @Inject constructor(
         startDirectory: String?,
         tmuxSessionId: String?,
         sessionCreated: Long?,
+        // Issue #1155: the trigger to RE-ENTER connect with once the session is
+        // confirmed alive (ColdRestore for the resume path, OpenExisting for a
+        // normal tree-row tap). The GONE branch is identical for both:
+        // [failSessionEnded] drops to the list AND broadcasts the stale-session
+        // recreate prompt.
+        originalTrigger: TmuxConnectTrigger,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -6485,17 +6540,17 @@ public class TmuxSessionViewModel @Inject constructor(
                     startDirectory = startDirectory,
                     tmuxSessionId = tmuxSessionId,
                     sessionCreated = sessionCreated,
-                    trigger = TmuxConnectTrigger.ColdRestore,
-                    skipColdRestorePreflight = true,
+                    trigger = originalTrigger,
+                    skipExistencePreflight = true,
                 )
             }
             if (lease == null) {
                 // No transport to probe with — fail open and let the normal
-                // ColdRestore attach (and its attach-only runConnect preflight)
-                // handle it.
+                // attach (and its attach-only runConnect preflight) handle it.
                 Log.i(
                     ISSUE_145_RECONNECT_TAG,
-                    "tmux-cold-restore-preflight-no-lease session=$sessionName — failing open to normal attach",
+                    "tmux-existence-preflight-no-lease session=$sessionName " +
+                        "trigger=${originalTrigger.logValue} — failing open to normal attach",
                 )
                 proceed()
                 return@launch
@@ -6510,20 +6565,24 @@ public class TmuxSessionViewModel @Inject constructor(
             val result = probe.getOrNull()
             when {
                 result == null -> {
-                    // The probe exec itself failed (transport hiccup). Fail open.
+                    // The probe exec itself failed (transport hiccup) — a TRANSIENT
+                    // condition, not a confirmed-gone. Fail open (attach as normal;
+                    // no recreate prompt).
                     Log.i(
                         ISSUE_145_RECONNECT_TAG,
-                        "tmux-cold-restore-preflight-probe-error session=$sessionName " +
+                        "tmux-existence-preflight-probe-error session=$sessionName " +
+                            "trigger=${originalTrigger.logValue} " +
                             "cause=${probe.exceptionOrNull()?.javaClass?.simpleName} — failing open",
                     )
                     proceed()
                 }
                 result.exitCode != 0 -> {
-                    // Session is GONE — do NOT attach or recreate it.
+                    // Session is CONFIRMED GONE — do NOT attach or recreate it.
                     Log.i(
                         ISSUE_145_RECONNECT_TAG,
-                        "tmux-cold-restore-session-gone session=$sessionName exit=${result.exitCode} " +
-                            "— dropping to list, not recreating",
+                        "tmux-existence-session-gone session=$sessionName " +
+                            "trigger=${originalTrigger.logValue} exit=${result.exitCode} " +
+                            "— dropping to list + stale-session recreate prompt, not recreating",
                     )
                     failSessionEnded(
                         target = target,
@@ -6533,7 +6592,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                 }
                 else -> {
-                    // Session is alive — proceed with the normal restore attach.
+                    // Session is alive — proceed with the normal attach for the
+                    // original trigger (ColdRestore resume or OpenExisting tap).
                     proceed()
                 }
             }
@@ -18677,6 +18737,13 @@ internal const val CONVERSATION_LOAD_TIMEOUT_MS: Long = 12_000L
 
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),
+    // Issue #1155 (Part B): a NORMAL tap of a PERSISTED session row in the folder
+    // tree. Distinct from [UserTap] (which also covers create-new) so a genuine
+    // cold open of an existing-but-maybe-gone session preflights `tmux has-session`
+    // and, when the session is CONFIRMED GONE, drops to the tree with the "create a
+    // new session in this folder?" prompt instead of silently resurrecting it as a
+    // fresh shell via `new-session -A`.
+    OpenExisting("open-existing"),
     LifecycleReattach("lifecycle-reattach"),
     ColdRestore("cold-restore"),
     FastSwitch("fast-switch"),
@@ -18693,6 +18760,7 @@ private val TmuxConnectTrigger.isReconnectTrigger: Boolean
         TmuxConnectTrigger.LifecycleReattach,
         -> true
         TmuxConnectTrigger.UserTap,
+        TmuxConnectTrigger.OpenExisting,
         TmuxConnectTrigger.ColdRestore,
         TmuxConnectTrigger.FastSwitch,
         -> false

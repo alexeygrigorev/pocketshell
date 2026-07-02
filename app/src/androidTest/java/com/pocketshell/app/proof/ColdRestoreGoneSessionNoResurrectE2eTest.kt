@@ -16,7 +16,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
+import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.app.tmux.StaleSession
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -24,7 +27,11 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -315,6 +322,222 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             "the deleted session's screen (Conversation/Terminal) must NOT be " +
                 "showing on resume after a delete",
             !sessionScreenStillUp,
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1155 (Part B) on-device emitter proof. When the persisted last
+     * session is confirmed GENUINELY GONE on the real cold-restore attach path
+     * (the exact journey the #666 test drives: attach → background → kill
+     * externally → recreate/cold-restore), the app must broadcast a
+     * [StaleSession] on the production singleton [SessionLifecycleSignals] so the
+     * folder tree can raise the "create a new session in this folder?" recovery
+     * prompt instead of leaving the user on a blank list. This is the
+     * genuinely-gone branch only — a transient reconnect never reaches this path
+     * (covered red/green in the JVM `TmuxSessionWarmOpenTest`). Same Docker
+     * `agents` fixture + same lifecycle path as the sibling tests, so the signal
+     * is proven on the real gone-session journey, not a proxy.
+     */
+    @Test
+    fun coldRestoreToGoneSessionBroadcastsStaleSignalForRecreatePrompt() { runBlocking {
+        val key = fixtureKey
+
+        // Subscribe to the production stale-session signal BEFORE the restore so
+        // the no-replay broadcast at attach-fail time is observed.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(ctx, TestAccessEntryPoint::class.java)
+        val staleEvents = java.util.Collections.synchronizedList(mutableListOf<StaleSession>())
+        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        collectorScope.launch {
+            entryPoint.sessionLifecycleSignals().staleSessions.collect { staleEvents.add(it) }
+        }
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- Attach to the seeded session via the normal journey.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+
+        // ---- Background -> persist last session, then kill it on the server.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+        killRemoteSession(key)
+        assertTrue("session must be gone on the server after kill", !sessionAlive(key))
+
+        // ---- Cold-restore into the gone session.
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // The genuinely-gone attach must broadcast a StaleSession naming the gone
+        // session, so the folder tree can offer the recreate prompt.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            staleEvents.any { it.sessionName == SEEDED_SESSION }
+        }
+        val fired = synchronized(staleEvents) { staleEvents.toList() }
+        writeText(
+            "stale-session-signal.txt",
+            buildString {
+                appendLine("expected_stale_session=$SEEDED_SESSION")
+                appendLine("stale_events=${fired.map { it.sessionName }}")
+                appendLine("stale_folders=${fired.map { it.folderPath }}")
+            },
+        )
+        collectorScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        assertTrue(
+            "a genuinely-gone cold-restore must broadcast a StaleSession for the " +
+                "folder tree's recreate prompt; saw ${fired.map { it.sessionName }}",
+            fired.any { it.sessionName == SEEDED_SESSION },
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1155 (Part B) blocker 3 — the maintainer's PRIMARY gesture. A NORMAL
+     * TAP of a persisted session row whose tmux session was killed externally must
+     * reach the "This session no longer exists — create a new session in this
+     * folder?" recreate DIALOG, NOT silently recreate a fresh shell via
+     * `new-session -A` (the reported "it was there but as a shell, not the agent").
+     *
+     * Journey on the deterministic Docker `agents` fixture:
+     *  1. host row -> folder list (the seeded session row is shown).
+     *  2. Kill that tmux session server-side (external removal — the RARE case the
+     *     persistent tree can't know about).
+     *  3. TAP the still-shown (advisory-cached) session row -> the OpenExisting
+     *     connect preflights `tmux has-session`, sees it gone, drops back to the
+     *     folder tree AND broadcasts the stale-session signal.
+     *  4. The folder tree (bound on the backstack) raises the recreate dialog.
+     *
+     * Acceptance: the `STALE_SESSION_DIALOG_TAG` recreate dialog is shown after the
+     * tap, and the session was NOT resurrected server-side.
+     */
+    @Test
+    fun openExistingTapOfGoneSessionShowsRecreateDialog() { runBlocking {
+        val key = fixtureKey
+
+        // ---- (1) host -> folder list; the seeded session row is present.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+
+        // ---- (2) Kill the session server-side (external removal).
+        killRemoteSession(key)
+        assertTrue("session must be gone server-side after kill", !sessionAlive(key))
+
+        // ---- (3) TAP the still-shown persisted row -> OpenExisting -> preflight
+        // confirms gone -> drop back + stale-session broadcast.
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+
+        // ---- (4) The folder tree raises the recreate dialog.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val dialogShown = compose
+            .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val resurrected = sessionAlive(key)
+        writeText(
+            "open-existing-tap-recreate-dialog.txt",
+            buildString {
+                appendLine("tapped_session=$SEEDED_SESSION")
+                appendLine("recreate_dialog_shown=$dialogShown")
+                appendLine("session_resurrected_server_side=$resurrected")
+                appendLine("expected_recreate_dialog_shown=true")
+                appendLine("expected_session_resurrected=false")
+            },
+        )
+        assertTrue(
+            "REGRESSION (#1155 blocker 3): tapping a gone persisted session must " +
+                "show the recreate dialog, not silently recreate a shell",
+            dialogShown,
+        )
+        assertTrue(
+            "tapping a gone session must NOT resurrect it server-side (no silent " +
+                "`new-session -A`)",
+            !resurrected,
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1155 (Part A) blocker 4 — the cold deep-link-back INSTANT render. The
+     * maintainer's recurring #867/#1109 symptom is the "Loading workspace tree"
+     * flash when returning to the folder tree. With the process-start warm
+     * ([com.pocketshell.app.App.onCreate] → `TreeClientCache.warmAll`), a cold
+     * process that deep-links back into the tree must paint the persisted tree
+     * (the seeded session row) with NO Loading panel.
+     *
+     * Journey:
+     *  1. host -> folder list (the tree reconciles + persists to the client cache).
+     *  2. Deep-link into the session, then `recreate()` the activity (COLD process:
+     *     App.onCreate re-warms the client cache from disk).
+     *  3. Back out to the folder tree.
+     *
+     * Acceptance: the persisted session row is shown and the `FOLDER_LIST_LOADING_TAG`
+     * Loading panel is NOT present when it appears (no rebuild flash). The reviewer
+     * additionally confirms the no-flash visually on the emulator.
+     */
+    @Test
+    fun coldDeepLinkBackToFolderTreeRendersPersistedTreeNoLoadingFlash() { runBlocking {
+        // ---- (1) host -> folder list; let the tree settle + persist to the cache.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (2) Deep-link into the session, then COLD-recreate the process.
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // ---- (3) Back out to the folder tree (the cold-restored session screen or
+        // wherever the restore landed) and assert the persisted tree paints.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithText(SEEDED_SESSION, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        // When the persisted row is present, the full-screen Loading panel must NOT
+        // be — i.e. the tree rendered from the warmed cache, not a rebuild flash.
+        val loadingShown = compose
+            .onAllNodesWithTag(FOLDER_LIST_LOADING_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val rowShown = compose
+            .onAllNodesWithText(SEEDED_SESSION, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        writeText(
+            "cold-deep-link-back-instant-render.txt",
+            buildString {
+                appendLine("persisted_row_shown=$rowShown")
+                appendLine("loading_panel_shown_with_row=$loadingShown")
+                appendLine("expected_persisted_row_shown=true")
+                appendLine("expected_loading_panel_shown_with_row=false")
+            },
+        )
+        assertTrue(
+            "the cold deep-link-back must paint the persisted session row from the " +
+                "warmed client cache",
+            rowShown,
+        )
+        assertTrue(
+            "REGRESSION (#1155 Part A): the folder tree showed the full-screen " +
+                "Loading panel alongside the persisted row (rebuild flash)",
+            !loadingShown,
         )
         Unit
     } }

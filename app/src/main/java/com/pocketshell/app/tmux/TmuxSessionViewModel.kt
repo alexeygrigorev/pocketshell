@@ -1087,8 +1087,15 @@ public class TmuxSessionViewModel @Inject constructor(
      * but HEALTHY channel is never torn down by the probe itself. Returns true if
      * the channel answered. The [LivenessProbe] wraps this in its own generous
      * per-probe timeout and N-consecutive-failure criterion.
+     *
+     * Issue #1193: [requireAnsweredRoundTrip] forwards to [TmuxClient.probeLiveness]
+     * so a NETWORK-TRANSITION probe (the restore / handoff arms) demands an actual
+     * answered round-trip over the (possibly new) path — the #927 reader-activity
+     * fallback is NOT valid liveness evidence across a WiFi↔cellular handoff, since
+     * those bytes crossed the OLD, now-dead socket. The steady-state periodic drop
+     * probe leaves it `false` (keeps the #927 busy-vs-dead tolerance).
      */
-    private suspend fun runLivenessProbePing(): Boolean {
+    private suspend fun runLivenessProbePing(requireAnsweredRoundTrip: Boolean = false): Boolean {
         // EPIC #792 Slice D — the per-PR synthetic-drop seam. When the test hook
         // is armed the ping reports DEAD regardless of the real channel, so the
         // silent-drop detection + recovery contract can be exercised
@@ -1097,7 +1104,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // real wire. Production default is false (the real probe runs).
         if (forceLivenessProbeDeadForTest) return false
         val client = clientRef ?: return false
-        return runCatching { client.probeLiveness() }.getOrDefault(false)
+        return runCatching { client.probeLiveness(requireAnsweredRoundTrip) }.getOrDefault(false)
     }
 
     /**
@@ -5012,8 +5019,13 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
     ) {
         viewModelScope.launch {
+            // Issue #1193: this handoff probe is a NETWORK-TRANSITION probe, so it
+            // requires an ANSWERED round-trip (like the restore arm). Recent reader
+            // bytes crossed the OLD socket and are not evidence the new path is
+            // alive — the #927 reader-activity fallback would let a dead post-handoff
+            // cellular socket pass, exactly the residual §4 of the #928 spike.
             val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
-                runLivenessProbePing()
+                runLivenessProbePing(requireAnsweredRoundTrip = true)
             } ?: false
             if (alive) {
                 rideThroughNetworkHandoffProvenAlive(change, target)
@@ -5244,32 +5256,46 @@ public class TmuxSessionViewModel @Inject constructor(
      * restore. On cellular the device dips into no-validated-network constantly
      * (tunnel, elevator, RAT handover, congestion re-validation) WITHOUT the TCP
      * socket dying, so that unconditional redial was the maintainer's "constant
-     * reconnects on mobile internet". We now check whether the EXISTING transport
-     * survived the dip before tearing it down:
-     *   1. if the always-on transport keepalive proves the link alive within its
-     *      ride-through window (a sub-budget loss never ages it out), RIDE THROUGH
-     *      synchronously with no redial; otherwise
-     *   2. issue ONE bounded control-channel probe — if it answers, ride through.
-     * Only when the transport does NOT answer (or the bounded probe times out) do we
-     * fall back to the #997 fresh-lease redial. A genuinely dead post-outage socket
-     * therefore STILL reconnects (BareNetworkLossRestoreReconnectE2eTest guards it).
+     * reconnects on mobile internet". We check whether the EXISTING transport
+     * survived the dip before tearing it down.
+     *
+     * Issue #1193 — the restore ride-through decision now goes through ONE
+     * mechanism only: a bounded ACTIVE probe. The pre-#1193 fast-path rode through
+     * whenever the passive transport keepalive TIMESTAMP was fresh
+     * ([isTransportKeepAliveProvenAliveRecently], a pure < 90s clock comparison —
+     * NO round-trip). On a WiFi→cellular handoff the old socket is silently dead
+     * (the new radio's IP/NAT invalidates the 4-tuple) while the last-inbound-byte
+     * age is still under the ~90s keepalive budget, so that fast-path committed to
+     * a DEAD transport, flipped back to Live, and the `-CC` reader threw ~157ms
+     * later → `passive_disconnect` + reconnect churn (the maintainer's 2026-07-02
+     * cellular spurious drop). This is the SAME defect #1078 already fixed on the
+     * sibling validated-identity-change arm ([suppressNetworkTransportProvenAlive]),
+     * which a real cellular flap bypasses because it arrives via loss→restore, not
+     * identity-change. We mirror that fix here: issue ONE bounded control-channel
+     * probe that requires an ANSWERED round-trip (#1193 `requireAnsweredRoundTrip`,
+     * so stale reader activity over the OLD socket cannot mask a dead new path). If
+     * it answers, RIDE THROUGH (the #974/#981/#1042 spurious-drop-suppression win is
+     * preserved — a truly-live transport answers fast, well inside the 2s budget).
+     * Only when the probe does NOT answer (or times out) do we fall back to the #997
+     * fresh-lease redial — a genuinely dead post-handoff socket therefore redials
+     * PROMPTLY instead of freezing Live-but-dead for ~90s
+     * (BareNetworkLossRestoreReconnectE2eTest guards both outcomes). The passive
+     * keepalive check remains a NEGATIVE signal elsewhere (the #964 probe deferral,
+     * the handoff classifier) but is NO LONGER a positive ride-through authority on
+     * restore (D22 hard-cut — the passive fast-path is deleted, not flagged).
      */
     private fun scheduleNetworkReconnectOnRestore(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
-        // (1) Fast synchronous ride-through: the keepalive already proves the link
-        // alive within its window, so the brief loss did not kill the socket.
-        if (isTransportKeepAliveProvenAliveRecently()) {
-            rideThroughNetworkRestore(change, target, cause = "transport_proven_alive")
-            return
-        }
-        // (2) The keepalive aged out (a quiet/idle link). Do not blindly redial —
-        // issue ONE bounded probe over the warm control channel; ride through if it
-        // answers, redial only if it does not.
+        // Issue #1193: EVERY restore ride-through decision goes through the bounded
+        // ACTIVE probe (require an answered round-trip). Ride through only if the
+        // (possibly new) path answers; redial via the #997 fresh lease if it does
+        // not. No passive-timestamp fast-path — that is what committed to a dead
+        // cellular socket.
         viewModelScope.launch {
             val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
-                runLivenessProbePing()
+                runLivenessProbePing(requireAnsweredRoundTrip = true)
             } ?: false
             if (alive) {
                 rideThroughNetworkRestore(change, target, cause = "probe_answered")

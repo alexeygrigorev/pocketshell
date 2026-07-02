@@ -142,4 +142,59 @@ class ProbeLivenessBusyVsDeadTest {
             client.probeLiveness(),
         )
     }
+
+    // ---- Issue #1193: NETWORK-TRANSITION probe (requireAnsweredRoundTrip) ----
+    //
+    // The #927 reader-activity fallback is correct for a STEADY-STATE periodic probe
+    // (a busy-but-alive link mid-`%output`-burst). But on a WiFi↔cellular
+    // restore/handoff those recent reader bytes crossed the OLD socket's 4-tuple —
+    // they do NOT prove the NEW default network's path is alive. On the maintainer's
+    // cellular flap the old socket was silently dead while the last-inbound-byte age
+    // was still fresh, so a fallback-tolerant probe would ride through onto the dead
+    // transport and the reader threw ~157ms later. A transition probe must require an
+    // actual ANSWERED round-trip.
+
+    @Test
+    fun `transition probe ignores the reader-activity fallback - a busy channel is DEAD`() = runTest {
+        // The exact #927 busy case, but as a NETWORK-TRANSITION probe: the
+        // refresh-client reply did NOT come back and only stale (old-socket) reader
+        // activity is present. The steady-state probe tolerates it (#927); the
+        // transition probe must report DEAD so the restore arm redials the new path.
+        val client = FakeProbeClient(bestEffortIsError = true, readerActivityAgeMs = 100)
+        assertTrue(
+            "the steady-state probe still tolerates the busy channel (#927 preserved)",
+            client.probeLiveness(),
+        )
+        assertFalse(
+            "a network-transition probe must require an ANSWERED round-trip and ignore the " +
+                "reader-activity fallback — recent bytes crossed the OLD socket (#1193)",
+            client.probeLiveness(requireAnsweredRoundTrip = true),
+        )
+    }
+
+    @Test
+    fun `transition probe is ALIVE when the round-trip actually answers`() = runTest {
+        // A truly-live new path answers refresh-client fast — the happy reattach that
+        // must NOT regress: the transition probe rides through when the round-trip
+        // answers, regardless of reader-activity.
+        val client = FakeProbeClient(bestEffortIsError = false, readerActivityAgeMs = Long.MAX_VALUE)
+        assertTrue(
+            "a transition probe with a clean answered round-trip is alive (happy reattach " +
+                "preserved)",
+            client.probeLiveness(requireAnsweredRoundTrip = true),
+        )
+    }
+
+    @Test
+    fun `transition probe on a disconnected client is DEAD`() = runTest {
+        val client = FakeProbeClient(
+            bestEffortIsError = false,
+            readerActivityAgeMs = 0,
+            isDisconnected = true,
+        )
+        assertFalse(
+            "a disconnected client is dead on a transition probe too",
+            client.probeLiveness(requireAnsweredRoundTrip = true),
+        )
+    }
 }

@@ -314,6 +314,154 @@ class SessionNameDerivationTest {
         assertEquals("tmp-issue898", name)
     }
 
+    // --- Issue #1184: user-entered custom session label (resolveSessionName /
+    // the derivedSessionName(choice, …) wrapper carrying choice.customName).
+    // These pin every acceptance criterion: default accepted → derived name;
+    // custom sanitised; collision disambiguated (never silently attaches to a
+    // different session's tmux); blank → derived default. ---
+
+    @Test
+    fun customNameNullFallsBackToDerivedDefault() {
+        // Acceptance: accepting the prefilled default unchanged reproduces
+        // today's derived-name behaviour (no regression).
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = null,
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+        )
+        assertEquals("git-pocketshell", name)
+    }
+
+    @Test
+    fun customNameEqualToDerivedDefaultIsUnchanged() {
+        // The picker prefills the field with the derived base; submitting it
+        // verbatim must yield exactly the derived name.
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = "git-pocketshell",
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+        )
+        assertEquals("git-pocketshell", name)
+    }
+
+    @Test
+    fun customNameWithSpacesIsSanitisedToValidTmuxName() {
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = "git pocketshell review",
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+        )
+        assertEquals("git-pocketshell-review", name)
+        assertNoTmuxForbidden(name)
+    }
+
+    @Test
+    fun customNameWithDotsAndColonsIsSanitised() {
+        // tmux forbids `.` and `:` — they must collapse to `_`.
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = "my.session:name",
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+        )
+        assertEquals("my_session_name", name)
+        assertNoTmuxForbidden(name)
+    }
+
+    @Test
+    fun customNameCollidingWithExistingIsDisambiguated() {
+        // Acceptance: a custom label that collides with an existing session
+        // must be disambiguated, never silently attach to a different
+        // session's tmux (which `new-session -A` would otherwise do).
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = "review",
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            existingNames = setOf("review"),
+        )
+        assertEquals("review-2", name)
+    }
+
+    @Test
+    fun customNameCollisionWalksUpUntilFreeSlot() {
+        val name = SessionNameDerivation.resolveSessionName(
+            customName = "review",
+            startDirectory = "~/git/pocketshell",
+            homeDirectory = home,
+            existingNames = setOf("review", "review-2", "review-3"),
+        )
+        assertEquals("review-4", name)
+    }
+
+    @Test
+    fun blankCustomNameFallsBackToDerivedDefault() {
+        // Acceptance: an empty/blank custom name falls back to the derived
+        // default. Covers "", whitespace-only, and punctuation-only (which
+        // sanitises to empty).
+        listOf("", "   ", "...", ":::", "---").forEach { blank ->
+            val name = SessionNameDerivation.resolveSessionName(
+                customName = blank,
+                startDirectory = "~/git/pocketshell",
+                homeDirectory = home,
+            )
+            assertEquals("git-pocketshell", name)
+        }
+    }
+
+    @Test
+    fun sanitiseNameNeverContainsTmuxForbiddenCharacters() {
+        listOf("a.b:c", "weird name!", "tab\tsep", "slash/path").forEach {
+            assertNoTmuxForbidden(SessionNameDerivation.sanitiseName(it))
+        }
+    }
+
+    @Test
+    fun derivedSessionNameWrapperUsesCustomLabel() {
+        // The UI carries the user's label on choice.customName; the wrapper
+        // must sanitise + use it instead of the directory-derived default.
+        val choice = SessionTypeChoice(
+            type = SessionType.Agent,
+            agent = AgentCli.Claude,
+            startDirectory = "~/git/pocketshell",
+            customName = "git pocketshell review",
+        )
+        val name = derivedSessionName(
+            choice = choice,
+            homeDirectory = home,
+        )
+        assertEquals("git-pocketshell-review", name)
+    }
+
+    @Test
+    fun derivedSessionNameWrapperDisambiguatesCustomLabel() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "~/git/pocketshell",
+            customName = "review",
+        )
+        val name = derivedSessionName(
+            choice = choice,
+            homeDirectory = home,
+            existingNames = setOf("review"),
+        )
+        assertEquals("review-2", name)
+    }
+
+    @Test
+    fun derivedSessionNameWrapperBlankCustomFallsBackToDerived() {
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "~/git/pocketshell",
+            customName = "   ",
+        )
+        val name = derivedSessionName(
+            choice = choice,
+            homeDirectory = home,
+        )
+        assertEquals("git-pocketshell", name)
+    }
+
     // --- conventionalRemoteHome / knownSessionNames helpers ---
 
     @Test

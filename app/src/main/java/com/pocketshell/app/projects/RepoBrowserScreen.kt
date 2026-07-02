@@ -155,6 +155,11 @@ fun RepoBrowserScreen(
             folderLabel = repoFolderLabel(repoPath),
             onDismiss = { pickerRepoPath = null },
             suggestStartDirectories = suggestStartDirectories,
+            // Issue #1184: prefill the editable "Session name" field with the
+            // directory-derived default for the chosen start folder.
+            deriveDefaultName = { dir ->
+                defaultSessionBaseName(dir, conventionalRemoteHome(username))
+            },
             onCreate = { choice ->
                 pickerRepoPath = null
                 val newName = derivedSessionName(

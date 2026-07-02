@@ -129,6 +129,7 @@ import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.projects.conventionalRemoteHome
+import com.pocketshell.app.projects.defaultSessionBaseName
 import com.pocketshell.app.projects.derivedSessionName
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.ConversationLoadState
@@ -2450,6 +2451,11 @@ public fun TmuxSessionScreen(
                 suggestStartDirectories = suggestStartDirectories,
                 claudeProfiles = newSessionClaudeProfiles,
                 codexProfiles = newSessionCodexProfiles,
+                // Issue #1184: prefill the editable "Session name" field with
+                // the directory-derived default for the chosen start folder.
+                deriveDefaultName = { dir ->
+                    defaultSessionBaseName(dir, conventionalRemoteHome(user))
+                },
                 onCreate = { choice ->
                     showNewSessionSheet = false
                     // Issue #898 (Finding 1): pass the host's already-known

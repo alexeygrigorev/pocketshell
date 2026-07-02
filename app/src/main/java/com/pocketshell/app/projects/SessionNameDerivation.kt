@@ -72,6 +72,50 @@ internal object SessionNameDerivation {
     }
 
     /**
+     * Resolve the final tmux session name for a NEW session, honouring an
+     * optional user-entered custom label (issue #1184).
+     *
+     * The directory-derived default ([derive]/#429/#642) is preserved as the
+     * fallback — this ADDS a user override, it does not replace the default
+     * (D22 hard-cut: no fork of the naming convention). Behaviour:
+     *
+     *  - A meaningful [customName] is sanitised to a tmux-safe name via
+     *    [sanitiseName] (spaces / `.` / `:` and other disallowed characters
+     *    are normalised) and used as the base.
+     *  - A blank/`null` [customName] — including one with no real content once
+     *    sanitised (all whitespace, or all-punctuation such as `...`/`:::`
+     *    that leaves only `_`/`-` separators) — falls back to the
+     *    directory-derived [baseName]. "Meaningful" means the sanitised label
+     *    contains at least one letter or digit.
+     *  - Either way the base is run through [disambiguate] against
+     *    [existingNames], so a duplicate label gets a deterministic `-2`,
+     *    `-3`, … suffix and can never silently attach to a DIFFERENT
+     *    session's tmux.
+     */
+    fun resolveSessionName(
+        customName: String?,
+        startDirectory: String,
+        homeDirectory: String?,
+        existingNames: Set<String> = emptySet(),
+    ): String {
+        val custom = customName
+            ?.let { sanitiseName(it) }
+            ?.takeIf { name -> name.any(Char::isLetterOrDigit) }
+        val base = custom ?: baseName(startDirectory, homeDirectory)
+        return disambiguate(base, existingNames)
+    }
+
+    /**
+     * Sanitise a whole user-entered custom label to a tmux-safe name (issue
+     * #1184), reusing the per-component [sanitisePart] rules: `.`/`:` → `_`
+     * (tmux forbids `.` and `:` in session names), any other disallowed run
+     * → `-`, then strip leading/trailing `-`. Leading/trailing whitespace is
+     * trimmed first. An all-punctuation label sanitises to the empty string,
+     * which the caller treats as "fall back to the derived default".
+     */
+    fun sanitiseName(name: String): String = sanitisePart(name.trim())
+
+    /**
      * The directory-derived part of the name (no agent prefix, no
      * collision suffix). Exposed for focused unit tests of the tmuxctl
      * path logic.
@@ -125,7 +169,7 @@ internal object SessionNameDerivation {
      * session names), then any other disallowed run collapses to `-`, then
      * strip leading/trailing `-`.
      */
-    private fun sanitisePart(part: String): String =
+    internal fun sanitisePart(part: String): String =
         part
             .replace(Regex("[.:]+"), "_")
             .replace(Regex("[^A-Za-z0-9_-]+"), "-")

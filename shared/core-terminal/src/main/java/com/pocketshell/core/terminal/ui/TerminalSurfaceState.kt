@@ -601,6 +601,81 @@ class TerminalSurfaceState(
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Issue #1192 — SURFACE-paint confirmation seam (distinct from the MODEL grid).
+    //
+    // Every predicate above reads the emulator MODEL grid (`renderedNonBlankCharCount`,
+    // `visibleScreenIsBlank`, `visibleRenderLostFrameVsCapture`, …). The heal oracle
+    // ([com.pocketshell.app.tmux.TmuxSessionViewModel.healActivePaneIfStaleRender])
+    // compares that MODEL against tmux's authoritative capture, so a black screen
+    // where the on-screen SURFACE is blank while the model grid still matches tmux is
+    // un-catchable BY CONSTRUCTION — the model never diverges (spike #874 GAP-1).
+    //
+    // This is the minimal paint-confirmation the vendored [com.termux.view.TerminalView]
+    // reports from `onDraw`: `true` when it painted the emulator content (the normal
+    // `mRenderer.render` path), `false` when it painted the BLACK fallback (the
+    // `mEmulator == null` window or a render that threw — #966/#967). The ViewModel's
+    // existing gated stale-render watchdog READS [surfaceIsBlackWhileModelHasContent]
+    // on the tick it already pays for — NO new poll/timer (respects #1164). Volatile
+    // longs, not Compose state: `onDraw` fires on the render thread and this is a
+    // best-effort diagnostic, never a gate on rendering.
+    // -------------------------------------------------------------------------
+
+    @Volatile
+    private var lastSurfaceContentPaintAtMs: Long = 0L
+
+    @Volatile
+    private var lastSurfaceBlankPaintAtMs: Long = 0L
+
+    /**
+     * Issue #1192 — called by [com.termux.view.TerminalView.onDraw] (wired in
+     * [TerminalSurface]) once per painted frame. [paintedEmulatorContent] is `true`
+     * for the normal `mRenderer.render` path and `false` for the black fallback
+     * (`mEmulator == null`, or a render that threw and cleared the canvas). [atMs]
+     * is an `elapsedRealtime()` monotonic stamp. Cheap: one volatile write, no
+     * allocation, called only from `onDraw`.
+     */
+    fun onSurfaceFramePainted(paintedEmulatorContent: Boolean, atMs: Long) {
+        if (paintedEmulatorContent) {
+            lastSurfaceContentPaintAtMs = atMs
+        } else {
+            lastSurfaceBlankPaintAtMs = atMs
+        }
+    }
+
+    /**
+     * Issue #1192 — the SURFACE-only-black detector (the sixth black-frame class the
+     * heal oracle cannot see). Returns `true` when BOTH:
+     *
+     *  1. the MODEL grid holds content ([renderedNonBlankCharCount] > 0) — so the
+     *     oracle, comparing model-vs-tmux, would call this pane HEALTHY; AND
+     *  2. the SURFACE is CONFIRMED black — its most recent painted frame was the
+     *     black fallback ([lastSurfaceBlankPaintAtMs] is newer than
+     *     [lastSurfaceContentPaintAtMs]), i.e. the View is drawing black while the
+     *     model still carries the frame.
+     *
+     * Requires POSITIVE evidence of a black paint (a blank-paint stamp exists AND is
+     * the most-recent frame): a surface that has simply not painted yet (the cold
+     * pre-first-`onDraw` transient) returns `false`, so a freshly-attached-but-seeded
+     * pane is never spuriously fingerprinted. Once the View paints the content, the
+     * content stamp overtakes and this returns `false` again. DIAGNOSTICS ONLY — this
+     * gates no reseed/heal (#721 already self-heals every KNOWN surface-blank trigger).
+     */
+    fun surfaceIsBlackWhileModelHasContent(): Boolean {
+        if (renderedNonBlankCharCount() <= 0) return false
+        return lastSurfaceBlankPaintAtMs > 0L &&
+            lastSurfaceBlankPaintAtMs > lastSurfaceContentPaintAtMs
+    }
+
+    /**
+     * Test-only (#1192): drive the paint-confirmation seam exactly as
+     * [com.termux.view.TerminalView.onDraw] does, so a JVM unit test can reproduce
+     * the surface-black-but-model-intact state WITHOUT a real Android View / render
+     * thread (the #780 synthetic-state model — the CI JVM cannot run `onDraw`).
+     */
+    fun recordSurfaceFramePaintedForTest(paintedEmulatorContent: Boolean, atMs: Long) =
+        onSurfaceFramePainted(paintedEmulatorContent, atMs)
+
     /**
      * Issue #966/#967 — the "mostly-black / stale render on a LIVE transport"
      * oracle. The v0.4.17 black-screen heal ([visibleScreenIsBlank] /

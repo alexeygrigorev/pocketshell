@@ -181,6 +181,51 @@ class ReseedBlankWatchdogCharacterizationTest {
     }
 
     /**
+     * Issue #1177 (black-screen GAP B): connect a VM the way [connectVm] does —
+     * suppress the connect()-auto-armed BLANK watchdog so a manually-armed one runs
+     * in isolation — but LEAVE the #966/#1166 stale-render auto-arm ENABLED (the
+     * production default). This lets the blank-watchdog EXHAUSTION hand-off actually
+     * arm the stale-render heal watchdog (the fix), which a stale-render-disabled VM
+     * would silently suppress.
+     */
+    private fun TestScope.connectVmReattachBlack(client: FakeTmuxClient): TmuxSessionViewModel {
+        val live = AlwaysConnectedSession(id = "live")
+        val connector = SingleSessionConnector(live)
+        val leaseManager =
+            testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
+        runCurrent()
+        // Isolate the manually-armed blank watchdog (as connectVm does), but keep
+        // the stale-render auto-arm ON so the GAP B exhaustion hand-off can fire.
+        vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        vm.setTmuxClientFactoryForTest { _, _, _ -> client }
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+        return vm
+    }
+
+    /**
+     * Issue #1177: a recovery `capture-pane` frame rich enough to clear the
+     * STALE_RENDER_MIN_CAPTURE_CHARS floor (a single short line is below it, so the
+     * heal oracle would not fire on it). The marker line proves the healed frame
+     * landed on the pane's grid.
+     */
+    private fun issue1177RecoveredFrame(): List<String> = buildList {
+        add("ISSUE1177-REATTACH-HEALED — recovered viewport after silent-reattach")
+        repeat(24) { add("recovered context row $it xxxxxxxxxxxxxxxxxxxxxxxxxxxx") }
+    }
+
+    /**
      * Issue #886: connect a VM whose active pane never seeds, leaving the
      * connect()-auto-armed blank-watchdog at the PRODUCTION bound, then drain to
      * idle so the watchdog runs to EXHAUSTION end-to-end through the real
@@ -615,6 +660,95 @@ class ReseedBlankWatchdogCharacterizationTest {
         assertFalse(
             "a healed reveal must NOT be the honest-error surface (was $reveal)",
             reveal is com.pocketshell.core.connection.RevealState.Error,
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // (e) Issue #1177 (black-screen GAP B) — the SILENT-REATTACH hole.
+    //     The passive/transport silent-reattach paths (:8077/:8319) arm the
+    //     blank watchdog with surfaceErrorOnExhaustion=false. When the reconnect
+    //     seed NEVER lands within the blank window the watchdog used to fall off
+    //     the end SILENTLY (:10658) — a PERMANENT BLACK pane on a LIVE (green)
+    //     transport (the maintainer's post_grace_foreground full-reconnect black,
+    //     #874). The fix: on exhaustion, hand off to the lifetime stale-render
+    //     heal watchdog so a seed that never landed keeps being healed against
+    //     tmux's authoritative grid (a fully-black pane IS caught by the heal
+    //     oracle, visibleRenderLostFrameVsCapture).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun reattachBlankWatchdogExhaustionArmsStaleRenderHealInsteadOfSilentBlack() = runVmTest {
+        // Model the reattach silent-black: a reconnected session (green dot) whose
+        // active pane's seed keeps coming back EMPTY — the pane is BLACK on a live
+        // transport, exactly the surface armConnectedBlankWatchdog(false) guards on
+        // the :8077/:8319 reattach paths. Stale-render auto-arm is LEFT ON (the
+        // production default) so the exhaustion hand-off can arm it.
+        val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        val vm = connectVmReattachBlack(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertTrue(
+            "precondition: the reconnect seed came back empty -> the pane is BLACK on a live transport",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        // Foreground + screen-on so the stale-render watchdog actually captures
+        // once it is armed (#1166 gate).
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+
+        // Baseline: right after connect no stale-render watchdog is running (the
+        // reveal skips arming it while the pane is blank).
+        vm.staleRenderWatchdogJobForTest().let {
+            assertTrue(
+                "precondition: no stale-render watchdog is armed before the blank watchdog exhausts",
+                it == null || it.isCancelled,
+            )
+        }
+
+        // Arm the blank watchdog the way the reattach paths do
+        // (armConnectedBlankWatchdogForTest passes the default
+        // surfaceErrorOnExhaustion=false), and drive it to EXHAUSTION with every
+        // capture empty — the pane stays black for the whole window.
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armConnectedBlankWatchdogForTest(guard)
+        // Each blank-watchdog tick also runs the bounded empty-capture reseed retry
+        // (500ms tick + up to 4 attempts x 120ms), so 20 ticks span ~17s of virtual
+        // time. Advance a comfortable margin past that so the watchdog fully
+        // EXHAUSTS on a still-blank pane (the GAP B condition).
+        advanceTimeBy(CONNECTED_BLANK_WATCHDOG_TICK_MS * CONNECTED_BLANK_WATCHDOG_MAX_TICKS * 4)
+        runCurrent()
+
+        // GAP B fix: on exhaustion the reattach path MUST hand off to the stale-
+        // render heal watchdog rather than exiting silently into a permanent black.
+        // RED (base): the branch returns silently -> no watchdog armed -> the pane
+        // is stranded BLACK forever. GREEN (fix): a live stale-render watchdog runs.
+        val staleJob = vm.staleRenderWatchdogJobForTest()
+        assertTrue(
+            "Issue #1177: on blank-watchdog exhaustion the silent-reattach path MUST " +
+                "arm the stale-render heal watchdog (not exit silently into a permanent " +
+                "black on a live transport). job=$staleJob",
+            staleJob != null && staleJob.isActive,
+        )
+
+        // ...and it actually HEALS the black pane: tmux's grid now carries a real
+        // frame, so the next stale-render capture repaints the pane. The recovery
+        // frame is rich enough to clear the STALE_RENDER_MIN_CAPTURE_CHARS floor.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = issue1177RecoveredFrame(), isError = false),
+        )
+        // The stale-render watchdog's first tick fires 4s after it was armed; a
+        // generous advance past the widest backed-off interval guarantees a tick.
+        advanceTimeBy(STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS + STALE_RENDER_WATCHDOG_TICK_MS + 100)
+        runCurrent()
+
+        assertFalse(
+            "Issue #1177: the stale-render heal must repaint the black reattached pane " +
+                "on a live transport — never a permanent black.",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            "the recovered frame must be on the pane's grid",
+            renderedTranscriptFor(pane).contains("ISSUE1177-REATTACH-HEALED"),
         )
     }
 

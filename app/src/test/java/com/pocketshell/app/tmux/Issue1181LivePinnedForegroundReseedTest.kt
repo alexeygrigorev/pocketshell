@@ -249,8 +249,10 @@ class Issue1181LivePinnedForegroundReseedTest {
         val pane = vm.panes.value.single { it.paneId == "%1" }
         assertFalse(vm.hasPendingReattachForTest())
 
-        // The idle agent's next capture carries its recovered alt-screen frame after the
-        // reseed forces a repaint (`send-keys C-l`) — the agent-TUI recovery path.
+        // The idle agent's next capture carries its recovered alt-screen frame — recovered
+        // from tmux's authoritative `-CC` server-side grid via a fresh `capture-pane`, NOT by
+        // injecting a repaint keystroke. #1151 removed the `send-keys C-l` nudge: the -CC grid
+        // is authoritative, so the recapture recovers the full alt-screen frame on its own.
         client.capturePaneResponses.addLast(
             CommandResponse(
                 number = 9L,
@@ -264,11 +266,18 @@ class Issue1181LivePinnedForegroundReseedTest {
         advanceUntilIdle()
 
         val sentDuring = client.sentCommands.drop(sentBefore)
+        // #1151 contract: the resume reseed recovers the idle agent's frame from tmux's
+        // authoritative `-CC` server grid via `capture-pane` — it must NOT inject a Ctrl+L
+        // (0x0C) repaint keystroke into the pane (that byte is APPLICATION INPUT the agent CLI
+        // reacts to). Mirror RedrawNonDestructiveReseedTest.assertNoCtrlLInjected.
+        val ctrlLOffenders = sentDuring.filter {
+            it.contains("send-keys") && (it.contains("C-l") || it.contains("\u000C"))
+        }
         assertTrue(
-            "the resume reseed must FORCE the idle agent to repaint with `send-keys -t %1 C-l` " +
-                "before capturing (so its full frame is recovered, not near-blank); sent: " +
-                "$sentDuring",
-            sentDuring.any { it == "send-keys -t %1 C-l" },
+            "the resume reseed must NOT inject a Ctrl+L (0x0C) keystroke into the idle agent " +
+                "pane — #1151 recovers the frame from tmux's server-side grid via capture-pane, " +
+                "not a `send-keys ... C-l` nudge (offenders: $ctrlLOffenders; sent: $sentDuring)",
+            ctrlLOffenders.isEmpty(),
         )
         assertTrue(
             "the resume must issue a fresh capture-pane for the idle agent pane; sent: $sentDuring",

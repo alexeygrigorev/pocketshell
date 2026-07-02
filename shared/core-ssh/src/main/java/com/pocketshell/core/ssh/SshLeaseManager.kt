@@ -2,7 +2,6 @@ package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -299,11 +298,21 @@ public class SshLeaseManager(
                 withContext(NonCancellable) {
                     mutex.withLock {
                         if (inFlightConnects[key] === deferred) inFlightConnects.remove(key)
-                        retractConnectingHintLocked(key)
+                        retractConnectingHintLocked(key, SshLeaseCloseReason.ConnectCancelled)
                     }
                 }
+                // Issue #1185: wake a coalescing awaiter with a TYPED, retryable
+                // failure — NOT a bare CancellationException value. The awaiter
+                // (a session the user selected that merely JOINED this owner's
+                // in-flight connect) is NOT itself cancelled; its own coroutine is
+                // alive. A bare CancellationException here was indistinguishable
+                // from a genuine unreachable at the consumer, so the selected
+                // session stranded on Disconnected + "Attaching…" with no re-dial.
+                // The typed [SshLeaseConnectCoalescedCancelException] lets the
+                // consumer tell "my superseded owner was cancelled — re-dial my own
+                // fresh connect" apart from "the host is unreachable".
                 deferred.complete(
-                    Result.failure(CancellationException("SSH connect cancelled for $key")),
+                    Result.failure(SshLeaseConnectCoalescedCancelException(key)),
                 )
             }
         }
@@ -772,6 +781,18 @@ public enum class SshLeaseCloseReason {
      * instead of an undifferentiated `lease_down` (the #964 ambiguity).
      */
     KeepaliveDead,
+
+    /**
+     * Issue #1185: the in-flight cold connect that owned this key was CANCELLED
+     * before it produced a live transport — the user superseded the create/attach
+     * flow (e.g. created a new session, then immediately selected an existing one
+     * on the same host) so the owner's acquire coroutine died. Distinct from the
+     * anonymous [Disconnected] so the shareable connection log (#1175) names
+     * `connect_cancelled` instead of an undifferentiated `lease_down`, and so a
+     * coalescing awaiter of that owner can re-dial its own fresh connect rather
+     * than stranding on a terminal "unreachable".
+     */
+    ConnectCancelled,
 }
 
 public data class SshLeaseKey(
@@ -866,3 +887,24 @@ public class SshLeaseConnectTimeoutException(
 ) : IllegalStateException(
     "SSH lease connect to ${key.user}@${key.host}:${key.port} exceeded ${timeoutMillis}ms and was aborted",
 )
+
+/**
+ * Issue #1185: a coalescing awaiter's in-flight connect OWNER (the create/attach
+ * flow it merely joined via #620 coalescing) was cancelled before it produced a
+ * live transport — the user superseded that flow (e.g. created a new session,
+ * then immediately selected an existing session on the SAME host). The awaiter is
+ * NOT itself cancelled; its own coroutine is alive, so it must be able to tell
+ * this superseded-owner cancellation apart from a genuine unreachable/auth/DNS
+ * failure and re-dial its OWN fresh connect (the owner's in-flight slot is already
+ * cleared, so a retry becomes a fresh owner and dials cleanly).
+ *
+ * This is a NORMAL, RETRYABLE failure delivered as a `Result` value — NOT a
+ * [kotlin.coroutines.cancellation.CancellationException] (which the consumer
+ * would misclassify as a terminal connect failure, stranding the selected session
+ * on a Disconnected pill + "Attaching…" spinner with no re-dial — the #1185 bug).
+ * The message is preserved verbatim so any existing diagnostic string continues
+ * to read the same.
+ */
+public class SshLeaseConnectCoalescedCancelException(
+    public val key: SshLeaseKey,
+) : IllegalStateException("SSH connect cancelled for $key")

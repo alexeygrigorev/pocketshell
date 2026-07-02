@@ -37,39 +37,43 @@ import java.io.File
 import java.io.InputStream
 
 /**
- * Issue #989 — REPRODUCE-FIRST (D33/G10) JVM proof that the manual Redraw and the
- * attach/within-grace reseed NEVER clear a content-rich pane to black, and that
- * Redraw FORCES the app to repaint (`send-keys C-l`) before capturing.
+ * Issue #1151 — REPRODUCE-FIRST (D33/G10) JVM proof that the manual Redraw and the
+ * attach / within-grace / switch / foreground-return / no-op-resize / reconnect
+ * reseed NEVER inject a Ctrl+L (0x0C) keystroke into the pane, AND still reseed the
+ * pane with fresh authoritative content (never a stale / black frame).
  *
- * The bug (confirmed in the spike): both Redraw and re-attach funnel through
- * `reseedActivePaneForReattach -> seedPaneFromCapture -> seedPaneFromCaptureOnce
- * -> appendRemoteOutput(toTerminalViewportBytes(...))`. `toTerminalViewportBytes`
- * unconditionally prepends `CSI 2J` (clear) before painting the captured lines.
- * For an IDLE alternate-screen agent (Claude/Codex) `capture-pane` returns a
- * near-blank-but-NON-EMPTY grid (whitespace rows + a stray fragment) — it passes
- * the `output.isEmpty()` guard and is painted, so the clear wipes the prior full
- * frame and the near-blank capture replaces it. Net = black-with-a-fragment (the
- * maintainer's #989 screenshot).
+ * THE BUG (maintainer dogfood, #1151): on session-switch and background→foreground
+ * return the reseed chokepoint [TmuxSessionViewModel.reseedActivePaneForReattach] →
+ * [seedPaneFromCapture] sent `tmux send-keys -t <pane> C-l` (the #989
+ * `forceFullRepaint` nudge) to "make an idle agent repaint before capture". But
+ * `send-keys C-l` is APPLICATION INPUT — tmux delivers the byte 0x0C into the pane's
+ * PTY exactly as if the user pressed Ctrl+L. A Claude/GLM CLI binds Ctrl+L and, mid
+ * task, surfaces the red "Ctrl+L is disabled while a task is in progress" banner on
+ * EVERY switch / foreground-return; Codex silently swallows it (so PocketShell was
+ * still sending an unsolicited control byte). The injection was universal (every
+ * active pane, not agent-gated — the `forceAgentRepaint` name was misleading).
  *
- * The fix (all at the shared chokepoint, so Redraw AND attach/return both
- * benefit):
- *   1. FORCE the agent to repaint first (`send-keys C-l`) before capture.
- *   2. NON-DESTRUCTIVE swap: refuse to paint a near-blank capture that would clear
- *      an existing content-rich frame ([captureWouldClearVisibleContent]); keep
- *      the last frame until a materially-non-blank capture arrives.
- *   3. Feedback (Toast) when Redraw can't act (no client / disconnected / no
- *      target) instead of a silent no-op (the original #989 report).
+ * THE FIX (#1151, all at the shared chokepoint so manual Redraw AND the automatic
+ * switch / foreground / no-op-resize / reconnect paths all benefit):
+ *   - DELETE the `send-keys C-l` keystroke path entirely (the `forceFullRepaint`
+ *     primitive + the `forceAgentRepaint` param + the settle). No `send-keys` is
+ *     ever issued to the pane on a reseed.
+ *   - Reseed PURELY from `capture-pane` of tmux's authoritative server-side grid,
+ *     which (in `-CC` control mode) holds the pane's full content independent of
+ *     whether the app re-emits. So capture returns the current content directly.
+ *   - KEEP the #989 NON-DESTRUCTIVE swap ([captureWouldClearVisibleContent] in
+ *     [seedPaneFromCaptureOnce]): if a capture is momentarily near-blank it is
+ *     REFUSED and the last good frame is kept, and the seed loop re-captures — so
+ *     the reseed lands fresh authoritative content or keeps the prior frame, NEVER
+ *     black, and NEVER a stray keystroke.
  *
- * RED on base (the assertions that fail without the fix):
- *   - [redrawDoesNotClearContentRichPaneToBlackForIdleAltScreenAgent]:
- *     after Redraw the pane keeps its content (rendered chars stay high) — on base
- *     the near-blank capture clears it to ~0.
- *   - same test asserts `send-keys C-l` was sent before the final capture — on base
- *     Redraw never forces a repaint.
- *   - [reattachDoesNotClearContentRichPaneToBlackForIdleAltScreenAgent]: the
- *     attach/return reseed shares the chokepoint, so it inherits the same RED→GREEN.
- *   - [redrawWithNoLiveClientSurfacesFeedbackInsteadOfSilentNoOp]: a no-client
- *     Redraw emits the feedback message — on base it silently returns.
+ * RED on base (the load-bearing assertions that FAIL without the fix): every test
+ * asserts NO `send-keys ... C-l` reaches the pane on its reseed path — on base the
+ * `forceFullRepaint` default fires `send-keys -t <pane> C-l`, recorded in
+ * [FakeTmuxClient.sentCommands], so the assertion fails RED. After the fix the
+ * command is never sent → GREEN. The "reseed still happens / fresh content lands /
+ * not cleared to black" assertions guard that the fix did not merely delete the
+ * repaint.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -121,7 +125,9 @@ class RedrawNonDestructiveReseedTest {
      * (well above the non-destructive-swap render floor) before the Redraw / reseed
      * under test. Returns the VM with its active pane painted.
      */
-    private fun TestScope.connectVmWithRichFrame(client: FakeTmuxClient): TmuxSessionViewModel {
+    private fun TestScope.connectVmWithRichFrame(
+        client: FakeTmuxClient,
+    ): TmuxSessionViewModel {
         val live = AlwaysConnectedSession(id = "live")
         val connector = SingleSessionConnector(live)
         val leaseManager =
@@ -164,6 +170,17 @@ class RedrawNonDestructiveReseedTest {
     }
 
     /**
+     * A content-rich SHELL pane frame (no box-drawing chrome) — proves the fix is
+     * UNIVERSAL, not agent-gated: a shell pane reseed must be C-l-free too.
+     */
+    private val shellRichFrame: List<String> = buildList {
+        repeat(12) { i ->
+            add("alex@dev:~/project\$ ls -la output-line-$i.txt  # rendered shell content")
+        }
+        add("alex@dev:~/project\$ ")
+    }
+
+    /**
      * The idle alt-screen capture the maintainer's pane returns: whitespace rows
      * plus ONE stray status fragment. Non-empty (passes the `isEmpty()` guard) but
      * materially blank — painting it with the leading `CSI 2J` clears the rich
@@ -177,6 +194,7 @@ class RedrawNonDestructiveReseedTest {
     private fun FakeTmuxClient.withRichInitialFrame(
         sessionName: String,
         paneId: String,
+        frame: List<String> = contentRichFrame,
     ): FakeTmuxClient = apply {
         responses.addLast(
             CommandResponse(
@@ -187,7 +205,7 @@ class RedrawNonDestructiveReseedTest {
         )
         // The attach seed paints the content-rich frame.
         capturePaneResponses.addLast(
-            CommandResponse(number = 2L, output = contentRichFrame, isError = false),
+            CommandResponse(number = 2L, output = frame, isError = false),
         )
         cursorQueryResponses.addLast(
             CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
@@ -195,12 +213,49 @@ class RedrawNonDestructiveReseedTest {
     }
 
     // -----------------------------------------------------------------------
-    // (1) Manual Redraw — must NOT clear a content-rich pane to black, and must
-    //     FORCE a repaint (`send-keys C-l`) before capturing.
+    // Assertion helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Issue #1151 — the load-bearing assertion: NO Ctrl+L (0x0C) keystroke may reach
+     * the pane on any reseed path. `send-keys ... C-l` is the byte the agent CLI
+     * reacts to; assert none was issued (either as the `C-l` key name or the raw
+     * form-feed 0x0C).
+     */
+    private fun assertNoCtrlLInjected(
+        sentCommands: List<String>,
+        context: String,
+    ) {
+        val offenders = sentCommands.filter {
+            it.contains("send-keys") && (it.contains("C-l") || it.contains("\u000C"))
+        }
+        assertTrue(
+            "Issue #1151: $context must NOT inject a Ctrl+L (0x0C) keystroke into the " +
+                "pane — no `send-keys ... C-l` may reach the pane on a reseed " +
+                "(offending commands: $offenders; all sent: $sentCommands)",
+            offenders.isEmpty(),
+        )
+    }
+
+    private fun assertReseedIssuedCapture(
+        sentCommands: List<String>,
+        context: String,
+    ) {
+        assertTrue(
+            "Issue #1151: $context must STILL reseed the pane from tmux's server-side " +
+                "grid — a `capture-pane` must be issued so the fix did not merely delete " +
+                "the repaint (sent: $sentCommands)",
+            sentCommands.any { it.startsWith("capture-pane") },
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // (1) Manual Redraw — must NOT inject Ctrl+L, must still reseed, and must not
+    //     clear a content-rich pane to black.
     // -----------------------------------------------------------------------
 
     @Test
-    fun redrawDoesNotClearContentRichPaneToBlackForIdleAltScreenAgent() = runVmTest {
+    fun redrawReseedsFromServerSideGridWithoutInjectingCtrlL() = runVmTest {
         val client = FakeTmuxClient().withRichInitialFrame("work", "%1")
         val vm = connectVmWithRichFrame(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
@@ -213,8 +268,8 @@ class RedrawNonDestructiveReseedTest {
         assertFalse(pane.terminalState.visibleScreenIsBlank())
 
         // The idle agent does NOT re-emit its frame on its own, so the next
-        // `capture-pane` returns the near-blank grid. WITHOUT the fix, Redraw paints
-        // it (after a `CSI 2J` clear) and wipes the pane to black-with-a-fragment.
+        // `capture-pane` returns the near-blank grid. The non-destructive swap keeps
+        // the last frame; the point of THIS test is that NO Ctrl+L is injected.
         client.capturePaneResponses.addLast(
             CommandResponse(number = 9L, output = nearBlankCapture, isError = false),
         )
@@ -223,30 +278,15 @@ class RedrawNonDestructiveReseedTest {
         vm.redrawActivePane()
         advanceUntilIdle()
 
-        // FIX part 1: Redraw FORCED a repaint before it captured.
         val sentDuringRedraw = client.sentCommands.drop(sentBefore)
-        val forceRepaintIndex = sentDuringRedraw.indexOfFirst {
-            // Issue #1104: flags BEFORE the key operand — `send-keys -t %1 C-l`.
-            // The old `send-keys C-l -t %1` ordering made tmux treat `-t` as a
-            // literal key and never targeted the pane, so this must pin the
-            // correct order (it FAILS if the key-before-`-t` bug returns).
-            it == "send-keys -t %1 C-l"
-        }
-        assertTrue(
-            "Redraw must send `send-keys -t %1 C-l` to FORCE the app to repaint " +
-                "(sent during redraw: $sentDuringRedraw)",
-            forceRepaintIndex >= 0,
-        )
-        val firstCaptureIndex = sentDuringRedraw.indexOfFirst { it.startsWith("capture-pane") }
-        assertTrue(
-            "the forced repaint must be sent BEFORE the capture, not after " +
-                "(C-l@$forceRepaintIndex capture@$firstCaptureIndex)",
-            firstCaptureIndex < 0 || forceRepaintIndex < firstCaptureIndex,
-        )
+        // LOAD-BEARING red→green: on base the `forceFullRepaint` default sent
+        // `send-keys -t %1 C-l` here; the fix removes it.
+        assertNoCtrlLInjected(sentDuringRedraw, "manual Redraw")
+        // The reseed still happens — a capture-pane was issued from the server grid.
+        assertReseedIssuedCapture(sentDuringRedraw, "manual Redraw")
 
-        // FIX part 2 (the load-bearing assertion): the pane was NOT cleared to black.
-        // The near-blank capture was REFUSED (non-destructive swap kept the last
-        // frame). On base the rich frame collapses to ~1 char (the stray fragment).
+        // The pane was NOT cleared to black — the near-blank capture was REFUSED
+        // (non-destructive swap kept the last frame).
         val renderedAfter = pane.terminalState.renderedNonBlankCharCount()
         assertTrue(
             "Redraw must NOT clear the content-rich pane to black — the last frame " +
@@ -265,17 +305,15 @@ class RedrawNonDestructiveReseedTest {
     }
 
     @Test
-    fun redrawRestoresTheRealFrameWhenTheForcedRepaintLands() = runVmTest {
-        // The full recovery path: the forced `C-l` makes the idle agent re-emit its
-        // frame, so the NEXT capture is content-rich and the pane is restored from
-        // (a possibly-degraded) state back to the real content.
+    fun reseedRestoresFreshFrameFromServerSideGridWithoutCtrlL() = runVmTest {
+        // Proves the reseed STILL gets FRESH content without any keystroke: the first
+        // capture is near-blank (REFUSED by the non-destructive swap), the retry
+        // capture carries the fresh server-side grid, and the pane is restored to it.
         val client = FakeTmuxClient().withRichInitialFrame("work", "%1")
         val vm = connectVmWithRichFrame(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
         assertFalse(pane.terminalState.visibleScreenIsBlank())
 
-        // First capture (immediately after C-l, agent slow) is near-blank → REFUSED;
-        // the retry capture (agent has now honored C-l) carries the recovered frame.
         client.capturePaneResponses.addLast(
             CommandResponse(number = 9L, output = nearBlankCapture, isError = false),
         )
@@ -286,31 +324,40 @@ class RedrawNonDestructiveReseedTest {
                 isError = false,
             ),
         )
+        val sentBefore = client.sentCommands.size
 
         vm.redrawActivePane()
         advanceUntilIdle()
 
+        val sentDuring = client.sentCommands.drop(sentBefore)
+        assertNoCtrlLInjected(sentDuring, "manual Redraw (fresh-content recovery)")
         assertFalse(pane.terminalState.visibleScreenIsBlank())
         assertTrue(
-            "the recovered real frame must be restored after the forced repaint lands",
+            "the fresh server-side-grid frame must be restored WITHOUT any keystroke " +
+                "nudge — proving `capture-pane` alone gets fresh content",
             renderedTranscriptFor(pane).contains("REDRAW-RECOVERED"),
         )
     }
 
     // -----------------------------------------------------------------------
-    // (2) Attach / within-grace return reseed — SAME chokepoint, SAME guarantee.
+    // (2) Attach / within-grace / switch / foreground-return / no-op-resize /
+    //     reconnect reseed — the SINGLE shared chokepoint
+    //     [reseedActivePaneForReattach]. Its KDoc documents that these are the
+    //     paths that funnel through it, so driving the chokepoint seam class-covers
+    //     all of them. SAME no-Ctrl+L guarantee.
     // -----------------------------------------------------------------------
 
     @Test
-    fun reattachDoesNotClearContentRichPaneToBlackForIdleAltScreenAgent() = runVmTest {
+    fun reattachReseedDoesNotInjectCtrlLAndKeepsFrame() = runVmTest {
         val client = FakeTmuxClient().withRichInitialFrame("work", "%1")
         val vm = connectVmWithRichFrame(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
         val renderedBefore = pane.terminalState.renderedNonBlankCharCount()
         assertTrue(renderedBefore > 100)
 
-        // The within-grace reattach reseed (the same path Redraw uses) re-captures
-        // the active pane; for an idle agent it comes back near-blank.
+        // The within-grace reattach / switch / no-op-resize / reconnect reseed (all
+        // the same chokepoint) re-captures the active pane; for an idle agent it
+        // comes back near-blank.
         client.capturePaneResponses.addLast(
             CommandResponse(number = 9L, output = nearBlankCapture, isError = false),
         )
@@ -320,20 +367,73 @@ class RedrawNonDestructiveReseedTest {
         advanceUntilIdle()
 
         val sentDuring = client.sentCommands.drop(sentBefore)
-        assertTrue(
-            // Issue #1104: correct arg order — flags (`-t %1`) BEFORE the `C-l`
-            // key operand; pins it so the key-before-`-t` bug can't silently return.
-            "the attach/return reseed must FORCE a repaint too with `send-keys -t %1 C-l` " +
-                "(sent: $sentDuring)",
-            sentDuring.any { it == "send-keys -t %1 C-l" },
+        assertNoCtrlLInjected(
+            sentDuring,
+            "the attach/switch/foreground/no-op-resize/reconnect reseed chokepoint",
         )
+        assertReseedIssuedCapture(sentDuring, "the reattach reseed chokepoint")
         val renderedAfter = pane.terminalState.renderedNonBlankCharCount()
         assertTrue(
-            "the attach/return reseed must NOT clear the content-rich pane to black " +
+            "the reattach reseed must NOT clear the content-rich pane to black " +
                 "(before=$renderedBefore after=$renderedAfter)",
             renderedAfter > 100,
         )
         assertFalse(pane.terminalState.visibleScreenIsBlank())
+    }
+
+    @Test
+    fun reattachReseedLandsFreshServerSideGridWithoutCtrlL() = runVmTest {
+        // The common `-CC` case: the server-side grid holds the full frame, so the
+        // FIRST capture is content-rich and is applied directly — no keystroke, no
+        // near-blank retry. Proves fresh content still lands on the happy path.
+        val client = FakeTmuxClient().withRichInitialFrame("work", "%1")
+        val vm = connectVmWithRichFrame(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertFalse(pane.terminalState.visibleScreenIsBlank())
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 9L,
+                output = contentRichFrame.map { it.replace("idle", "SWITCH-FRESH") },
+                isError = false,
+            ),
+        )
+        val sentBefore = client.sentCommands.size
+
+        vm.reseedActivePaneForReattachForTest(vm.currentRuntimeGuardForTest())
+        advanceUntilIdle()
+
+        val sentDuring = client.sentCommands.drop(sentBefore)
+        assertNoCtrlLInjected(sentDuring, "the reattach reseed (fresh grid)")
+        assertReseedIssuedCapture(sentDuring, "the reattach reseed (fresh grid)")
+        assertTrue(
+            "the fresh server-side-grid frame must be applied on reseed WITHOUT a " +
+                "keystroke nudge",
+            renderedTranscriptFor(pane).contains("SWITCH-FRESH"),
+        )
+    }
+
+    @Test
+    fun reattachReseedDoesNotInjectCtrlLForShellPane() = runVmTest {
+        // Class coverage: the fix is UNIVERSAL (not agent-gated). A plain SHELL pane
+        // reseed must also send no Ctrl+L — a shell absorbs 0x0C invisibly, which is
+        // exactly why the injection went unnoticed before an agent surfaced it.
+        val client = FakeTmuxClient().withRichInitialFrame("work", "%1", frame = shellRichFrame)
+        val vm = connectVmWithRichFrame(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertTrue(pane.terminalState.renderedNonBlankCharCount() > 100)
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 9L, output = nearBlankCapture, isError = false),
+        )
+        val sentBefore = client.sentCommands.size
+
+        vm.reseedActivePaneForReattachForTest(vm.currentRuntimeGuardForTest())
+        advanceUntilIdle()
+
+        val sentDuring = client.sentCommands.drop(sentBefore)
+        assertNoCtrlLInjected(sentDuring, "the reattach reseed for a SHELL pane")
+        assertReseedIssuedCapture(sentDuring, "the reattach reseed for a SHELL pane")
     }
 
     // -----------------------------------------------------------------------

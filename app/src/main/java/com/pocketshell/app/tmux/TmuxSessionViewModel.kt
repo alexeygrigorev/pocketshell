@@ -4099,18 +4099,25 @@ public class TmuxSessionViewModel @Inject constructor(
         if (!freshlySeededAndPainted) {
             // UNCONDITIONAL full-viewport restore of the active pane (id-tagged via the
             // guard) — NOT gated on `visibleScreenIsBlank()`, so a partial blank is healed.
-            // Issue #989: FORCE the app to repaint first (`send-keys C-l`) so an idle
-            // alt-screen agent re-emits its full frame BEFORE we capture — otherwise the
-            // capture is near-blank and the seed would clear visible content to black.
-            // This single chokepoint feeds manual Redraw, the within-grace reattach, the
-            // no-op-resize heal, and the reflow completion — so all four recover content,
-            // never clear-to-black.
+            // Issue #1151: reseed PURELY from tmux's authoritative server-side grid via
+            // `capture-pane` — NO keystroke is injected into the pane. #989 used to send a
+            // `send-keys C-l` here to nudge an idle alt-screen agent to repaint, but that
+            // byte (0x0C) is APPLICATION INPUT, not a rendering primitive: it reached the
+            // agent CLI exactly as if the user pressed Ctrl+L, so Claude/GLM surfaced
+            // "Ctrl+L is disabled while a task is in progress" on every switch /
+            // foreground-return. In `-CC` control mode the tmux server holds the pane's
+            // full grid independent of whether the app re-emits, so `capture-pane` returns
+            // the current content directly; the retained non-destructive swap
+            // ([captureWouldClearVisibleContent] in [seedPaneFromCaptureOnce]) keeps the
+            // last good frame if a capture is momentarily near-blank, so the reseed either
+            // lands fresh authoritative content or keeps the prior frame — never black,
+            // never a stray keystroke. This single chokepoint feeds manual Redraw, the
+            // within-grace reattach, the no-op-resize heal, and the reflow completion.
             seedPaneFromCapture(
                 client,
                 activePane,
                 refreshGuard,
                 recordMilestone = false,
-                forceAgentRepaint = true,
             )
         }
         // Then run the existing blank-net backstop over any OTHER visible pane that came
@@ -11370,15 +11377,6 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshGuard: RuntimeRefreshGuard?,
         recordMilestone: Boolean,
         maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
-        // Issue #989: when true, FORCE the app in the pane to repaint its full
-        // frame (`send-keys C-l`) BEFORE the first capture, then settle, so an
-        // idle alternate-screen agent (which never re-emits its existing frame on
-        // its own) hands tmux a fresh full grid to capture — instead of a near-
-        // blank one that the seed would clear the visible content to black with.
-        // Only the manual-Redraw / attach-reseed chokepoint
-        // ([reseedActivePaneForReattach]) sets this; the cold-open preload leaves
-        // it false to avoid paying the repaint round-trip on every fresh pane.
-        forceAgentRepaint: Boolean = false,
     ): Boolean {
         // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
         // round-trip so a concurrent reseed net (the pager-settle
@@ -11387,24 +11385,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // so the genuine #662 black-window heal still fires once no seed is pending.
         panesSeedInFlightThisAttach.add(pane.paneId)
         try {
-            // Issue #989: ask the app to repaint BEFORE we capture. `send-keys C-l`
-            // is geometry-stable (no window reflow, so it cannot momentarily strip
-            // the idle frame the way a `refresh-client -C` size-nudge can) and is
-            // honored by every well-behaved TUI. Best-effort: a failure here is
-            // harmless because the non-destructive swap in [seedPaneFromCaptureOnce]
-            // keeps the last frame if the subsequent capture is still near-blank.
-            val runtimeStillCurrent = refreshGuard == null || isCurrentRuntime(refreshGuard)
-            if (forceAgentRepaint && runtimeStillCurrent && !client.disconnected.value) {
-                runCatching {
-                    withContext(seedIoDispatcher) {
-                        client.forceFullRepaint(pane.paneId)
-                    }
-                }
-                // Give the app a beat to emit its fresh redraw before we capture.
-                // The runtime-guard re-check at the top of the loop aborts a
-                // superseded reseed even if this settle is mid-flight.
-                delay(FORCE_REPAINT_SETTLE_MS)
-            }
+            // Issue #1151: reseed purely from tmux's authoritative server-side grid
+            // via `capture-pane` — we NEVER inject a keystroke into the pane to nudge
+            // a repaint. #989's `send-keys C-l` did exactly that and the 0x0C byte
+            // reached the agent CLI as input (Claude/GLM's "Ctrl+L is disabled…"
+            // banner on every switch / foreground-return). In `-CC` control mode the
+            // tmux server tracks the pane's full grid regardless of whether the app
+            // re-emits, so `capture-pane` returns the current content directly; the
+            // non-destructive swap in [seedPaneFromCaptureOnce]
+            // ([captureWouldClearVisibleContent]) keeps the last good frame across the
+            // retry loop below if a capture is momentarily near-blank — so the reseed
+            // lands fresh authoritative content or keeps the prior frame, never black,
+            // and never sends the app a control byte.
             var attempt = 0
             while (true) {
                 if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
@@ -18298,16 +18290,6 @@ internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
  * without stalling a genuinely-empty pane's reveal.
  */
 internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L
-
-/**
- * Issue #989: how long [seedPaneFromCapture] waits after sending `send-keys C-l`
- * (the forced full repaint) before it captures the pane, so the app has a beat to
- * emit its fresh redraw and tmux's grid holds the real frame at capture time.
- * Short — an explicit user Redraw / a within-grace reattach can absorb this — and
- * the empty-capture retry loop covers a slower app, while the non-destructive
- * swap keeps the last frame if the repaint never lands.
- */
-internal const val FORCE_REPAINT_SETTLE_MS: Long = 120L
 
 /**
  * Issue #989: the user-visible message shown when the manual Redraw kebab item is

@@ -10674,13 +10674,38 @@ public class TmuxSessionViewModel @Inject constructor(
             // old code fell off the end here SILENTLY, leaving the reveal stuck
             // in Seeding with a green dot. For a COLD/SWITCH ATTACH reveal, surface
             // a retryable error + the #823 Reconnect affordance instead of an
-            // infinite spinner. (Reattach/reconnect reseed nets pass
-            // surfaceErrorOnExhaustion=false and keep the old silent exit — the
-            // transport is healthy and later %output still heals the pane.)
-            if (!surfaceErrorOnExhaustion) return@launch
+            // infinite spinner.
             if (!isCurrentRuntime(refreshGuard)) return@launch
             if (clientRef?.disconnected?.value == true) return@launch
             if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+            if (!surfaceErrorOnExhaustion) {
+                // Issue #1177 (black-screen GAP B): the passive/transport SILENT-
+                // REATTACH paths (:8077/:8319) arm this watchdog with
+                // surfaceErrorOnExhaustion=false. Before, when the reconnect seed
+                // NEVER landed within the blank window this branch fell off the end
+                // SILENTLY — leaving a PERMANENT BLACK pane on a LIVE (green)
+                // transport with no error, no heal, no reconnect (the maintainer's
+                // post_grace_foreground full-reconnect black, #874). The transport
+                // IS healthy, so declaring a stuck attach (failStuckAttachReveal)
+                // would be wrong; instead HAND OFF to the lifetime stale-render heal
+                // watchdog so a seed that never landed keeps being re-captured and
+                // healed against tmux's authoritative grid. A fully-black pane IS
+                // caught by the heal oracle (visibleRenderLostFrameVsCapture), so
+                // once tmux carries a frame the pane is repainted rather than
+                // stranded black. This adds NO new polling (#1164): it arms the
+                // EXISTING #966/#1166 stale-render watchdog on a path that
+                // previously armed nothing on exhaustion.
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-connected-blank-watchdog exhausted on a reattach reseed " +
+                        "(surfaceErrorOnExhaustion=false) with a still-blank active " +
+                        "pane on a LIVE transport — arming the stale-render heal " +
+                        "watchdog instead of exiting silently into a black pane " +
+                        "(#1177). session=${activeTarget?.sessionName}",
+                )
+                armActivePaneStaleRenderWatchdog(refreshGuard)
+                return@launch
+            }
             val stillBlank = activeVisiblePane()?.terminalState?.visibleScreenIsBlank() ?: false
             if (stillBlank) {
                 failStuckAttachReveal()

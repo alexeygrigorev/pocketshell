@@ -3247,6 +3247,162 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ------------------------------------------------------------------
+    // Issue #1177 (black-screen GAP B) — the silent-reattach paths (:8077
+    // warm same-SSH reattach, :8319 fresh-transport reattach) arm the blank
+    // watchdog with surfaceErrorOnExhaustion=false. When the reattach SEED
+    // stays blank for the whole blank-watchdog window the watchdog used to
+    // exit SILENTLY, leaving a PERMANENT BLACK pane on a live (green) transport
+    // (the maintainer's #874 fully-black-on-green). Class coverage: both real
+    // reattach call sites must now hand off to the lifetime stale-render heal
+    // watchdog on exhaustion (never silent black), and it must actually heal
+    // the pane once tmux carries a frame.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun passiveSilentReattachThatSeedsBlankArmsStaleRenderHealNotSilentBlack() = runTest(scheduler) {
+        // :8077 — the WARM same-SSH silent reattach. The replacement client's
+        // list-panes row resolves (reattach reaches Live) but every capture is
+        // empty, so the reattached active pane is BLACK on a live transport.
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+        // Foreground + screen-on so the armed stale-render watchdog actually
+        // captures (the #1166 heat gate) and can heal.
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        val session = FakeSshSession()
+        val deadClient = FakeTmuxClient()
+        val replacementClient =
+            FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = session,
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        // Complete the warm reattach (reaches Live) but DON'T drain the lifetime
+        // watchdog: advance a bounded window that (a) settles the reattach and
+        // (b) exhausts the ~17s blank-watchdog run on the still-black pane.
+        advanceTimeBy(CONNECTED_BLANK_WATCHDOG_TICK_MS * CONNECTED_BLANK_WATCHDOG_MAX_TICKS * 4)
+        runCurrent()
+
+        assertSame(
+            "the warm reattach reached Live on the fresh client",
+            replacementClient,
+            registry.clients.value[7L]?.client,
+        )
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertTrue(
+            "the reattached pane's seed stayed empty -> black on a live transport",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        // GAP B fix: on blank-watchdog exhaustion the :8077 path hands off to the
+        // stale-render heal watchdog instead of exiting silently into permanent
+        // black. RED (base): no watchdog armed (job null). GREEN: it is running.
+        val staleJob = vm.staleRenderWatchdogJobForTest()
+        assertTrue(
+            "Issue #1177 (:8077 warm reattach): a blank reattach seed must arm the " +
+                "stale-render heal watchdog, never a permanent silent black. job=$staleJob",
+            staleJob != null && staleJob.isActive,
+        )
+        // ...and it HEALS the black pane once tmux carries a real frame.
+        replacementClient.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = issue1177RecoveredFrame(), isError = false),
+        )
+        advanceTimeBy(STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS + STALE_RENDER_WATCHDOG_TICK_MS + 100)
+        runCurrent()
+        assertFalse(
+            "Issue #1177 (:8077): the stale-render heal must repaint the black " +
+                "reattached pane — never a permanent black on a live transport.",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+    }
+
+    @Test
+    fun transportSilentReattachThatSeedsBlankArmsStaleRenderHealNotSilentBlack() = runTest(scheduler) {
+        // :8319 — the FRESH-TRANSPORT silent reattach. The old session is broken
+        // (isConnected=false) so the warm reattach fails and a fresh transport is
+        // reacquired via the lease connector; its replacement client's row resolves
+        // but every capture is empty, so the reattached pane is BLACK on green.
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        val deadClient = FakeTmuxClient()
+        val replacementClient =
+            FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceTimeBy(CONNECTED_BLANK_WATCHDOG_TICK_MS * CONNECTED_BLANK_WATCHDOG_MAX_TICKS * 4)
+        runCurrent()
+
+        assertSame(
+            "the fresh-transport reattach reached Live on the fresh client",
+            replacementClient,
+            registry.clients.value[7L]?.client,
+        )
+        assertEquals("a fresh transport was reacquired", 1, connector.connectCount)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        assertTrue(
+            "the fresh-transport reattach's seed stayed empty -> black on a live transport",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        val staleJob = vm.staleRenderWatchdogJobForTest()
+        assertTrue(
+            "Issue #1177 (:8319 fresh-transport reattach): a blank reattach seed must " +
+                "arm the stale-render heal watchdog, never a permanent silent black. job=$staleJob",
+            staleJob != null && staleJob.isActive,
+        )
+        replacementClient.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = issue1177RecoveredFrame(), isError = false),
+        )
+        advanceTimeBy(STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS + STALE_RENDER_WATCHDOG_TICK_MS + 100)
+        runCurrent()
+        assertFalse(
+            "Issue #1177 (:8319): the stale-render heal must repaint the black " +
+                "reattached pane — never a permanent black on a live transport.",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+    }
+
     /**
      * Issue #685 (Bug B): the "control channel closed before response /
      * mid-command" error in the maintainer's screenshot is the beyond-grace
@@ -16699,6 +16855,39 @@ class TmuxSessionViewModelTest {
         cursorQueryResponses.addLast(
             CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
         )
+    }
+
+    /**
+     * Issue #1177 (black-screen GAP B): a replacement/reattach client whose
+     * `list-panes` row RESOLVES (so the reattach reaches Live — panes-ready gates
+     * on the row, not the capture) but whose `capture-pane` seed keeps coming back
+     * EMPTY — so the reattached active pane stays BLACK on a live (green) transport.
+     * This is the exact silent-reattach surface the :8077/:8319 paths arm the blank
+     * watchdog for.
+     */
+    private fun FakeTmuxClient.withSinglePaneRowButEmptyCapture(
+        sessionName: String,
+        paneId: String,
+    ): FakeTmuxClient = apply {
+        responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("$paneId\t@0\t\$0\t$sessionName\t$sessionName\t0"),
+                isError = false,
+            ),
+        )
+        // No capturePaneResponses queued: every capture falls back to the default
+        // empty response -> the reattached pane stays black.
+    }
+
+    /**
+     * Issue #1177: a recovery `capture-pane` frame rich enough to clear the heal
+     * oracle's STALE_RENDER_MIN_CAPTURE_CHARS floor (a single short line is below
+     * it). The marker line proves the healed frame landed on the pane's grid.
+     */
+    private fun issue1177RecoveredFrame(): List<String> = buildList {
+        add("ISSUE1177-REATTACH-HEALED — recovered viewport after silent-reattach")
+        repeat(24) { add("recovered context row $it xxxxxxxxxxxxxxxxxxxxxxxxxxxx") }
     }
 
     private fun tmuxRuntimeKeyForTest(

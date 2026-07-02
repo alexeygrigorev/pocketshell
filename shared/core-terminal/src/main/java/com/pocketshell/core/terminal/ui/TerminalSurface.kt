@@ -581,7 +581,15 @@ fun TerminalSurface(
                 factory = { ctx ->
                     TerminalView(ctx, /* attributes = */ null)
                         .applyPocketShellDefaults(viewClient)
-                        .also { terminalView = it }
+                        .also { view ->
+                            terminalView = view
+                            // Issue #1192: forward each painted frame's outcome (content
+                            // vs black fallback) into the state's surface-paint seam so
+                            // the tmux watchdog can fingerprint a surface-only-black.
+                            view.setFramePaintObserver { paintedContent, atMs ->
+                                state.onSurfaceFramePainted(paintedContent, atMs)
+                            }
+                        }
                 },
                 update = { view ->
                     terminalView = view

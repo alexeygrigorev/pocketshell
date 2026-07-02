@@ -62,6 +62,24 @@ public final class TerminalView extends View {
 
     public TerminalViewClient mClient;
 
+    /**
+     * Issue #1192 — reports, per painted frame, whether {@link #onDraw} painted the
+     * emulator content or the BLACK fallback (the {@code mEmulator == null} window or a
+     * render that threw). PocketShell's tmux ViewModel wires this to the pane's
+     * {@code TerminalSurfaceState} so its EXISTING gated stale-render watchdog can
+     * fingerprint a surface-only-black (model intact, on-screen surface black) — the one
+     * black-screen class the model-vs-tmux heal oracle cannot see. Null is a no-op.
+     */
+    public interface FramePaintObserver {
+        void onFramePainted(boolean paintedEmulatorContent, long atElapsedRealtimeMs);
+    }
+
+    private FramePaintObserver mFramePaintObserver;
+
+    public void setFramePaintObserver(FramePaintObserver observer) {
+        mFramePaintObserver = observer;
+    }
+
     private TextSelectionCursorController mTextSelectionCursorController;
 
     private Handler mTerminalCursorBlinkerHandler;
@@ -1352,6 +1370,12 @@ public final class TerminalView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
+        // Issue #1192: track whether THIS frame painted emulator content (the normal
+        // render path) or the BLACK fallback (mEmulator == null, or a render that threw
+        // — the catch below). Reported to the paint-confirmation observer at the end so
+        // the tmux watchdog can fingerprint a surface-only-black (model intact, surface
+        // black). Defaults to false; only the successful render path sets it true.
+        boolean paintedEmulatorContent = false;
         try {
             if (mEmulator == null) {
                 canvas.drawColor(mDefaultBackgroundColor);
@@ -1366,6 +1390,7 @@ public final class TerminalView extends View {
 
                 // render the text selection handles
                 renderTextSelection();
+                paintedEmulatorContent = true;
             }
         } catch (Throwable t) {
             // Issues #966/#967: widen from RuntimeException to Throwable. An
@@ -1381,6 +1406,14 @@ public final class TerminalView extends View {
             // dirty-region cache (#469) no longer reflects what is on screen, so
             // force the next frame to repaint every row.
             if (mRenderer != null) mRenderer.invalidateDirtyCache();
+        }
+        // Issue #1192: report this frame's paint outcome to the surface-paint seam.
+        // `paintedEmulatorContent` is false for both the mEmulator == null fallback and
+        // a render that threw (the catch above). Cheap, best-effort; never throws into
+        // the draw path.
+        final FramePaintObserver observer = mFramePaintObserver;
+        if (observer != null) {
+            observer.onFramePainted(paintedEmulatorContent, android.os.SystemClock.elapsedRealtime());
         }
     }
 

@@ -11576,7 +11576,26 @@ public class TmuxSessionViewModel @Inject constructor(
         // predicate alone read it "healthy" and the watchdog never fired. The new predicate
         // also heals a partial-black pane when tmux's grid holds materially more (anti-thrash
         // guarded), restoring the FULL viewport from tmux's authoritative capture.
-        if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) return false
+        if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) {
+            // Issue #1192: the MODEL grid did NOT lose tmux's frame — the heal oracle,
+            // comparing model-vs-tmux, calls this pane HEALTHY and returns without
+            // touching the grid. But the on-screen SURFACE can still be black while the
+            // model is intact (a surface-only black never diverges from tmux by
+            // construction, spike #874 GAP-1), so it emits NONE of the five #1175
+            // classes above. Fingerprint that ONE otherwise-invisible class here — the
+            // exact site the oracle short-circuits — ONLY when the paint-confirmation
+            // seam says the surface is CONFIRMED black while the model holds content.
+            // Rides this same already-paid capture tick: NO new poll/timer (#1164).
+            // Diagnostics only — no reseed/heal (#721 self-heals known surface-blanks).
+            if (pane.terminalState.surfaceIsBlackWhileModelHasContent()) {
+                recordBlackFrameObserved(
+                    pane,
+                    BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT,
+                    captureText,
+                )
+            }
+            return false
+        }
         // Issue #1175: the render LOST tmux's frame (capture carries materially more
         // than the render). Fingerprint the observed black frame BEFORE the heal
         // repaints it. A render with SOME surviving live content is the partial/half-
@@ -18358,6 +18377,17 @@ internal const val BLACK_FRAME_CLASS_REVEAL_GATE_GAVE_UP: String = "reveal_gate_
 
 /** Some live content survives but the majority of the viewport is black (partial/half-black). */
 internal const val BLACK_FRAME_CLASS_PARTIAL_BLANK: String = "partial_blank"
+
+/**
+ * Issue #1192 — the SIXTH class: the MODEL grid matches tmux (so the heal oracle,
+ * comparing model-vs-tmux, calls the pane HEALTHY) but the on-screen SURFACE is
+ * confirmed black. Un-catchable by the oracle BY CONSTRUCTION (a surface-only black
+ * never diverges from tmux), so it emits none of the five classes above. Fingerprinted
+ * from the paint-confirmation seam ([TerminalSurfaceState.surfaceIsBlackWhileModelHasContent])
+ * at the oracle's model-healthy short-circuit. DIAGNOSTICS ONLY (no reseed — #721
+ * self-heals every known surface-blank trigger; this is the safety-net for an UNKNOWN one).
+ */
+internal const val BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT: String = "surface_black_model_intact"
 
 /**
  * Issue #693/#661: backoff between active-pane reveal-gate seed retries.

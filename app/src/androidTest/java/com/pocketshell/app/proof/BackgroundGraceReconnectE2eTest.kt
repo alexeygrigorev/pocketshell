@@ -23,6 +23,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.MainThreadResponsivenessProbe
 import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
@@ -164,6 +165,20 @@ class BackgroundGraceReconnectE2eTest {
         captureViewport("issue548-01-attached")
         diagnostics!!.clear()
 
+        // Issue #1084: wire the direct main-thread responsiveness probe across the
+        // WHOLE background->grace->foreground reconnect cycle (within-grace
+        // ride-through AND the post-grace teardown + lifecycle reattach). The
+        // grace/reconnect path (Vector 2/3) must never park Dispatchers.Main — a
+        // teardown/reattach that blocks Main is the #895/#928 freeze class. This
+        // HARD-asserts Main responsiveness (no self-skip on the load-bearing
+        // assertion). The probe is a non-blocking Handler heartbeat, so it records
+        // any Main-thread park across the bg<->fg cycles without itself hanging.
+        val mainProbe = MainThreadResponsivenessProbe(
+            intervalMs = MAIN_PROBE_INTERVAL_MS,
+            budgetMs = MAIN_STALL_BUDGET_MS,
+        )
+        mainProbe.start()
+
         // Within-grace branch: ProcessLifecycle ON_STOP starts the timer,
         // but foreground arrives before the short injected window elapses.
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
@@ -234,6 +249,22 @@ class BackgroundGraceReconnectE2eTest {
         waitForVisibleTerminal("post-grace terminal") { it.contains(READY_MARKER) }
         recordTiming("post_grace_cycle_ms", SystemClock.elapsedRealtime() - postStart)
         captureViewport("issue548-03-post-grace-reattached")
+
+        // Issue #1084 (load-bearing): Main stayed responsive across the whole
+        // within-grace + post-grace teardown/reattach cycle. RED if any grace or
+        // reconnect step parked Dispatchers.Main beyond budget (the freeze class).
+        val mainResult = mainProbe.stop(minExpectedSamples = MAIN_PROBE_MIN_SAMPLES)
+        recordTiming("main_max_stall_ms", mainResult.maxGapMs)
+        recordTiming("main_probe_samples", mainResult.sampleCount.toLong())
+        writeText("main-thread-probe.txt", mainResult.message)
+        assertTrue(
+            "MAIN-THREAD FREEZE during the background grace/reconnect cycle: " +
+                "${mainResult.message}. maxStall=${mainResult.maxGapMs}ms exceeds the " +
+                "${MAIN_STALL_BUDGET_MS}ms budget — a grace/reattach step parked " +
+                "Dispatchers.Main (the #895/#928 freeze class this gate guards).",
+            mainResult.responsive,
+        )
+
         writeTimings()
     } }
 
@@ -1033,6 +1064,18 @@ class BackgroundGraceReconnectE2eTest {
 
         const val WITHIN_GRACE_MS: Long = 3_000L
         const val POST_GRACE_MS: Long = 500L
+
+        // Issue #1084 — main-thread responsiveness probe wiring. See the twin
+        // constants in MultiSessionSwitchJourneyE2eTest for the budget rationale:
+        // the freeze class parks Main for SECONDS, so a budget above legitimate
+        // grace/reattach frame jank avoids per-push flake while still catching a
+        // multi-second block. The bounded teardown block (closeCachedRuntimes,
+        // up to ~600ms x N cached runtimes) is well under this with the single
+        // session this journey holds.
+        const val MAIN_PROBE_INTERVAL_MS: Long = 100L
+        const val MAIN_PROBE_MIN_SAMPLES: Int = 10
+        val MAIN_STALL_BUDGET_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 2_000L else 1_200L
         const val SIX_SECOND_APP_SWITCH_MS: Long = 6_000L
         const val WATCH_NO_RECONNECT_MS: Long = 1_200L
 

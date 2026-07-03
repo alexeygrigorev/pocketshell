@@ -919,19 +919,25 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
-    fun detectLiveTranscriptForPaneBindsTheMostRecentKindWithoutAKnownKind() = runTest {
-        // Issue #975 (B1): the kind-agnostic transcript fallback. With NO known
-        // kind (the daemon returned `unknown`), it enumerates ALL kinds for the
-        // cwd, picks the MOST-RECENT candidate's kind, and binds its source. Here
-        // Claude is the most recent, so a Claude detection binds — this is the
-        // masked-live-agent evidence the recorded-shell verdict could not see.
+    fun detectLiveTranscriptForPaneBindsTheFdOwnedKindWithoutAKnownKind() = runTest {
+        // Issue #975 (B1) + #1228: the kind-agnostic transcript fallback. With NO
+        // known kind (the daemon returned `unknown`) and MORE THAN ONE engine's
+        // transcript live in the cwd, the kind must come from the pane's OWN
+        // process identity (`/proc/<pid>/fd`), NEVER a cross-kind mtime race. Here
+        // a busier Codex sibling flushed MORE RECENTLY, but the pane's own claude
+        // (node) process holds the Claude transcript open, so Claude binds.
         val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/live.jsonl"
         val session = FakeSshSession(
             detectionOutput = """
-                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/live.jsonl
-                codex|${now - 600}|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-older.jsonl
+                claude|${now - 600}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-busier.jsonl
             """.trimIndent(),
             hostWideProcessOutput = "1001 1 pts/7 node node",
+            // The pane's own node/claude process (pid 1001) holds the Claude
+            // transcript fd open — the identity signal that beats the busier
+            // Codex sibling's newer mtime.
+            procFdOutput = ownClaude,
         )
 
         val detection = AgentConversationRepository().detectLiveTranscriptForPane(
@@ -942,8 +948,8 @@ class AgentConversationRepositoryTest {
         )
 
         assertEquals(
-            "#975 (B1): the kind-agnostic fallback binds the most-recent live " +
-                "transcript's kind (Claude) without a known/recorded kind",
+            "#1228: the kind-agnostic fallback binds the fd-OWNED kind (Claude), " +
+                "never the busier same-cwd Codex sibling picked by cross-kind mtime",
             AgentKind.ClaudeCode,
             detection?.agent,
         )
@@ -995,6 +1001,238 @@ class AgentConversationRepositoryTest {
                 paneTty = "",
                 paneCommand = "bash",
             ),
+        )
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #1228: cross-kind mtime wrong-binding (#819/#807 class). When TWO
+    // engines' transcripts share one cwd, the masked-agent fallback must pick the
+    // kind from the pane's OWN `/proc/<pid>/fd` ownership — NEVER a cross-kind
+    // mtime race won by a busier sibling — and REFUSE to bind when no ownership
+    // signal is present. Reproduce-first (G10): each two-kind case is RED on the
+    // base `candidates.maxByOrNull { it.modifiedAtMillis }?.agent` pick.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectLiveTranscriptForPaneNeverBindsBusierCodexSiblingOverFdOwnedClaude() = runTest {
+        // THE reported instance: pane A runs a MASKED Claude; a sibling pane runs a
+        // busier Codex that flushed its rollout 3 s ago. Both live in the same cwd.
+        // Base code: recordedKind = maxByOrNull(mtime).agent = Codex (newer) →
+        // pane A shows the OTHER agent's transcript (wrong-pane foreign content).
+        // Fix: the pane's own claude process holds the Claude fd open → bind Claude.
+        val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/paneA.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 400}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-busier.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3100 1 pts/5 node node",
+            procFdOutput = ownClaude,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "#1228: a masked-Claude pane must bind Claude via fd ownership, never " +
+                "the busier same-cwd Codex sibling the mtime pick would choose",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("paneA", detection?.sessionId)
+        assertEquals(ownClaude, detection?.sourcePath)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsFdOwnedCodexOverBusierClaudeSibling() = runTest {
+        // Class coverage — the SYMMETRIC direction: the pane runs Codex while a
+        // busier Claude sibling flushed more recently in the same cwd. Base code
+        // picks Claude (newer mtime); the fd-owned Codex rollout must win.
+        val now = System.currentTimeMillis() / 1000
+        val ownCodex = "/home/testuser/.codex/sessions/2026/07/03/rollout-paneB.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/busier.jsonl
+                codex|${now - 400}|/workspace/proj|$ownCodex
+            """.trimIndent(),
+            hostWideProcessOutput = "3200 1 pts/6 codex /usr/local/bin/codex",
+            procFdOutput = ownCodex,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/6",
+            paneCommand = "codex",
+        )
+
+        assertEquals(
+            "#1228: a Codex pane must bind Codex via fd ownership, never the busier " +
+                "same-cwd Claude sibling the mtime pick would choose",
+            AgentKind.Codex,
+            detection?.agent,
+        )
+        assertEquals("rollout-paneB", detection?.sessionId)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneRefusesToBindWhenTwoKindsShareCwdWithoutFdOwnership() = runTest {
+        // Missing-data class case: two engines' transcripts share the cwd but the
+        // pane's process holds NO resolvable transcript fd (older CLI build,
+        // non-Linux host, permission error). Base code guesses the newer kind by
+        // mtime — here the busier sibling is CLAUDE, which base binds with
+        // requireProcessMatch=false → wrong-pane foreign content. The fix REFUSES
+        // to bind (null) and surfaces a diagnostic instead.
+        val now = System.currentTimeMillis() / 1000
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+                codex|${now - 400}|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-x.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3300 1 pts/7 node node",
+            // No fd resolvable → cannot prove which kind this pane runs.
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/7",
+                paneCommand = "node",
+            )
+
+        assertEquals(
+            "#1228: two kinds share the cwd with NO fd-ownership signal — must " +
+                "refuse to bind, never guess by cross-kind mtime",
+            null,
+            detection,
+        )
+        assertTrue(
+            "#1228: the refusal must surface a diagnostic naming the ambiguity; got $diagnostics",
+            diagnostics.any {
+                it.contains("refusing to bind by cross-kind mtime") &&
+                    it.contains("Conversation will not bind")
+            },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneResolvesFdOwnershipThroughPaneSubtree() = runTest {
+        // Nested/sub-agent class case: the pane's tty leader is a shell; the agent
+        // (node/claude) runs as a CHILD on a different tty, reachable only through
+        // the ppid subtree walk. The fd-ownership scan must include the child pid,
+        // so the Claude fd it holds still resolves the kind (over a busier Codex
+        // sibling). Base code would pick Codex by mtime.
+        val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/child.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 400}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-busier.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                4000 1 pts/9 bash -bash
+                4001 4000 ? node node
+            """.trimIndent(),
+            procFdOutput = ownClaude,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/9",
+            paneCommand = "bash",
+        )
+
+        assertEquals(
+            "#1228: fd ownership must resolve through the pane's process SUBTREE " +
+                "(the child agent pid), binding Claude over the busier Codex sibling",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("child", detection?.sessionId)
+        assertTrue(
+            "#1228: the /proc fd scan must cover the child pid reached via ppid walk",
+            session.execCommands.any { it.contains("/proc/") && it.contains(" 4001") },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsOnlyKindWithoutFdOwnershipWhenSingleKindPresent() = runTest {
+        // Boundary: only ONE engine's transcript is live in the cwd. There is no
+        // cross-kind guess to make, so the fallback binds it even WITHOUT an
+        // fd-ownership signal — the #1228 refusal is scoped strictly to the
+        // >1-kind case and must NOT regress the #975 single-kind masked-agent bind.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/solo.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "5000 1 pts/3 node node",
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/3",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "#1228: a single-kind cwd must still bind (no cross-kind ambiguity)",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("solo", detection?.sessionId)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneRefusesWhenPaneOwnsNeitherOfTheTwoForeignKinds() = runTest {
+        // Foreign-session class case: two engines' transcripts share the cwd (the
+        // busier sibling is CLAUDE, which base would bind with
+        // requireProcessMatch=false → wrong foreign content), and the pane's own
+        // process holds open a transcript that belongs to NEITHER enumerated kind
+        // (a stray fd, or a rollout for a cwd not in-window). ownedKinds
+        // intersected with presentKinds is empty → refuse to bind rather than
+        // mis-attribute a foreign sibling.
+        val now = System.currentTimeMillis() / 1000
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+                codex|${now - 400}|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-x.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3400 1 pts/8 node node",
+            // A fd that is NOT a recognised transcript convention → classifies to
+            // no kind → provides no usable ownership signal.
+            procFdOutput = "/home/testuser/somewhere/unrelated.log",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/8",
+                paneCommand = "node",
+            )
+
+        assertEquals(
+            "#1228: an fd that maps to no enumerated kind is not an ownership " +
+                "signal — must refuse to bind, never fall back to mtime",
+            null,
+            detection,
+        )
+        assertTrue(
+            "#1228: the refusal must be surfaced; got $diagnostics",
+            diagnostics.any { it.contains("Conversation will not bind") },
         )
     }
 

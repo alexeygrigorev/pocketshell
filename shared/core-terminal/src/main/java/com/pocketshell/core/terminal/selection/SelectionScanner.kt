@@ -31,29 +31,12 @@ fun findVisibleTerminalMatches(
     view: TerminalView,
     matcher: TerminalMatcher = DefaultTerminalMatcher(),
 ): List<TerminalMatchRegion> {
-    val emulator = view.mEmulator ?: return emptyList()
-    val screen = emulator.screen ?: return emptyList()
-    val columns = emulator.mColumns
-    val rows = emulator.mRows
-    if (columns <= 0 || rows <= 0) return emptyList()
-
-    val topRow = view.topRow
-    val visualRows = mutableListOf<VisualRow>()
-    for (row in topRow until topRow + rows) {
-        val line: String = try {
-            screen.getSelectedText(0, row, columns, row)
-        } catch (_: Throwable) {
-            visualRows += VisualRow(row = row, text = "", wrapsToNext = false)
-            continue
-        }
-        val wraps = try {
-            row + 1 < topRow + rows && screen.getLineWrap(row)
-        } catch (_: Throwable) {
-            false
-        }
-        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
-    }
-    return terminalMatchRegionsForRows(visualRows, columns, matcher)
+    // Issue #1233: read the visible viewport via the shared
+    // [extractVisibleViewportRows] primitive so all four shell-pane affordance
+    // scanners share ONE extraction per coalesced frame rather than each running
+    // an independent `getSelectedText` row loop on the main thread.
+    val snapshot = extractVisibleViewportRows(view)
+    return terminalMatchRegionsForRows(snapshot.rows, snapshot.columns, matcher)
 }
 
 internal fun terminalMatchRegionsForRows(

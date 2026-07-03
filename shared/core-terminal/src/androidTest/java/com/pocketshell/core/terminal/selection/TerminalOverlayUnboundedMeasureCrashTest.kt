@@ -35,10 +35,10 @@ import org.junit.runner.RunWith
  *   at …pager.PagerMeasureKt.measurePager(…)
  * ```
  *
- * i.e. the draw-only terminal affordance overlays
- * ([SmartSelectionAffordanceOverlay], [FilePathOverlay],
- * [AgentPaneAffordanceOverlay], [EngineCommandOverlay]) each laid out at the raw
- * `constraints.maxHeight.coerceAtLeast(0)` — fine under a normal bounded measure,
+ * i.e. the draw-only terminal affordance overlays ([ShellPaneAffordanceOverlay],
+ * [AgentPaneAffordanceOverlay]; before issue #1233 the shell overlay was three
+ * separate scanners — SmartSelection / FilePath / EngineCommand) each laid out at
+ * the raw `constraints.maxHeight.coerceAtLeast(0)` — fine under a normal bounded measure,
  * but the overlay sits inside the terminal pane, which sits inside the
  * `TmuxTerminalPager` ([androidx.compose.foundation.pager.Pager]). The pager /
  * lookahead runs intermittent measure passes with an **unbounded**
@@ -51,12 +51,13 @@ import org.junit.runner.RunWith
  *
  * ## Why this is the load-bearing assertion (F2 / G6 / G10)
  *
- * This composes EACH of the four PRODUCTION overlays (no proxy/stand-in) inside a
+ * This composes EACH production overlay (no proxy/stand-in) inside a
  * [measureUnbounded] harness that hands it EXACTLY the crash constraint —
  * `Constraints(maxWidth = 1070, maxHeight = Infinity)`. On the unfixed overlay
  * this throws the exact `Size(1070 x Int.MAX_VALUE)` crash (the test fails / the
  * activity dies); with the fix every overlay lays out at a FINITE, bounded size.
- * Class coverage (G2): all four overlays, not only the one in the captured trace.
+ * Class coverage (G2): both production overlays (the consolidated shell overlay +
+ * the agent overlay), not only the one in the captured trace.
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalOverlayUnboundedMeasureCrashTest {
@@ -114,24 +115,23 @@ class TerminalOverlayUnboundedMeasureCrashTest {
     }
 
     @Test
-    fun smartSelectionAffordanceOverlay_measuresFiniteUnderUnboundedHeight() {
-        assertOverlayMeasuresFinite("SmartSelectionAffordance") {
-            SmartSelectionAffordanceOverlay(
+    fun shellPaneAffordanceOverlay_measuresFiniteUnderUnboundedHeight() {
+        // Issue #1233: the consolidated shell-pane overlay replaced the three
+        // per-frame scanning overlays (SmartSelection / FilePath / EngineCommand);
+        // it must keep the same unbounded-measure guard. All four passes enabled so
+        // its full draw path is exercised.
+        assertOverlayMeasuresFinite("ShellPaneAffordance") {
+            ShellPaneAffordanceOverlay(
                 view = null,
                 renderRequests = renders,
-                onMatchesChanged = {},
-                modifier = Modifier,
-            )
-        }
-    }
-
-    @Test
-    fun filePathOverlay_measuresFiniteUnderUnboundedHeight() {
-        assertOverlayMeasuresFinite("FilePath") {
-            FilePathOverlay(
-                view = null,
-                renderRequests = renders,
+                matcher = DefaultTerminalMatcher(),
+                knownCommands = setOf("/clear"),
+                scanUrls = true,
+                scanFilePaths = true,
+                onUrlsChanged = {},
                 onFilePathsChanged = {},
+                onMatchesChanged = {},
+                onEngineCommandsChanged = {},
                 modifier = Modifier,
             )
         }
@@ -147,19 +147,6 @@ class TerminalOverlayUnboundedMeasureCrashTest {
                 renderRequests = renders,
                 onFilePathsChanged = {},
                 onUrlsChanged = {},
-                modifier = Modifier,
-            )
-        }
-    }
-
-    @Test
-    fun engineCommandOverlay_measuresFiniteUnderUnboundedHeight() {
-        assertOverlayMeasuresFinite("EngineCommand") {
-            EngineCommandOverlay(
-                view = null,
-                renderRequests = renders,
-                knownCommands = setOf("git", "ls"),
-                onEngineCommandsChanged = {},
                 modifier = Modifier,
             )
         }

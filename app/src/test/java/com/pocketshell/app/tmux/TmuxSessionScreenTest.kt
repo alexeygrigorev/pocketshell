@@ -16,6 +16,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1841,8 +1842,8 @@ class TmuxSessionScreenTest {
     @Test
     fun topReconnectBarNeverShownForNonReconnectingStatus() {
         // The top bar renders ONLY for Reconnecting — so it is never the sole
-        // indicator for any other state. Connecting has its own full-screen
-        // overlay; Connected/Switching/Failed/Idle drive their own affordances.
+        // indicator for any other state. Connecting has its own top overlay (gated
+        // the same way); Connected/Switching/Failed/Idle drive their own affordances.
         val nonReconnecting = listOf(
             TmuxSessionViewModel.ConnectionStatus.Idle,
             TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
@@ -1860,6 +1861,117 @@ class TmuxSessionScreenTest {
                 "no top progress bar for $status (terminal held)",
                 false,
                 shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
+            )
+        }
+    }
+
+    // --- Issue #750 (4th occurrence): the beyond-grace RECONNECT two-loaders bug.
+    // The maintainer sees the top "Connecting to host…" [ConnectingProgressOverlay]
+    // banner AND the centered "Attaching…" hold at the SAME time on a beyond-grace
+    // reconnect. Root cause: a reconnect re-dials through the controller's
+    // `Connecting` state → status projects to [ConnectionStatus.Connecting] (the top
+    // banner) WHILE the reveal machine holds the terminal (effectiveHidesTerminal ==
+    // true) and paints the centered spinner. The previous #750 fix gated only the
+    // Reconnecting band, never the Connecting overlay. These tests pin the reducer +
+    // BOTH gate predicates so exactly ONE primary loading surface resolves per state.
+
+    private val connectingStatus =
+        TmuxSessionViewModel.ConnectionStatus.Connecting("beta.example", 22, "alex")
+
+    @Test
+    fun connectingOverlaySuppressedWhileTerminalHeld_beyondGraceReconnectRepro() {
+        // REPRODUCTION of the maintainer's exact reopen state: a beyond-grace
+        // reconnect projects Connecting (the top overlay) WHILE the terminal is held
+        // (the centered "Attaching…" hold is up). Pre-fix the overlay was ungated on
+        // `status is Connecting`, so it stacked on top of the centered hold — TWO
+        // loaders. The reducer must resolve to the SINGLE centered hold and suppress
+        // the top banner.
+        assertEquals(
+            PrimaryLoadingSurface.CenteredAttaching,
+            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = true),
+        )
+        assertEquals(
+            "top Connecting overlay must be suppressed while the terminal is held",
+            false,
+            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = true),
+        )
+    }
+
+    @Test
+    fun connectingOverlayShownOnlyWhenTerminalNotHeld() {
+        // The top overlay is the fallback loader for a (currently unreached)
+        // Connecting that keeps a live frame painted (terminal NOT held), so it is
+        // never the sole indicator stripped from a state that needs it.
+        assertEquals(
+            PrimaryLoadingSurface.ConnectingBanner,
+            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = false),
+        )
+        assertTrue(
+            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = false),
+        )
+    }
+
+    @Test
+    fun exactlyOnePrimaryLoadingSurfacePerInProgressState_classCoverage() {
+        // Class coverage (D31/G2): every in-progress connection state resolves to
+        // EXACTLY ONE primary loading surface — never a top banner AND the centered
+        // "Attaching…" at once. Each in-progress state ALWAYS holds the terminal
+        // (RevealState.Seeding), so each resolves to the SINGLE centered hold; the
+        // top banners are suppressed. This is the invariant the maintainer's symptom
+        // keeps regressing on, pinned for all four states plus the never-held edges.
+
+        // Beyond-grace reconnect re-dials through the controller's Connecting →
+        // status Connecting; within-grace/steady recovery → status Reconnecting;
+        // a same-host switch → status Switching; a cold connect → status Connecting.
+        val inProgressHeldStates = listOf(
+            "cold Connecting" to connectingStatus,
+            "beyond-grace reconnect (re-dial → Connecting)" to connectingStatus,
+            "Switching / Attaching" to
+                TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
+            "Reattaching / Reconnecting" to reconnectingStatus,
+        )
+        inProgressHeldStates.forEach { (label, status) ->
+            // Terminal held (the real in-progress reality): the SOLE loader is the
+            // centered "Attaching…"; BOTH top banners are suppressed.
+            assertEquals(
+                "$label must resolve to the single centered hold while the terminal is held",
+                PrimaryLoadingSurface.CenteredAttaching,
+                primaryLoadingSurface(status, effectiveHidesTerminal = true),
+            )
+            assertEquals(
+                "$label: top Connecting overlay suppressed while held",
+                false,
+                shouldShowConnectingProgressOverlay(status, effectiveHidesTerminal = true),
+            )
+            assertEquals(
+                "$label: top Reconnecting band suppressed while held",
+                false,
+                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
+            )
+            // Never both banners at once regardless of hold state.
+            listOf(true, false).forEach { held ->
+                assertFalse(
+                    "$label (held=$held): the two top banners must be mutually exclusive",
+                    shouldShowConnectingProgressOverlay(status, held) &&
+                        shouldShowReconnectingProgressRow(status, held),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun steadyStatesHaveNoPrimaryLoadingSurface() {
+        // Connected / Idle / Failed with a live (not-held) frame have no primary
+        // loading surface — no spinner falsely implying in-flight work.
+        listOf(
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Idle,
+            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
+        ).forEach { status ->
+            assertEquals(
+                "no loading surface for steady $status",
+                PrimaryLoadingSurface.None,
+                primaryLoadingSurface(status, effectiveHidesTerminal = false),
             )
         }
     }

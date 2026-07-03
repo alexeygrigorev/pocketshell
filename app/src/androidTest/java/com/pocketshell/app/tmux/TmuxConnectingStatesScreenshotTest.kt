@@ -191,6 +191,88 @@ class TmuxConnectingStatesScreenshotTest {
     }
 
     @Test
+    fun captureBeyondGraceReconnectSingleIndicator_reopenRepro() {
+        // Issue #750 (4th occurrence — the maintainer's exact reopen state,
+        // 2026-07-03). A BEYOND-GRACE reconnect re-dials through the controller's
+        // `Connecting` state, which projects to [ConnectionStatus.Connecting] — so
+        // the REAL screen renders the top [ConnectingProgressOverlay] ("Connecting
+        // to host… / Still working, this may be slow…") WHILE the id-keyed
+        // [RevealStateMachine] holds the terminal (`effectiveHidesTerminal == true`)
+        // and the surface paints the centered "Attaching…" hold. Pre-fix the
+        // [ConnectingProgressOverlay] was ungated on `status is Connecting`, so BOTH
+        // rendered = TWO loaders (the reopened symptom).
+        //
+        // This mounts the REAL production [TmuxTopConnectingBanner] (the actual
+        // single render site for both top banners, driven by the real
+        // [primaryLoadingSurface] gate) ABOVE the REAL [SwitchingLoadingPlaceholder]
+        // centered hold — the exact production composition. It is a genuine WIRING
+        // guard: revert the gate and the top overlay renders again, pushing the
+        // indeterminate-indicator count to 2 (RED).
+        val connecting =
+            TmuxSessionViewModel.ConnectionStatus.Connecting(
+                host = "135.181.114.209",
+                port = 22,
+                user = "alexey",
+            )
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "git-pocketshell",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    // The REAL top-banner render site. With `effectiveHidesTerminal =
+                    // true` (the reconnect re-dial reality) the gate suppresses BOTH
+                    // banners → this renders NOTHING.
+                    TmuxTopConnectingBanner(
+                        status = connecting,
+                        effectiveHidesTerminal = true,
+                        sessionName = "git-pocketshell",
+                        onCancelConnect = {},
+                        onRetryNow = {},
+                    )
+                    // The REAL centered "Attaching…" hold — the SOLE loader that
+                    // must remain.
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        SwitchingLoadingPlaceholder()
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("Attaching…").assertExists()
+        // The top "Connecting to host…" banner (and its slow-hint line) MUST be
+        // absent while the terminal is held — the fix.
+        compose
+            .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose
+            .onAllNodesWithTag(TMUX_CONNECTING_SLOW_HINT_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        // The centered "Attaching…" hold is present exactly once.
+        compose
+            .onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.waitForIdle()
+        // EXACTLY ONE animated indicator: the centered "Attaching…" spinner. Pre-fix
+        // the ungated top overlay's linear bar added a second → count 2 (the RED
+        // reproduction of the maintainer's beyond-grace reconnect symptom).
+        assertIndeterminateIndicatorCount(1)
+        SystemClock.sleep(300)
+        captureFullDevice(File(artifactDir(), "tmux-beyond-grace-reconnect-single-indicator.png"))
+    }
+
+    @Test
     fun captureSteadyReconnectingSurfaceSingleIndicator() {
         // STEADY reconnecting state (`effectiveHidesTerminal == false`): the REAL
         // production composition mounts the [ReconnectingProgressRow] band (text +

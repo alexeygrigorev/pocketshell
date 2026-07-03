@@ -772,11 +772,52 @@ public class AgentConversationRepository internal constructor(
             }
             return fdBound
         }
-        // Pick the kind of the MOST-RECENT candidate scoped to this cwd — the
-        // transcript that is actually live now. Resolve that single kind through
-        // the SAME selection discipline (the kind is taken FROM the present
-        // transcript, never guessed by output parsing).
-        val recordedKind = candidates.maxByOrNull { it.modifiedAtMillis }?.agent ?: return null
+        // Resolve which KIND this pane runs. Issue #1228 (#819/#807 class): when a
+        // busier same-cwd SIBLING of a DIFFERENT engine flushed more recently, the
+        // old `candidates.maxByOrNull { it.modifiedAtMillis }?.agent` cross-kind
+        // pick bound the pane to the WRONG agent's transcript (masked Claude pane
+        // + busier Codex sibling → pane shows Codex). The kind must come from
+        // process identity, never a cross-kind mtime race.
+        val presentKinds: Set<AgentKind> = candidates.mapTo(LinkedHashSet<AgentKind>()) { it.agent }
+        val recordedKind: AgentKind = if (presentKinds.size == 1) {
+            // Only one engine's transcript is live in this cwd — unambiguous, no
+            // cross-kind guess to make. (Same-kind sibling disambiguation, e.g.
+            // two Codex rollouts, is still handled inside selectRecordedCandidate
+            // by the #819 /proc fd-owned-rollout gate.)
+            presentKinds.first()
+        } else {
+            // >1 engine's transcript shares this cwd. NEVER pick by cross-kind
+            // mtime. Bind ONLY the kind the pane's OWN process subtree holds open
+            // via `/proc/<pid>/fd` — the fd-ownership signal (#819), extended here
+            // beyond Codex to Claude/OpenCode. If ownership is absent or ambiguous,
+            // REFUSE to bind (surface a diagnostic) rather than guess.
+            val paneProcesses = paneOwnedProcessRows(session, normalizedTty)
+            val ownedFdPaths = resolveProcessOwnedTranscriptFdPaths(
+                session,
+                pidsFromProcessRows(paneProcesses),
+            )
+            val ownedKinds = ownedFdPaths
+                .mapNotNull(::kindOfOwnedTranscriptPath)
+                .filter { it in presentKinds }
+                .toSet()
+            val ownedKind = ownedKinds.singleOrNull()
+            if (ownedKind == null) {
+                val ownership = if (ownedKinds.isEmpty()) {
+                    "no transcript fd"
+                } else {
+                    "ambiguous fds across $ownedKinds"
+                }
+                diagnostic(
+                    "detectLiveTranscriptForPane: ${presentKinds.size} agent kinds " +
+                        "$presentKinds share cwd=$normalizedCwd and the pane's own " +
+                        "process subtree (tty=$normalizedTty) owns $ownership — " +
+                        "refusing to bind by cross-kind mtime (#1228). " +
+                        "Conversation will not bind.",
+                )
+                return null
+            }
+            ownedKind
+        }
         return selectRecordedCandidate(
             session = session,
             normalizedCwd = normalizedCwd,
@@ -829,12 +870,7 @@ public class AgentConversationRepository internal constructor(
         // realistic RTT). The recorded-Codex path keeps the scan unchanged.
         val needsProcessScan = recordedKind == AgentKind.Codex
         val paneProcesses = if (needsProcessScan) {
-            val ttyArg = normalizedTty.removePrefix("/dev/")
-            val processSnapshot = session.exec(PROCESS_TREE_SCAN_COMMAND)
-                .stdout
-                .lines()
-                .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
-            processLinesForPane(processSnapshot, ttyArg)
+            paneOwnedProcessRows(session, normalizedTty)
         } else {
             emptyList()
         }
@@ -1316,6 +1352,82 @@ public class AgentConversationRepository internal constructor(
                 .filter { it.isNotEmpty() && it.contains("/.codex/sessions/") && it.endsWith(".jsonl") }
                 .toSet()
         }.getOrDefault(emptySet())
+    }
+
+    /**
+     * Issue #1228: the host-wide process scan folded to the rows belonging to the
+     * pane's OWN process subtree (the pane's tty leader + its descendants). Shared
+     * by [selectRecordedCandidate] (the recorded-Codex fd binding) and the
+     * cross-kind fd-ownership disambiguation in [detectLiveTranscriptForPane], so
+     * both derive the pane's PIDs from exactly the same `ps` snapshot semantics.
+     */
+    private suspend fun paneOwnedProcessRows(
+        session: SshSession,
+        normalizedTty: String,
+    ): List<String> {
+        val ttyArg = normalizedTty.removePrefix("/dev/")
+        val processSnapshot = session.exec(PROCESS_TREE_SCAN_COMMAND)
+            .stdout
+            .lines()
+            .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
+        return processLinesForPane(processSnapshot, ttyArg)
+    }
+
+    /**
+     * Issue #1228: resolve which transcript files the given pane-owned PIDs hold
+     * OPEN via `/proc/<pid>/fd`, ACROSS ALL engine kinds (not only Codex). The
+     * open fd is process identity — far stronger than a same-cwd mtime race — so
+     * it is the correct signal for "which agent is THIS pane running" when a
+     * busier sibling of a different engine shares the cwd (the #819/#807 class).
+     *
+     * Recognised transcript fds:
+     *  - a `.codex/sessions` rollout `.jsonl` (Codex),
+     *  - a `.claude/projects` transcript `.jsonl` (Claude),
+     *  - `.../opencode.db` (OpenCode SQLite; identifies the KIND — the specific
+     *    session is still chosen by recency within the kind).
+     *
+     * Best-effort: on a non-Linux remote (no `/proc`), a CLI build that doesn't
+     * keep the fd open, or a permission/read error, this returns an empty set and
+     * the caller degrades to "refuse to bind" for the cross-kind case rather than
+     * guessing. The command still contains `.codex/sessions/` so the same fixtures
+     * that exercised the Codex-only fd path continue to route here.
+     */
+    private suspend fun resolveProcessOwnedTranscriptFdPaths(
+        session: SshSession,
+        pids: List<Long>,
+    ): Set<String> {
+        if (pids.isEmpty()) return emptySet()
+        val pidList = pids.joinToString(" ")
+        val command =
+            "for p in $pidList; do " +
+                "for fd in /proc/\$p/fd/*; do " +
+                "t=\$(readlink \"\$fd\" 2>/dev/null) || continue; " +
+                "case \"\$t\" in " +
+                "*/.codex/sessions/*.jsonl|*/.claude/projects/*.jsonl|*/opencode.db) " +
+                "printf '%s\\n' \"\$t\";; " +
+                "esac; " +
+                "done; " +
+                "done 2>/dev/null || true"
+        return runCatching {
+            session.exec(command).stdout
+                .lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && kindOfOwnedTranscriptPath(it) != null }
+                .toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    /**
+     * Issue #1228: classify an fd-held transcript path (from
+     * [resolveProcessOwnedTranscriptFdPaths]) into the engine that owns it, or
+     * `null` for a path outside a known transcript convention. Kept in lockstep
+     * with the enumeration directories in [detectionCommand].
+     */
+    private fun kindOfOwnedTranscriptPath(path: String): AgentKind? = when {
+        path.contains("/.codex/sessions/") && path.endsWith(".jsonl") -> AgentKind.Codex
+        path.contains("/.claude/projects/") && path.endsWith(".jsonl") -> AgentKind.ClaudeCode
+        path.substringBefore('#').endsWith("/opencode.db") -> AgentKind.OpenCode
+        else -> null
     }
 
     private data class ProcessRow(

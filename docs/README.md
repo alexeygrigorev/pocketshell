@@ -24,6 +24,7 @@ context; the README and current feature docs track released behavior.
 | [screenshots/](screenshots/) | Curated README screenshot assets captured from the visual-audit workflow |
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
+| [audit-2026-07-03.md](audit-2026-07-03.md) | Stability + UX jobs-to-be-done audit (5 parallel auditors); issue map #1222–#1243 |
 | [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 

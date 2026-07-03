@@ -432,6 +432,20 @@ public class TmuxSessionViewModel @Inject constructor(
     private val seedCaptureTimeoutMs: Long = SEED_CAPTURE_TIMEOUT_MS
 
     /**
+     * Issue #1206: backoff (ms) between bounded prewarm seed-recovery capture
+     * retries ([schedulePrewarmSeedRecovery]). Defaults to the production value;
+     * a unit test may shorten it via [setPrewarmSeedRetryBackoffForTest] so the
+     * retry window doesn't need real wall-clock delay under a real-thread driver
+     * (the virtual-clock `runTest` driver auto-advances it either way).
+     */
+    private var prewarmSeedRetryBackoffMs: Long = PREWARM_SEED_RETRY_BACKOFF_MS
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setPrewarmSeedRetryBackoffForTest(backoffMs: Long) {
+        prewarmSeedRetryBackoffMs = backoffMs
+    }
+
+    /**
      * Issue #576 (Slice A of #792): the dispatcher the structural reconcile's
      * pane-state APPLY step runs on. The `list-panes`/`capture-pane` IO runs
      * off-main on [reconcileDispatcher], but the resulting `_panes` /
@@ -2479,6 +2493,12 @@ public class TmuxSessionViewModel @Inject constructor(
     // would also stop them, but we want to release the bridge cleanly
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    // Issue #1206: background seed-recovery jobs for ACTIVE-runtime panes whose
+    // seed capture came back empty/wedged (e.g. the surface-error recovery
+    // reseed in [reseedRecoveredSurface]). The prewarm path tracks its own local
+    // map per [PrewarmedPaneRuntime]; this is the active-runtime registry so the
+    // retry/deferred-reseed is cancellable when the runtime is deactivated.
+    private val paneSeedRecoveryJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneOutputActivityJobs: MutableMap<String, Job> = ConcurrentHashMap()
     // Issue #959: track the EXACT `-CC` client each pane's output producer +
     // input drain are currently bound to. A beyond-grace background→foreground
@@ -4608,6 +4628,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = panes.paneProducerJobs,
                 paneInputQueues = panes.paneInputQueues,
                 paneInputJobs = panes.paneInputJobs,
+                // Issue #1206: carry the prewarm seed-recovery jobs into the
+                // cache entry so a promoted-but-still-parked recovery job is
+                // cancelled on cache eviction / deactivate rather than leaking
+                // until whole-VM `bridgeScope` teardown.
+                paneSeedRecoveryJobs = panes.paneSeedRecoveryJobs,
                 paneAgentJobs = emptyMap(),
                 paneAgentInputs = emptyMap(),
                 agentConversations = emptyMap(),
@@ -4661,6 +4686,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val paneInputQueues = LinkedHashMap<String, TmuxPaneInputQueue>()
         val paneInputJobs = LinkedHashMap<String, Job>()
         val paneProducerJobs = LinkedHashMap<String, Job>()
+        // Issue #1206: background seed-recovery jobs (bounded capture retry +
+        // one deferred reseed on the first live %output) for panes whose FIRST
+        // capture came back empty/error/timeout on a busy shared -CC channel.
+        val paneSeedRecoveryJobs = LinkedHashMap<String, Job>()
         val paneRows = LinkedHashMap<String, TmuxPaneState>()
         try {
             val parsed = response.output
@@ -4704,6 +4733,7 @@ public class TmuxSessionViewModel @Inject constructor(
                             paneProducerJobs = paneProducerJobs,
                             paneInputQueues = paneInputQueues,
                             paneInputJobs = paneInputJobs,
+                            paneSeedRecoveryJobs = paneSeedRecoveryJobs,
                         )
                     },
                 )
@@ -4711,7 +4741,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // Issue #448 (epic #432 slice C): also tap the prewarmed
                 // pane's shared output flow for new-port detection.
                 startPortDetectionForPane(paneId = pane.paneId, client = client)
-                seedPrewarmedPane(client, row)
+                seedPrewarmedPane(client, row, paneSeedRecoveryJobs)
             }
             return PrewarmedPaneRuntime(
                 panes = paneRows.values.toList(),
@@ -4719,6 +4749,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = paneProducerJobs,
                 paneInputQueues = paneInputQueues,
                 paneInputJobs = paneInputJobs,
+                paneSeedRecoveryJobs = paneSeedRecoveryJobs,
             )
         } catch (t: Throwable) {
             PrewarmedPaneRuntime(
@@ -4727,6 +4758,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = paneProducerJobs,
                 paneInputQueues = paneInputQueues,
                 paneInputJobs = paneInputJobs,
+                paneSeedRecoveryJobs = paneSeedRecoveryJobs,
             ).closePartialPrewarm()
             throw t
         }
@@ -4738,48 +4770,123 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerJobs: MutableMap<String, Job>,
         paneInputQueues: MutableMap<String, TmuxPaneInputQueue>,
         paneInputJobs: MutableMap<String, Job>,
+        paneSeedRecoveryJobs: MutableMap<String, Job>,
     ) {
         val existing = paneRows[paneId] ?: return
         if (existing.surfaceError) return
         paneProducerJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
+        // Issue #1206: the pane's feed failed — stop any background seed-recovery
+        // retry/deferred-reseed too so it doesn't reseed a dead surface.
+        paneSeedRecoveryJobs.remove(paneId)?.cancel()
         runCatching { existing.terminalState.detachExternalProducer() }
         paneRows[paneId] = existing.copy(surfaceError = true)
     }
 
-    private suspend fun seedPrewarmedPane(client: TmuxClient, pane: TmuxPaneState) {
+    private suspend fun seedPrewarmedPane(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        paneSeedRecoveryJobs: MutableMap<String, Job> = this.paneSeedRecoveryJobs,
+    ) {
         // Issue #468: the live %output producer is gated behind the seed.
         // appendRemoteOutput opens the gate when a snapshot lands; if the
         // capture fails (or anything throws) we must still open the gate so
         // buffered live output is flushed in order rather than swallowed.
-        var seeded = false
-        try {
-            // Issue #640: single-flight combined capture+cursor exchange (see
-            // [TmuxClient.captureWithCursor]) shared with the cold-open seed
-            // path so both pay one wire round-trip and restore the #259 cursor.
-            // Issue #926: the round-trip runs OFF Main on [seedIoDispatcher] with
-            // the short seed ceiling — the prewarm seed must never park the UI
-            // thread on a wedged channel either.
-            val combined = runCatching {
-                withContext(seedIoDispatcher) {
-                    client.captureWithCursor(
-                        pane.paneId,
-                        scrollbackLines = SEED_SCROLLBACK_LINES,
-                        timeoutMs = seedCaptureTimeoutMs,
-                    )
-                }
-            }.getOrNull() ?: return
-            val capture = combined.capture
-            if (capture.isError || capture.output.isEmpty()) return
-            val cursor = parseTmuxPaneCursor(combined.cursorReply)
-            pane.terminalState.appendRemoteOutput(
-                capture.output.toTerminalViewportBytes(cursor),
-            )
-            seeded = true
-        } finally {
-            if (!seeded) pane.terminalState.openSeedGateWithoutSeed()
+        val seeded = captureAndApplyPrewarmSeed(client, pane)
+        if (!seeded) {
+            // Open the gate immediately (do NOT hold live %output behind a
+            // multi-second retry) and recover in the background.
+            pane.terminalState.openSeedGateWithoutSeed()
+            // Issue #1206: the FIRST capture came back empty/error/timeout on a
+            // busy shared -CC channel (Claude floods at startup and can wedge the
+            // capture acquire). Without recovery the model grid stays empty and
+            // only future incremental %output paints → fragments-over-black. Retry
+            // a bounded number of times with backoff, and failing that re-arm ONE
+            // deferred reseed on the first live %output so the full grid is
+            // recovered the moment the pane produces anything.
+            schedulePrewarmSeedRecovery(client, pane, paneSeedRecoveryJobs)
         }
+    }
+
+    /**
+     * Issue #640/#926: one combined capture+cursor seed attempt for a prewarmed
+     * pane, run OFF Main on [seedIoDispatcher] with the short seed ceiling.
+     * Returns true and applies the snapshot (firing the full-repaint) when the
+     * capture returned content; false on empty/error/timeout/throw so the caller
+     * can open the gate and schedule recovery (#1206).
+     */
+    private suspend fun captureAndApplyPrewarmSeed(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+    ): Boolean {
+        // Issue #1206 (connected AC4 proof, #780 synthetic-injection): a busy
+        // shared `-CC` channel can wedge/empty the FIRST `capture-pane` on a
+        // fresh prewarmed pane even though the pane HAS content — the exact
+        // non-happy state the happy real-agent workbench structurally cannot
+        // enter. This seam lets a connected journey force the first seed attempt
+        // to be TREATED as empty (deterministically, BEFORE the wire round-trip),
+        // driving the retry/deferred-reseed recovery against a real pane.
+        // [onSeedAttempt] is a diagnostic counter (how many times the prewarm
+        // seed path ran). Production never arms the seam (default 0), so this is
+        // a pure test hook.
+        PrewarmSeedFaultTestOverride.onSeedAttempt()
+        if (PrewarmSeedFaultTestOverride.consumeForcedEmpty(pane.paneId)) return false
+        val combined = runCatching {
+            withContext(seedIoDispatcher) {
+                client.captureWithCursor(
+                    pane.paneId,
+                    scrollbackLines = SEED_SCROLLBACK_LINES,
+                    timeoutMs = seedCaptureTimeoutMs,
+                )
+            }
+        }.getOrNull() ?: return false
+        val capture = combined.capture
+        if (capture.isError || capture.output.isEmpty()) return false
+        val cursor = parseTmuxPaneCursor(combined.cursorReply)
+        pane.terminalState.appendRemoteOutput(
+            capture.output.toTerminalViewportBytes(cursor),
+        )
+        return true
+    }
+
+    /**
+     * Issue #1206: background recovery for a prewarmed pane whose first seed
+     * capture came back empty/error/timeout. Runs on [bridgeScope] (never blocks
+     * the prewarm loop; cancelled with the VM), retries the capture a bounded
+     * number of times with backoff, and — if the capture stays wedged/empty for
+     * the whole window — re-arms ONE deferred reseed that fires the moment the
+     * first live %output lands (an idle pane emits nothing, so no wasted
+     * capture; when Claude finally paints a cell, one fresh capture seeds the
+     * full grid over the fragment-only screen).
+     */
+    private fun schedulePrewarmSeedRecovery(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        paneSeedRecoveryJobs: MutableMap<String, Job>,
+    ) {
+        val paneId = pane.paneId
+        paneSeedRecoveryJobs.remove(paneId)?.cancel()
+        val job = bridgeScope.launch {
+            // Bounded retry with backoff (≈PREWARM_SEED_RETRY_ATTEMPTS attempts
+            // over ≈PREWARM_SEED_RETRY_BACKOFF_MS spacing).
+            repeat(PREWARM_SEED_RETRY_ATTEMPTS) {
+                delay(prewarmSeedRetryBackoffMs)
+                if (captureAndApplyPrewarmSeed(client, pane)) return@launch
+            }
+            // Retry window exhausted while the capture stayed empty/wedged.
+            // Re-arm ONE deferred reseed: wait for the first live %output, then
+            // do a single fresh capture. The wait parks harmlessly for a truly
+            // idle pane (nothing to reseed) and is torn down with bridgeScope.
+            runCatching { client.outputFor(paneId).first() }
+                .onSuccess { captureAndApplyPrewarmSeed(client, pane) }
+        }
+        // The map is a per-runtime cancellation registry only (torn down with the
+        // runtime); a completed entry left behind is harmless (`cancel()` on a
+        // finished job is a no-op). Deliberately NOT self-removed on completion so
+        // a completion handler can't mutate the map while [closePartialPrewarm]
+        // iterates it.
+        paneSeedRecoveryJobs[paneId] = job
     }
 
     /**
@@ -5675,6 +5782,10 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
+        // Issue #1206: cancel any active-runtime seed-recovery retry/deferred
+        // reseed — the runtime is being parked; a fresh attach/restore re-seeds.
+        paneSeedRecoveryJobs.values.forEach { it.cancel() }
+        paneSeedRecoveryJobs.clear()
         // Issue #959: the parked panes' producers will be re-bound to a (new
         // or same) client on restore via [rebindRestoredRuntimePaneJobsIfNeeded];
         // drop the stale-client bindings so a restore re-binds rather than
@@ -5812,6 +5923,14 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.putAll(runtime.paneInputQueues)
         paneInputJobs.clear()
         paneInputJobs.putAll(runtime.paneInputJobs)
+        // Issue #1206: a restored prewarmed runtime may still carry a parked
+        // seed-recovery job (its capture stayed empty). Move it into the
+        // active-runtime registry so it is cancelled on the next
+        // [deactivateCurrentRuntimeToCache] (and the whole-VM teardown) rather
+        // than leaking. Cancel any stale active entry first.
+        paneSeedRecoveryJobs.values.forEach { it.cancel() }
+        paneSeedRecoveryJobs.clear()
+        paneSeedRecoveryJobs.putAll(runtime.paneSeedRecoveryJobs)
         paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.clear()
         // Issue #793: drop any pending load watchdogs from the prior runtime so
@@ -17963,9 +18082,15 @@ private data class PrewarmedPaneRuntime(
     val paneProducerJobs: Map<String, Job>,
     val paneInputQueues: Map<String, TmuxPaneInputQueue>,
     val paneInputJobs: Map<String, Job>,
+    // Issue #1206: background seed-recovery jobs (bounded capture retry + one
+    // deferred reseed on first live %output) for empty/wedged-capture panes.
+    val paneSeedRecoveryJobs: Map<String, Job> = emptyMap(),
 )
 
 private suspend fun PrewarmedPaneRuntime.closePartialPrewarm() {
+    // Issue #1206: cancel background seed recovery first so no retry/deferred
+    // reseed touches a pane whose producer we are tearing down.
+    paneSeedRecoveryJobs.values.forEach { it.cancel() }
     paneProducerJobs.values.forEach { it.cancelAndJoin() }
     paneInputJobs.values.forEach { it.cancelAndJoin() }
     paneInputQueues.values.forEach { it.close() }
@@ -18323,6 +18448,25 @@ internal const val SEED_SCROLLBACK_LINES: Int = 200
  * lands the snapshot, short enough that a wedge never reads as a freeze.
  */
 internal const val SEED_CAPTURE_TIMEOUT_MS: Long = 2_500L
+
+/**
+ * Issue #1206: how many times a prewarmed pane whose FIRST seed `capture-pane`
+ * came back empty/error/timeout retries the capture in the background before it
+ * falls back to a deferred reseed on the first live %output. Bounded so a
+ * genuinely-empty (brand-new, nothing-drawn-yet) pane isn't captured forever,
+ * but generous enough to ride out a Claude startup flood wedging the shared
+ * `-CC` capture acquire.
+ */
+internal const val PREWARM_SEED_RETRY_ATTEMPTS: Int = 3
+
+/**
+ * Issue #1206: backoff (ms) between prewarm seed-recovery capture retries. Three
+ * attempts at ≈1.6 s spacing covers the ≈5 s window a startup flood typically
+ * takes to drain enough for the capture acquire to succeed. The retry runs in
+ * the background on `bridgeScope`, so this spacing never blocks the prewarm loop
+ * or the UI thread.
+ */
+internal const val PREWARM_SEED_RETRY_BACKOFF_MS: Long = 1_600L
 
 /**
  * Issue #662: how long the post-reveal black-pane safety net waits before
@@ -18847,6 +18991,79 @@ internal object LivenessProbeTestOverride {
 
     fun failureThreshold(): Int =
         failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
+}
+
+/**
+ * Issue #1206: test-only synthetic-injection seam (the #780 model) for the
+ * prewarm seed path. A fresh Claude pane's FIRST `capture-pane` can come back
+ * empty/wedged on a busy shared `-CC` channel even though the pane HAS content
+ * — the exact non-happy state the happy real-agent workbench structurally
+ * cannot enter, which is why AC4 must inject it synthetically to prove the pane
+ * still lands on a PAINTED grid via the retry/deferred-reseed recovery.
+ *
+ * A connected journey arms [setForcedEmptyFirstCaptures] BEFORE launching the
+ * activity; the production seed path calls [consumeForcedEmpty] once per
+ * capture and, while budget remains, TREATS that capture as empty (after the
+ * real wire round-trip). [consumedCount] lets the journey hard-assert the
+ * injected fault was actually hit by the prewarm seed path (no vacuous pass),
+ * and the analogue of [LivenessProbeTestOverride]. Production keeps it at 0.
+ */
+internal object PrewarmSeedFaultTestOverride {
+    @Volatile
+    private var forcedEmptyFirstCaptures: Int = 0
+
+    /** Number of forced-empty captures actually consumed by the seed path. */
+    @Volatile
+    var consumedCount: Int = 0
+        private set
+
+    /**
+     * Diagnostic: how many times the prewarm seed path entered
+     * [captureAndApplyPrewarmSeed]. A connected journey reads this to tell
+     * "prewarm never seeded the target" (0) apart from "prewarm seeded but the
+     * seam wasn't armed / consumed" (>0, consumed 0).
+     */
+    @Volatile
+    var seedAttemptCount: Int = 0
+        private set
+
+    /**
+     * Arm the seam so the next [count] prewarm seed captures are treated as
+     * empty (simulating a wedged/empty first `capture-pane`). Resets the
+     * consumed + attempt counters so a journey can assert the injection landed.
+     */
+    fun setForcedEmptyFirstCaptures(count: Int) {
+        require(count >= 0) { "count must be >= 0" }
+        forcedEmptyFirstCaptures = count
+        consumedCount = 0
+        seedAttemptCount = 0
+    }
+
+    fun clear() {
+        forcedEmptyFirstCaptures = 0
+        consumedCount = 0
+        seedAttemptCount = 0
+    }
+
+    /** Record that the prewarm seed path ran once (diagnostic counter). */
+    @Synchronized
+    fun onSeedAttempt() {
+        seedAttemptCount += 1
+    }
+
+    /**
+     * Consume one unit of forced-empty budget for [paneId]. Returns true (and
+     * decrements the budget) when this capture must be treated as empty. The
+     * [paneId] is accepted for future per-pane targeting and diagnostic logging;
+     * the budget itself is process-global and consumed in call order.
+     */
+    @Synchronized
+    fun consumeForcedEmpty(paneId: String): Boolean {
+        if (forcedEmptyFirstCaptures <= 0) return false
+        forcedEmptyFirstCaptures -= 1
+        consumedCount += 1
+        return true
+    }
 }
 
 /**

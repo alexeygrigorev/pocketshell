@@ -143,9 +143,21 @@ class TerminalSurfaceState(
      * not Compose state: remote output can arrive in tight bursts, and each
      * burst should redraw the Android [TerminalView] without recomposing the
      * Compose wrapper.
+     *
+     * `replay = 1` (PocketShell #1206): mirrors the #879 fix on
+     * [_fullRepaintRequests]. On a fresh-pane seed / post-switch reveal the pane
+     * is seeded and its render request fires BEFORE the late-subscribing
+     * [TerminalSurface] binds its collector. With `replay = 0` that request was
+     * silently dropped (`extraBufferCapacity = 1` + `DROP_OLDEST` only buffers
+     * for an ALREADY-subscribed slow collector, never for a not-yet-subscribed
+     * one), and an idle Claude pane emits no follow-up byte to compensate — so
+     * the freshly seeded rows were left unpainted (fragments-over-black). With
+     * `replay = 1` a collector that subscribes after the emit still receives the
+     * most-recent render request and redraws. Harmless in steady state: one
+     * coalesced render on bind, then the #469 dirty path resumes.
      */
     private val _renderRequests = MutableSharedFlow<Unit>(
-        replay = 0,
+        replay = 1,
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
@@ -364,29 +376,39 @@ class TerminalSurfaceState(
      * `capture-pane` snapshot before future `%output` events arrive.
      */
     fun appendRemoteOutput(bytes: ByteArray) {
-        if (bytes.isEmpty()) return
-        val activeBridge = bridge ?: return
-        val clean = if (sanitizeQueryResponses) {
+        val activeBridge = bridge
+        val clean = if (bytes.isNotEmpty() && sanitizeQueryResponses) {
             TerminalQueryResponseSanitizer.sanitize(bytes)
         } else {
             bytes
         }
-        if (clean.isEmpty()) return
-        // Issue #468: apply this seed snapshot, then release any live `%output`
-        // bytes that were buffered behind the seed gate while the
-        // `capture-pane` round-trip was in flight — in their original arrival
-        // order, after the seed. When the gate was never closed (plain SSH
-        // surface, or a re-seed) this is just an ordinary feed plus an
-        // already-open-gate no-op.
-        activeBridge.seedThenOpenGate(clean)
-        _output.tryEmit(clean)
+        if (activeBridge != null && clean.isNotEmpty()) {
+            // Issue #468: apply this seed snapshot, then release any live
+            // `%output` bytes that were buffered behind the seed gate while the
+            // `capture-pane` round-trip was in flight — in their original arrival
+            // order, after the seed. When the gate was never closed (plain SSH
+            // surface, or a re-seed) this is just an ordinary feed plus an
+            // already-open-gate no-op.
+            activeBridge.seedThenOpenGate(clean)
+            _output.tryEmit(clean)
+            bufferTick.value = bufferTick.value + 1
+        }
         // Issue #721: a re-seed applies the captured snapshot to the emulator
         // buffer but does not change which rows the renderer's #469 dirty cache
         // considers stale — so a plain render request would repaint only freshly
         // changed cells and leave the rest of the existing screen black. Signal a
         // FULL repaint so every row is redrawn straight from the buffer.
+        //
+        // Issue #1206: fire the full repaint even when the capture came back
+        // EMPTY (or sanitized to empty). An idle alt-screen pane (Claude at rest)
+        // already holds its frame in the emulator buffer, but with the request
+        // gated behind the empty short-circuit it got neither fresh content NOR a
+        // repaint — so the #469 dirty cache clipped the next draw to changed rows
+        // over a black canvas and the pane stayed black until the agent happened
+        // to touch a cell. Firing here (above the empty short-circuits) repaints
+        // the existing buffer from a clean slate. Combined with the #879/#1206
+        // `replay = 1` flows, a late-subscribing surface still receives it.
         _fullRepaintRequests.tryEmit(Unit)
-        bufferTick.value = bufferTick.value + 1
     }
 
     /**
@@ -398,6 +420,13 @@ class TerminalSurfaceState(
      */
     fun openSeedGateWithoutSeed() {
         bridge?.openGateFlushingPending()
+        // Issue #1206: a fresh/empty-capture seed leaves the emulator holding
+        // whatever the idle alt-screen pane already had (or nothing). Fire a FULL
+        // repaint so an idle pane redraws its existing buffer from a clean slate
+        // instead of staying black behind the #469 dirty cache — the same
+        // idle-pane gap the empty-capture branch in [appendRemoteOutput] closes.
+        // Coalesced + `replay = 1`, so this is at worst one extra redraw on bind.
+        _fullRepaintRequests.tryEmit(Unit)
     }
 
     /**
@@ -429,6 +458,18 @@ class TerminalSurfaceState(
      */
     internal fun emitFullRepaintRequestForTesting(): Boolean =
         _fullRepaintRequests.tryEmit(Unit)
+
+    /**
+     * Test-only seam (PocketShell #1206): fire a plain render request exactly as
+     * a Termux screen-update callback does, WITHOUT a real session. Lets a unit
+     * test reproduce the fresh-pane / post-switch reveal ordering — the render
+     * request fires BEFORE the fresh [TerminalSurface]'s collector subscribes —
+     * and assert that with `replay = 1` a late subscriber still receives the
+     * most-recent request (with `replay = 0` it was silently dropped, leaving the
+     * freshly seeded rows unpainted over black).
+     */
+    internal fun emitRenderRequestForTesting(): Boolean =
+        _renderRequests.tryEmit(Unit)
 
     /**
      * Matcher used by [flowOfMatches] to extract tap-target candidates from

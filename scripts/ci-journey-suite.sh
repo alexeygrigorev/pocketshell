@@ -911,6 +911,26 @@ JOURNEY_CLASSES=(
   #     a toggle for a conversation-less shell).
   # Uses ONLY agents:2222 that tests.yml already brings up; no self-skip on CI.
   "com.pocketshell.app.tmux.ConversationStaysReachableAfterDetectionDropsDockerTest"
+  # ADDED (#1207 — reviewer BLOCKED-G4 residual, D33/G10): the composer-send
+  # INTEGRATION on the REAL TmuxSessionScreen that the component/JVM proofs
+  # could not cover. A fresh Claude session opens on the Conversation view; a
+  # `/model` (an alt-screen TUI picker that writes NOTHING to the JSONL) used to
+  # echo a MISLEADING optimistic user bubble and offer no way forward. This class
+  # drives the REAL app + REAL Docker agent:
+  #   - modelCommandFromConversationShowsNoticeNoEchoBubbleThenTapOpensTerminal:
+  #     the LOAD-BEARING real-path red->green. Detection binds via the #975
+  #     transcript-evidence fallback (so the composer routes AgentConversation);
+  #     `/model` is typed into the REAL composer and Sent. On base (echo-always)
+  #     sendToAgentPaneResult inserts a misleading /model User bubble and no
+  #     Open-in-Terminal notice appears (RED); with the #1207 fix the no-echo path
+  #     runs -> NO optimistic bubble + the notice IS shown + one tap lands the user
+  #     on SessionTab.Terminal and the notice self-clears (GREEN).
+  #   - confirmedShellShowsNoConversationNoticeOrPlaceholder (#894 no-flap
+  #     ADJACENCY): a genuine no-agent recorded shell shows NO Conversation tab, so
+  #     neither the #1207 notice nor the Conversation placeholder can appear on a
+  #     confirmed shell.
+  # Uses ONLY agents:2222 that tests.yml already brings up; no self-skip on CI.
+  "com.pocketshell.app.tmux.ConversationTuiCommandJourneyDockerTest"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /
@@ -993,6 +1013,20 @@ JOURNEY_CLASSES=(
   # the inline-image render + the path-text FALLBACK on a failed fetch stay
   # durably guarded. It lives under com.pocketshell.app.conversation.
   "com.pocketshell.app.conversation.ConversationImageContentRenderTest"
+  # ADDED (#1207 — black-screen audit UX leg, D33/G10): a fresh Claude session
+  # opens on the Conversation view with zero transcript; `/model` (an alt-screen
+  # TUI picker that writes NOTHING to the JSONL) showed a silent nothing + a
+  # misleading optimistic bubble, and a torn-down row stranded an eternal
+  # "Loading conversation…" spinner. This class renders the REAL production
+  # composables (ConversationTuiCommandNotice + ConversationDetectingPlaceholder
+  # via the production tmuxConversationPlaceholderLoadState fallback) and asserts
+  # the Open-in-Terminal affordance is shown + the terminal Empty state renders
+  # instead of the eternal spinner. PURE Compose (NO Docker fixture, NO SSH/tmux,
+  # NO port) — no tests.yml service change — and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi())). Per G9 it must run per-push so the
+  # TUI-command UX + spinner-race fix stay durably guarded. It lives under
+  # com.pocketshell.app.conversation.
+  "com.pocketshell.app.conversation.ConversationTuiCommandNoticeRenderTest"
   # ADDED (#931 — D33/G10 reproduce-first): the port-forward panel LazyColumn
   # duplicate-key crash guard. The maintainer's captured crash
   # (IllegalArgumentException: Key "22" already used) was a real Compose

@@ -782,6 +782,15 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+    // Issue #1207: when a TUI-only slash-command (/model, /config, a picker) is
+    // sent from the Conversation composer, the picker opens in the covered
+    // alt-screen Terminal and writes NOTHING to the transcript — so the
+    // Conversation surface can never show it. Instead of the misleading
+    // optimistic bubble + silent nothing, we raise an inline notice holding the
+    // command text with a one-tap "Open in Terminal" action. Null when no notice
+    // is up. Reset whenever the send target identity changes so a stale notice
+    // never bleeds into another session on a switch/recreation.
+    var tuiCommandNotice by remember(targetSessionId.value) { mutableStateOf<String?>(null) }
     var showCardFeedSheet by remember(activeSessionCardsTargetKey) { mutableStateOf(false) }
     val sessionCardInteractions = remember(viewModel) {
         object : SessionCardInteractions {
@@ -976,7 +985,30 @@ public fun TmuxSessionScreen(
                 false
             } else when (target.route) {
                 OutboundRoute.AgentConversation ->
-                    viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
+                    // Issue #1207: a TUI-only slash-command (/model, /config, any
+                    // picker) writes NOTHING to the transcript — it drives an
+                    // alt-screen picker in the covered Terminal pane. Echoing an
+                    // optimistic "/model" user bubble (the old `sendToAgentPaneResult`
+                    // path) is actively misleading: the bubble sits there as if a
+                    // normal turn ran while the picker is invisible on the
+                    // Conversation surface by construction. So for a slash-command we
+                    // send the keystrokes to the pane WITHOUT the optimistic echo (the
+                    // same raw text+Enter delivery a confirmed agent uses on the
+                    // Terminal tab) and raise the inline "Open in Terminal" notice.
+                    when (tmuxAgentConversationSend(request.text)) {
+                        TmuxAgentConversationSend.TuiCommandNoEcho -> {
+                            val ok = viewModel.writeInputToPaneResult(
+                                paneId,
+                                (request.text.trimEnd('\n') + "\r").toByteArray(Charsets.UTF_8),
+                            ).isSuccess
+                            if (ok) {
+                                tuiCommandNotice = request.text.trim()
+                            }
+                            ok
+                        }
+                        TmuxAgentConversationSend.Echo ->
+                            viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
+                    }
                 OutboundRoute.AgentPayload ->
                     tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
                         viewModel.sendAgentPayloadToPaneResult(
@@ -2163,11 +2195,27 @@ public fun TmuxSessionScreen(
                     // a clear Failed terminal state (with Retry) once the
                     // watchdog trips, instead of an infinite "Waiting for agent…"
                     // spinner.
+                    // Issue #1207 (stranded-spinner race): when the conversation
+                    // row is GONE (`visibleConversation == null`) — e.g. the
+                    // 2-consecutive-null detection teardown removed it BEFORE the
+                    // 12s load watchdog fired — there is no watchdog left behind
+                    // this placeholder, so the old `?: Loading` fallback spins
+                    // FOREVER. [tmuxConversationPlaceholderLoadState] resolves a
+                    // missing row to a terminal, legible Empty state ("No
+                    // conversation yet — the agent is live in the Terminal tab")
+                    // with the same one-tap Open-in-Terminal action, never Loading.
                     ConversationDetectingPlaceholder(
-                        loadState = visibleConversation?.loadState
-                            ?: ConversationLoadState.Loading,
+                        loadState = tmuxConversationPlaceholderLoadState(
+                            visibleConversation?.loadState,
+                        ),
                         onRetry = {
                             surfacePane?.paneId?.let { viewModel.retryAgentConversationLoad(it) }
+                        },
+                        onOpenTerminal = {
+                            surfacePane?.paneId?.let {
+                                viewModel.selectSessionTab(it, SessionTab.Terminal)
+                            }
+                            tuiCommandNotice = null
                         },
                     )
                 } else if (unifiedPanes.isEmpty()) {
@@ -2180,6 +2228,36 @@ public fun TmuxSessionScreen(
                 // all stable, so an overlay-visibility toggle skips it) and supplies
                 // the warm, attached terminal surface for BOTH the raw-Terminal tab
                 // and (covered, underneath) the Conversation tab.
+
+                // Issue #1207: a TUI-only slash-command (/model, /config, a
+                // permission picker) sent from the Conversation composer opens its
+                // picker in the covered alt-screen Terminal and writes NOTHING to
+                // the transcript — so nothing appears here. Instead of the old
+                // misleading optimistic bubble + silent nothing, an inline notice
+                // over the Conversation surface tells the user the picker is live in
+                // the Terminal and offers a one-tap jump. Only on the Conversation
+                // tab (the Terminal already shows the picker). The notice self-clears
+                // on the jump, on dismiss, and on a session switch (state key).
+                val activeTuiCommandNotice = tuiCommandNotice
+                if (activeTuiCommandNotice != null &&
+                    currentSelectedTab == SessionTab.Conversation
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        ConversationTuiCommandNotice(
+                            command = activeTuiCommandNotice,
+                            onOpenTerminal = {
+                                surfacePane?.paneId?.let {
+                                    viewModel.selectSessionTab(it, SessionTab.Terminal)
+                                }
+                                tuiCommandNotice = null
+                            },
+                            onDismiss = { tuiCommandNotice = null },
+                        )
+                    }
+                }
             }
             Box(
                 modifier = Modifier
@@ -3863,6 +3941,68 @@ internal fun tmuxComposerSendRoute(
     else -> TmuxComposerSendRoute.RawBytes
 }
 
+/**
+ * Issue #1207: true when [text] is an agent TUI slash-command — an alt-screen
+ * interaction (`/model`, `/config`, `/login`, `/agents`, permission pickers …)
+ * that the agent handles in its terminal UI and writes NOTHING to the JSONL
+ * transcript. Such input can NEVER appear on the Conversation surface by
+ * construction, so it must NOT get an optimistic transcript bubble, and the user
+ * must be offered the Terminal (the only surface that can drive the picker).
+ *
+ * The grammar is deliberately narrow so a normal prompt or a filesystem path is
+ * NOT misclassified:
+ *  - the trimmed text is a single line (a multi-line message is a prompt);
+ *  - its first whitespace-delimited token is `/word[...]` where `word` starts
+ *    with a letter and contains only `[A-Za-z0-9_-]` (no further `/`), so
+ *    `/model`, `/model sonnet`, `/config` match but `/home/user/file`,
+ *    `/`, and `/2 + 2` (a leading-slash math prompt) do not.
+ */
+internal fun tmuxComposerIsTuiSlashCommand(text: String): Boolean {
+    val trimmed = text.trim()
+    if (!trimmed.startsWith("/")) return false
+    // A multi-line message is a prompt the user typed, not a slash-command.
+    if (trimmed.contains('\n') || trimmed.contains('\r')) return false
+    val firstToken = trimmed.substringBefore(' ').substringBefore('\t')
+    return firstToken.matches(Regex("^/[A-Za-z][A-Za-z0-9_-]*$"))
+}
+
+/**
+ * Issue #1207: which agent-conversation send path a composer submit takes.
+ *  - [Echo]: a normal prompt — submit to the agent AND echo the optimistic user
+ *    turn into the transcript (`sendToAgentPaneResult`), unchanged from before.
+ *  - [TuiCommandNoEcho]: a TUI-only slash-command — deliver the keystrokes to
+ *    the pane WITHOUT an optimistic transcript bubble and raise the
+ *    Open-in-Terminal notice, because the picker it opens shows only on the
+ *    covered Terminal pane, never on the Conversation surface.
+ */
+internal enum class TmuxAgentConversationSend { Echo, TuiCommandNoEcho }
+
+internal fun tmuxAgentConversationSend(text: String): TmuxAgentConversationSend =
+    if (tmuxComposerIsTuiSlashCommand(text)) {
+        TmuxAgentConversationSend.TuiCommandNoEcho
+    } else {
+        TmuxAgentConversationSend.Echo
+    }
+
+/**
+ * Issue #1207: resolve the load state the Conversation-tab placeholder renders
+ * when it has NO backing conversation row (`rowLoadState == null`).
+ *
+ * The stranded-spinner bug: the 2-consecutive-null detection teardown
+ * (`AGENT_EXIT_CONFIRMATIONS`) can remove the conversation row BEFORE the 12s
+ * load watchdog fires. The placeholder is still shown (the tab stays reachable
+ * via `presumedAgent`), but with no row there is no watchdog behind it — so a
+ * `?: Loading` fallback spins FOREVER. A missing row means no load is in flight
+ * and nothing can ever flip it to a terminal state, so it MUST resolve to a
+ * terminal legible state ([ConversationLoadState.Empty] — "No conversation yet,
+ * the agent is live in the Terminal tab"), never [ConversationLoadState.Loading].
+ * When a row exists we honour its own load state (a `Loading` row always has the
+ * watchdog armed behind it).
+ */
+internal fun tmuxConversationPlaceholderLoadState(
+    rowLoadState: ConversationLoadState?,
+): ConversationLoadState = rowLoadState ?: ConversationLoadState.Empty
+
 internal fun tmuxComposerOutboundRoute(route: TmuxComposerSendRoute): OutboundRoute = when (route) {
     TmuxComposerSendRoute.AgentConversation -> OutboundRoute.AgentConversation
     TmuxComposerSendRoute.AgentPayload -> OutboundRoute.AgentPayload
@@ -4186,6 +4326,12 @@ internal const val TMUX_CONVERSATION_DETECTING_TAG = "tmux:conversation:detectin
 internal const val TMUX_CONVERSATION_LOAD_FAILED_TAG = "tmux:conversation:load-failed"
 internal const val TMUX_CONVERSATION_LOAD_RETRY_TAG = "tmux:conversation:load-retry"
 internal const val TMUX_CONVERSATION_LOAD_EMPTY_TAG = "tmux:conversation:load-empty"
+// Issue #1207: one-tap "Open in Terminal" action on the terminal-state
+// Conversation placeholder + the TUI-command notice — the only surface that can
+// drive a TUI-only slash-command picker (/model, /config …).
+internal const val TMUX_CONVERSATION_OPEN_TERMINAL_TAG = "tmux:conversation:open-terminal"
+internal const val TMUX_CONVERSATION_TUI_NOTICE_TAG = "tmux:conversation:tui-command-notice"
+internal const val TMUX_CONVERSATION_TUI_NOTICE_OPEN_TAG = "tmux:conversation:tui-command-open-terminal"
 // Issue #793: top-of-list progress row shown while older messages page in on
 // upward scroll (tail-first windowed load).
 internal const val TMUX_CONVERSATION_PAGING_OLDER_TAG = "tmux:conversation:paging-older"
@@ -4892,6 +5038,10 @@ internal fun ConversationDetectingPlaceholder(
     // "no messages yet" terminal state.
     loadState: ConversationLoadState = ConversationLoadState.Loading,
     onRetry: () -> Unit = {},
+    // Issue #1207: switch to the Terminal tab — the only surface that can show a
+    // live agent's alt-screen TUI (a fresh session's picker / prompt). Offered on
+    // the terminal Empty state so a stranded placeholder is never a dead end.
+    onOpenTerminal: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier
@@ -4920,16 +5070,83 @@ internal fun ConversationDetectingPlaceholder(
                     Text("Retry")
                 }
             }
-            ConversationLoadState.Empty -> Text(
-                text = "No conversation events yet.",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 14.sp,
-                modifier = Modifier.testTag(TMUX_CONVERSATION_LOAD_EMPTY_TAG),
-            )
+            // Issue #1207: the Empty terminal state is no longer a dead "No
+            // conversation events yet." line. A fresh Claude/Codex session shows
+            // nothing on the Conversation surface because the agent is live in its
+            // alt-screen TUI (the picker / prompt) that writes NOTHING to the
+            // transcript — so this state points the user at the Terminal tab, the
+            // only surface that can show it, with a one-tap action. This is also
+            // the terminal state a stranded placeholder (torn-down row, no
+            // watchdog) now resolves to, instead of an eternal spinner.
+            ConversationLoadState.Empty -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .padding(horizontal = 24.dp)
+                    .testTag(TMUX_CONVERSATION_LOAD_EMPTY_TAG),
+            ) {
+                Text(
+                    text = "No conversation yet — the agent is live in the Terminal tab.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                TextButton(
+                    onClick = onOpenTerminal,
+                    modifier = Modifier.testTag(TMUX_CONVERSATION_OPEN_TERMINAL_TAG),
+                ) {
+                    Text("Open in Terminal")
+                }
+            }
             else -> LoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
                 label = "Loading conversation…",
             )
+        }
+    }
+}
+
+/**
+ * Issue #1207: inline notice shown over the Conversation surface after a TUI-only
+ * slash-command ([tmuxComposerIsTuiSlashCommand]) is sent from the composer. Such
+ * a command (`/model`, `/config`, a permission picker …) drives an alt-screen
+ * picker in the covered Terminal pane and writes NOTHING to the transcript, so
+ * the Conversation view can never show it. Rather than the old misleading
+ * optimistic bubble + a silent nothing, this banner is honest about where the
+ * interaction is and gives a one-tap jump to the only surface that can drive it.
+ *
+ * `internal` so the #1207 rendered-UI regression test can mount the REAL notice.
+ */
+@Composable
+internal fun ConversationTuiCommandNotice(
+    command: String,
+    onOpenTerminal: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag(TMUX_CONVERSATION_TUI_NOTICE_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "“$command” opens an interactive picker in the Terminal — " +
+                "it doesn't show here.",
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onOpenTerminal,
+            modifier = Modifier.testTag(TMUX_CONVERSATION_TUI_NOTICE_OPEN_TAG),
+        ) {
+            Text("Open in Terminal", color = PocketShellColors.Accent)
+        }
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = PocketShellColors.TextSecondary)
         }
     }
 }

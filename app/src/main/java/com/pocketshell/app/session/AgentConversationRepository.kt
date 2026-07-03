@@ -315,6 +315,111 @@ internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
 internal const val JSONL_RAW_LINES_PER_EVENT: Int = 8
 
 /**
+ * Issue #1225: the cold-open transcript read is bounded by LINE count only
+ * ([JSONL_RAW_LINES_PER_EVENT] × the message budget), never by BYTES. One
+ * Claude Code JSONL line can be multi-megabyte — an inline base64 image block
+ * (the #842 path) or a huge `tool_result` — so a single pathological line
+ * materialises hundreds of MB into the JVM heap on the phone → jank / OOM.
+ *
+ * [MAX_TRANSCRIPT_LINE_BYTES] is a per-line byte ceiling applied **server-side**
+ * (via [transcriptLineClampPipe]) so the oversized bytes never cross SSH into
+ * the app's heap at all. A line longer than this is replaced by a compact
+ * [LINE_TRUNCATION_SENTINEL] marker carrying the original byte length; the
+ * parser turns that marker into a user-visible truncation placeholder
+ * ([ConversationEvent.SystemNote]) rather than crashing or silently dropping
+ * the message.
+ *
+ * 256 KiB is chosen to sit safely ABOVE any realistic single transcript event:
+ * even a large `tool_result` (a full file dump, a long command's stdout) is
+ * well under this, while a base64-encoded screenshot (typically 1–10 MB per
+ * inline image) is far above it and gets clamped. The whole first-paint window
+ * (~240 raw lines) is thereby bounded at 240 × 256 KiB in the absolute worst
+ * case, and realistically stays a few hundred KB because only a pathological
+ * line ever approaches the ceiling.
+ */
+internal const val MAX_TRANSCRIPT_LINE_BYTES: Int = 262_144
+
+/**
+ * Issue #1225: sentinel emitted (server-side) in place of a transcript line
+ * that exceeded [MAX_TRANSCRIPT_LINE_BYTES], immediately followed by the
+ * original line's byte length. Recognised by [parseTranscriptTailLines], which
+ * renders it as a visible truncation placeholder instead of feeding the (now
+ * absent) oversized JSON to the parser.
+ */
+internal const val LINE_TRUNCATION_SENTINEL: String = "@@PS_LINE_TRUNCATED@@"
+
+/**
+ * Issue #1225: the server-side shell fragment that byte-clamps a tailed JSONL
+ * transcript, one line at a time. Any line whose byte length exceeds
+ * [MAX_TRANSCRIPT_LINE_BYTES] is replaced by
+ * `<LINE_TRUNCATION_SENTINEL><byteLength>`; all other lines pass through
+ * unchanged. Piped AFTER `tail -n <N>` so the bytes that reach the app are
+ * bounded by (lines × [MAX_TRANSCRIPT_LINE_BYTES]) regardless of how large any
+ * single line is on the host.
+ *
+ * `LC_ALL=C` makes awk's `length` count BYTES (not locale characters) on both
+ * gawk and BusyBox awk, so the clamp is a true byte bound. `awk` is used (not
+ * `head -c`, which would cut mid-line and keep only the OLDEST lines of the tail
+ * window) because a per-line clamp preserves EVERY message — recent and old —
+ * and only degrades the pathological one. `$0` is a literal in the Kotlin string
+ * (`0` cannot start a Kotlin identifier); it is written `\$0` for clarity.
+ */
+internal fun transcriptLineClampPipe(): String =
+    "LC_ALL=C awk -v m=$MAX_TRANSCRIPT_LINE_BYTES " +
+        "'{ if (length(\$0) > m) print \"$LINE_TRUNCATION_SENTINEL\" length(\$0); else print \$0 }'"
+
+/**
+ * Issue #1225: parse a tailed JSONL transcript window into
+ * [ConversationEvent]s, translating any [LINE_TRUNCATION_SENTINEL] marker
+ * (emitted by [transcriptLineClampPipe] for an oversized line) into a
+ * user-visible [ConversationEvent.SystemNote] placeholder. Normal lines are
+ * handed to [parser] unchanged, so this is a byte-safe drop-in for the previous
+ * `rawLines.flatMap { parser.parseLine(it) }`.
+ *
+ * The marker becomes a VISIBLE note (never silently dropped — the oversized
+ * JSON is gone server-side, so feeding a truncated fragment to the parser would
+ * just vanish the message). Ids are ordinal-stable within a read so re-reads
+ * reconcile the same placeholder rather than stacking duplicates.
+ */
+internal fun parseTranscriptTailLines(
+    parser: ConversationParser,
+    agent: AgentKind,
+    rawLines: Sequence<String>,
+): List<ConversationEvent> {
+    val out = ArrayList<ConversationEvent>()
+    var truncationOrdinal = 0
+    for (line in rawLines) {
+        val truncatedBytes = truncatedLineByteCountOrNull(line)
+        if (truncatedBytes != null) {
+            out += ConversationEvent.SystemNote(
+                id = "ps-truncated-line-$truncationOrdinal",
+                agent = agent,
+                tag = "truncated",
+                content = truncationPlaceholderText(truncatedBytes),
+            )
+            truncationOrdinal++
+        } else {
+            out += parser.parseLine(line)
+        }
+    }
+    return out
+}
+
+private fun truncatedLineByteCountOrNull(line: String): Long? {
+    if (!line.startsWith(LINE_TRUNCATION_SENTINEL)) return null
+    return line.removePrefix(LINE_TRUNCATION_SENTINEL).trim().toLongOrNull() ?: 0L
+}
+
+private fun truncationPlaceholderText(byteCount: Long): String =
+    if (byteCount > 0L) {
+        "[A ${byteCount}-byte transcript line was too large to load and was " +
+            "truncated — likely a pasted image or a large tool result.]"
+    } else {
+        "[A transcript line was too large to load and was truncated — likely a " +
+            "pasted image or a large tool result.]"
+    }
+
+/**
  * Issue #793: first-paint message budget for the tail-first conversation
  * load. Opening the Conversation tab reads only the most recent
  * [FIRST_PAINT_MESSAGE_BUDGET] messages so the tail paints quickly instead of
@@ -958,7 +1063,11 @@ public class AgentConversationRepository internal constructor(
                     "printf 'PATH=%s\\n' \"\$newest\"; " +
                     "wc -l < \"\$newest\" 2>/dev/null || printf 0; " +
                     "printf '\\n%s\\n' $claudeWindowSentinel; " +
-                    "tail -n $claudeRawLineBudget \"\$newest\" 2>/dev/null || true; " +
+                    // Issue #1225: byte-clamp the folded prefetch window too, so
+                    // a pathological line in the cold-open prefetch degrades to a
+                    // marker instead of ballooning the single-round-trip read.
+                    "tail -n $claudeRawLineBudget \"\$newest\" 2>/dev/null | " +
+                    "${transcriptLineClampPipe()} 2>/dev/null || true; " +
                     "fi",
             )
         }
@@ -1102,7 +1211,7 @@ public class AgentConversationRepository internal constructor(
             .toLongOrNull() ?: 0L
         val tailRawLines = lines.drop(sentinelIndex + 1)
         val parser = ClaudeCodeParser()
-        val events = tailRawLines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        val events = parseTranscriptTailLines(parser, AgentKind.ClaudeCode, tailRawLines.asSequence())
         return ConversationEventsWindow(
             events = events,
             hasMoreOlder = totalLines > rawLineBudget,
@@ -1234,10 +1343,15 @@ public class AgentConversationRepository internal constructor(
         // events back to budget.
         val rawLineBudget = (maxLines * JSONL_RAW_LINES_PER_EVENT)
             .coerceAtLeast(maxLines)
+        // Issue #1225: byte-clamp each line server-side so one multi-MB JSONL
+        // line (inline base64 image / huge tool_result) cannot balloon the read
+        // into the JVM heap. Oversized lines arrive as a compact truncation
+        // marker that [parseTranscriptTailLines] renders as a visible note.
         val result = session.exec(
-            "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null || true",
+            "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null | " +
+                "${transcriptLineClampPipe()} 2>/dev/null || true",
         )
-        return result.stdout.lineSequence().flatMap { parser.parseLine(it) }.toList()
+        return parseTranscriptTailLines(parser, detection.agent, result.stdout.lineSequence())
     }
 
     /**
@@ -1293,10 +1407,14 @@ public class AgentConversationRepository internal constructor(
         // window. We compare the total against the window size to know whether
         // older raw lines (hence older turns) exist before the window.
         val sentinel = "@@PS_WINDOW@@"
+        // Issue #1225: the same server-side per-line byte clamp as
+        // [readInitialEvents] — a single pathological line in the window cannot
+        // balloon the read; it degrades to a visible truncation marker.
         val result = session.exec(
             "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0; " +
                 "printf '%s\\n' $sentinel; " +
-                "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null || true",
+                "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null | " +
+                "${transcriptLineClampPipe()} 2>/dev/null || true",
         )
         val lines = result.stdout.split("\n")
         val sentinelIndex = lines.indexOf(sentinel)
@@ -1310,7 +1428,7 @@ public class AgentConversationRepository internal constructor(
         } else {
             lines
         }
-        val events = tailRawLines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        val events = parseTranscriptTailLines(parser, detection.agent, tailRawLines.asSequence())
         return ConversationEventsWindow(
             events = events,
             hasMoreOlder = totalLines > rawLineBudget,

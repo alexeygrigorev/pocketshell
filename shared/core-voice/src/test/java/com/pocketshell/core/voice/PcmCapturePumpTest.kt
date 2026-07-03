@@ -352,6 +352,97 @@ class PcmCapturePumpTest {
         )
     }
 
+    /**
+     * A source that never runs dry — every blocking read delivers a full frame.
+     * Models a mic that keeps streaming forever (a stuck/forgotten recording),
+     * which is exactly the runaway the byte cap must bound. The drain has nothing
+     * to add.
+     */
+    private class InfiniteSource(private val frameBytes: Int) : PcmSource {
+        val totalReads = AtomicInteger(0)
+        override fun read(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int {
+            totalReads.incrementAndGet()
+            loudFrame(frameBytes).copyInto(buffer, destinationOffset = offsetBytes)
+            return sizeBytes
+        }
+
+        override fun readNonBlocking(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int = 0
+    }
+
+    @Test
+    fun captureSelfStopsAtByteCapOnAMultipleOfFrameSize() {
+        // A never-ending mic stream must not accumulate without bound. With a cap
+        // of exactly 4 frames the reader loop self-stops after 4 frames instead of
+        // growing forever (~19 MB per 10 min on-device), and flags that it capped.
+        val cap = frameBytes * 4
+        val source = InfiniteSource(frameBytes)
+        val pump = PcmCapturePump(source = source, frameBytes = frameBytes, maxCaptureBytes = cap)
+
+        pump.start()
+        // The loop self-stops WITHOUT any external stop() once the cap trips.
+        val cappedInTime = awaitTrue(2_000) { pump.captureCapReached() }
+        assertTrue("capture must self-stop when the byte cap is reached", cappedInTime)
+
+        val pcm = pump.stop()
+        assertEquals("capture must not exceed the byte cap", cap, pcm.size)
+        assertTrue("cap-reached flag must be set for the user notice", pump.captureCapReached())
+    }
+
+    @Test
+    fun captureCapClampsToExactByteBudgetNotAWholeFrame() {
+        // The cap is byte-exact, not frame-rounded: a cap that lands mid-frame
+        // clamps the final write so the buffer is never even one frame over.
+        val cap = frameBytes * 3 + 100
+        val source = InfiniteSource(frameBytes)
+        val pump = PcmCapturePump(source = source, frameBytes = frameBytes, maxCaptureBytes = cap)
+
+        pump.start()
+        assertTrue(awaitTrue(2_000) { pump.captureCapReached() })
+        val pcm = pump.stop()
+
+        assertEquals("cap must clamp to the exact byte budget", cap, pcm.size)
+    }
+
+    /**
+     * A source whose blocking read always reports "no data available right now"
+     * (return 0) — the underrunning-mic case. Without a backoff the reader loop
+     * hot-spins on this; the test counts reads to prove the loop yields.
+     */
+    private class ZeroReadSource : PcmSource {
+        val totalReads = AtomicInteger(0)
+        override fun read(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int {
+            totalReads.incrementAndGet()
+            return 0
+        }
+
+        override fun readNonBlocking(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int = 0
+    }
+
+    @Test
+    fun zeroLengthReadsBackOffInsteadOfBusySpinning() {
+        // read == 0 must not pin a CPU core. With a 10 ms backoff, a ~120 ms
+        // window can only fit ~12 reads; a hot-spin (no backoff) would rack up
+        // many thousands. Asserting a low bound pins the yield: remove the
+        // backoff and this goes red.
+        val source = ZeroReadSource()
+        val pump = PcmCapturePump(
+            source = source,
+            frameBytes = frameBytes,
+            idleReadBackoffMs = 10L,
+        )
+
+        pump.start()
+        Thread.sleep(120)
+        pump.stop()
+
+        val reads = source.totalReads.get()
+        assertTrue("reader must actually poll at least once", reads > 0)
+        assertTrue(
+            "zero-length reads must back off, not hot-spin (saw $reads reads in ~120ms)",
+            reads < 500,
+        )
+    }
+
     @Test
     fun stopWithoutStartReturnsEmpty() {
         val source = FakeSource(frameBytes = frameBytes, bufferedFrames = 0)
@@ -378,6 +469,16 @@ class PcmCapturePumpTest {
             assertTrue(e.message?.contains("ERROR_DEAD_OBJECT") == true)
         }
     }
+}
+
+/** Poll [condition] until it is true or [timeoutMs] elapses. */
+private fun awaitTrue(timeoutMs: Long, condition: () -> Boolean): Boolean {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+        if (condition()) return true
+        Thread.sleep(2)
+    }
+    return condition()
 }
 
 /** One frame of non-silent 16-bit PCM (constant 0x4000 samples). */

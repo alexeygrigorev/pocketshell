@@ -189,4 +189,49 @@ class ShareIntentDecodeTest {
         val intent = Intent(Intent.ACTION_VIEW).apply { type = "image/*" }
         assertTrue(decodeShareIntent(intent).isEmpty())
     }
+
+    /**
+     * The share activity is EXPORTED, so a malicious/broken sender can put a
+     * non-`Uri` Parcelable under `EXTRA_STREAM`. On pre-33 the untyped
+     * `getParcelableExtra` casts the stored value to `Uri`, throwing a
+     * `ClassCastException` mid-`onCreate`. `decodeShareIntent` must swallow that
+     * and return an empty list (the activity then finishes gracefully) instead
+     * of crashing. Run under SDK 28 to exercise the untyped getter path.
+     *
+     * Without the `runCatching` guard in `decodeShareIntent` this test throws
+     * (CCE) instead of asserting — the red→green pin for the fix.
+     */
+    @Test
+    @Config(sdk = [28])
+    fun malformedStreamExtraDecodesToEmptyInsteadOfCrashing() {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            // A Bundle is a valid Parcelable but NOT a Uri — the exact "wrong
+            // type in EXTRA_STREAM" shape that CCEs the pre-33 untyped getter.
+            putExtra(Intent.EXTRA_STREAM, android.os.Bundle())
+        }
+
+        val items = decodeShareIntent(intent)
+
+        assertTrue("a malformed EXTRA_STREAM must decode to nothing, not crash", items.isEmpty())
+    }
+
+    /**
+     * Class coverage: the `ACTION_SEND_MULTIPLE` list path unmarshals + casts
+     * each element too, so a wrong-type element there must also degrade to empty
+     * rather than crash the exported activity.
+     */
+    @Test
+    @Config(sdk = [28])
+    fun malformedStreamListDecodesToEmptyInsteadOfCrashing() {
+        val bogus = arrayListOf<android.os.Parcelable>(android.os.Bundle())
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "image/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, bogus)
+        }
+
+        val items = decodeShareIntent(intent)
+
+        assertTrue("a malformed EXTRA_STREAM list must decode to nothing, not crash", items.isEmpty())
+    }
 }

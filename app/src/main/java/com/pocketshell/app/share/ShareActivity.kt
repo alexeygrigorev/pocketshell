@@ -3,6 +3,7 @@ package com.pocketshell.app.share
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -44,7 +45,13 @@ class ShareActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val staged = decodeShareIntent(intent)
+        // This activity is EXPORTED (it is a system share target), so `intent`
+        // is fully untrusted: a malformed `EXTRA_STREAM` can throw
+        // BadParcelableException / ClassCastException while Android unmarshals
+        // the parcelled extras (the pre-33 untyped getters are the classic
+        // offender). Never let that crash the share surface — decode defensively
+        // and finish gracefully on anything unroutable.
+        val staged = runCatching { decodeShareIntent(intent) }.getOrDefault(emptyList())
         if (staged.isEmpty()) {
             Toast.makeText(this, "Nothing to share", Toast.LENGTH_SHORT).show()
             finish()
@@ -165,6 +172,19 @@ private const val SHARE_URI_METADATA_TOTAL_TIMEOUT_MS = 2_000L
  */
 internal fun decodeShareIntent(intent: Intent?): List<ShareableItem> {
     if (intent == null) return emptyList()
+    // The share intent comes from an EXPORTED activity, so its parcelled extras
+    // are untrusted input. Reading a malformed `EXTRA_STREAM` can throw
+    // BadParcelableException / ClassCastException as Android unmarshals it
+    // (notably via the pre-33 untyped `getParcelableExtra` getters). Treat any
+    // such failure as "nothing routable" rather than crashing the share surface.
+    return runCatching { decodeShareIntentExtras(intent) }
+        .getOrElse { error ->
+            Log.w("ShareActivity", "failed to decode share intent extras", error)
+            emptyList()
+        }
+}
+
+private fun decodeShareIntentExtras(intent: Intent): List<ShareableItem> {
     val mime = intent.type
     return when (intent.action) {
         Intent.ACTION_SEND -> {

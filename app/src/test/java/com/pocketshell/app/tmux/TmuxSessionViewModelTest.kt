@@ -168,6 +168,23 @@ class TmuxSessionViewModelTest {
     // It is a real `Dispatchers.IO` scope (off-Main), so the F2 off-Main
     // hand-off it backs is genuine, not a virtual-clock proxy.
     private val defaultTeardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Issue #1168: third real-`Dispatchers.IO` scope of the same species as
+    // factoryScope/defaultTeardownScope. The default `newVm()` builds its
+    // AgentConversationRepository with THIS injected scope instead of the
+    // repository's own default real-IO `tailScope`, so the test owns the tail
+    // drain. The drain runs infinite `while (isActive) { delay() }` loops
+    // (AgentConversationRepository JSONL-batch/OpenCode-poll tails); when a
+    // follow job completes/cancels, the VM's `invokeOnCompletion` hops back via
+    // `bridgeScope.launch { ... }` — and `bridgeScope` is `Dispatchers.Main`-
+    // bound — so a foreign IO thread READS `Dispatchers.Main`. Left un-joined,
+    // that read races the NEXT test's `setMain`/`resetMain` write and
+    // kotlinx-coroutines-test throws "Dispatchers.Main is used concurrently
+    // with setting it" (TestMainDispatcher.kt:72), attributed to whichever
+    // victim test is doing setMain at that instant. We cancel-THEN-join this
+    // scope in @After (the drain is infinite, so cancel first) BEFORE the
+    // rule's `resetMain()` runs — exactly the factoryScope rationale.
+    private val agentTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     private fun newVm(
@@ -187,7 +204,11 @@ class TmuxSessionViewModelTest {
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
         folderListGateway: FolderListGateway? = null,
         hostDao: HostDao? = null,
-        agentRepository: AgentConversationRepository = AgentConversationRepository(),
+        // Issue #1168: inject the test-owned real-IO `agentTailScope` so the
+        // tail drain is joinable in @After (see the field doc). The #576
+        // burst-ingest test keeps its own `tailScope = backgroundScope`.
+        agentRepository: AgentConversationRepository =
+            AgentConversationRepository(tailScope = agentTailScope),
         agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
             // Issue #1001 (CI-flake fix): pin the daemon-RPC bounded-exec
             // dispatcher to the SHARED virtual-clock scheduler. In production it
@@ -403,6 +424,20 @@ class TmuxSessionViewModelTest {
             // concurrently with setting it".
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 defaultTeardownScope.coroutineContext.job.children.forEach { it.join() }
+            }
+            // Issue #1168: drain the AgentConversationRepository tail scope
+            // BEFORE the rule's `resetMain()` runs. Unlike the FINITE teardown
+            // closes above, the tail drain is an infinite
+            // `while (isActive) { delay() }` loop that never self-completes, so
+            // it must be CANCELLED FIRST, THEN joined — a bare join would hang.
+            // Joining here (Main still installed by the rule) forces every
+            // `invokeOnCompletion -> bridgeScope.launch` foreign-IO-thread
+            // `Dispatchers.Main` read to happen and finish while Main is stable
+            // and no `setMain`/`resetMain` write is in flight, so no tail
+            // completion touches Main after `resetMain`.
+            agentTailScope.cancel()
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                agentTailScope.coroutineContext.job.children.forEach { it.join() }
             }
         }
         defaultTeardownScope.cancel()
@@ -12644,6 +12679,79 @@ class TmuxSessionViewModelTest {
         assertEquals(SessionTab.Conversation, after.selectedTab)
         assertEquals("assistant-late", after.events.single().id)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    // Issue #1168: durable anchor for the tmux TestMainDispatcher flake
+    // (blocked PRs #1211/#1217). The AgentConversationRepository tail drain
+    // (`tailScope.launch { while (isActive) delay() }`) runs on the injected
+    // real-`Dispatchers.IO` `tailScope`. The default `newVm()` repo USED to be
+    // built with the repository's OWN default real-IO `tailScope`, which this
+    // class's @After never cancelled/joined (unlike factoryScope /
+    // defaultTeardownScope). So a live drain — or its
+    // `invokeOnCompletion -> bridgeScope.launch` (a Main-bound scope) foreign-IO
+    // `Dispatchers.Main` READ on non-cancel completion — survived past
+    // `resetMain` and, racing the next test's `setMain`/`resetMain` WRITE,
+    // threw "Dispatchers.Main is used concurrently with setting it"
+    // (TestMainDispatcher.kt:72), attributed to a random victim test.
+    //
+    // This proves the fix's two properties deterministically on the REAL path
+    // (real VM + real repository + real batched tail):
+    //  (a) LEAK EXISTS — an OPEN tail (its umbrella never completes) leaves a
+    //      LIVE drain coroutine on the tail scope; that is precisely the real-IO
+    //      coroutine the un-joined default scope leaked across the test boundary.
+    //  (b) DRAIN WORKS — cancel-THEN-join (the fix's @After shape, run here while
+    //      the rule's Main is STILL installed, i.e. BEFORE resetMain) drains it,
+    //      so no tail coroutine survives to race the next test's setMain.
+    // The drain is an infinite loop, so it must be cancelled FIRST, then joined.
+    @Test
+    fun issue1168AgentTailScopeLeaksALiveDrainThatCancelJoinDrains() {
+        val probeTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val repository = AgentConversationRepository(tailScope = probeTailScope)
+            val vm = newVm(agentRepository = repository)
+            vm.attachClientForTest(FakeTmuxClient())
+            val detection = newClaudeDetection()
+            vm.startAgentConversationForTest("%0", detection)
+            // An OPEN tail: FakeSshSession's tail Job is never completed, so the
+            // umbrella never completes and the batched drain keeps looping on
+            // the injected real-IO tailScope — the un-joined leak.
+            val umbrella = vm.startAgentTailForTest(
+                paneId = "%0",
+                session = FakeSshSession(tailJob = Job()),
+                detection = detection,
+                fromLineExclusive = 0L,
+            )
+            assertNotNull("the follow tail must start (umbrella job non-null)", umbrella)
+
+            // (a) the real-IO drain child is ALIVE on the tail scope.
+            val liveChildren = probeTailScope.coroutineContext.job.children
+                .filter { it.isActive }
+                .toList()
+            assertTrue(
+                "expected a live tail-drain coroutine on the real-IO tailScope " +
+                    "(the un-joined #1168 leak), found none",
+                liveChildren.isNotEmpty(),
+            )
+
+            // (b) cancel-THEN-join drains it (the fix's @After shape), while the
+            // rule's Main is still installed — i.e. before any resetMain.
+            probeTailScope.cancel()
+            runBlocking {
+                withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                    probeTailScope.coroutineContext.job.children.forEach { it.join() }
+                }
+            }
+            val survivors = probeTailScope.coroutineContext.job.children
+                .filter { it.isActive }
+                .toList()
+            assertTrue(
+                "cancel-then-join must drain every tail coroutine before " +
+                    "resetMain; survivors=$survivors",
+                survivors.isEmpty(),
+            )
+        } finally {
+            probeTailScope.cancel()
+        }
     }
 
     @Test

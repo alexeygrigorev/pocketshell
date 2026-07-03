@@ -3385,6 +3385,25 @@ class TmuxSessionViewModelTest {
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        // Issue #1250 (CI-flake fix): pin the TerminalSurfaceState external-producer
+        // dispatcher to the SHARED virtual-clock scheduler. The default factory builds
+        // `TerminalSurfaceState()` on the production `Dispatchers.IO` (a real off-Main
+        // thread — correct for the on-device feed). But this fresh-transport reattach
+        // REBINDS each pane's producer several times (initial attach → reattach
+        // rebindVisiblePaneProducersToClient → each connected-blank-watchdog reseed),
+        // and every rebind CANCELS the prior producer whose `finally` runs
+        // `detachCompletedExternalProducer` (nulling `bridge`/`_session`) via a
+        // `Dispatchers.Main.immediate` hop OFF that real IO thread. Under `runTest`'s
+        // virtual clock that real-thread hop lands at a non-deterministic point, so the
+        // pane's emulator was sometimes DETACHED (isAttached=false) at assertion time —
+        // and `visibleScreenIsBlank()` returns false with NO emulator, spuriously
+        // failing the "seed stayed empty -> black" precondition (~70% in isolation).
+        // Confining the producer to the shared scheduler makes attach/detach step
+        // deterministically under `advanceTimeBy`/`runCurrent` (same pin as the sibling
+        // heal tests, e.g. PartialBlackPaneHealTest / ReseedBlankWatchdogCharacterizationTest).
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(scheduler))
+        }
         val deadClient = FakeTmuxClient()
         val replacementClient =
             FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")

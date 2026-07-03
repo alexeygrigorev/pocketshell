@@ -114,27 +114,40 @@ open class ReleaseChecker(
                     setRequestProperty("User-Agent", USER_AGENT)
                 }
 
-                val code = conn.responseCode
-                if (code != 200) {
-                    // GitHub returns 403 with a rate-limit body for
-                    // unauthenticated bursts — the single most likely cause
-                    // of "the banner never showed at cold launch". Naming the
-                    // code makes that diagnosable.
-                    val reason = "GitHub returned HTTP $code"
-                    Log.w(TAG, "release check failed: $reason (current=$currentVersion)")
-                    return@withContext ReleaseCheckResult.Failed(reason)
-                }
-
-                val body = conn.inputStream.bufferedReader().readText()
-                when (val outcome = parseReleaseOutcome(body, currentVersion)) {
-                    is ParsedReleaseOutcome.UpdateAvailable ->
-                        ReleaseCheckResult.UpdateAvailable(outcome.info)
-                    ParsedReleaseOutcome.UpToDate ->
-                        ReleaseCheckResult.UpToDate
-                    is ParsedReleaseOutcome.Failed -> {
-                        Log.w(TAG, "release check failed: ${outcome.reason} (current=$currentVersion)")
-                        ReleaseCheckResult.Failed(outcome.reason)
+                // A single `disconnect()` in the finally releases the socket no
+                // matter which branch runs (or throws). Without it the keep-alive
+                // socket leaks — repeated cold-launch polls pile up half-open
+                // connections. The input/error streams are additionally closed
+                // (via `use`) so the body is drained; on a non-200 (the common
+                // GitHub 403 rate-limit) an unread + unclosed `errorStream`
+                // otherwise leaks the connection back-pressure too.
+                try {
+                    val code = conn.responseCode
+                    if (code != 200) {
+                        // GitHub returns 403 with a rate-limit body for
+                        // unauthenticated bursts — the single most likely cause
+                        // of "the banner never showed at cold launch". Naming the
+                        // code makes that diagnosable. Drain + close the error
+                        // stream so the socket is reusable rather than leaked.
+                        conn.errorStream?.use { runCatching { it.readBytes() } }
+                        val reason = "GitHub returned HTTP $code"
+                        Log.w(TAG, "release check failed: $reason (current=$currentVersion)")
+                        ReleaseCheckResult.Failed(reason)
+                    } else {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        when (val outcome = parseReleaseOutcome(body, currentVersion)) {
+                            is ParsedReleaseOutcome.UpdateAvailable ->
+                                ReleaseCheckResult.UpdateAvailable(outcome.info)
+                            ParsedReleaseOutcome.UpToDate ->
+                                ReleaseCheckResult.UpToDate
+                            is ParsedReleaseOutcome.Failed -> {
+                                Log.w(TAG, "release check failed: ${outcome.reason} (current=$currentVersion)")
+                                ReleaseCheckResult.Failed(outcome.reason)
+                            }
+                        }
                     }
+                } finally {
+                    conn.disconnect()
                 }
             } catch (e: Exception) {
                 val reason = "${e.javaClass.simpleName}: ${e.message ?: "no message"}"

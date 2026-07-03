@@ -2525,6 +2525,51 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #1233 shell-pane single-snapshot affordance-scan proof (core-terminal
+# androidTest). A shell / non-agent pane used to run FOUR independent per-frame
+# on-main full-viewport affordance scanners (URL + SmartSelection + FilePath +
+# EngineCommand), each re-extracting the whole viewport AND running its regex on
+# Main every frame — a milder cousin of the #796 ANR on a high-throughput
+# streaming pane with the keyboard up. The fix consolidates them into ONE
+# ShellPaneAffordanceOverlay that extracts the viewport ONCE per coalesced frame
+# and runs the enabled passes OFF-main (the #871 single-snapshot split applied to
+# all four shell scanners). This proof asserts BOTH (a) URL / file-path /
+# engine-command affordances stay tappable on a real shell pane (behavior
+# UNCHANGED), and (b) the LOAD-BEARING property — the scan runs OFF the main
+# thread and dispatches ONE debounced single-snapshot scan per frame, NOT four
+# on-main scans per tick. Because #1233 is adjacent to the #796/#803/#866/#871
+# terminal-ANR class it runs alongside those proofs in this per-push gate. Uses
+# NO Docker fixture (in-process Compose UI test).
+CORE_TERMINAL_SHELL_SNAPSHOT_CLASS="com.pocketshell.core.terminal.ui.ShellPaneAffordanceSingleSnapshotProofTest"
+SHELL_SNAPSHOT_STATUS="PASS"
+
+run_core_terminal_shell_snapshot() {
+  run_ct_class "$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS"
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  SHELL_SNAPSHOT_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #1233 shell-pane single-snapshot proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #1233 SHELL-PANE SINGLE-SNAPSHOT PROOF: $CORE_TERMINAL_SHELL_SNAPSHOT_CLASS (attempt 1)"
+  echo "=========================================================="
+  shell_snapshot_start=$SECONDS
+  if run_core_terminal_shell_snapshot; then
+    echo "SHELL_SNAPSHOT_PASS: passed on attempt 1 (elapsed $((SECONDS - shell_snapshot_start))s)"
+  else
+    echo ">>> SHELL-PANE SINGLE-SNAPSHOT PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_shell_snapshot; then
+      echo "SHELL_SNAPSHOT_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "SHELL_SNAPSHOT_FAILED: #1233 proof failed twice"
+      SHELL_SNAPSHOT_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -2538,14 +2583,14 @@ if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
       && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
       && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
-      && "$SURFACE_REPAINT_STATUS" == "PASS" ]]; then
+      && "$SURFACE_REPAINT_STATUS" == "PASS" && "$SHELL_SNAPSHOT_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
         && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
         && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
-        && "$SURFACE_REPAINT_STATUS" != "FAIL" ]]; then
+        && "$SURFACE_REPAINT_STATUS" != "FAIL" && "$SHELL_SNAPSHOT_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -2597,6 +2642,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #1203 surface-only-black recovery proof (\`shared:core-terminal\`): **$SURFACE_REPAINT_STATUS**"
   echo "- \`$CORE_TERMINAL_SURFACE_REPAINT_CLASS\`"
+  echo
+  echo "Core-terminal #1233 shell-pane single-snapshot affordance-scan proof (\`shared:core-terminal\`): **$SHELL_SNAPSHOT_STATUS**"
+  echo "- \`$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"

@@ -94,37 +94,14 @@ public data class DetectedFilePath(
  * Safe to call from the UI thread. One regex pass per visible row.
  */
 public fun findVisibleFilePaths(view: TerminalView): List<FilePathRegion> {
-    val emulator = view.mEmulator ?: return emptyList()
-    val screen = emulator.screen ?: return emptyList()
-    val columns = emulator.mColumns
-    val rows = emulator.mRows
-    if (columns <= 0 || rows <= 0) return emptyList()
-
-    val topRow = view.topRow
-    val firstRow = topRow
-    val lastRowExclusive = topRow + rows
-
-    // Issue #558 bug 2: read every visible row WITH its line-wrap flag so a path
-    // soft-wrapped across rows is reassembled into one logical line before
-    // matching, then re-emitted per visual row sharing the full path string.
-    val visualRows = mutableListOf<VisualRow>()
-    for (row in firstRow until lastRowExclusive) {
-        val line: String = try {
-            screen.getSelectedText(0, row, columns, row)
-        } catch (_: Throwable) {
-            // Mid-resize the vendored emulator occasionally throws AIOOBE.
-            visualRows += VisualRow(row = row, text = "", wrapsToNext = false)
-            continue
-        }
-        val wraps = try {
-            row + 1 < lastRowExclusive && screen.getLineWrap(row)
-        } catch (_: Throwable) {
-            false
-        }
-        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
-    }
-
-    return filePathRegionsForRows(visualRows, columns)
+    // Issue #558 bug 2 / #1233: read every visible row WITH its line-wrap flag via
+    // the shared [extractVisibleViewportRows] primitive so a path soft-wrapped
+    // across rows is reassembled into one logical line before matching (then
+    // re-emitted per visual row sharing the full path string), AND so the four
+    // shell-pane affordance scanners share ONE viewport extraction per coalesced
+    // frame rather than each re-running the row loop.
+    val snapshot = extractVisibleViewportRows(view)
+    return filePathRegionsForRows(snapshot.rows, snapshot.columns)
 }
 
 internal fun filePathRegionsForRows(

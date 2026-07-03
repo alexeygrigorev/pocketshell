@@ -75,32 +75,44 @@ public fun findVisibleEngineCommands(
     knownCommands: Set<String>,
 ): List<EngineCommandRegion> {
     if (knownCommands.isEmpty()) return emptyList()
-    val emulator = view.mEmulator ?: return emptyList()
-    val screen = emulator.screen ?: return emptyList()
-    val columns = emulator.mColumns
-    val rows = emulator.mRows
-    if (columns <= 0 || rows <= 0) return emptyList()
+    // Issue #1233: share the single cheap main-thread viewport extraction
+    // ([extractVisibleViewportRows]) with the URL / file-path / smart-selection
+    // scanners instead of running an independent `getSelectedText` row loop here.
+    // The engine-command detection is per-row (no soft-wrap reassembly — a
+    // slash-command never wraps), so it iterates the snapshot rows directly.
+    val snapshot = extractVisibleViewportRows(view)
+    return engineCommandRegionsForRows(snapshot.rows, snapshot.columns, knownCommands)
+}
 
-    val topRow = view.topRow
-    val firstRow = topRow
-    val lastRowExclusive = topRow + rows
-
+/**
+ * Pure, Android-`TerminalView`-free engine-command detection over an
+ * already-extracted list of [VisualRow]s (issue #1233). This is the regex half of
+ * [findVisibleEngineCommands], split out so the four shell-pane affordance
+ * scanners can all run against ONE [extractVisibleViewportRows] snapshot per
+ * coalesced frame (and off the main thread), instead of each re-extracting the
+ * full viewport itself.
+ *
+ * Per-row, no soft-wrap reassembly: an engine slash-command (`/clear`) is a short
+ * token that never wraps across a visual-row boundary, so each row is scanned in
+ * isolation — identical output to the inline row loop [findVisibleEngineCommands]
+ * previously performed.
+ */
+internal fun engineCommandRegionsForRows(
+    visualRows: List<VisualRow>,
+    columns: Int,
+    knownCommands: Set<String>,
+): List<EngineCommandRegion> {
+    if (columns <= 0 || knownCommands.isEmpty() || visualRows.isEmpty()) return emptyList()
     val out = mutableListOf<EngineCommandRegion>()
-    for (row in firstRow until lastRowExclusive) {
-        val line: String = try {
-            screen.getSelectedText(0, row, columns, row)
-        } catch (_: Throwable) {
-            // Mid-resize the vendored emulator occasionally throws AIOOBE.
-            continue
-        }
-        for (detected in detectEngineCommandsInLine(line, knownCommands)) {
+    for (visual in visualRows) {
+        for (detected in detectEngineCommandsInLine(visual.text, knownCommands)) {
             val startCol = detected.start
             if (startCol >= columns) continue
             val endCol = detected.endExclusive.coerceAtMost(columns)
             if (endCol <= startCol) continue
             out += EngineCommandRegion(
                 command = detected.command,
-                row = row,
+                row = visual.row,
                 startCol = startCol,
                 endColExclusive = endCol,
             )

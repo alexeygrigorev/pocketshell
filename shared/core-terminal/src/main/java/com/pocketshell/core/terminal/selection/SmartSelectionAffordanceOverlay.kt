@@ -107,13 +107,24 @@ fun SmartSelectionAffordanceOverlay(
         val initial = findVisibleTerminalMatches(view, matcher)
         regions = initial
         latestOnMatchesChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleTerminalMatches(view, matcher)
-            // Only churn the host when the list shape changes; equal lists
-            // are no-ops both visually and for tap routing.
-            if (fresh != regions) {
-                regions = fresh
-                latestOnMatchesChanged(fresh)
+        // Issue #1260: collect on the Handler-based [Dispatchers.Main.immediate],
+        // NOT the LaunchedEffect's default Compose `AndroidUiDispatcher.Main`.
+        // The coalesced render stream ([RenderFrameCoalescer]) times its window
+        // with `delay`, and AndroidUiDispatcher batches dispatch to Choreographer
+        // frames — during a `%output` burst on a non-invalidating surface those
+        // frames stop, so the scan stalls for the whole burst (the #1260 shell
+        // `scans=0` regression, exposed by #1216's `renderRequests replay = 1`).
+        // The main-thread Handler dispatcher is not frame-gated; the emulator read
+        // still runs on the main thread, so this is thread-safe.
+        withContext(Dispatchers.Main.immediate) {
+            renderRequests.collect {
+                val fresh = findVisibleTerminalMatches(view, matcher)
+                // Only churn the host when the list shape changes; equal lists
+                // are no-ops both visually and for tap routing.
+                if (fresh != regions) {
+                    regions = fresh
+                    latestOnMatchesChanged(fresh)
+                }
             }
         }
     }
@@ -167,11 +178,16 @@ public fun FilePathOverlay(
         val initial = findVisibleFilePaths(view)
         paths = initial
         latestOnPathsChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleFilePaths(view)
-            if (fresh != paths) {
-                paths = fresh
-                latestOnPathsChanged(fresh)
+        // Issue #1260: collect on the Handler-based [Dispatchers.Main.immediate]
+        // so the coalesced-render window resumes during a burst — see
+        // [SmartSelectionAffordanceOverlay] for the frame-gated-dispatcher detail.
+        withContext(Dispatchers.Main.immediate) {
+            renderRequests.collect {
+                val fresh = findVisibleFilePaths(view)
+                if (fresh != paths) {
+                    paths = fresh
+                    latestOnPathsChanged(fresh)
+                }
             }
         }
     }
@@ -269,41 +285,52 @@ public fun AgentPaneAffordanceOverlay(
         // The Main dispatcher. The cheap viewport extraction and the Compose-state
         // publish MUST run on Main (the live emulator is not thread-safe, and an
         // off-main snapshot-state write would not notify the recomposer reliably).
-        // Only the regex pass is moved OFF it onto [scanDispatcher]. We use an
-        // explicit [Dispatchers.Main] rather than the LaunchedEffect's own context
-        // because `conflate()` runs the collector on the upstream/producer
-        // dispatcher (here a background pool), so `coroutineContext` is NOT Main.
-        val mainDispatcher = Dispatchers.Main
+        // Only the regex pass is moved OFF it onto [scanDispatcher].
+        //
+        // Issue #1260: drive the collect on the Handler-based
+        // [Dispatchers.Main.immediate], NOT the LaunchedEffect's default Compose
+        // `AndroidUiDispatcher.Main`. AndroidUiDispatcher batches its dispatch to
+        // Choreographer frames; during a `%output` burst on a non-invalidating
+        // surface those frames stop, so this collect stalls for the whole burst and
+        // the agent-pane file-path / URL affordance never populates (the #1260
+        // agent-pane regression, exposed by #1216's `renderRequests replay = 1`).
+        // The main-thread Handler dispatcher is not frame-gated, so the collect
+        // frame is serviced regardless. This is ALSO why `mainDispatcher` is
+        // Main.immediate: `conflate()` can run the collector off the LaunchedEffect
+        // context, so the extract/publish are explicitly pinned to the main thread.
+        val mainDispatcher = Dispatchers.Main.immediate
         // Each render-settle (or initial composition) triggers ONE off-main scan
         // of the latest snapshot. `conflate` drops intermediate emissions while a
         // scan is in flight, so a Codex `%output` burst never queues N scans — the
         // collector always re-extracts the freshest settled viewport, never a
         // backlog. `onStart { emit(Unit) }` runs the initial scan before the first
         // render signal arrives.
-        renderRequests.onStart { emit(Unit) }.conflate().collect {
-            // CHEAP, on Main: copy the live, non-thread-safe viewport into a
-            // plain-data snapshot.
-            val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
-            // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
-            // per-frame cost that caused the #803/#866 ANR; here it never touches
-            // the UI thread.
-            val (freshPaths, freshUrls) = withContext(scanDispatcher) {
-                val p = runCatching { filePathRegionsForRows(snapshot.rows, snapshot.columns) }
-                    .getOrDefault(emptyList())
-                val u = runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }
-                    .getOrDefault(emptyList())
-                p to u
-            }
-            // Publish the Compose-state diff back ON Main so the recomposer reliably
-            // picks it up (and the host's hit-test snapshot / hairline update).
-            withContext(mainDispatcher) {
-                if (freshPaths != paths) {
-                    paths = freshPaths
-                    latestOnPathsChanged(freshPaths)
+        withContext(mainDispatcher) {
+            renderRequests.onStart { emit(Unit) }.conflate().collect {
+                // CHEAP, on Main: copy the live, non-thread-safe viewport into a
+                // plain-data snapshot.
+                val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
+                // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
+                // per-frame cost that caused the #803/#866 ANR; here it never touches
+                // the UI thread.
+                val (freshPaths, freshUrls) = withContext(scanDispatcher) {
+                    val p = runCatching { filePathRegionsForRows(snapshot.rows, snapshot.columns) }
+                        .getOrDefault(emptyList())
+                    val u = runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }
+                        .getOrDefault(emptyList())
+                    p to u
                 }
-                if (freshUrls != urls) {
-                    urls = freshUrls
-                    latestOnUrlsChanged(freshUrls)
+                // Publish the Compose-state diff back ON Main so the recomposer reliably
+                // picks it up (and the host's hit-test snapshot / hairline update).
+                withContext(mainDispatcher) {
+                    if (freshPaths != paths) {
+                        paths = freshPaths
+                        latestOnPathsChanged(freshPaths)
+                    }
+                    if (freshUrls != urls) {
+                        urls = freshUrls
+                        latestOnUrlsChanged(freshUrls)
+                    }
                 }
             }
         }
@@ -388,11 +415,16 @@ public fun EngineCommandOverlay(
         val initial = findVisibleEngineCommands(view, knownCommands)
         commands = initial
         latestOnCommandsChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleEngineCommands(view, knownCommands)
-            if (fresh != commands) {
-                commands = fresh
-                latestOnCommandsChanged(fresh)
+        // Issue #1260: collect on the Handler-based [Dispatchers.Main.immediate]
+        // so the coalesced-render window resumes during a burst — see
+        // [SmartSelectionAffordanceOverlay] for the frame-gated-dispatcher detail.
+        withContext(Dispatchers.Main.immediate) {
+            renderRequests.collect {
+                val fresh = findVisibleEngineCommands(view, knownCommands)
+                if (fresh != commands) {
+                    commands = fresh
+                    latestOnCommandsChanged(fresh)
+                }
             }
         }
     }

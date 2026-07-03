@@ -206,6 +206,33 @@ class UsageRemoteSourceTest {
         assertTrue("zero-parse must not be a silent Success", result is UsageFetchResult.Failed)
     }
 
+    // -- issue #1220: pocketshell present but `quse` backend missing ---------
+
+    @Test
+    fun fetchUsage_exit0QuseMissingText_surfacesPocketshellOwnError_notParserInternals() = runTest {
+        // Issue #1220 (reproduce-first): pocketshell IS installed and runs
+        // (exit 0), but `pocketshell usage --json` prints pocketshell's OWN
+        // dependency error — `quse` missing — as PLAIN TEXT on stdout instead
+        // of usage JSON. The panel must surface pocketshell's real message +
+        // install hint. It must NOT be classified as ToolMissing ("pocketshell
+        // not installed"), and it must NOT leak the JSON parser internals.
+        val quseMissing =
+            "pocketshell: `quse` is not installed on this host. " +
+                "Install it via `uv tool install quse` or `pipx install quse` and re-run."
+        val session = FakeSshSession(
+            mapOf(defaultFetchCommand to ExecResult(quseMissing, "", 0)),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue("quse-missing must NOT read as pocketshell missing", result !is UsageFetchResult.ToolMissing)
+        assertTrue("zero-parse pocketshell error must be a visible Failed, got $result", result is UsageFetchResult.Failed)
+        val reason = (result as UsageFetchResult.Failed).reason
+        assertTrue("must surface pocketshell's own quse dependency error, got: $reason", reason.contains("quse"))
+        assertTrue("must keep pocketshell's install hint, got: $reason", reason.contains("Install", ignoreCase = true))
+        assertTrue("must not leak the JSON parser internals, got: $reason", !reason.contains("invalid usage JSON", ignoreCase = true))
+    }
+
     @Test
     fun fetchUsage_nonzeroNonJsonStillReportsFailure() = runTest {
         val session = FakeSshSession(

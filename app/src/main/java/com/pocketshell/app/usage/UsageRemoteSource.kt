@@ -4,6 +4,7 @@ import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
+import com.pocketshell.core.usage.UsageParseException
 import com.pocketshell.core.usage.UsageProviderRecord
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
@@ -166,7 +167,18 @@ public class UsageRemoteSource @Inject constructor(
                 val reason = result.stderr.ifBlank { result.stdout }.ifBlank { "usage command exited ${result.exitCode}" }
                 return UsageFetchResult.Failed(reason)
             }
-            UsageFetchResult.Success(parser.parse(result.stdout))
+            // exit 0: pocketshell resolved and ran (binary present). Parse its
+            // usage JSON — but when parsing yields NO records because pocketshell
+            // printed its OWN dependency error (e.g. `quse` missing) as plain
+            // text on stdout (issue #1220), surface pocketshell's real message +
+            // install hint. Do NOT leak the JSON parser internals, and NEVER map
+            // this to ToolMissing — "pocketshell not installed" is exit-127 only.
+            val records = try {
+                parser.parse(result.stdout)
+            } catch (e: UsageParseException) {
+                return UsageFetchResult.Failed(pocketshellUsageErrorReason(result.stdout, e))
+            }
+            UsageFetchResult.Success(records)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -190,6 +202,35 @@ public class UsageRemoteSource @Inject constructor(
          * the PATH-robust [PocketshellCommand.wrap] of [DEFAULT_USAGE_ARGS].
          */
         public const val defaultUsageCommand: String = "pocketshell usage --json"
+
+        /**
+         * Upper bound on the surfaced pocketshell-error reason (issue #1220) so
+         * an unexpectedly large non-JSON stdout can't produce a runaway panel
+         * message. The failure panel already caps to a few lines visually; this
+         * keeps the model value bounded too.
+         */
+        private const val POCKETSHELL_ERROR_REASON_MAX_CHARS: Int = 500
+    }
+
+    /**
+     * Build the user-facing failure reason for an exit-0 usage read whose
+     * stdout did not parse into any usage record (issue #1220).
+     *
+     * pocketshell resolved and ran (exit 0 ⇒ the binary is present), so this is
+     * NOT "pocketshell not installed". The most common cause is pocketshell
+     * emitting its OWN dependency error — e.g. "`quse` is not installed on this
+     * host. Install it via `uv tool install quse` ..." — as plain text. Prefer
+     * that message (dropping pocketshell's own "pocketshell: " prefix so it
+     * reads as the dependency error, not as pocketshell itself being absent) so
+     * the panel shows the real problem + install hint. Fall back to the parse
+     * diagnostic only when stdout is blank.
+     */
+    private fun pocketshellUsageErrorReason(stdout: String, parseError: UsageParseException): String {
+        val message = stdout.trim().takeIf { it.isNotEmpty() }
+            ?.removePrefix("pocketshell:")?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return parseError.message ?: "usage command produced no usable data"
+        return message.take(POCKETSHELL_ERROR_REASON_MAX_CHARS)
     }
 
     private fun parseProviderErrorStdout(stdout: String): List<UsageProviderRecord>? {

@@ -41,10 +41,13 @@ import kotlinx.coroutines.launch
  *    [onAppForegrounded]/[onAppBackgrounded]; the service only starts on background and
  *    stops on foreground. Starting/stopping the service never touches the connection itself
  *    (the service owns only Android process-survival mechanics).
- *  - **Part 3**: while a port-forward is active ([setPortForwardActive]) the notification
- *    reads "Port forwarding active" and shows NO count-down — the connection is pinned
- *    always-on (the App-level grace teardown is suppressed), so there is no disconnect
- *    deadline to count down to.
+ *  - **Part 3 / issues #1202 + #1198 (hard-cut, D22)**: while a port-forward is active
+ *    ([setPortForwardActive]) the session FGS is SUPPRESSED. The
+ *    [com.pocketshell.app.portfwd.service.ForwardingService] FGS is the SINGLE owner of the
+ *    port-forward notification (its Stop actually tears down the tunnels); running the session
+ *    FGS in parallel posted a second notification whose Stop only ended the session hold and
+ *    left the tunnels running (the #1202 bug). The ForwardingService FGS already keeps the
+ *    process — and the pinned connection — alive, so nothing is lost by not holding here.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @Singleton
@@ -115,17 +118,26 @@ class SessionServiceController @Inject constructor(
                     // Issue #1159 (Part 1): hold the FGS ONLY while backgrounded. In the
                     // foreground the Activity holds the connection — no service, no tray
                     // notification (and no Stop-action footgun).
-                    val shouldHold = rawSnapshot.isHoldingConnection && !foreground
+                    //
+                    // Issue #1202 + #1198 (hard-cut, D22): while a port-forward is active the
+                    // ForwardingService FGS is the SINGLE owner of the port-forward
+                    // notification — its Stop actually tears down the tunnels
+                    // ([com.pocketshell.app.portfwd.ForwardingController.stopAllForwarding]).
+                    // The session FGS must NOT run in parallel: it would post a SECOND
+                    // notification (the #1198 double-notification) whose Stop only ended the
+                    // session hold and left the tunnels running (the #1202 reported bug). The
+                    // ForwardingService FGS already keeps the process (and the pinned
+                    // connection) alive, so suppressing the session hold here loses nothing
+                    // while collapsing to exactly one notification with a working Stop.
+                    val shouldHold = rawSnapshot.isHoldingConnection && !foreground && !pfActive
                     val snapshot = if (holdStoppedByUser || !shouldHold) {
                         SessionConnectionSnapshot.Empty
                     } else {
-                        rawSnapshot.copy(
-                            portForwardActive = pfActive,
-                            // Part 3: a port-forward pins the connection always-on (no
-                            // teardown) → no count-down deadline. Otherwise the bounded
-                            // grace count-down.
-                            disconnectAtWallClockMillis = if (pfActive) null else deadline,
-                        )
+                        // pfActive is guaranteed false here (it gates shouldHold above), so the
+                        // held session notification always shows the normal bounded-grace
+                        // count-down — never the port-forward wording (that is now owned solely
+                        // by ForwardingService).
+                        rawSnapshot.copy(disconnectAtWallClockMillis = deadline)
                     }
                     val wasHolding = _snapshot.value.isHoldingConnection
                     _snapshot.value = snapshot
@@ -160,10 +172,15 @@ class SessionServiceController @Inject constructor(
     }
 
     /**
-     * Issue #1159 (Part 3): mark whether a port-forward is currently active. When true the
-     * notification reads "Port forwarding active" with no count-down (the connection is
-     * pinned always-on); when it drops back to false the normal bounded-grace count-down
-     * applies again on the next background.
+     * Mark whether a port-forward is currently active.
+     *
+     * Issue #1202 + #1198 (hard-cut, D22): while a port-forward is active the session FGS is
+     * SUPPRESSED — the [com.pocketshell.app.portfwd.service.ForwardingService] FGS is the
+     * SINGLE owner of the port-forward notification, and its Stop actually tears down the
+     * tunnels. Running the session FGS in parallel posted a second "Port forwarding active"
+     * notification whose Stop only ended the session hold and left the tunnels running (the
+     * reported bug). When the last forward drops back to false the normal bounded-grace
+     * count-down hold applies again while still backgrounded.
      */
     fun setPortForwardActive(active: Boolean) {
         portForwardActive.value = active

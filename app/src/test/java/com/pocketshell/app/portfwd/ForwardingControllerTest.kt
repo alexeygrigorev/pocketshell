@@ -114,6 +114,41 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `ForwardingService Stop action tears down every tunnel via stopAllForwarding`() {
+        // Issue #1202: the single-owner ForwardingService notification's Stop must ACTUALLY
+        // stop forwarding. Deliver its ACTION_STOP and confirm the controller tears down EVERY
+        // active host (stopAllForwarding), not merely hides a notification. This is the working
+        // Stop the reported bug lacked — the session FGS's "Port forwarding active" Stop only
+        // ended the session hold and left the tunnels running.
+        val controller = ForwardingController(context)
+        controller.registerActiveHost(hostId = 1, hostName = "hetzner")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        assertEquals(2, controller.flowOfActiveHostCount().value)
+        drainStartedServices()
+
+        // buildService(...).get() returns the service WITHOUT running onCreate (no Hilt); we
+        // wire the controller manually, and confine the (unused here) observe dispatcher to a
+        // test scheduler so nothing leaks past the test (issue #994).
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.controller = controller
+        service.observeDispatcher = StandardTestDispatcher(TestCoroutineScheduler())
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java).setAction(ForwardingService.ACTION_STOP),
+            0,
+            0,
+        )
+
+        assertEquals(
+            "ForwardingService Stop must tear down every active host (stopAllForwarding), " +
+                "not just hide the notification (#1202)",
+            0,
+            controller.flowOfActiveHostCount().value,
+        )
+        assertEquals(0, controller.flowOfTotalTunnelCount().value)
+        service.onDestroy()
+    }
+
+    @Test
     fun `unregisterActiveHost keeps service running while other hosts remain`() {
         val controller = ForwardingController(context)
 

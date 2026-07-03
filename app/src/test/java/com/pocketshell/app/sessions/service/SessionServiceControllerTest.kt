@@ -110,46 +110,101 @@ class SessionServiceControllerTest {
     }
 
     @Test
-    fun `port-forward active flags the snapshot with no count-down`() = runTest {
+    fun `port-forward active stops the session FGS so ForwardingService owns the single notification`() = runTest {
+        // Issue #1202 + #1198 (reported on-device, v0.4.23): a hetzner session is held in the
+        // background — the session FGS is up and its notification (reworded "Port forwarding
+        // active", #1159) is on screen. A port-forward then goes active on the SAME host, so
+        // the ForwardingService FGS posts its OWN "Port forwarding running" notification too:
+        // TWO stacked notifications. Worse, the maintainer taps Stop on the session's "Port
+        // forwarding active" notification (the one deliberately worded to represent the
+        // forward) and it only ends the session hold — the tunnels keep running.
+        //
+        // The fix collapses to ONE notification whose Stop actually stops forwarding: the
+        // ForwardingService FGS is the SINGLE owner (its Stop calls
+        // ForwardingController.stopAllForwarding), and the session FGS is SUPPRESSED while a
+        // port-forward is active. The ForwardingService FGS already keeps the process (and the
+        // pinned connection) alive, so nothing is lost by stopping the session FGS here.
         val activeClients = ActiveTmuxClients()
         val controller = controller(activeClients, testScheduler)
 
         controller.observeActiveSessions()
         runCurrent()
-        registerLive(activeClients, "alpha")
-        runCurrent()
-        controller.setPortForwardActive(true)
+        registerLive(activeClients, "hetzner")
         controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
         runCurrent()
+        // The session FGS is up and holding — its notification is on screen.
+        assertEquals(SessionConnectionService.ACTION_START, shadow.nextStartedService?.action)
+        drainStartedServices()
+        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
 
-        val snapshot = controller.flowOfSnapshot().value
-        assertTrue("a port-forward-pinned session must still hold", snapshot.isHoldingConnection)
-        assertTrue("port-forward-active must flag the snapshot", snapshot.portForwardActive)
-        assertNull(
-            "a port-forward pins the connection always-on — NO count-down deadline (#1159 Part 3)",
-            snapshot.disconnectAtWallClockMillis,
+        // A port-forward goes active on the pinned host.
+        controller.setPortForwardActive(true)
+        runCurrent()
+
+        val stopped = shadow.nextStartedService
+        assertNotNull(
+            "port-forward active must STOP the session FGS so its second, broken-Stop " +
+                "notification disappears — ForwardingService is the single owner (#1202/#1198)",
+            stopped,
+        )
+        assertEquals(SessionConnectionService::class.java.name, stopped?.component?.className)
+        assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
+        assertFalse(
+            "the session FGS must not keep holding a second port-forward notification",
+            controller.flowOfSnapshot().value.isHoldingConnection,
         )
     }
 
     @Test
-    fun `dropping the port-forward restores the bounded count-down while still backgrounded`() = runTest {
+    fun `standalone forward with no live session never starts the session FGS`() = runTest {
+        // Class coverage (G2): a pure port-forward with NO interactive tmux session. The
+        // session FGS must never start (no live client to hold), so ForwardingService is
+        // trivially the single owner even before/without the suppression.
         val activeClients = ActiveTmuxClients()
         val controller = controller(activeClients, testScheduler)
 
         controller.observeActiveSessions()
         runCurrent()
-        registerLive(activeClients, "alpha")
         controller.setPortForwardActive(true)
         controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
         runCurrent()
-        assertTrue(controller.flowOfSnapshot().value.portForwardActive)
-        assertNull(controller.flowOfSnapshot().value.disconnectAtWallClockMillis)
+
+        assertNull(
+            "a standalone forward (no live tmux session) must not start the session FGS",
+            shadow.nextStartedService,
+        )
+        assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+    }
+
+    @Test
+    fun `dropping the forward while still backgrounded restarts the session FGS with the count-down`() = runTest {
+        // Class coverage (G2): the transition back. While the forward pins the connection the
+        // session FGS is suppressed; when the last forward stops (activeHostCount 0 →
+        // setPortForwardActive(false)) and the app is still backgrounded with a live session,
+        // the session FGS restarts with the normal bounded-grace count-down restored.
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "hetzner")
+        controller.setPortForwardActive(true)
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
+        runCurrent()
+        drainStartedServices()
+        assertFalse(
+            "while the forward pins the connection, the session FGS is suppressed",
+            controller.flowOfSnapshot().value.isHoldingConnection,
+        )
 
         controller.setPortForwardActive(false)
         runCurrent()
 
+        val restarted = shadow.nextStartedService
+        assertNotNull("dropping the forward while backgrounded must restart the session FGS", restarted)
+        assertEquals(SessionConnectionService.ACTION_START, restarted?.action)
         val snapshot = controller.flowOfSnapshot().value
-        assertFalse("dropping the forward must clear the flag", snapshot.portForwardActive)
+        assertTrue("the live session must hold again once the forward is gone", snapshot.isHoldingConnection)
         assertEquals(
             "dropping the forward restores the bounded count-down deadline",
             5_000L,

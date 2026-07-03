@@ -1027,6 +1027,24 @@ JOURNEY_CLASSES=(
   # recorded no loss_hold/ride_through and force-redialled the loss + proven-alive
   # restore); GREEN with #1058. Same agents:2222 fixture; runs on CI.
   "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest"
+  # ADDED (#1202 — D31/D32 durable-fix gate, on-device regression): the port-forward
+  # "Stop" no-op + double-notification bug. The maintainer reported (v0.4.23) that
+  # while a session is pinned for a forward, TWO tray notifications stack ("Port
+  # forwarding running" + "Port forwarding active") and Stop on the "active" one only
+  # ends the session hold — a no-op for the tunnels. The #1202/#1198 fix (hard-cut D22)
+  # SUPPRESSES the session FGS while a forward is active so ForwardingService is the
+  # SOLE notification owner, and its Stop actually tears the tunnels down.
+  # `sessionPinnedForForward_hasExactlyOneForwardNotification_andStopTearsDownTunnels`
+  # reproduces the exact reported state on the REAL path (App.kt mirrors the
+  # active-host count into SessionServiceController.setPortForwardActive, exactly as
+  # production) and HARD-asserts the REAL tray: exactly ONE app foreground
+  # notification while pinned (RED on base — the session-channel second notification
+  # posts), then fires the Stop action's PendingIntent and asserts the forward is
+  # actually torn down (active host count → 0) + the notification gone. It does NOT
+  # self-skip on CI (the screenshot proof in the sibling test method does; this one
+  # is pure activeNotifications + Stop). NO Docker fixture / SSH / port — in-process
+  # ActiveTmuxClients + ForwardingController doubles — so no tests.yml service change.
+  "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest#sessionPinnedForForward_hasExactlyOneForwardNotification_andStopTearsDownTunnels"
   # ADDED (epic #792 Slice D, #822/V7a + #823 — D31 durable-fix gate): the
   # PROACTIVE silent mid-session drop detection + auto-recovery journey. The
   # maintainer's headline #822 bug: SSH silently drops on stable Wi-Fi while the

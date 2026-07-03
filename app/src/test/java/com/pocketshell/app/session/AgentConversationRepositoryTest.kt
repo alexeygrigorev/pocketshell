@@ -998,6 +998,217 @@ class AgentConversationRepositoryTest {
         )
     }
 
+    // ----------------------------------------------------------------
+    // Issue #1227: version-skew fragility (#847 class). A drifted/mismatched
+    // Codex CLI or a host-helper preamble must NOT silently blank the
+    // Conversation view. These reproduce the non-happy state first (G10) and
+    // prove the fd fallback / diagnostic / tolerant parse recover it.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsCodexViaFdWhenCwdExtractionYieldsNothing() = runTest {
+        // #1227 site 1 (version-skew, reproduce-first): a LIVE Codex pane whose
+        // rollout has a drifted/moved `session_meta` cwd field yields ZERO
+        // candidate rows from the shell enumeration (the shell-side cwd
+        // extraction silently drops it — see
+        // detectionCommandTolerantlyExtractsCwd* below for the real-shell proof
+        // of that drop). Base code returns null here (candidates empty → no kind
+        // → give up), silently blanking Conversation. The fd-owned fallback must
+        // degrade to fd-identity: bind the rollout the pane's OWN codex process
+        // holds open via /proc/<pid>/fd, never trusting the drifted cwd field.
+        val ownPath = "/home/testuser/.codex/sessions/2026/07/03/rollout-drift.jsonl"
+        val session = FakeSshSession(
+            // Empty enumeration == the version-skew drop the shell would produce.
+            detectionOutput = "",
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex",
+            // The pane's own codex process (pid 4242) holds the drifted rollout open.
+            procFdOutput = ownPath,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+        )
+
+        assertEquals(
+            "#1227: a live Codex pane whose cwd extraction drifted must still bind " +
+                "via the /proc fd owned-rollout fallback, not silently blank",
+            AgentKind.Codex,
+            detection?.agent,
+        )
+        assertEquals(ownPath, detection?.sourcePath)
+        assertEquals("rollout-drift", detection?.sessionId)
+        assertTrue(
+            "the fd fallback must resolve the owned rollout via /proc fd",
+            session.execCommands.any { it.contains("/proc/") && it.contains(".codex/sessions/") },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneEmitsDiagnosticWhenNothingBinds() = runTest {
+        // #1227 criterion 3: a failure to bind must be surfaced as a DIAGNOSTIC,
+        // not a silent empty Conversation view. A live-looking Codex pane whose
+        // enumeration yields nothing AND whose process holds no resolvable
+        // rollout fd cannot bind — the repository must log WHY.
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = "",
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex",
+            // No fd-owned rollout resolvable (older Codex build that doesn't hold
+            // the fd, non-Linux host, permission error) → genuinely cannot bind.
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/5",
+                paneCommand = "codex",
+            )
+
+        assertEquals(null, detection)
+        assertTrue(
+            "#1227: a bind failure must surface a diagnostic, not silently blank " +
+                "the view; got $diagnostics",
+            diagnostics.any { it.contains("Conversation will not bind") },
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesSkipsPreambleBeforeEnvelope() = runTest {
+        // #1227 site 2 (version-skew, reproduce-first): a host-helper preamble
+        // line printed BEFORE the JSON envelope (an update banner / warning /
+        // MOTD leak) must not blank the whole window. Base code commits to the
+        // first non-blank line being the envelope → JSONObject(preamble) fails →
+        // returns empty (indistinguishable from "no messages yet"). The parser
+        // must scan past non-JSON preamble to the first JSON object carrying
+        // `lines`.
+        val envelope = JSONObject(
+            mapOf(
+                "count" to 2,
+                "engine" to "codex",
+                "lines" to JSONArray(listOf("first line", "second line")),
+            ),
+        ).toString()
+        val outputWithPreamble = buildString {
+            appendLine("pocketshell: a newer version is available (run `pocketshell self-update`)")
+            appendLine(envelope)
+        }
+
+        assertEquals(
+            "#1227: an agent-log preamble ahead of the envelope must not blank the window",
+            listOf("first line", "second line"),
+            AgentConversationRepository().parseAgentLogEnvelopeLines(outputWithPreamble),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesSkipsMultiLineAndNonEnvelopeJsonPreamble() = runTest {
+        // #1227 class coverage (G2) for site 2: multiple preamble lines, AND a
+        // JSON object that is NOT the envelope (no `lines` key) ahead of the real
+        // envelope, must all be skipped — not just a single non-JSON banner.
+        val envelope = JSONObject(
+            mapOf("engine" to "codex", "lines" to JSONArray(listOf("only line"))),
+        ).toString()
+        val output = buildString {
+            appendLine("Warning: locale not set")
+            appendLine("")
+            // A JSON object that is not the envelope (a stray status line).
+            appendLine("""{"status":"ok","note":"warming up"}""")
+            appendLine(envelope)
+        }
+
+        assertEquals(
+            listOf("only line"),
+            AgentConversationRepository().parseAgentLogEnvelopeLines(output),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesStaysSilentAndEmptyForNoOutput() = runTest {
+        // #1227 missing-data case (G2): genuinely no output ("no messages yet")
+        // must return empty WITHOUT emitting a drift diagnostic — the diagnostic
+        // is reserved for the non-blank-but-unparseable version-skew case.
+        val diagnostics = mutableListOf<String>()
+        val repo = AgentConversationRepository(diagnostic = { diagnostics += it })
+
+        assertEquals(emptyList<String>(), repo.parseAgentLogEnvelopeLines(""))
+        assertEquals(emptyList<String>(), repo.parseAgentLogEnvelopeLines("   \n  \n"))
+        assertTrue(
+            "blank output is 'no messages yet', not a drift — must stay silent; got $diagnostics",
+            diagnostics.isEmpty(),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesEmitsDiagnosticForUnparseableOutput() = runTest {
+        // #1227 criterion 3 for site 2: non-blank output that carries no JSON
+        // envelope with `lines` (total format drift) must surface a diagnostic
+        // instead of a silent empty view.
+        val diagnostics = mutableListOf<String>()
+        val repo = AgentConversationRepository(diagnostic = { diagnostics += it })
+
+        val result = repo.parseAgentLogEnvelopeLines(
+            "pocketshell: unknown flag --json\nusage: pocketshell agent-log ...\n",
+        )
+
+        assertEquals(emptyList<String>(), result)
+        assertTrue(
+            "#1227: unparseable agent-log output must surface a diagnostic; got $diagnostics",
+            diagnostics.any { it.contains("no JSON envelope") },
+        )
+    }
+
+    @Test
+    fun detectionCommandTolerantlyExtractsCwdFromPrettyPrintedCodexRollout() {
+        // #1227 site 1 (G10 non-happy fixture, REAL shell): the Codex candidate
+        // enumeration extracts each rollout's cwd from its session_meta record.
+        // If Codex PRETTY-PRINTS the rollout JSONL (session_meta split across
+        // lines, cwd on its own line), the OLD extraction (grep the session_meta
+        // line, sed the cwd off the SAME line) yields nothing → the rollout is
+        // dropped → zero candidates → Conversation never binds. Run the REAL
+        // detectionCommand shell against a drifted fixture and prove a `codex|`
+        // row is emitted (RED on base: no codex row).
+        val prettyRollout = """
+            {
+              "type": "session_meta",
+              "payload": {
+                "id": "rollout-pretty",
+                "cwd": "/workspace/proj"
+              }
+            }
+        """.trimIndent()
+
+        val row = runCodexDetectionRow(rolloutContent = prettyRollout, cwd = "/workspace/proj")
+
+        assertTrue(
+            "#1227: a pretty-printed Codex rollout must still emit a codex candidate " +
+                "row (tolerant cwd extraction); got: $row",
+            row != null && row.startsWith("codex|") && row.endsWith("rollout-pretty.jsonl"),
+        )
+    }
+
+    @Test
+    fun detectionCommandTolerantlyExtractsCwdWhenFieldMovedOutsidePayload() {
+        // #1227 site 1 class coverage (G2): a rollout whose `cwd` field moved
+        // OUTSIDE `payload` (a plausible schema drift) also broke the old
+        // `"payload":{...,"cwd"...}`-on-one-line extraction. The tolerant scan
+        // must still find it (RED on base: no codex row).
+        val movedFieldRollout =
+            """{"type":"session_meta","cwd":"/workspace/proj","payload":{"id":"rollout-moved"}}"""
+
+        val row = runCodexDetectionRow(rolloutContent = movedFieldRollout, cwd = "/workspace/proj")
+
+        assertTrue(
+            "#1227: a rollout with cwd moved outside payload must still emit a codex " +
+                "candidate row; got: $row",
+            row != null && row.startsWith("codex|") && row.endsWith("rollout-moved.jsonl"),
+        )
+    }
+
     @Test
     fun recordedClaudeSessionResolvesWithoutTheHostWideProcessScan() = runTest {
         // Issue #828 (perf): the recorded-Claude path selects on the cwd-encoded
@@ -2030,13 +2241,29 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
-    fun detectionCommandFiltersCodexCandidatesBySessionMetaPayloadCwd() {
+    fun detectionCommandTolerantlyExtractsCodexCwdAndStillGatesOnCwdMatch() {
+        // Issue #1227 (site 1, version-skew): the Codex cwd extraction is now
+        // tolerant of drift — it scans the rollout's metadata region (first 50
+        // lines) for any `"cwd":"..."` instead of requiring
+        // `"payload":{...,"cwd":"..."}` all on the FIRST session_meta line — so a
+        // pretty-printed or moved cwd field no longer silently drops the rollout.
+        // The cwd-equality gate is preserved so a different-cwd rollout is still
+        // filtered out (the fd fallback binds the true-cwd-unknown case).
         val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
 
-        assertTrue(command.contains("\"session_meta\""))
-        assertTrue(command.contains("\"payload\""))
-        assertTrue(command.contains("\"cwd\""))
-        assertTrue(command.contains("[ \"${'$'}codex_cwd\" = \"${'$'}cwd\" ] || continue"))
+        assertTrue("must still extract the cwd field", command.contains("\"cwd\""))
+        assertTrue(
+            "must scan the metadata region tolerantly, not just the first session_meta line",
+            command.contains("head -n 50"),
+        )
+        assertFalse(
+            "must not re-couple extraction to a payload-scoped single-line match (#1227)",
+            command.contains("\"payload\"[[:space:]]*:[[:space:]]*{[^}]*\"cwd\""),
+        )
+        assertTrue(
+            "must still gate on cwd equality so a foreign-cwd rollout is filtered out",
+            command.contains("[ \"${'$'}codex_cwd\" = \"${'$'}cwd\" ] || continue"),
+        )
     }
 
     @Test
@@ -2514,6 +2741,42 @@ class AgentConversationRepositoryTest {
 
     private fun openCodePartRow(index: Int, partId: String, text: String): String =
         """{"message_id":"m$index","message_data":"{\"role\":\"assistant\"}","message_time_created":$index,"message_time_updated":$index,"part_id":"$partId","part_data":"{\"type\":\"output_text\",\"text\":\"$text\"}","part_time_created":$index}"""
+
+    /**
+     * Issue #1227 (site 1, G10 real-shell fixture): run the REAL
+     * [AgentConversationRepository.detectionCommand] shell script against a
+     * temporary `$HOME` that contains a single Codex rollout whose content is
+     * [rolloutContent], and return the first `codex|...` enumeration row the
+     * shell emits (or `null` if none). This exercises the actual grep/sed/head
+     * cwd extraction — the exact code path that silently drops a rollout on a
+     * version-skew drift — rather than a mocked enumeration. The rollout file is
+     * named after its `"id"` so the caller can assert on the emitted path.
+     */
+    private fun runCodexDetectionRow(rolloutContent: String, cwd: String): String? {
+        val id = Regex(""""id"\s*:\s*"([^"]+)"""").find(rolloutContent)?.groupValues?.get(1)
+            ?: "rollout-fixture"
+        val home = File.createTempFile("ps-codex-home", "").let { tmp ->
+            tmp.delete()
+            tmp.mkdirs()
+            tmp
+        }
+        try {
+            val rolloutDir = File(home, ".codex/sessions/2026/07/03")
+            rolloutDir.mkdirs()
+            File(rolloutDir, "$id.jsonl").writeText(rolloutContent)
+
+            val script = AgentConversationRepository().detectionCommand(cwd)
+            val process = ProcessBuilder("sh", "-c", script)
+                .apply { environment()["HOME"] = home.absolutePath }
+                .redirectErrorStream(false)
+                .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+            return stdout.lineSequence().firstOrNull { it.startsWith("codex|") }
+        } finally {
+            home.deleteRecursively()
+        }
+    }
 
     private class FakeSshSession(
         private val sqliteOutput: String = "",

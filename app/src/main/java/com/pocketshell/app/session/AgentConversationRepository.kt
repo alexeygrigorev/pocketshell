@@ -1,5 +1,6 @@
 package com.pocketshell.app.session
 
+import android.util.Log
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentDetector
 import com.pocketshell.core.agents.AgentKind
@@ -44,6 +45,17 @@ import java.io.IOException
  *    + presence of the optimistic prefix).
  */
 internal const val OPTIMISTIC_USER_MESSAGE_ID_PREFIX: String = "optimistic:"
+
+/**
+ * Issue #1227: log tag for the conversation-source binding diagnostics. When a
+ * live pane's Conversation source cannot be resolved (a version-skew drift in
+ * the Codex rollout `session_meta` cwd field, or a host-helper preamble ahead
+ * of the agent-log JSON envelope), the repository emits a one-line diagnostic
+ * instead of silently returning an empty view — so a `#847`-class silent blank
+ * leaves a trace in logcat / an injected sink rather than looking identical to
+ * "no messages yet".
+ */
+internal const val CONVERSATION_DIAGNOSTIC_TAG: String = "PsConversationBind"
 
 /**
  * Issue #160 (review round 2): single source of truth for the
@@ -494,6 +506,15 @@ public class AgentConversationRepository internal constructor(
      * normal one-line-at-a-time live stream still feels immediate.
      */
     private val tailBatchWindowMillis: Long = 60L,
+    /**
+     * Issue #1227: sink for conversation-source binding diagnostics. Defaults to
+     * a logcat warning so a silent bind failure (Codex `session_meta` cwd drift,
+     * or an agent-log preamble ahead of the JSON envelope) leaves a trace on
+     * device; unit tests inject a capturing sink to assert the diagnostic fires.
+     */
+    private val diagnostic: (String) -> Unit = { message ->
+        Log.w(CONVERSATION_DIAGNOSTIC_TAG, message)
+    },
 ) {
     /**
      * Epic #821 slice #3 (#825): read the agent kind PocketShell recorded for
@@ -719,7 +740,38 @@ public class AgentConversationRepository internal constructor(
             .lineSequence()
             .mapNotNull(::parseCandidate)
             .toList()
-        if (candidates.isEmpty()) return null
+        if (candidates.isEmpty()) {
+            // Issue #1227 (site 1, version-skew fd fallback): an empty
+            // enumeration is NOT proof that no agent is live. Claude (cwd-encoded
+            // log dir) and OpenCode (SQLite) carry their identity in the path and
+            // don't depend on parsing a rollout's cwd; only Codex enumeration
+            // extracts each rollout's `session_meta` cwd shell-side and drops the
+            // rollout if that field drifts/moves/pretty-prints. So an empty
+            // enumeration for a live-looking pane is the Codex-drift signature.
+            // Degrade to fd-identity: bind the `.codex/sessions/*.jsonl` rollout
+            // the pane's OWN process holds open (`/proc/<pid>/fd`, the #819
+            // mechanism), which never trusts the drifted cwd field. A genuine
+            // shell with no Codex process resolves no owned fd → still null (the
+            // #894/#975 no-flap invariant holds).
+            val fdBound = selectRecordedCandidate(
+                session = session,
+                normalizedCwd = normalizedCwd,
+                normalizedTty = normalizedTty,
+                paneCommand = paneCommand,
+                recordedKind = AgentKind.Codex,
+                recordedSource = null,
+                candidates = emptyList(),
+            )
+            if (fdBound == null) {
+                diagnostic(
+                    "detectLiveTranscriptForPane: no transcript candidates for cwd=" +
+                        "$normalizedCwd and no /proc fd-owned Codex rollout for tty=" +
+                        "$normalizedTty — Conversation will not bind (Codex session_meta " +
+                        "cwd drift or genuinely no live agent)",
+                )
+            }
+            return fdBound
+        }
         // Pick the kind of the MOST-RECENT candidate scoped to this cwd — the
         // transcript that is actually live now. Resolve that single kind through
         // the SAME selection discipline (the kind is taken FROM the present
@@ -1808,11 +1860,35 @@ public class AgentConversationRepository internal constructor(
         return lines.asSequence().flatMap { parser.parseLine(it) }.toList()
     }
 
-    private fun parseAgentLogEnvelopeLines(output: String): List<String> {
+    /**
+     * Issue #1227 (site 2, version-skew): parse the `pocketshell agent-log
+     * --json` envelope's `lines` array. The envelope is normally the sole line
+     * of output, but a host-helper PREAMBLE (an update banner, a warning, an
+     * SSH MOTD leak) can print ahead of it. The previous code committed to the
+     * FIRST non-blank line being the envelope, so any preamble made
+     * `JSONObject(preamble)` fail and the whole window returned empty —
+     * indistinguishable from "no messages yet", silently blanking Conversation.
+     *
+     * Scan instead for the FIRST line that parses as a JSON object CARRYING a
+     * `lines` array, skipping any non-JSON / non-envelope preamble. When the
+     * output is non-blank yet no envelope is found, surface a diagnostic rather
+     * than a silent empty view.
+     */
+    internal fun parseAgentLogEnvelopeLines(output: String): List<String> {
         val envelope = output.lineSequence()
-            .firstOrNull { it.isNotBlank() }
-            ?.let { runCatching { JSONObject(it) }.getOrNull() }
-            ?: return emptyList()
+            .filter { it.isNotBlank() }
+            .firstNotNullOfOrNull { line ->
+                runCatching { JSONObject(line) }.getOrNull()?.takeIf { it.has("lines") }
+            }
+        if (envelope == null) {
+            if (output.isNotBlank()) {
+                diagnostic(
+                    "agent-log output had non-blank lines but no JSON envelope carrying " +
+                        "`lines` (preamble/format drift) — returning no messages",
+                )
+            }
+            return emptyList()
+        }
         val lines = envelope.optJSONArray("lines") ?: return emptyList()
         return buildList {
             for (index in 0 until lines.length()) {
@@ -1890,9 +1966,20 @@ public class AgentConversationRepository internal constructor(
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
             find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
+              # Issue #1227 (site 1, version-skew): extract the rollout's cwd
+              # tolerantly. The old form required `"payload":{...,"cwd":"..."}`
+              # all on the FIRST session_meta line, so a PRETTY-PRINTED rollout
+              # (cwd on its own line) or a MOVED/reordered cwd field silently
+              # extracted nothing and dropped EVERY candidate. Scan the first 50
+              # lines (the metadata region — session_meta is the first record)
+              # for any `"cwd":"..."` and take the first match, regardless of the
+              # surrounding object structure. When extraction still yields
+              # nothing the rollout is skipped here and the JVM-side
+              # /proc/<pid>/fd owned-rollout fallback (#819/#1227) binds it by
+              # process identity instead. Stays POSIX/BusyBox-compatible.
               codex_cwd=${'$'}(
-                grep -m 1 '"type"[[:space:]]*:[[:space:]]*"session_meta"' "${'$'}f" 2>/dev/null |
-                  sed -n 's/.*"payload"[[:space:]]*:[[:space:]]*{[^}]*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' |
+                head -n 50 "${'$'}f" 2>/dev/null |
+                  sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' |
                   head -n 1
               )
               [ "${'$'}codex_cwd" = "${'$'}cwd" ] || continue

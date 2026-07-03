@@ -2091,6 +2091,80 @@ class TmuxClientTest {
         }
     }
 
+    /**
+     * Issue #1205 — the CORE reproduction of the trySend-drop that used to KILL
+     * the pane. A sustained %output flood past the bounded [OUTPUT_BACKLOG_EVENTS]
+     * channel (with the pane collector parked so the drain job can't keep up)
+     * makes `trySend` drop and fires [TmuxClient.outputBacklogOverflows] — exactly
+     * the signal the app latched `surfaceError` on. The FIX's recovery path drains
+     * the pane's queued backlog before a `capture-pane` reseed so the stale burst
+     * frames can't replay on top of the authoritative snapshot; this proves the
+     * NEW [TmuxClient.drainPaneOutputBacklog] actually empties the saturated
+     * channel (returns > 0 for the overflowed pane) and is a no-op for an
+     * unregistered pane.
+     */
+    @Test
+    fun `drainPaneOutputBacklog empties a saturated pane channel so a reseed is authoritative`() =
+        runBlocking {
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 1_000L)
+            val firstOutputBlocked = CompletableDeferred<Unit>()
+            val releasePaneCollector = CompletableDeferred<Unit>()
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // Park the pane collector on the first frame: the drain job stalls,
+                // the flow buffer fills, the channel backs up, and the flood below
+                // overflows it (the exact trySend-drop condition).
+                val blockedPaneCollector = scope.async {
+                    client.outputFor("%0").collect {
+                        firstOutputBlocked.complete(Unit)
+                        releasePaneCollector.await()
+                    }
+                }
+                val overflow = scope.async { client.outputBacklogOverflows.first() }
+                delay(100)
+
+                val feedJob = scope.async {
+                    shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = 5_000))
+                }
+
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { firstOutputBlocked.await() }
+                val overflowEvent = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { overflow.await() }
+                assertEquals("%0", overflowEvent.paneId)
+                assertTrue("sustained flood must overflow the channel", overflowEvent.droppedEvents > 0)
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { feedJob.await() }
+
+                // LOAD-BEARING: the queued stale frames ARE drainable — the recovery
+                // clears them before the capture-pane reseed so they cannot double
+                // apply on top of the authoritative grid. A saturated channel has
+                // frames to drop.
+                val drained = client.drainPaneOutputBacklog("%0")
+                assertTrue(
+                    "drainPaneOutputBacklog must empty the saturated backlog (drained=$drained)",
+                    drained > 0,
+                )
+                // Draining again is now a no-op (already emptied), and an
+                // unregistered pane returns 0 without throwing.
+                assertEquals(0, client.drainPaneOutputBacklog("%0"))
+                assertEquals(0, client.drainPaneOutputBacklog("%does-not-exist"))
+                assertFalse(
+                    "draining the backlog is a local recovery, never a transport disconnect",
+                    client.disconnected.value,
+                )
+
+                blockedPaneCollector.cancel()
+            } finally {
+                releasePaneCollector.complete(Unit)
+                client.close()
+            }
+        }
+
     @Test
     fun `close fails an in-flight sendCommand with TmuxClientException`() = runBlocking {
         val shell = FakeShell()

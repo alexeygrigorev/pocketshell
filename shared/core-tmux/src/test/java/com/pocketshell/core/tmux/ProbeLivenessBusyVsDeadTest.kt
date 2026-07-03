@@ -62,6 +62,7 @@ class ProbeLivenessBusyVsDeadTest {
             error("not used")
         override val events: Flow<ControlEvent> = emptyFlow()
         override fun outputFor(paneId: String): Flow<ControlEvent.Output> = emptyFlow()
+        override fun drainPaneOutputBacklog(paneId: String): Int = 0
         override val disconnected: StateFlow<Boolean> = disconnectedState
         override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = MutableStateFlow(null)
         override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()

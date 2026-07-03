@@ -203,6 +203,21 @@ public interface TmuxClient : AutoCloseable {
     public fun outputFor(paneId: String): Flow<ControlEvent.Output>
 
     /**
+     * Issue #1205: discard every `%output` frame currently queued in [paneId]'s
+     * per-pane delivery backlog and return the number of frames dropped.
+     *
+     * After a backlog overflow (a sustained high-output burst outran the local
+     * renderer and [outputBacklogOverflows] fired), the buffered burst frames
+     * still queued in the pane's channel are STALE deltas: the recovery path
+     * repaints the pane from an authoritative `capture-pane` snapshot, and if
+     * those queued deltas were allowed to replay AFTER the snapshot they would
+     * double-apply on top of the already-current grid and corrupt it. Draining
+     * the backlog before the reseed is what makes "one reseed, not a dead pane"
+     * correct. No-op (returns 0) when the pane has no registered pipe.
+     */
+    public fun drainPaneOutputBacklog(paneId: String): Int
+
+    /**
      * Issue #173: observable signal that the control channel has
      * disconnected — either because [close] was called or because the
      * underlying SSH transport's reader loop exited (clean EOF or
@@ -1658,6 +1673,12 @@ internal class RealTmuxClient(
         return pipe.flow.asSharedFlow()
     }
 
+    // Issue #1205: empty the pane's queued delivery backlog so a post-overflow
+    // `capture-pane` reseed is not clobbered by stale burst frames replaying on
+    // top of it. Best-effort: only touches the live channel, never the reader.
+    override fun drainPaneOutputBacklog(paneId: String): Int =
+        paneOutputPipes[paneId]?.drainBacklog() ?: 0
+
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
         sendCommandInternal(
             "set-window-option -t '${escapeSingleQuoted(sessionId)}' window-size latest",
@@ -2666,6 +2687,20 @@ internal class RealTmuxClient(
         fun close() {
             channel.close()
             job.cancel()
+        }
+
+        /**
+         * Issue #1205: discard every frame currently buffered in the live
+         * channel (best-effort, non-blocking) and return the count drained.
+         * The pipe's drain job keeps running; only the queued-but-undelivered
+         * burst frames are dropped so a post-overflow reseed is authoritative.
+         */
+        fun drainBacklog(): Int {
+            var drained = 0
+            while (channel.tryReceive().isSuccess) {
+                drained++
+            }
+            return drained
         }
 
         companion object {

@@ -57,13 +57,13 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -166,10 +166,24 @@ public class InlineDictationViewModel @Inject constructor(
     /** Current dictation state — drives the mic slot's visual treatment. */
     public val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    // Replay = 0 because every transcription is a one-shot event that must
-    // be written to the terminal exactly once. Re-collecting (e.g. on
-    // recomposition) must not re-write old bytes.
-    private val _transcriptions: MutableSharedFlow<String> = MutableSharedFlow(replay = 0)
+    // Issue #1226: a durable delivery Channel — NOT a `replay = 0`
+    // MutableSharedFlow. A replay-0 SharedFlow drops any emit that lands
+    // while there is no active collector, so a transcript produced during the
+    // 1-3s Whisper round-trip was silently lost whenever the screen's
+    // collector was momentarily torn down — e.g. the focused pane flips to
+    // `null` or re-keys during a brief reconnect (common on mobile). The FSM
+    // was already back at Idle with `error == null`, so the user believed
+    // they had sent a command that never arrived.
+    //
+    // A Channel buffers emitted transcripts even when no collector is
+    // subscribed, and hands each buffered value to exactly one collector
+    // exactly once when the screen re-subscribes on re-key. That gives us the
+    // "delivered on re-key, never dropped, never duplicated" contract:
+    //  - UNLIMITED + `trySend` so emission never suspends or fails.
+    //  - `receiveAsFlow()` distributes each element to a single collector and
+    //    resumes across consecutive collections (the LaunchedEffect re-key),
+    //    so nothing is replayed to a fresh collector (no double-write).
+    private val deliveryChannel: Channel<String> = Channel(capacity = Channel.UNLIMITED)
 
     /**
      * Stream of successfully transcribed text. The session screen collects
@@ -180,8 +194,13 @@ public class InlineDictationViewModel @Inject constructor(
      * transcribed text becomes terminal stdin directly" — the user is
      * dictating a command name or fragment, not a complete line they want
      * submitted.
+     *
+     * Issue #1226: backed by [deliveryChannel] so a transcript emitted while
+     * the collector is torn down (pane null / re-keying during a reconnect)
+     * is buffered and delivered when the collector re-subscribes, rather than
+     * being dropped into the collector gap.
      */
-    public val transcriptions: SharedFlow<String> = _transcriptions.asSharedFlow()
+    public val transcriptions: Flow<String> = deliveryChannel.receiveAsFlow()
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
@@ -638,7 +657,10 @@ public class InlineDictationViewModel @Inject constructor(
                         "pendingQueued" to (pendingId != null),
                         "mode" to _uiState.value.mode.name,
                     )
-                    _transcriptions.emit(trimmed)
+                    // Issue #1226: buffered send — survives a torn-down /
+                    // re-keying collector so the transcript is not lost in the
+                    // reconnect gap.
+                    deliveryChannel.trySend(trimmed)
                 },
                 onFailure = { t ->
                     val msg = when (t) {
@@ -728,9 +750,11 @@ public class InlineDictationViewModel @Inject constructor(
             "transcriptBytes" to text.toByteArray(Charsets.UTF_8).size,
             "mode" to _uiState.value.mode.name,
         )
-        transcribeJob = viewModelScope.launch {
-            _transcriptions.emit(text)
-        }
+        // Issue #1226: buffered send (see [deliveryChannel]) — no coroutine
+        // needed since `trySend` never suspends, and it survives a torn-down /
+        // re-keying collector so the Android-speech transcript is not dropped
+        // in a reconnect gap.
+        deliveryChannel.trySend(text)
     }
 
     private fun failAndroidSpeechRecognition(message: String) {

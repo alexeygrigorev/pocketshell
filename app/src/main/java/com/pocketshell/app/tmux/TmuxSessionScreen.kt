@@ -1158,8 +1158,18 @@ public fun TmuxSessionScreen(
     // user is looking at once promotion makes it active — not a no-op.
     val focusedPaneId = surfacePane?.paneId
     LaunchedEffect(inlineDictationViewModel, dictationMode, focusedPaneId) {
+        // Issue #1226: do NOT drain the durable delivery channel while there
+        // is no pane to receive the text. The old code collected the flow even
+        // when `focusedPaneId` was null and then `return@collect`-discarded the
+        // value — so a transcript that resolved during a brief drop/reconnect
+        // (pane flipped to null mid Whisper round-trip) was pulled out of the
+        // channel and thrown away, silently losing the user's command. By
+        // returning early here we leave the transcript buffered in the
+        // ViewModel's channel; when the session re-attaches and the pane
+        // re-keys to a live id, this effect re-runs and delivers the buffered
+        // transcript into the pane the user is now looking at.
+        val paneId = focusedPaneId ?: return@LaunchedEffect
         inlineDictationViewModel.transcriptions.collect { text ->
-            val paneId = focusedPaneId ?: return@collect
             when (dictationMode) {
                 InlineDictationViewModel.DictationMode.Prompt -> {
                     if (text.isNotEmpty()) {

@@ -582,11 +582,11 @@ jobs:
           echo "::group::Accept SDK licenses"
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
           echo "::endgroup::"
-          echo "::group::Warm up api-34 packages"
+          echo "::group::Warm up api-35 packages"
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
-            "platforms;android-34" \
-            "system-images;android-34;google_apis;x86_64" || true
+            "platforms;android-35" \
+            "system-images;android-35;google_apis;x86_64" || true
           echo "::endgroup::"
 
       - name: Build SSH base image
@@ -722,7 +722,13 @@ jobs:
         # above), NOT an action regression — this pin is hygiene, not the fix.
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
-          api-level: 34
+          # API 35 (Android 15): matches the maintainer's dogfood device and the
+          # three connection-core journeys (BoundedGraceSessionHoldJourneyE2eTest,
+          # NotificationTapLivePinnedForegroundReseedJourneyE2eTest,
+          # SessionConnectionServiceE2eTest) that hard-assert SDK_INT == 35.
+          # nightly-extensive.yml already runs these classes green on this exact
+          # image/action. (#1197)
+          api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7
@@ -817,7 +823,13 @@ jobs:
         # Issue #771: same v2.37.0 pin as the first attempt (see note above).
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
-          api-level: 34
+          # API 35 (Android 15): matches the maintainer's dogfood device and the
+          # three connection-core journeys (BoundedGraceSessionHoldJourneyE2eTest,
+          # NotificationTapLivePinnedForegroundReseedJourneyE2eTest,
+          # SessionConnectionServiceE2eTest) that hard-assert SDK_INT == 35.
+          # nightly-extensive.yml already runs these classes green on this exact
+          # image/action. (#1197)
+          api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7

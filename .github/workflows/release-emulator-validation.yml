@@ -113,7 +113,10 @@ jobs:
           # Issue #851: `gh` auth for the nightly-fault release guard.
           GH_TOKEN: ${{ github.token }}
         with:
-          api-level: 34
+          # API 35 (Android 15): match the maintainer's dogfood device and the
+          # per-push emulator jobs (#1197). nightly-extensive.yml already boots
+          # this exact image on this action.
+          api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7

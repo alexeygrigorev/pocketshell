@@ -5126,7 +5126,7 @@ internal fun ConversationTuiCommandNotice(
         modifier = Modifier
             .fillMaxWidth()
             .padding(12.dp)
-            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
             .padding(horizontal = 14.dp, vertical = 12.dp)
             .testTag(TMUX_CONVERSATION_TUI_NOTICE_TAG),
         verticalAlignment = Alignment.CenterVertically,

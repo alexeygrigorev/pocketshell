@@ -745,10 +745,14 @@ class HostListViewModel internal constructor(
                     auth = SshImportAuth.KeyReference(name = key.name),
                 ),
             )
-            val payload = QrChunkCodec.encode(importPayload).single()
+            // Issue #1230: encode returns one-or-more envelope chunks. Do NOT
+            // `.single()` — that throws (and crashes viewModelScope) the moment
+            // the payload needs more than one QR. Keep every part; the share
+            // dialog renders the multi-QR sequence and the scanner reassembles.
+            val payloads = QrChunkCodec.encode(importPayload)
             _sharePayload.value = HostSharePayload(
                 hostName = host.name,
-                payload = payload,
+                payloads = payloads,
             )
             _shareMessage.value = null
         }
@@ -1665,7 +1669,17 @@ class HostListViewModel internal constructor(
 
     data class HostSharePayload(
         val hostName: String,
-        val payload: String,
+        /**
+         * The one-or-more QR envelope strings the payload split into
+         * (issue #1230). [QrChunkCodec.encode] is explicitly multi-part
+         * (1500-byte chunks) — a host with long name/hostname/username or a
+         * long key name pushes the payload past one chunk. Rendering (and
+         * text-sharing) must iterate ALL parts; the old export did
+         * `encode(...).single()`, which threw and crashed the app for any
+         * multi-chunk payload. `part=1/N` order is preserved so the in-app
+         * scanner ([QrChunkAssembler]) can reassemble them.
+         */
+        val payloads: List<String>,
     )
 
     /**

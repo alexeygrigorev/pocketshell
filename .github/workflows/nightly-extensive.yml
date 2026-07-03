@@ -65,6 +65,18 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      # Issue #1201: validate the release-gate fault-verdict decision logic on
+      # every nightly/dispatch (cheap, no network). The helper self-test proves
+      # the verdict is computed from the network-fault + bootstrap phases ONLY
+      # (journey suite + #822 expected-fail lane excluded); the guard self-test
+      # proves the release-gate guard GREENs on a fault-verdict-green run (even
+      # with an unrelated red shard) and REDs on a fault-verdict-red run.
+      - name: "Self-test the fault-verdict logic (issue #1201)"
+        run: |
+          chmod +x scripts/lib/nightly-fault-verdict.sh scripts/check-nightly-fault-run.sh
+          scripts/lib/nightly-fault-verdict.sh --self-test
+          scripts/check-nightly-fault-run.sh --self-test
+
       - name: Decide whether to run the extensive suite
         id: decide
         env:
@@ -382,6 +394,98 @@ jobs:
           path: artifacts/docker/
           if-no-files-found: ignore
 
+      # Issue #1201: the authoritative machine-readable fault-injection safety
+      # verdict is written ONLY by the shard that runs the aux fault phases
+      # (network-fault + bootstrap), i.e. shard 0. Upload it under a stable,
+      # dedicated name so the separate `Fault-injection safety verdict` job can
+      # download and evaluate it, independent of the whole flaky extensive shard.
+      - name: Upload fault-injection safety verdict (shard 0 only)
+        if: always() && matrix.shard == 0
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-extensive-fault-verdict
+          path: artifacts/nightly-extensive/fault-verdict.txt
+          if-no-files-found: ignore
+
       - name: Stop Docker fixtures
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Fault-injection safety verdict (issue #1201) — the RELEASE-GATING signal.
+  #
+  # The extensive shard job is `continue-on-error` and mixes the flaky journey
+  # suite + the #822 expected-fail lane with the actual fault suite, so its job
+  # conclusion is essentially never `success` and can't gate a release. This
+  # cheap job instead reads the machine-readable verdict the suite wrote from the
+  # network-fault + bootstrap phases ONLY, and turns it into a clean job
+  # conclusion. `scripts/check-nightly-fault-run.sh` reads THIS job's conclusion
+  # (JOB_NEEDLE="Fault-injection safety verdict"), NOT the mixed extensive job.
+  #
+  # It is intentionally NOT `continue-on-error`: a red fault phase (or a shard-0
+  # crash that produced no verdict — genuine nightly-infra breakage, the #1056
+  # escape-hatch case) leaves this job red so the release gate blocks.
+  # ---------------------------------------------------------------------------
+  fault-verdict:
+    name: Fault-injection safety verdict (release gate)
+    needs: [guard, extensive]
+    # `extensive` is continue-on-error, so it counts as success for `needs`; run
+    # whenever the guard decided to run the suite (and even if a shard cancelled,
+    # so we still evaluate any verdict shard 0 produced).
+    if: always() && needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download fault-injection verdict (shard 0)
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          name: nightly-extensive-fault-verdict
+          path: fault-verdict
+
+      - name: Evaluate fault-injection safety verdict
+        run: |
+          set -uo pipefail
+          file="fault-verdict/fault-verdict.txt"
+
+          if [[ ! -f "$file" ]]; then
+            {
+              echo "# Fault-injection safety verdict"
+              echo
+              echo "**BLOCK** — no verdict artifact was produced."
+              echo
+              echo "Shard 0 did not write \`fault-verdict.txt\` (the fault phase did"
+              echo "not complete — most likely genuine nightly-infra breakage such as"
+              echo "an emulator boot / Docker-fixture failure). There is NO fault"
+              echo "signal to release on. Investigate the shard-0 logs; if it is"
+              echo "genuine infra breakage, re-run the nightly, or use the #1056"
+              echo "escape hatch (NIGHTLY_FAULT_GATE_DISABLED=1) for a deliberately"
+              echo "infra-waived release."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "Verdict artifact contents:"
+          cat "$file"
+          echo
+
+          verdict="$(grep -E '^fault_verdict=' "$file" | head -1 | cut -d= -f2)"
+          nf="$(grep -E '^network_fault_status=' "$file" | head -1 | cut -d= -f2)"
+          bootstrap="$(grep -E '^bootstrap_status=' "$file" | head -1 | cut -d= -f2)"
+          expectedfail="$(grep -E '^expected_fail_status=' "$file" | head -1 | cut -d= -f2)"
+
+          {
+            echo "# Fault-injection safety verdict"
+            echo
+            echo "- network-fault (GATING): \`$nf\`"
+            echo "- bootstrap (GATING): \`$bootstrap\`"
+            echo "- #822 expected-fail lane (NON-GATING, tracked only): \`$expectedfail\`"
+            echo "- **fault_verdict: \`$verdict\`**"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$verdict" == "PASS" ]]; then
+            echo "PASS: the fault-injection safety journeys (network-fault + bootstrap) passed on this HEAD."
+            exit 0
+          fi
+          echo "BLOCK: fault_verdict=$verdict — a fault-injection safety phase failed on this HEAD."
+          exit 1

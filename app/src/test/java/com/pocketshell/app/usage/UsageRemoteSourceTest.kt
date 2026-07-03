@@ -136,6 +136,76 @@ class UsageRemoteSourceTest {
         assertTrue(record.lastError?.contains("HTTP Error 401", ignoreCase = true) == false)
     }
 
+    // -- issue #1223: exit-0 per-record resilience (#847 version-skew class) --
+
+    @Test
+    fun fetchUsage_exit0PartialDrift_stillRendersHealthyProvider() = runTest {
+        // An old/mismatched host CLI emits provider A fine but provider B
+        // drifted (short_term is not an object). Before #1223 the whole usage
+        // panel showed Failed/blank; the healthy provider must now render.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = """{"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                        "\n" +
+                        """{"status":"ok","short_term":"drifted","long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(result is UsageFetchResult.Success)
+        val record = (result as UsageFetchResult.Success).records.single()
+        assertEquals("codex", record.provider)
+        assertEquals(UsageStatus.Ok, record.status)
+    }
+
+    @Test
+    fun fetchUsage_exit0NonJsonPreamble_stillRendersAllProviders() = runTest {
+        // A wrapper prepends a non-JSON MOTD/deprecation line before the valid
+        // NDJSON. All valid providers must still render.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = "WARNING: pocketshell 0.3.1 is deprecated\n" +
+                        """{"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                        "\n" +
+                        """{"provider":"claude","status":"ok","short_term":{"percent_remaining":41.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(result is UsageFetchResult.Success)
+        val records = (result as UsageFetchResult.Success).records
+        assertEquals(listOf("codex", "claude"), records.map { it.provider })
+    }
+
+    @Test
+    fun fetchUsage_exit0AllRecordsUnparseable_reportsFailure() = runTest {
+        // Zero parseable records must still surface a visible failure — never a
+        // silent empty-success.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = "this is not json at all\nalso not json {broken",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue("zero-parse must not be a silent Success", result is UsageFetchResult.Failed)
+    }
+
     @Test
     fun fetchUsage_nonzeroNonJsonStillReportsFailure() = runTest {
         val session = FakeSshSession(

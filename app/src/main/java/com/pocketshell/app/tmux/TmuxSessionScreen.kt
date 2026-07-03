@@ -5090,12 +5090,12 @@ internal fun ConversationDetectingPlaceholder(
                     fontSize = 14.sp,
                 )
                 Spacer(modifier = Modifier.height(12.dp))
-                TextButton(
+                PocketShellButton(
+                    text = "Open in Terminal",
                     onClick = onOpenTerminal,
                     modifier = Modifier.testTag(TMUX_CONVERSATION_OPEN_TERMINAL_TAG),
-                ) {
-                    Text("Open in Terminal")
-                }
+                    variant = ButtonVariant.Text,
+                )
             }
             else -> LoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
@@ -5139,15 +5139,18 @@ internal fun ConversationTuiCommandNotice(
             fontSize = 13.sp,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
+        PocketShellButton(
             onClick = onOpenTerminal,
             modifier = Modifier.testTag(TMUX_CONVERSATION_TUI_NOTICE_OPEN_TAG),
+            variant = ButtonVariant.Text,
         ) {
             Text("Open in Terminal", color = PocketShellColors.Accent)
         }
-        TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary)
-        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+        )
     }
 }
 

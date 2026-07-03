@@ -1545,6 +1545,205 @@ class TmuxClientTest {
         }
     }
 
+    /**
+     * Issue #1204 — the primary suspect for the fragments-over-black class.
+     *
+     * `%output` that tmux emits for a pane BEFORE its per-pane pipe is
+     * registered by [RealTmuxClient.outputFor] used to be discarded silently
+     * (the null-safe `paneOutputPipes[paneId]?.send(event)` no-op) — no
+     * counter, no diagnostic, no recovery. On a Claude pane, whose TUI only
+     * repaints incrementally, the lost first frame stays black indefinitely.
+     *
+     * G10 red→green core: feed two frames for `%0` before anyone registers
+     * `outputFor("%0")`, then register + collect. On base the buffered bytes
+     * are gone (this `take(3)` never completes → timeout); with the bounded
+     * pre-registration replay buffer all three arrive in order, the two
+     * pre-registration frames correctly interleaved ahead of the live one.
+     */
+    @Test
+    fun `pane output arriving before outputFor registration is replayed in order`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            // Subscribe to the GLOBAL bus first so we can prove the reader
+            // actually processed the pre-registration %output frames BEFORE
+            // anyone calls outputFor("%0"). The global bus emits regardless of
+            // whether a per-pane pipe exists, so this synchronisation works on
+            // both base (drop) and the fixed (replay) code.
+            val preRegProcessed = CompletableDeferred<Unit>()
+            val seen = AtomicInteger(0)
+            val globalWatcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.Output && ev.paneId == "%0") {
+                        if (seen.incrementAndGet() == 2) preRegProcessed.complete(Unit)
+                    }
+                }
+            }
+            delay(100) // let the global collector attach
+
+            // %output for %0 BEFORE its per-pane pipe is registered.
+            shell.feed("%output %0 before-one\n%output %0 before-two\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { preRegProcessed.await() }
+
+            // Now register the pane pipe and collect. On base, before-one/two
+            // are gone (dropped at the no-pipe site) so this never reaches 3
+            // and times out; with the fix all three arrive in order.
+            val paneEvents = scope.async {
+                client.outputFor("%0").take(3).toList()
+            }
+            delay(100) // let the pane collector attach
+            shell.feed("%output %0 after-one\n")
+
+            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { paneEvents.await() }
+            globalWatcher.cancel()
+
+            assertEquals(
+                listOf("before-one", "before-two", "after-one"),
+                events.map { String(it.data, StandardCharsets.US_ASCII) },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1204 — class coverage (G2): the attach/switch re-registration
+     * case. A background/other-window pane (`%1`) floods output while the user
+     * is on `%0`; the user only later switches to `%1` (first
+     * `outputFor("%1")`). The buffered `%1` frames must replay on switch, and
+     * the co-registered `%0` pipe must NOT consume `%1`'s buffer (per-pane
+     * demux is preserved).
+     */
+    @Test
+    fun `switching to a pane replays output buffered before its first registration`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            // %0 is the currently-attached pane.
+            val pane0 = scope.async { client.outputFor("%0").take(1).toList() }
+            delay(100)
+
+            // Confirm the reader processed the background %1 frames via the
+            // global bus before we switch (register outputFor("%1")).
+            val bgProcessed = CompletableDeferred<Unit>()
+            val bgSeen = AtomicInteger(0)
+            val globalWatcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.Output && ev.paneId == "%1") {
+                        if (bgSeen.incrementAndGet() == 2) bgProcessed.complete(Unit)
+                    }
+                }
+            }
+            delay(100)
+
+            shell.feed(
+                "%output %0 live0\n" +
+                    "%output %1 bg-one\n" +
+                    "%output %1 bg-two\n",
+            )
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { bgProcessed.await() }
+
+            // User switches to %1 — first registration replays the buffered
+            // background frames in order.
+            val pane1 = scope.async { client.outputFor("%1").take(3).toList() }
+            delay(100)
+            shell.feed("%output %1 bg-three\n")
+
+            val p0 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane0.await() }
+            val p1 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane1.await() }
+            globalWatcher.cancel()
+
+            assertEquals(listOf("live0"), p0.map { String(it.data, StandardCharsets.US_ASCII) })
+            assertEquals(
+                listOf("bg-one", "bg-two", "bg-three"),
+                p1.map { String(it.data, StandardCharsets.US_ASCII) },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1204 — class coverage (G2): the buffer-overflow eviction case.
+     * More pre-registration frames than the cap arrive; the oldest are evicted
+     * (bounded), the drop is counted, and the eviction fires the
+     * `tmux_client_preregistration_output_drop` diagnostic into the exportable
+     * JSONL sink so this loss is never invisible again.
+     */
+    @Test
+    fun `pre-registration buffer overflow evicts oldest and records drop diagnostic`() = runBlocking {
+        val diagnostics = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields -> diagnostics += event to fields }
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            // 300 > the 256-event pre-registration cap → 44 evictions.
+            val target = 300
+            val cap = 256
+            val processed = CompletableDeferred<Unit>()
+            val seen = AtomicInteger(0)
+            val watcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.Output && ev.paneId == "%9") {
+                        if (seen.incrementAndGet() == target) processed.complete(Unit)
+                    }
+                }
+            }
+            delay(100)
+            shell.feed(
+                buildString {
+                    repeat(target) { i ->
+                        append("%output %9 frame-")
+                        append(i)
+                        append('\n')
+                    }
+                },
+            )
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { processed.await() }
+            watcher.cancel()
+
+            // Register: only the newest `cap` survive; the oldest were evicted.
+            val paneEvents = scope.async {
+                client.outputFor("%9").take(cap).toList()
+            }
+            delay(100)
+            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { paneEvents.await() }
+
+            // Bounded: exactly the cap survives, oldest evicted, order kept.
+            assertEquals(cap, events.size)
+            assertEquals(
+                "frame-${target - cap}",
+                String(events.first().data, StandardCharsets.US_ASCII),
+            )
+            assertEquals(
+                "frame-${target - 1}",
+                String(events.last().data, StandardCharsets.US_ASCII),
+            )
+
+            // Observable: the eviction fired the drop diagnostic into the JSONL.
+            val drop = diagnostics.firstOrNull {
+                it.first == "tmux_client_preregistration_output_drop"
+            }
+            assertTrue("expected a pre-registration drop diagnostic to be recorded", drop != null)
+            assertEquals("%9", drop!!.second["pane"])
+            assertEquals(1, drop.second["droppedEvents"])
+        } finally {
+            TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
+            client.close()
+        }
+    }
+
     @Test
     fun `codex scale output flood cannot starve command response parsing`() = runBlocking {
         val shell = FakeShell()

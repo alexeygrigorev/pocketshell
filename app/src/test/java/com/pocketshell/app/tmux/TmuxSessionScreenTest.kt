@@ -1062,6 +1062,101 @@ class TmuxSessionScreenTest {
         )
     }
 
+    // --- Issue #1207: TUI-only slash-command handling on the Conversation
+    // composer (no misleading echo, Open-in-Terminal notice) + the stranded
+    // placeholder spinner-race fix. ---
+
+    @Test
+    fun tuiSlashCommandRecognisesAgentPickerCommands() {
+        // Criterion (a): `/model` and friends are TUI-only picker commands that
+        // write NOTHING to the transcript. They must be recognised so the
+        // composer suppresses the optimistic bubble and raises the notice.
+        assertTrue(tmuxComposerIsTuiSlashCommand("/model"))
+        assertTrue(tmuxComposerIsTuiSlashCommand("/config"))
+        assertTrue(tmuxComposerIsTuiSlashCommand("/login"))
+        // A slash-command WITH arguments (e.g. `/model sonnet`) is still a
+        // command — the first token drives the classification.
+        assertTrue(tmuxComposerIsTuiSlashCommand("/model sonnet"))
+        // Surrounding whitespace is trimmed before classifying.
+        assertTrue(tmuxComposerIsTuiSlashCommand("  /model  "))
+    }
+
+    @Test
+    fun tuiSlashCommandRejectsPromptsAndPaths() {
+        // A normal prompt is NOT a slash-command — it must keep the optimistic
+        // echo (`Echo`), never divert to the notice path.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("explain this diff"))
+        assertTrue(!tmuxComposerIsTuiSlashCommand(""))
+        // A bare slash is not a command.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/"))
+        // A filesystem path is not a command (it has a second `/`).
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/home/user/file.txt"))
+        // A leading-slash arithmetic/prompt is not a command (first token starts
+        // with a digit, not a letter).
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/2 + 2"))
+        // A multi-line message is a prompt the user typed, not a command, even
+        // when the first line looks command-like.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/model\nand also do this"))
+    }
+
+    @Test
+    fun agentConversationSendSuppressesEchoForTuiSlashCommand() {
+        // Criterion (a) — the load-bearing decision: a `/model` sent from the
+        // Conversation composer takes the NO-ECHO path (deliver keystrokes to the
+        // pane, raise the Open-in-Terminal notice), NOT the optimistic-bubble
+        // `sendToAgentPaneResult` echo path. On base (echo always) this would be
+        // `Echo`; the fix makes it `TuiCommandNoEcho`.
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/model"),
+        )
+        // A normal prompt keeps the optimistic echo — unchanged behaviour.
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("summarise the failing test"),
+        )
+    }
+
+    @Test
+    fun placeholderWithNoRowResolvesToTerminalEmptyNotEternalSpinner() {
+        // Criterion (b) — the stranded-spinner race: the 2-null detection
+        // teardown can remove the conversation row BEFORE the load watchdog
+        // fires, leaving the placeholder with NO row and NO watchdog behind it.
+        // The old `?: ConversationLoadState.Loading` fallback then spins FOREVER.
+        // A missing row (null) MUST resolve to a terminal legible state (Empty),
+        // never Loading. This is the exact fallback at
+        // TmuxSessionScreen.kt's showConversationPlaceholder branch.
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Empty,
+            tmuxConversationPlaceholderLoadState(null),
+        )
+    }
+
+    @Test
+    fun placeholderWithRowHonoursItsOwnLoadState() {
+        // When a row exists, honour its own load state — a `Loading` row always
+        // has the load watchdog armed behind it, so it is NOT a stranded spinner
+        // and must keep showing "Loading conversation…".
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Loading,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Loading,
+            ),
+        )
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Failed,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Failed,
+            ),
+        )
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Ready,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Ready,
+            ),
+        )
+    }
+
     @Test
     fun composerOutboundRouteMapsAllRoutes() {
         assertEquals(

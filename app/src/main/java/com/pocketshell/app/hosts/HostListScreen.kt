@@ -755,7 +755,13 @@ fun HostListScreen(
                         Intent.createChooser(
                             Intent(Intent.ACTION_SEND)
                                 .setType("text/plain")
-                                .putExtra(Intent.EXTRA_TEXT, share.payload),
+                                // Issue #1230: a payload may split into several
+                                // QR envelope parts; share every one (newline
+                                // separated) so a text import can reassemble.
+                                .putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    share.payloads.joinToString("\n"),
+                                ),
                             "Share host",
                         ),
                     )
@@ -1465,7 +1471,14 @@ private fun HostShareDialog(
     onDismiss: () -> Unit,
     onShare: () -> Unit,
 ) {
-    val qr = remember(share.payload) { HostQrCode.encode(share.payload, sizePx = 640) }
+    // Issue #1230: a large payload (long name/hostname/username, long key
+    // name) splits into several QR envelope parts. Page through them so the
+    // in-app scanner can reassemble; a single-part payload shows just its QR.
+    val total = share.payloads.size
+    var index by remember(share) { mutableStateOf(0) }
+    val safeIndex = index.coerceIn(0, (total - 1).coerceAtLeast(0))
+    val current = share.payloads[safeIndex]
+    val qr = remember(current) { HostQrCode.encode(current, sizePx = 640) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Share ${share.hostName}", color = PocketShellColors.Text) },
@@ -1476,6 +1489,37 @@ private fun HostShareDialog(
                     contentDescription = "Host share QR code",
                     modifier = Modifier.size(220.dp),
                 )
+                if (total > 1) {
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        PocketShellButton(
+                            text = "Prev",
+                            onClick = { if (safeIndex > 0) index = safeIndex - 1 },
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                        )
+                        Text(
+                            text = "QR ${safeIndex + 1} of $total",
+                            color = PocketShellColors.Text,
+                            style = PocketShellTypography.labelSmall,
+                        )
+                        PocketShellButton(
+                            text = "Next",
+                            onClick = { if (safeIndex < total - 1) index = safeIndex + 1 },
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+                    Text(
+                        text = "This host is large, so it splits across $total codes. Scan all of them with the in-app QR scanner to combine.",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellTypography.labelSmall,
+                    )
+                }
                 Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 Text(
                     text = "Private keys and passphrases are never included. Import requires a local key with the same name.",

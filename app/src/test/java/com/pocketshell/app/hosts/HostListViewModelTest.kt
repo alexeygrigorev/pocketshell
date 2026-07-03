@@ -1713,13 +1713,91 @@ class HostListViewModelTest {
 
         val share = viewModel.sharePayload.value
         assertNotNull(share)
-        assertTrue(QrChunkCodec.isEnvelope(share!!.payload))
-        val part = QrChunkCodec.decodePart(share.payload).getOrThrow()
+        // A normal-sized host fits in a single QR envelope part (AC2).
+        assertEquals(1, share!!.payloads.size)
+        val envelope = share.payloads.single()
+        assertTrue(QrChunkCodec.isEnvelope(envelope))
+        val part = QrChunkCodec.decodePart(envelope).getOrThrow()
         assertEquals(1, part.total)
         val decoded = SshImportPayloadCodec.decode(
             String(part.chunk, Charsets.UTF_8),
         ).getOrThrow()
         assertEquals("shared", decoded.name)
+        assertEquals("shared.example.com", decoded.host)
+        assertEquals(2222, decoded.port)
+        assertEquals("ubuntu", decoded.username)
+        assertEquals(SshImportAuth.KeyReference("shared-key"), decoded.auth)
+    }
+
+    /**
+     * Issue #1230 regression (reproduce-first, D33/G10). The export used to do
+     * `QrChunkCodec.encode(importPayload).single()`; `.single()` throws
+     * `IllegalArgumentException` on a >1-element list, and the uncaught throw
+     * inside the bare `viewModelScope.launch` crashed the app for ANY payload
+     * that split into more than one QR chunk (a host with a long
+     * name/hostname/username or a long key name).
+     *
+     * The fixture below has a name long enough to push the SSH-import JSON well
+     * past [QrChunkCodec.ChunkSize] (1500 bytes), so `encode` returns multiple
+     * parts — the exact crash trigger.
+     *
+     * RED (revert the fix — restore `.single()` in `createSharePayload`): the
+     * coroutine throws before assigning `_sharePayload`, so `share` is null and
+     * `assertNotNull` fails (and the uncaught crash surfaces via `runTest`).
+     * GREEN (with the fix): every part is produced and reassembles through the
+     * live scanner's [QrChunkAssembler] back into the original import payload.
+     */
+    @Test
+    fun createSharePayload_producesAllParts_forOversizedPayload_andRoundTrips() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        // ~4 KiB name → SSH-import JSON far exceeds the 1500-byte chunk size, so
+        // the QR envelope MUST split into multiple parts.
+        val longName = "long-host-".repeat(400)
+        val host = HostEntity(
+            name = longName,
+            hostname = "shared.example.com",
+            port = 2222,
+            username = "ubuntu",
+            keyId = keyId,
+        )
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        viewModel.createSharePayload(host)
+
+        val share = viewModel.sharePayload.value
+        assertNotNull("multi-chunk share must not crash (issue #1230)", share)
+        // The crash trigger: the payload genuinely splits into >1 part.
+        assertTrue(
+            "oversized payload should produce more than one QR part",
+            share!!.payloads.size > 1,
+        )
+        // Every part is a well-formed envelope sharing one id, parts 1..N, and
+        // the whole set reassembles the way the in-app scanner combines them.
+        val assembler = QrChunkAssembler()
+        var assembled: String? = null
+        share.payloads.forEach { envelope ->
+            assertTrue(QrChunkCodec.isEnvelope(envelope))
+            val part = QrChunkCodec.decodePart(envelope).getOrThrow()
+            assertEquals(share.payloads.size, part.total)
+            when (val outcome = assembler.accept(part)) {
+                is QrChunkAssembler.Outcome.Complete -> assembled = outcome.payload
+                else -> Unit
+            }
+        }
+        assertNotNull("all parts should reassemble into the payload", assembled)
+        val decoded = SshImportPayloadCodec.decode(assembled!!).getOrThrow()
+        assertEquals(longName, decoded.name)
         assertEquals("shared.example.com", decoded.host)
         assertEquals(2222, decoded.port)
         assertEquals("ubuntu", decoded.username)

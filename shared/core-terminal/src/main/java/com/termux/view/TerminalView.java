@@ -193,6 +193,54 @@ public final class TerminalView extends View {
         invalidate();
     }
 
+    /**
+     * Issue #1203 — force a SURFACE-level repaint that recovers a
+     * surface-only-black: the on-screen surface is black while the MODEL grid
+     * (the session/bridge emulator) still holds the frame. This is the sixth
+     * {@code black_frame_observed} class (#1192, {@code surface_black_model_intact}),
+     * the ONE the model-vs-tmux heal oracle cannot see — the model never diverges
+     * from tmux, so a model reseed (the manual Redraw / stale-render heal) restores
+     * NOTHING and the surface stays black.
+     *
+     * <p>{@link #forceFullRepaint()} (#721) CANNOT recover this class either: it
+     * only resets the renderer's dirty cache and issues {@code invalidate()}. When
+     * the surface is black because {@link #mEmulator} is {@code null} (the
+     * {@link #onDraw} BLACK fallback), a plain {@code invalidate()} just re-runs
+     * {@code onDraw}, finds {@code mEmulator == null} again, and paints the black
+     * fallback AGAIN. The View lost its emulator binding even though the session
+     * still holds a live emulator with the full grid — no amount of model reseeding
+     * repaints the surface.
+     *
+     * <p>This re-binds {@link #mEmulator} from the live {@link #mTermSession} (so the
+     * next {@code onDraw} takes the CONTENT path instead of {@code drawColor(black)}),
+     * then resets the renderer's dirty cache and forces a full-clip repaint of the
+     * whole surface straight from the buffer — covering both the {@code mEmulator ==
+     * null} case AND the case where the surface holds a stale black hardware buffer
+     * whose #469 dirty cache still thinks every row is painted.
+     */
+    public void forceSurfaceRepaint() {
+        // Re-bind the emulator the View paints from. When the View lost it
+        // (mEmulator == null → the onDraw BLACK fallback) but the session still
+        // holds a live emulator, re-fetch it so the next onDraw takes the content
+        // path instead of drawColor(black) — the surface_black_model_intact fix.
+        if (mEmulator == null && mTermSession != null) {
+            TerminalEmulator sessionEmulator = mTermSession.getEmulator();
+            if (sessionEmulator != null) {
+                mEmulator = sessionEmulator;
+                if (mTerminalCursorBlinkerRunnable != null) {
+                    mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
+                }
+            }
+        }
+        // Reset the renderer's dirty cache (a stale surface may hold a black
+        // hardware buffer whose cache still thinks every row is painted) and force
+        // a full-clip repaint straight from the buffer.
+        if (mRenderer != null) {
+            mRenderer.invalidateDirtyCache();
+        }
+        invalidate();
+    }
+
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
 

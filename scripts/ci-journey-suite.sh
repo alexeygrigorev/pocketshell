@@ -2371,6 +2371,50 @@ else
   fi
 fi
 
+# Issue #1203 surface-only-black recovery proof (core-terminal androidTest).
+# v0.4.23 shipped a 6th black-frame class, `surface_black_model_intact` (#1192):
+# the terminal MODEL grid matches tmux (the model-vs-tmux heal oracle says
+# healthy and never fires), but the on-screen SURFACE is confirmed black — the
+# View's own emulator binding (mEmulator) is null while the session still holds
+# a live emulator, so every onDraw takes the BLACK fallback. The manual Redraw /
+# stale-render heal only RESEED the MODEL (capture-pane → appendRemoteOutput →
+# forceFullRepaint), which restores NOTHING here (the model already matches
+# tmux) → "Redraw doesn't work". This proof drives a REAL TerminalView through
+# the REAL onDraw + the REAL FramePaintObserver seam: RED with mEmulator == null
+# (the black fallback paints, observer reports paintedEmulatorContent=false),
+# then forceSurfaceRepaint() re-binds the emulator and GREEN — the next real
+# onDraw paints CONTENT (observer reports true). Proves the surface re-bind is
+# the load-bearing recovery, not another invalidate(). Uses NO Docker fixture
+# (in-process render test). Lives under com.termux.view.
+CORE_TERMINAL_SURFACE_REPAINT_CLASS="com.termux.view.TerminalViewForceSurfaceRepaintInstrumentedTest"
+SURFACE_REPAINT_STATUS="PASS"
+
+run_core_terminal_surface_repaint() {
+  run_ct_class "$CORE_TERMINAL_SURFACE_REPAINT_CLASS"
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  SURFACE_REPAINT_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #1203 surface-repaint proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #1203 SURFACE-REPAINT PROOF: $CORE_TERMINAL_SURFACE_REPAINT_CLASS (attempt 1)"
+  echo "=========================================================="
+  surface_repaint_start=$SECONDS
+  if run_core_terminal_surface_repaint; then
+    echo "SURFACE_REPAINT_PASS: passed on attempt 1 (elapsed $((SECONDS - surface_repaint_start))s)"
+  else
+    echo ">>> SURFACE-REPAINT PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_surface_repaint; then
+      echo "SURFACE_REPAINT_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "SURFACE_REPAINT_FAILED: #1203 proof failed twice"
+      SURFACE_REPAINT_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -2383,13 +2427,15 @@ SUITE_ELAPSED=$((SECONDS - SUITE_START))
 if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
       && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
-      && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" ]]; then
+      && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
+      && "$SURFACE_REPAINT_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
         && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
-        && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" ]]; then
+        && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
+        && "$SURFACE_REPAINT_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -2438,6 +2484,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal v0.4.17 overlay-unbounded-measure crash proof (\`shared:core-terminal\`): **$OVERLAY_UNBOUNDED_STATUS**"
   echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\`"
+  echo
+  echo "Core-terminal #1203 surface-only-black recovery proof (\`shared:core-terminal\`): **$SURFACE_REPAINT_STATUS**"
+  echo "- \`$CORE_TERMINAL_SURFACE_REPAINT_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"

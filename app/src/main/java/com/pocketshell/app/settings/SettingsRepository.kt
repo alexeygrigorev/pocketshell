@@ -2,6 +2,7 @@ package com.pocketshell.app.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
@@ -113,13 +114,57 @@ class SettingsRepository @VisibleForTesting internal constructor(
         // return — while a test is reading the first value.
         warmUpGate?.await()
         snapshotBuildThreadName = currentPhysicalThreadName()
-        val prefs = appContext
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .also { cachedPrefs = it }
-        val snapshot = readSnapshot(prefs)
+        val snapshot = buildSnapshotResiliently()
         StartupTiming.markOnce("settings-snapshot-preloaded")
         snapshot
     }
+
+    /**
+     * Open the prefs file and build the persisted snapshot, tolerating a
+     * corrupt/unreadable `app_settings` prefs file (issue #1229).
+     *
+     * `getSharedPreferences(...)` does a synchronous first-touch open + XML
+     * parse. A power loss or disk-full event can truncate/mangle
+     * `shared_prefs/app_settings.xml`, and a corrupt file makes that open
+     * THROW (the individual key reads below are already `safeXxx`-wrapped —
+     * only the file open/parse was not). Before this guard the exception
+     * latched in [snapshotDeferred] and rethrew on **Main** at the first
+     * `settings.collectAsState()` (the theme root), crash-looping the app at
+     * launch with no recovery short of clearing app data.
+     *
+     * Hard-cut recovery (D22): a corrupt prefs file degrades to default
+     * [AppSettings] AND is best-effort DELETED so the recovery is durable —
+     * the next launch opens a fresh empty file and reads cleanly, without the
+     * user clearing app data. The delete also lets subsequent writes persist
+     * ([cachedPrefs] is re-seeded from the freshly-cleared file). Same
+     * containment `MainActivity.resolveDefaultHostLaunchAsync` applies to its
+     * Room read.
+     */
+    private fun buildSnapshotResiliently(): AppSettings =
+        runCatching {
+            val prefs = appContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .also { cachedPrefs = it }
+            readSnapshot(prefs)
+        }.getOrElse { error ->
+            Log.e(
+                TAG,
+                "app_settings prefs open/parse failed — corrupt prefs file; " +
+                    "clearing it and degrading to defaults so launch survives",
+                error,
+            )
+            // Best-effort clear the corrupt file so a fresh empty one is
+            // created and the recovery is durable across relaunch. Then retry
+            // the open on the cleared file so writes still persist. Any failure
+            // here must NOT propagate — degrading to defaults is the whole point.
+            runCatching { appContext.deleteSharedPreferences(PREFS_NAME) }
+            runCatching {
+                appContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .also { cachedPrefs = it }
+            }
+            AppSettings()
+        }
 
     private val prefs: SharedPreferences
         get() = cachedPrefs ?: runBlocking {
@@ -514,6 +559,7 @@ class SettingsRepository @VisibleForTesting internal constructor(
             }
 
     private companion object {
+        const val TAG = "PsSettingsRepo"
         const val PREFS_NAME = "app_settings"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_CONVERSATION_FONT_SP = "conversation_font_sp"

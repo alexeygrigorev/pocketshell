@@ -96,6 +96,19 @@ class TmuxSessionCloseCascadeNoCrashTest {
     val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Issue #1168: the AgentConversationRepository tail scope, injected so the
+    // default `newVm()` owns it (instead of the repository's own default
+    // real-`Dispatchers.IO` `tailScope`) and can cancel-then-join it in @After.
+    // Same species as `factoryScope`: an infinite `while (isActive) { delay() }`
+    // drain whose `invokeOnCompletion -> bridgeScope.launch` reads
+    // `Dispatchers.Main` from a foreign IO thread; un-joined, that read races
+    // the next test's `setMain`/`resetMain` and throws "Dispatchers.Main is used
+    // concurrently with setting it". The agent-pane cascade tests here bind an
+    // agent conversation, so this class is in the same latent-leak class as
+    // TmuxSessionViewModelTest — pin the scope rather than leave a sibling that
+    // could reintroduce the #1168 flake.
+    private val agentTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     // The thread-level uncaught-exception probe. On device this slot is the
@@ -118,7 +131,10 @@ class TmuxSessionCloseCascadeNoCrashTest {
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
         folderListGateway: FolderListGateway? = null,
         hostDao: HostDao? = null,
-        agentRepository: AgentConversationRepository = AgentConversationRepository(),
+        // Issue #1168: inject the test-owned real-IO `agentTailScope` so the tail
+        // drain is joinable in @After (see the field doc).
+        agentRepository: AgentConversationRepository =
+            AgentConversationRepository(tailScope = agentTailScope),
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -155,9 +171,18 @@ class TmuxSessionCloseCascadeNoCrashTest {
         createdViewModels.asReversed().forEach { vm -> runCatching { vm.clearForTest() } }
         createdViewModels.clear()
         factoryScope.cancel()
+        // Issue #1168: cancel-THEN-join the agent tail scope BEFORE @After
+        // returns (i.e. before the rule's `resetMain()`). The drain is an
+        // infinite loop, so it must be cancelled first, then joined — draining
+        // every `invokeOnCompletion -> bridgeScope.launch` foreign-IO Main read
+        // while Main is still stable, so nothing touches Main after `resetMain`.
+        agentTailScope.cancel()
         runBlocking {
             withTimeoutOrNull(5_000L) {
                 factoryScope.coroutineContext.job.children.forEach { it.join() }
+            }
+            withTimeoutOrNull(5_000L) {
+                agentTailScope.coroutineContext.job.children.forEach { it.join() }
             }
         }
     }

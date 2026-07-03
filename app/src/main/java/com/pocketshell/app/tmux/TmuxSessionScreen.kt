@@ -1733,63 +1733,19 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Issue #165: replace the bare one-line "connecting" status
-            // with a visible progress overlay (linear indeterminate bar
-            // + host string) so a 2-5s SSH handshake doesn't feel like
-            // the app is frozen. After 5s a "Still working, this may
-            // be slow" subline appears; after 15s a Cancel affordance
-            // tears down the in-flight [connectJob] (#151's
-            // join-on-cancel machinery makes the teardown deterministic).
-            (status as? ConnectionStatus.Connecting)?.let {
-                ConnectingProgressOverlay(
-                    user = it.user,
-                    host = it.host,
-                    port = it.port,
-                    sessionLabel = "tmux $sessionName",
-                    onCancel = { viewModel.cancelConnect() },
-                )
-            }
-            // Issue #750: a same-host session switch ([Switching]) no longer
-            // renders a thin under-header progress line here. During a switch the
-            // terminal surface is always replaced by a centered placeholder —
-            // either the "Attaching…" [SwitchingLoadingPlaceholder]
-            // (switchHidesTerminal) or the "waiting for tmux panes…"
-            // [EmptyPanesPlaceholder] (warm open, panes emptied) — and each of
-            // those now shows the canonical centered spinner (#757). Keeping the
-            // top bar produced the maintainer's reported "two loading indicators"
-            // on the reattach screen, so the centered spinner is the SOLE attach
-            // affordance and the top line is removed. Input stays gated because
-            // [Switching] is not [Connected].
-            //
-            // Issue #750 (post-#766 regression): the SAME two-loaders symptom came
-            // back on the RECONNECT/REATTACH screen. The #766 connection migration
-            // made the controller the authoritative status source: a recoverable
-            // drop projects [ConnectionStatus.Reconnecting] (this top
-            // [ReconnectingProgressRow] bar) WHILE the id-keyed [RevealStateMachine]
-            // maps the controller's `Reattaching`/`Reconnecting` to
-            // [RevealState.Seeding] → [effectiveHidesTerminal] is true → the
-            // centered "Attaching…" [SwitchingLoadingPlaceholder] is already up in
-            // the surface Box below. Two indicators at once. Gate the top bar on
-            // `!effectiveHidesTerminal` so it is suppressed exactly while the
-            // centered hold is showing — the centered "Attaching…" is then the SOLE
-            // reattach affordance, matching the [Switching] fix above. The top bar
-            // is NOT the sole indicator for any other state: it ONLY renders for
-            // [ConnectionStatus.Reconnecting], and every reconnect/reattach keeps
-            // the terminal held (the reveal machine never reveals Live for a
-            // Reattaching/Reconnecting controller state — see RevealStateMachine
-            // §"loading" mapping), so suppressing it here never leaves a reconnect
-            // with zero indicators. (Reconnect speed/behaviour is untouched — this
-            // is presentation-only.)
-            if (shouldShowReconnectingProgressRow(status, effectiveHidesTerminal)) {
-                (status as ConnectionStatus.Reconnecting).let {
-                    ReconnectingProgressRow(
-                        status = it,
-                        sessionLabel = "tmux $sessionName",
-                        onRetryNow = { viewModel.reconnect() },
-                        onCancel = { viewModel.cancelConnect() },
-                    )
-                }
-            }
+            // Issue #750 (4th occurrence): the top under-header connecting /
+            // reconnecting banner region. Both banners are routed through the
+            // single [primaryLoadingSurface] reducer so neither can ever stack on
+            // top of the centered "Attaching…" hold painted by the surface Box
+            // below (the maintainer's recurring "two loaders at once" symptom). See
+            // [TmuxTopConnectingBanner] for the per-banner rationale.
+            TmuxTopConnectingBanner(
+                status = status,
+                effectiveHidesTerminal = effectiveHidesTerminal,
+                sessionName = sessionName,
+                onCancelConnect = { viewModel.cancelConnect() },
+                onRetryNow = { viewModel.reconnect() },
+            )
             // Issue #145: render a user-facing error band (status text +
             // Reconnect affordance) when the SSH transport drops
             // mid-session. The view model's `client.disconnected`
@@ -4106,6 +4062,86 @@ internal fun reconnectKebabEnabled(
         status !is ConnectionStatus.Reconnecting
 
 /**
+ * Issue #750 (4th occurrence — the beyond-grace RECONNECT path): the single
+ * authoritative primary loading surface for the tmux session screen.
+ *
+ * The maintainer's recurring symptom is TWO loading surfaces at once on a
+ * connect/reconnect. The screen has THREE mutually-exclusive primary loading
+ * surfaces, and this reducer makes "two of them at once" TYPE-UNREPRESENTABLE —
+ * it returns EXACTLY ONE (or [None]):
+ *
+ *  - [CenteredAttaching] — the centered "Attaching…" [SwitchingLoadingPlaceholder]
+ *    hold, painted by the surface whenever the id-keyed [RevealStateMachine] holds
+ *    the terminal ([effectiveHidesTerminal] == true). This is the CANONICAL loader
+ *    per #750's original decision and WINS over any top banner: every in-progress
+ *    connect/switch/reattach/reconnect holds the terminal in [RevealState.Seeding],
+ *    so the centered hold is the sole loader for all of them.
+ *  - [ConnectingBanner] — the top [ConnectingProgressOverlay] ("Connecting to
+ *    host…", + slow hint + Cancel). It renders ONLY when the terminal is NOT held
+ *    (the rare live-frame-kept Connecting edge, e.g. the #178 dead-session-mid-
+ *    switch fallback), so it can never stack on top of the centered hold.
+ *  - [ReconnectingBand] — the top [ReconnectingProgressRow] (text + Retry now /
+ *    Cancel). Same rule: only when the terminal is NOT held.
+ *
+ * The 4th recurrence (2026-07-03): a beyond-grace reconnect re-dials through the
+ * controller's `Connecting` state, which projects to [ConnectionStatus.Connecting]
+ * (the top [ConnectingProgressOverlay] banner). The previous #750 fix gated only
+ * the [ReconnectingProgressRow] band on `!effectiveHidesTerminal` — it never gated
+ * the [ConnectingProgressOverlay], so on the reconnect re-dial BOTH the top
+ * "Connecting to host…" banner AND the centered "Attaching…" hold rendered at
+ * once. Routing BOTH banners through this reducer closes that gap: when the
+ * terminal is held (which it always is on a reconnect re-dial), the reducer
+ * returns [CenteredAttaching] and BOTH banners are suppressed.
+ */
+internal enum class PrimaryLoadingSurface {
+    /** No primary loading surface (Connected / Idle / Failed steady states). */
+    None,
+
+    /** The centered "Attaching…" [SwitchingLoadingPlaceholder] hold. */
+    CenteredAttaching,
+
+    /** The top [ConnectingProgressOverlay] "Connecting to host…" banner. */
+    ConnectingBanner,
+
+    /** The top [ReconnectingProgressRow] "Reconnecting to host…" band. */
+    ReconnectingBand,
+}
+
+/**
+ * Issue #750: the SINGLE source of truth for which primary loading surface is
+ * shown, so the screen can never paint two at once. See [PrimaryLoadingSurface].
+ */
+internal fun primaryLoadingSurface(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+): PrimaryLoadingSurface = when {
+    // The terminal is held → the surface paints the centered "Attaching…" hold,
+    // which is the canonical SOLE loader. Both top banners are suppressed so the
+    // maintainer never sees the top connecting banner AND the centered spinner at
+    // once (the 4th-recurrence beyond-grace reconnect symptom).
+    effectiveHidesTerminal -> PrimaryLoadingSurface.CenteredAttaching
+    status is ConnectionStatus.Connecting -> PrimaryLoadingSurface.ConnectingBanner
+    status is ConnectionStatus.Reconnecting -> PrimaryLoadingSurface.ReconnectingBand
+    else -> PrimaryLoadingSurface.None
+}
+
+/**
+ * Issue #750: the single-indicator gate for the top under-header
+ * [ConnectingProgressOverlay] "Connecting to host…" banner. Derived from
+ * [primaryLoadingSurface] so it can never coexist with the centered "Attaching…"
+ * hold — the exact 4th-recurrence beyond-grace-reconnect stacking (a reconnect
+ * re-dials through `Connecting`, projecting this banner, WHILE the reveal machine
+ * holds the terminal and paints the centered spinner). The banner renders ONLY in
+ * the live-frame-kept Connecting edge (terminal NOT held), so it is never the sole
+ * indicator stripped from a state that needs it.
+ */
+internal fun shouldShowConnectingProgressOverlay(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+): Boolean =
+    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ConnectingBanner
+
+/**
  * Issue #750: the single-indicator gate for the top under-header
  * [ReconnectingProgressRow] progress line.
  *
@@ -4116,19 +4152,20 @@ internal fun reconnectKebabEnabled(
  * terminal in [RevealState.Seeding] ([effectiveHidesTerminal] == true) and
  * paints the centered spinner — the two-loaders regression.
  *
- * This pure predicate makes the invariant a unit-testable wiring guard rather
- * than a comment: the top bar renders ONLY for a [ConnectionStatus.Reconnecting]
- * status AND only when the terminal is NOT held (so the centered spinner is not
- * up). Every real reconnect/reattach holds the terminal, so in practice the
- * centered spinner is the sole reattach affordance — but the predicate keeps the
- * top bar as a (currently unreached) fallback for any future reconnect that does
- * keep a live frame painted, so suppressing it can never leave a reconnect with
- * zero indicators.
+ * Derived from [primaryLoadingSurface] (single source of truth): the top bar
+ * renders ONLY for a [ConnectionStatus.Reconnecting] status AND only when the
+ * terminal is NOT held (so the centered spinner is not up). Every real
+ * reconnect/reattach holds the terminal, so in practice the centered spinner is
+ * the sole reattach affordance — but the reducer keeps the top bar as a
+ * (currently unreached) fallback for any future reconnect that does keep a live
+ * frame painted, so suppressing it can never leave a reconnect with zero
+ * indicators.
  */
 internal fun shouldShowReconnectingProgressRow(
     status: ConnectionStatus,
     effectiveHidesTerminal: Boolean,
-): Boolean = status is ConnectionStatus.Reconnecting && !effectiveHidesTerminal
+): Boolean =
+    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ReconnectingBand
 
 /**
  * Issue #463: the short leaf label for the header project crumb, derived
@@ -4763,6 +4800,74 @@ private fun StatusLine(text: String) {
 }
 
 /**
+ * Issue #750 (4th occurrence): the top under-header connecting / reconnecting
+ * banner region — the SINGLE render site for both top loading banners.
+ *
+ * Both the cold-dial [ConnectingProgressOverlay] ("Connecting to host…") and the
+ * recovery [ReconnectingProgressRow] band are gated through [primaryLoadingSurface]
+ * (via [shouldShowConnectingProgressOverlay] / [shouldShowReconnectingProgressRow]),
+ * so NEITHER can render while the terminal is held ([effectiveHidesTerminal] ==
+ * true) — that is exactly when the surface Box paints the centered "Attaching…"
+ * hold. This makes the maintainer's recurring "top connecting banner AND centered
+ * spinner at once" symptom structurally impossible: while the terminal is held the
+ * reducer resolves to [PrimaryLoadingSurface.CenteredAttaching] and this whole
+ * region renders nothing.
+ *
+ * The two banners are mutually exclusive by status ([ConnectionStatus.Connecting]
+ * vs [ConnectionStatus.Reconnecting]), so at most one ever renders here — and only
+ * in the (currently unreached) live-frame-kept edge where the terminal is NOT held.
+ *
+ * Extracting this as a composable (rather than inlining the two `if` blocks in the
+ * screen body) makes it a genuine WIRING guard: the #750 regression test drives
+ * this exact composable in the beyond-grace state and hard-asserts a single loader,
+ * so a future re-introduction of an ungated banner is caught in CI.
+ */
+@Composable
+internal fun TmuxTopConnectingBanner(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+    sessionName: String,
+    onCancelConnect: () -> Unit,
+    onRetryNow: () -> Unit,
+) {
+    // Issue #165: the cold-dial progress overlay (linear bar + host string + slow
+    // hint + Cancel). Gated on [shouldShowConnectingProgressOverlay] so it never
+    // stacks on top of the centered "Attaching…" hold on a reconnect re-dial (the
+    // 4th-recurrence beyond-grace symptom: a reconnect re-dials through the
+    // controller's `Connecting`, projecting this banner, while the terminal is
+    // held). It renders ONLY in the live-frame-kept Connecting edge.
+    if (shouldShowConnectingProgressOverlay(status, effectiveHidesTerminal)) {
+        (status as ConnectionStatus.Connecting).let {
+            ConnectingProgressOverlay(
+                user = it.user,
+                host = it.host,
+                port = it.port,
+                sessionLabel = "tmux $sessionName",
+                onCancel = onCancelConnect,
+            )
+        }
+    }
+    // Issue #750: the recovery band. A same-host session switch ([Switching]) and
+    // every reconnect/reattach hold the terminal and paint the centered
+    // "Attaching…" [SwitchingLoadingPlaceholder] (the SOLE attach affordance), so
+    // the band is suppressed while held ([shouldShowReconnectingProgressRow]). It
+    // renders ONLY for a [ConnectionStatus.Reconnecting] status that keeps a live
+    // frame painted (terminal NOT held) — the fallback so a reconnect is never left
+    // with zero indicators. (Reconnect speed/behaviour is untouched — this is
+    // presentation-only.)
+    if (shouldShowReconnectingProgressRow(status, effectiveHidesTerminal)) {
+        (status as ConnectionStatus.Reconnecting).let {
+            ReconnectingProgressRow(
+                status = it,
+                sessionLabel = "tmux $sessionName",
+                onRetryNow = onRetryNow,
+                onCancel = onCancelConnect,
+            )
+        }
+    }
+}
+
+/**
  * Issue #165: progress overlay rendered above the terminal viewport
  * while the screen is in [ConnectionStatus.Connecting].
  *
@@ -5182,7 +5287,7 @@ private fun EmptyPanesPlaceholder() {
  * reveals the real terminal the instant the new session's panes are seeded.
  */
 @Composable
-private fun SwitchingLoadingPlaceholder() {
+internal fun SwitchingLoadingPlaceholder() {
     Box(
         modifier = Modifier
             .fillMaxSize()

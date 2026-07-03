@@ -2,8 +2,10 @@ package com.pocketshell.app.session
 
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ClaudeCodeParser
 import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationImage
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.ssh.ExecResult
@@ -2227,6 +2229,252 @@ class AgentConversationRepositoryTest {
         assertTrue("expected the agent-log window in the same exec", command.contains("pocketshell agent-log --engine codex"))
     }
 
+    // ===================================================================
+    // Issue #1225: the cold-open transcript read is bounded by LINE count
+    // only, never by BYTES — one multi-MB JSONL line (an inline base64
+    // image, the #842 path, or a huge tool_result) balloons the read into
+    // the JVM heap → jank/OOM on the phone. A server-side per-line byte
+    // clamp bounds the read; the oversized line degrades to a VISIBLE
+    // truncation marker instead of crashing or vanishing.
+    // ===================================================================
+
+    @Test
+    fun readInitialEventsByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // The pathological transcript: a normal user turn, then ONE ~5 MB line
+        // (an inline base64 image, far above the 256 KiB per-line cap), then a
+        // normal assistant turn. Cold-open must not materialise the 5 MB line
+        // into the heap.
+        val hugeBase64 = "A".repeat(5 * 1024 * 1024) // ~5 MB, >> MAX_TRANSCRIPT_LINE_BYTES
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"here is a screenshot"}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$hugeBase64"}}]}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"got it"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, detection)
+
+        // RED on base: the tail read has NO server-side byte clamp, so the 5 MB
+        // line crosses SSH verbatim. GREEN with the fix: the command pipes the
+        // tail through the awk clamp.
+        val tailCommand = session.execCommands.single { it.trimStart().startsWith("tail -n") }
+        assertTrue(
+            "the cold-open tail must byte-clamp each line server-side; got: $tailCommand",
+            tailCommand.contains(LINE_TRUNCATION_SENTINEL) && tailCommand.contains("awk"),
+        )
+
+        // The read is bounded: no event carries the multi-MB payload. RED on
+        // base (the 5 MB base64 arrives as an image/text event far above cap).
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no cold-open event may exceed the per-line byte cap " +
+                "($MAX_TRANSCRIPT_LINE_BYTES); largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+
+        // The truncation is USER-VISIBLE (a marker), not a silently dropped
+        // message. RED on base (no marker exists).
+        val note = events.filterIsInstance<ConversationEvent.SystemNote>()
+            .singleOrNull { it.tag == "truncated" }
+        assertNotNull("the oversized line must degrade to a visible truncation note", note)
+        assertTrue(
+            "the marker must name the truncated byte size; got: ${note?.content}",
+            note!!.content.contains("truncated"),
+        )
+
+        // The normal turns around the pathological line still render.
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("the leading user turn survives; got $messages", messages.contains("here is a screenshot"))
+        assertTrue("the trailing assistant turn survives; got $messages", messages.contains("got it"))
+    }
+
+    @Test
+    fun readEventsWindowByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed cold-open read (readEventsWindow) shares
+        // the same balloon risk and must byte-clamp too.
+        val hugeToolResult = "B".repeat(4 * 1024 * 1024) // ~4 MB huge tool_result
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"dump the file"}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"$hugeToolResult"}]}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"done"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(wcOutput = "12\n", jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val windowCommand = session.execCommands.single { it.contains("@@PS_WINDOW@@") }
+        assertTrue(
+            "the windowed read must byte-clamp each line server-side; got: $windowCommand",
+            windowCommand.contains(LINE_TRUNCATION_SENTINEL) && windowCommand.contains("awk"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized tool_result must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>()
+                .singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal turns survive; got $messages", messages.contains("dump the file"))
+        assertTrue("normal turns survive; got $messages", messages.contains("done"))
+    }
+
+    @Test
+    fun readInitialEventsLeavesANormalTranscriptUnchangedByTheByteClamp() = runTest {
+        // Counter-pin: a normal transcript (every line well under the cap) must
+        // be byte-clamped harmlessly — same events, NO spurious truncation
+        // marker. Guards against over-clamping legitimate content.
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"run the tests"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"all green"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, detection)
+
+        assertTrue(
+            "a normal transcript must not produce any truncation marker",
+            events.none { it is ConversationEvent.SystemNote && it.tag == "truncated" },
+        )
+        assertEquals(
+            listOf(
+                ConversationRole.User to "run the tests",
+                ConversationRole.Assistant to "all green",
+            ),
+            events.filterIsInstance<ConversationEvent.Message>().map { it.role to it.text },
+        )
+        // The clamp is still present in the command — it is a byte CEILING, not a
+        // transform of normal content.
+        assertTrue(
+            session.execCommands.single { it.trimStart().startsWith("tail -n") }
+                .contains(LINE_TRUNCATION_SENTINEL),
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenByteClampsTheFoldedClaudePrefetchWindow() = runTest {
+        // Class coverage: the single-round-trip cold-open (resolveRecordedSessionOpen)
+        // folds the FIRST Claude window into its exec, so it must byte-clamp that
+        // prefetch too — a pathological line in the prefetch would otherwise
+        // balloon the very first read.
+        val now = System.currentTimeMillis() / 1000
+        val sourcePath = "/home/testuser/.claude/projects/-workspace-proj/sess-huge.jsonl"
+        val hugeBase64 = "C".repeat(3 * 1024 * 1024)
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            recordedSourceOutput = "$sourcePath\n",
+            detectionOutput = "claude|$now|/workspace/proj|$sourcePath",
+            hostWideProcessOutput = "1001 1 pts/7 claude claude",
+            foldedClaudeWcOutput = "3",
+            foldedClaudeTail = listOf(
+                """{"type":"user","uuid":"u1","message":{"role":"user","content":"look at this"}}""",
+                """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$hugeBase64"}}]}}""",
+                """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"seen"}}""",
+            ).joinToString("\n"),
+            emulateFoldedClaudePathFromShell = true,
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$3",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertTrue(
+            "the folded cold-open exec must byte-clamp the prefetch tail; got: " +
+                session.execCommands.single(),
+            session.execCommands.single().contains(LINE_TRUNCATION_SENTINEL) &&
+                session.execCommands.single().contains("awk"),
+        )
+        val window = open.prefetchedWindow
+        assertNotNull("recorded Claude open must prefetch a window", window)
+        val maxEventBytes = window!!.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no prefetched event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized prefetch line must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>()
+                .singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal prefetch turns survive; got $messages", messages.contains("look at this"))
+        assertTrue("normal prefetch turns survive; got $messages", messages.contains("seen"))
+    }
+
+    @Test
+    fun parseTranscriptTailLinesTurnsTheClampMarkerIntoAVisibleNoteAndParsesNormalLines() {
+        // Unit-level: the parser helper maps a LINE_TRUNCATION_SENTINEL line to a
+        // visible SystemNote (never silently dropped) and hands normal lines to
+        // the real parser unchanged, with ordinal-stable placeholder ids.
+        val lines = sequenceOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"first"}}""",
+            "${LINE_TRUNCATION_SENTINEL}5242880",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"second"}}""",
+            "${LINE_TRUNCATION_SENTINEL}9999999",
+        )
+
+        val events = parseTranscriptTailLines(ClaudeCodeParser(), AgentKind.ClaudeCode, lines)
+
+        val notes = events.filterIsInstance<ConversationEvent.SystemNote>().filter { it.tag == "truncated" }
+        assertEquals("both markers become visible notes", 2, notes.size)
+        assertEquals(
+            "placeholder ids are ordinal-stable within a read",
+            listOf("ps-truncated-line-0", "ps-truncated-line-1"),
+            notes.map { it.id },
+        )
+        assertTrue("the marker note names the byte size", notes.first().content.contains("5242880"))
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertEquals(listOf("first", "second"), messages)
+    }
+
+    private fun estimatedEventBytes(event: ConversationEvent): Long = when (event) {
+        is ConversationEvent.Message ->
+            event.text.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.images.sumOf { imageBytes(it) }
+        is ConversationEvent.ToolResult ->
+            event.output.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.images.sumOf { imageBytes(it) }
+        is ConversationEvent.ToolCall ->
+            event.name.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.input.toByteArray(Charsets.UTF_8).size.toLong()
+        is ConversationEvent.SystemNote ->
+            event.content.toByteArray(Charsets.UTF_8).size.toLong()
+    }
+
+    private fun imageBytes(image: ConversationImage): Long =
+        (image.base64Data?.length ?: 0).toLong() +
+            (image.path?.length ?: 0).toLong() +
+            (image.url?.length ?: 0).toLong()
+
     private fun assertOpenCodeSqliteQueryIsShellSingleQuoted(cwd: String) {
         val sqliteLine = openCodeSqliteLine(AgentConversationRepository().detectionCommand(cwd))
         val normalizedCwd = cwd.trim().trimEnd('/').ifBlank { "/" }
@@ -2326,7 +2574,10 @@ class AgentConversationRepositoryTest {
                         append("PATH=").append(emulatedFoldedPath).append("\n")
                         append(foldedClaudeWcOutput.trim()).append("\n")
                         append("@@PS_CLAUDE_WINDOW@@\n")
-                        append(foldedClaudeTail)
+                        // Issue #1225: emulate the server-side per-line byte clamp
+                        // on the folded prefetch tail so the fold reproduces what
+                        // the real host would send (marker for oversized lines).
+                        append(applyLineClamp(command, foldedClaudeTail))
                     }
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
@@ -2346,7 +2597,7 @@ class AgentConversationRepositoryTest {
                 // tail into ONE round-trip. Emit them in that shape so the
                 // repository can split total-lines from the tail window.
                 command.contains("@@PS_WINDOW@@") ->
-                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n$jsonlTailOutput"
+                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n${applyLineClamp(command, jsonlTailOutput)}"
                 // Issue #817: the Codex windowed read folds wc -l + a sentinel +
                 // the agent-log window into ONE round-trip so it carries the
                 // raw-file line count (the follow cursor) without a separate
@@ -2355,7 +2606,7 @@ class AgentConversationRepositoryTest {
                     "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n$agentLogOutput"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogOutput
-                command.trimStart().startsWith("tail -n") -> jsonlTailOutput
+                command.trimStart().startsWith("tail -n") -> applyLineClamp(command, jsonlTailOutput)
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
                     sqliteOutputs.removeFirstOrNull() ?: sqliteOutput
@@ -2363,6 +2614,24 @@ class AgentConversationRepositoryTest {
                 else -> ""
             }
             return ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
+
+        // Issue #1225: faithfully emulate the server-side per-line byte clamp
+        // ([transcriptLineClampPipe]) so a byte-bound regression test is a
+        // genuine red->green. If the repository's command does NOT pipe through
+        // the awk clamp (base code), the raw text is returned unchanged and a
+        // multi-MB line balloons the read exactly as on-device. If the command
+        // DOES carry the clamp, each line whose UTF-8 byte length exceeds the
+        // `-v m=<N>` cap is replaced by the sentinel + byte length, mirroring the
+        // real host `LC_ALL=C awk` behaviour.
+        private fun applyLineClamp(command: String, text: String): String {
+            if (!command.contains("@@PS_LINE_TRUNCATED@@")) return text
+            val cap = Regex("-v m=(\\d+)").find(command)?.groupValues?.get(1)?.toIntOrNull()
+                ?: return text
+            return text.split("\n").joinToString("\n") { line ->
+                val bytes = line.toByteArray(Charsets.UTF_8).size
+                if (bytes > cap) "@@PS_LINE_TRUNCATED@@$bytes" else line
+            }
         }
 
         private fun emulatedFoldedClaudePath(command: String): String {

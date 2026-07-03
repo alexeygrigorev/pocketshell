@@ -781,6 +781,12 @@ public fun TmuxSessionScreen(
     // into a tmux pane (see #123 — the primary user route was completely
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
+    // Issue #585: when the composer is opened via the launcher's hold+swipe-up
+    // ENTRY gesture, it must open WITH recording already started + locked
+    // hands-free. A plain launcher tap opens the composer with NO recording. This
+    // flag carries that intent into the sheet; it is reset every time the sheet
+    // closes so the next plain-tap open never inherits a stale auto-record.
+    var micSheetAutoStartRecording by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
     // Issue #1207: when a TUI-only slash-command (/model, /config, a picker) is
     // sent from the Conversation composer, the picker opens in the covered
@@ -816,6 +822,10 @@ public fun TmuxSessionScreen(
     LaunchedEffect(initialComposerAttachments) {
         if (initialComposerAttachments.isNotEmpty()) {
             initialComposerAttachments.forEach { promptComposerViewModel.seedAttachment(it) }
+            // Issue #585: a share/attach intent opens the composer to edit + Send,
+            // never to auto-record — keep the flag false so no stale swipe-open
+            // intent bleeds into this entry.
+            micSheetAutoStartRecording = false
             showMicSheet = true
             onInitialComposerAttachmentsConsumed()
         }
@@ -829,6 +839,9 @@ public fun TmuxSessionScreen(
     LaunchedEffect(initialComposerPrompt) {
         if (initialComposerPrompt.isNotBlank()) {
             promptComposerViewModel.seedDraftPrompt(initialComposerPrompt)
+            // Issue #585: a routed review-prompt opens the composer to edit + Send,
+            // not to auto-record.
+            micSheetAutoStartRecording = false
             showMicSheet = true
             onInitialComposerPromptConsumed()
         }
@@ -1027,6 +1040,7 @@ public fun TmuxSessionScreen(
             }
             if (sent) {
                 showMicSheet = false
+                micSheetAutoStartRecording = false
             }
             sent
         }
@@ -1034,7 +1048,10 @@ public fun TmuxSessionScreen(
     PromptComposerSendDispatcher(
         viewModel = promptComposerViewModel,
         onSend = composerSendHandler,
-        onDelivered = { showMicSheet = false },
+        onDelivered = {
+            showMicSheet = false
+            micSheetAutoStartRecording = false
+        },
     )
 
     // Issue #167: intercept system-back so the user returns to the host
@@ -1066,7 +1083,10 @@ public fun TmuxSessionScreen(
             showSessionDrawer = false
             sessionPickerViewModel.dismiss()
         },
-        onDismissMicSheet = { showMicSheet = false },
+        onDismissMicSheet = {
+            showMicSheet = false
+            micSheetAutoStartRecording = false
+        },
         onDismissSnippetPicker = { showSnippetPicker = false },
         onDismissCardFeedSheet = { showCardFeedSheet = false },
         onBack = onBack,
@@ -2387,7 +2407,18 @@ public fun TmuxSessionScreen(
                     // Issue #810: the composer launcher is UNCONDITIONAL — it only
                     // opens the Prompt Composer sheet (no pane needed), so it is
                     // never gated on `surfacePane`.
-                    onDictateTap = { showMicSheet = true },
+                    onDictateTap = {
+                        // Plain tap: open the composer with NO recording (unchanged).
+                        micSheetAutoStartRecording = false
+                        showMicSheet = true
+                    },
+                    // Issue #585: hold the launcher + swipe UP → open the composer
+                    // AND start recording immediately (locked hands-free), one
+                    // gesture. The sheet consumes `autoStartRecording` on open.
+                    onDictateHoldSwipeUp = {
+                        micSheetAutoStartRecording = true
+                        showMicSheet = true
+                    },
                     onEnterTap = pane?.let { p -> { viewModel.onKeyBarKey(p.paneId, "Enter") } },
                     // Issue #131: surface the show-keyboard chip on the tmux
                     // route too. The helper looks up the TerminalView of the
@@ -2836,7 +2867,15 @@ public fun TmuxSessionScreen(
             // the exact target identity so a "Not sent" draft authored here never
             // bleeds into another session on a switch or same-name recreation.
             composerTargetKey = targetSessionId.value,
-            onDismiss = { showMicSheet = false },
+            // Issue #585: when the launcher's hold+swipe-up entry gesture opened
+            // this sheet, start recording immediately (locked hands-free) as the
+            // sheet appears. A plain-tap open leaves this false = no recording.
+            autoStartRecording = micSheetAutoStartRecording,
+            onDismiss = {
+                showMicSheet = false
+                // Reset so the next plain-tap open never inherits auto-record.
+                micSheetAutoStartRecording = false
+            },
             // Issue #745: surface the live connection state in the composer so a
             // send while the SSH/tmux link is degraded shows a connection-lost
             // indicator immediately rather than leaving the user waiting blind.
@@ -7142,6 +7181,9 @@ internal fun TmuxSessionBottomControlsCallSite(
     isAgentPane: Boolean,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked hands-free.
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
@@ -7165,6 +7207,7 @@ internal fun TmuxSessionBottomControlsCallSite(
         isAgentPane = isAgentPane,
         onChipTap = onChipTap,
         onDictateTap = onDictateTap,
+        onDictateHoldSwipeUp = onDictateHoldSwipeUp,
         onEnterTap = onEnterTap,
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
@@ -7182,6 +7225,9 @@ internal fun TmuxTerminalBottomControls(
     isAgentPane: Boolean,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked hands-free.
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
@@ -7256,6 +7302,7 @@ internal fun TmuxTerminalBottomControls(
                 if (onDictateTap != null) {
                     ConversationComposerLauncherRow(
                         onDictateTap = onDictateTap,
+                        onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                         inputEnabled = sessionLive,
                         modifier = modifier,
                     )
@@ -7272,6 +7319,7 @@ internal fun TmuxTerminalBottomControls(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = onChipTap,
                     onDictateTap = onDictateTap,
+                    onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                     onEnterTap = onEnterTap,
                     onShowKeyboardTap = onShowKeyboardTap,
                     onAddSnippetTap = onAddSnippetTap,

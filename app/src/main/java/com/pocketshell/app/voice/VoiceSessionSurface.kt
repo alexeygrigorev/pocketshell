@@ -3,6 +3,8 @@ package com.pocketshell.app.voice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,18 +22,28 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.getValue
@@ -565,6 +577,10 @@ internal fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked. Null leaves the launcher
+    // tap-only (open-only), the pre-#585 behaviour.
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)? = null,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
@@ -707,6 +723,7 @@ internal fun BottomChipControls(
                         ComposerLauncherButton(
                             enabled = inputEnabled,
                             onClick = onDictateTap,
+                            onHoldSwipeUp = onDictateHoldSwipeUp,
                         )
                     }
                 }
@@ -738,6 +755,10 @@ internal fun ConversationComposerLauncherRow(
     onDictateTap: () -> Unit,
     inputEnabled: Boolean,
     modifier: Modifier = Modifier,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked. Null leaves the launcher
+    // tap-only (open-only).
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
 ) {
     Box(
         modifier = modifier
@@ -753,6 +774,7 @@ internal fun ConversationComposerLauncherRow(
         ComposerLauncherButton(
             enabled = inputEnabled,
             onClick = onDictateTap,
+            onHoldSwipeUp = onDictateHoldSwipeUp,
         )
     }
 }
@@ -762,16 +784,67 @@ private fun ComposerLauncherButton(
     enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #585: the Telegram-style ENTRY gesture. Hold the launcher and swipe
+    // UP past [LAUNCHER_HOLD_SWIPE_UP_THRESHOLD_DP] to open the Prompt Composer
+    // WITH recording already started + locked hands-free — one gesture, no
+    // separate tap-to-open then tap-to-record. A plain TAP (and a hold WITHOUT a
+    // swipe) still routes to [onClick] = open-only, so the launcher's normal
+    // behaviour is untouched. Null (the default) leaves the launcher tap-only for
+    // callers/previews that don't wire the entry gesture.
+    onHoldSwipeUp: (() -> Unit)? = null,
 ) {
     val containerColor = if (enabled) PocketShellColors.SurfaceElev else PocketShellColors.Surface
     val borderColor = if (enabled) PocketShellColors.AccentDim else PocketShellColors.BorderSoft
     val glyphColor = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted
     val shape = PocketShellShapes.small
 
+    val swipeThresholdPx = with(LocalDensity.current) {
+        LAUNCHER_HOLD_SWIPE_UP_THRESHOLD_DP.dp.toPx()
+    }
+    val currentOnClick by rememberUpdatedState(onClick)
+    val currentOnHoldSwipeUp by rememberUpdatedState(onHoldSwipeUp)
+
+    // Issue #585: the launcher's tap and hold+swipe-up ENTRY gesture are detected
+    // in ONE pointer handler that OWNS the pointer (consumes the down + moves),
+    // the same reliable delivery pattern as the composer's proven mic swipe-lock —
+    // a non-owning detector was silently losing the drag once the pointer left the
+    // small 44dp button. A release WITHOUT crossing the up-threshold (a plain tap
+    // OR a hold-without-swipe) opens the composer only; an upward pull past the
+    // threshold opens it WITH recording. When no swipe handler is wired the plain
+    // `clickable` is used instead, so unrelated launcher call sites are untouched.
+    val useEntryGesture = onHoldSwipeUp != null
+
     Box(
         modifier = modifier
             .size(PocketShellDensity.tapTargetMin)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .then(
+                if (useEntryGesture) {
+                    Modifier
+                        .composerLauncherTapOrHoldSwipeUpGesture(
+                            thresholdPx = swipeThresholdPx,
+                            enabled = { enabled },
+                            onTap = { currentOnClick() },
+                            onHoldSwipeUp = { currentOnHoldSwipeUp?.invoke() },
+                        )
+                        // Keep the control accessible: TalkBack "double-tap to
+                        // activate" and test `performClick()` route through this
+                        // OnClick action (open-only), which the pointer handler's
+                        // consume-the-down otherwise hides from `clickable`.
+                        .semantics(mergeDescendants = true) {
+                            role = Role.Button
+                            onClick(label = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION) {
+                                if (enabled) {
+                                    onClick()
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        }
+                } else {
+                    Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+                },
+            )
             .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION }
             .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
         contentAlignment = Alignment.Center,
@@ -789,6 +862,77 @@ private fun ComposerLauncherButton(
                 tint = glyphColor,
                 modifier = Modifier.size(PocketShellDensity.treeIndent),
             )
+        }
+    }
+}
+
+/**
+ * Issue #585: the upward-swipe distance (from the launcher press-down point) that
+ * commits the "open the composer WITH recording" entry gesture. Deliberately well
+ * ABOVE the ~viewConfiguration touch-slop a plain tap can wander, so a normal tap
+ * (or a hold-without-swipe) never accidentally opens with recording — it stays an
+ * open-only tap. Small enough that a deliberate hold-and-pull-up commits promptly.
+ */
+internal const val LAUNCHER_HOLD_SWIPE_UP_THRESHOLD_DP: Int = 40
+
+/**
+ * Issue #585: true when a pointer drag from the launcher's press-down point is a
+ * deliberate UPWARD swipe past [thresholdPx] — i.e. it has travelled at least
+ * [thresholdPx] up (negative Y) and is more vertical than horizontal, so a
+ * sideways scroll on the bottom control row is never misread as the entry
+ * gesture. Pure so it is unit-testable without a pointer harness.
+ */
+internal fun launcherSwipeCrossedUpThreshold(
+    dragX: Float,
+    dragY: Float,
+    thresholdPx: Float,
+): Boolean = dragY <= -thresholdPx && abs(dragY) >= abs(dragX)
+
+/**
+ * Issue #585: the launcher's combined TAP + hold-and-pull-up ENTRY gesture in one
+ * pointer handler. It OWNS the pointer from the down (consumes the down + every
+ * move) in the Initial pass so it beats the tap detector AND any ancestor drag,
+ * and — critically — so the drag keeps being delivered after the pointer leaves
+ * the small 44dp launcher (a non-owning Initial-pass detector silently lost the
+ * pull on device). An upward drag past [thresholdPx] fires [onHoldSwipeUp] once
+ * (open the composer WITH recording). A release WITHOUT crossing the threshold —
+ * a plain tap OR a hold-without-swipe — fires [onTap] (open-only, #585: the safe,
+ * least-surprising hold-without-swipe behaviour). Accessibility "activate" is
+ * served by the sibling `semantics { onClick }` on the launcher, not this handler.
+ */
+internal fun Modifier.composerLauncherTapOrHoldSwipeUpGesture(
+    thresholdPx: Float,
+    enabled: () -> Boolean,
+    onTap: () -> Unit,
+    onHoldSwipeUp: () -> Unit,
+): Modifier = pointerInput(thresholdPx) {
+    awaitEachGesture {
+        val down = awaitFirstDown(
+            requireUnconsumed = false,
+            pass = PointerEventPass.Initial,
+        )
+        if (!enabled()) return@awaitEachGesture
+        down.consume()
+        var swipeFired = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            val drag = change.position - down.position
+            if (!swipeFired && launcherSwipeCrossedUpThreshold(drag.x, drag.y, thresholdPx)) {
+                swipeFired = true
+                onHoldSwipeUp()
+            }
+            if (change.positionChanged()) {
+                change.consume()
+            }
+            if (change.changedToUpIgnoreConsumed()) {
+                // Release without an upward pull past the threshold = a plain tap
+                // (or a hold-without-swipe) → open the composer only.
+                if (!swipeFired) {
+                    onTap()
+                }
+                break
+            }
         }
     }
 }

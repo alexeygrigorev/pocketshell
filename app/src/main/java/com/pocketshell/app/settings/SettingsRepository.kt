@@ -62,16 +62,37 @@ import javax.inject.Singleton
  *   eager [async] kicked off from the constructor. Because construction itself
  *   happens during `App.onCreate`, that async IS the splash/startup-window
  *   PRELOAD — it warms while the activity inflates, before `setContent`. A
- *   [StartupTiming] mark fires when it completes for cold-launch observability.
+ *   [StartupTiming] mark fires when it completes for cold-launch observability;
+ *   its result is stashed in [warmSnapshot] for a zero-cost seed.
  * - [settings] is created LAZILY (a getter over the lazy [_settings]); its
- *   initial value is the warm snapshot. The very first value the composition
- *   observes is therefore the persisted snapshot — never a default — so there
- *   is no flash. The first read blocks only on the await, which by first
- *   composition is already complete (warmed during the splash window), so it
- *   does not block launch.
+ *   initial value is the persisted snapshot — never a default — so there is no
+ *   flash.
  *
- * Hard-cut (D22): there is no synchronous on-Main read path. Reads/writes route
- * through [prefs], which warms-or-awaits the off-main build.
+ * ## Non-blocking cold-start seed (issue #1249)
+ *
+ * The earlier #1088 design seeded [_settings] with `runBlocking {
+ * snapshotDeferred.await() }` at first composition. That re-coupled Main to the
+ * IO dispatcher: if the eager preload had not finished (cold start floods
+ * [Dispatchers.IO] with every store's warm-up + Room reads), the first
+ * composition PARKED Main on the whole IO-queue drain, not merely on the
+ * small-file read — a launch stall. [seedSnapshot] removes that await:
+ *
+ * - Warm/common case: the eager preload has already completed by first
+ *   composition (it warms during the splash window), so [warmSnapshot] is set
+ *   and the seed is a plain volatile read — zero on-Main disk work.
+ * - Cold/contended case: [warmSnapshot] is still null, so the seed reads the
+ *   persisted snapshot SYNCHRONOUSLY on the current thread via
+ *   [buildSnapshotResiliently]. That is a single bounded small-file read that
+ *   reuses the SharedPreferences load already kicked off at construction — it
+ *   never parks Main on the contended IO dispatcher queue.
+ *
+ * Either way the first observed value is the PERSISTED snapshot (no #1088
+ * flash — the seed reads the real persisted file, never a default-then-update),
+ * and the launch path no longer blocks on the off-main coroutine.
+ *
+ * Hard-cut (D22): there is no `runBlocking`-await on the launch path. Reads and
+ * writes route through [prefs] / [seedSnapshot], which open the prefs file
+ * synchronously (bounded) rather than awaiting the off-main coroutine.
  */
 @Singleton
 class SettingsRepository @VisibleForTesting internal constructor(
@@ -100,6 +121,16 @@ class SettingsRepository @VisibleForTesting internal constructor(
     @Volatile
     private var snapshotBuildThreadName: String? = null
 
+    /**
+     * The warm result of the eager off-main preload ([snapshotDeferred]). `null`
+     * until that preload completes; set to the persisted snapshot when it does.
+     * [seedSnapshot] reads this for a zero-cost seed when the preload has already
+     * finished (the common warm case) — it must NOT `await()` the deferred, which
+     * is what would park Main on the contended IO queue (#1249).
+     */
+    @Volatile
+    private var warmSnapshot: AppSettings? = null
+
     private val warmUpScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -109,12 +140,14 @@ class SettingsRepository @VisibleForTesting internal constructor(
      */
     private val snapshotDeferred: Deferred<AppSettings> = warmUpScope.async {
         // Test-only: hold the build in-flight until the gate opens. No-op in
-        // production (gate == null). Placed BEFORE the snapshot is built so the
-        // deferred cannot complete — and `_settings`' blocking-await cannot
-        // return — while a test is reading the first value.
+        // production (gate == null). Placed BEFORE the snapshot is built so a
+        // test can hold the OFF-MAIN preload provably in-flight while it reads
+        // the first `settings.value` — the seed then takes the synchronous
+        // cold-path (#1249) rather than this gated preload.
         warmUpGate?.await()
         snapshotBuildThreadName = currentPhysicalThreadName()
         val snapshot = buildSnapshotResiliently()
+        warmSnapshot = snapshot
         StartupTiming.markOnce("settings-snapshot-preloaded")
         snapshot
     }
@@ -167,22 +200,45 @@ class SettingsRepository @VisibleForTesting internal constructor(
         }
 
     private val prefs: SharedPreferences
-        get() = cachedPrefs ?: runBlocking {
-            snapshotDeferred.await()
-            cachedPrefs ?: error("settings prefs not cached after off-main build")
+        get() = cachedPrefs ?: run {
+            // Do NOT await the off-main coroutine (that is the #1249 park). Open
+            // the prefs file synchronously — bounded, reuses the already-started
+            // SharedPreferences load — which sets [cachedPrefs] as a side effect.
+            buildSnapshotResiliently()
+            cachedPrefs ?: error("settings prefs not cached after synchronous open")
         }
 
     private val _settings: MutableStateFlow<AppSettings> by lazy {
-        MutableStateFlow(runBlocking { snapshotDeferred.await() })
+        MutableStateFlow(seedSnapshot())
     }
 
     /**
+     * Seed the first observed [settings] value WITHOUT parking on the off-main
+     * preload's IO coroutine (#1249).
+     *
+     * - If the eager preload already completed ([warmSnapshot] set — the common
+     *   warm case, warmed during the splash window before first composition),
+     *   reuse its result at zero on-Main cost.
+     * - Otherwise read the persisted snapshot SYNCHRONOUSLY on the current
+     *   thread via [buildSnapshotResiliently]. That is a single bounded
+     *   small-file read that reuses the SharedPreferences load already kicked
+     *   off at construction, rather than blocking Main on the cold-start-
+     *   contended [Dispatchers.IO] queue.
+     *
+     * Either way the first value is the PERSISTED snapshot (no #1088 flash — the
+     * seed reads the real persisted file, never a default-then-update). It does
+     * not record [snapshotBuildThreadName]; that remains the off-main preload's
+     * to set, so the #1088 off-main assertion stays load-bearing.
+     */
+    private fun seedSnapshot(): AppSettings =
+        warmSnapshot ?: buildSnapshotResiliently()
+
+    /**
      * Hot, always-current snapshot of [AppSettings]. A getter (not an eager
-     * `val`) so the backing [_settings] — and its blocking await on the warm
-     * snapshot — is initialised at first read (first composition), NOT at
-     * construction/injection. By first composition the preload is warm, so the
-     * initial value is the persisted snapshot (no default flash) and the read
-     * does not block launch.
+     * `val`) so the backing [_settings] — and its [seedSnapshot] read — is
+     * initialised at first read (first composition), NOT at
+     * construction/injection. The seed is the persisted snapshot (no default
+     * flash) and, per #1249, does NOT block launch on the off-main coroutine.
      */
     val settings: StateFlow<AppSettings>
         get() = _settings.asStateFlow()

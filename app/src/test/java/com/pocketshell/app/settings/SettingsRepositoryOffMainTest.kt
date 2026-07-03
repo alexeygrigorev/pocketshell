@@ -6,6 +6,7 @@ import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -80,7 +81,7 @@ class SettingsRepositoryOffMainTest {
      * No default→persisted flash (the reason #1088 was deferred from #1087):
      * after a non-default value is persisted, a FRESH instance's FIRST observed
      * [SettingsRepository.settings] value is the persisted snapshot, never the
-     * default. The lazy StateFlow's initial value is the warm preload, so the
+     * default. The lazy StateFlow's initial value is the seeded snapshot, so the
      * composition never sees a default first.
      *
      * DETERMINISTIC, not timing-dependent (#1088 reviewer round 2 — the
@@ -92,13 +93,14 @@ class SettingsRepositoryOffMainTest {
      * sensitivity the reviewer demonstrated.
      *
      * This version uses the [SettingsRepository] warm-up GATE seam to hold the
-     * snapshot build provably IN-FLIGHT at the moment `settings.value` is first
+     * OFF-MAIN preload provably IN-FLIGHT at the moment `settings.value` is first
      * read, on a worker thread. The two implementations then diverge
      * DETERMINISTICALLY, independent of CPU scheduling:
      *
-     *  - Shipped (blocking-await `_settings by lazy { … runBlocking { await() } }`):
-     *    the first read BLOCKS until the gate opens — so the very first value it
-     *    can ever observe is the persisted snapshot. GREEN.
+     *  - Shipped (#1249 non-blocking seed): with the preload gated, the first
+     *    read takes the SYNCHRONOUS cold-path — it opens the prefs file directly
+     *    and returns the PERSISTED snapshot without awaiting the gated preload.
+     *    GREEN.
      *  - Racy (seed a default StateFlow, then update from the async): the first
      *    read returns the DEFAULT immediately, BEFORE the gated async can update
      *    — the visible flash. The captured first value is the default. RED.
@@ -136,34 +138,92 @@ class SettingsRepositoryOffMainTest {
         val readReturned = CountDownLatch(1)
         val reader = thread(name = "settings-first-read") {
             readEntered.countDown()
-            // Shipped: this BLOCKS in `runBlocking { await() }` until the gate
-            // opens. Racy seed-default: this returns the default immediately.
+            // Shipped (#1249): the gated preload forces the SYNCHRONOUS cold
+            // seed, which reads the persisted snapshot directly. Racy
+            // seed-default: this returns the default immediately.
             firstObserved.set(repo.settings.value)
             readReturned.countDown()
         }
 
         // The reader thread is running and about to read.
         readEntered.await()
-        // Give the read itself a generous window to execute WHILE the gate is
-        // still closed. The racy variant captures the default within this
-        // window (the read does not block); the shipped variant cannot return
-        // here at all (it is blocked on the gated await), which is the whole
-        // point — so a timeout here is expected and correct for the fix.
+        // Give the read a generous window to execute WHILE the gate is still
+        // closed. The racy variant captures the default within this window; the
+        // shipped variant reads the persisted snapshot synchronously (it never
+        // parks on the gated preload — #1249). Both return here without opening
+        // the gate.
         readReturned.await(2, TimeUnit.SECONDS)
 
-        // Open the gate so the off-main build can complete and the shipped
-        // reader can unblock with the persisted snapshot.
+        // Open the gate so the off-main build can complete and drain its scope.
         gate.countDown()
         reader.join(TimeUnit.SECONDS.toMillis(5))
 
         val observed = firstObserved.get()
-            ?: error("settings.value read never completed even after the gate opened")
+            ?: error("settings.value read never completed")
         // LOAD-BEARING: the FIRST value the composition can observe is the
         // PERSISTED snapshot, never a default. The seed-default variant captured
-        // the default above → RED here; the shipped blocking-await returns the
+        // the default above → RED here; the shipped synchronous seed returns the
         // persisted snapshot → GREEN.
         assertEquals(PERSISTED_FONT_SP, observed.terminalFontSizeSp, 0f)
         assertEquals(PERSISTED_KEYBOARD_MODE, observed.terminalKeyboardMode)
+    }
+
+    /**
+     * LOAD-BEARING (#1249): the cold-start first read of [settings] must NOT
+     * block on the off-main preload. This is the perf half of #1229 — the old
+     * #1088 design seeded `_settings` with `runBlocking { snapshotDeferred.await()
+     * }`, which parked the reading thread until the preload finished. On a
+     * contended cold start (every store warming on [kotlinx.coroutines.Dispatchers.IO]
+     * at once) that stalled launch.
+     *
+     * Reproduce-first (D33 / G10): the off-main preload is GATED and the gate is
+     * NEVER opened, so the preload can never complete. The first `settings.value`
+     * read is then required to RETURN — with the persisted snapshot — WITHOUT the
+     * gate opening.
+     *
+     *  - Pre-fix (`runBlocking { snapshotDeferred.await() }`): the read blocks on
+     *    the gated preload forever → `done.await(timeout)` returns false → the
+     *    `assertTrue` fails → RED.
+     *  - Fixed (#1249 synchronous seed): the read opens the prefs file directly,
+     *    returns the persisted snapshot, never parks on the preload → GREEN.
+     *
+     * This single test proves BOTH #1249 properties at once: cold start no longer
+     * blocks on the prefs read (the no-block assertion) AND the seed is still the
+     * persisted snapshot, not a default (the no-#1088-flash assertion).
+     */
+    @Test
+    fun cold_start_first_read_does_not_block_on_gated_offmain_preload() {
+        // Persist a genuinely NON-default value via a fully-warmed instance.
+        assertNotEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, PERSISTED_FONT_SP)
+        SettingsRepository(context).setTerminalFontSizeSp(PERSISTED_FONT_SP)
+
+        // Fresh instance = a "process restart" with its off-main preload GATED —
+        // and the gate is NEVER opened, simulating a preload that has not yet
+        // completed by first composition (the contended cold start).
+        val gate = CountDownLatch(1)
+        val repo = SettingsRepository(context, gate)
+
+        val firstObserved = AtomicReference<AppSettings?>(null)
+        val done = CountDownLatch(1)
+        thread(name = "cold-start-first-read") {
+            firstObserved.set(repo.settings.value)
+            done.countDown()
+        }
+
+        // The read MUST return without the gate ever opening (#1249). Pre-fix
+        // this blocks on the gated await → times out → RED.
+        val returned = done.await(3, TimeUnit.SECONDS)
+        assertTrue(
+            "cold-start first settings read must NOT block on the off-main " +
+                "preload (#1249) — it blocked past the timeout with the gate still closed",
+            returned,
+        )
+
+        // And the value it returned is the PERSISTED snapshot (no #1088 flash),
+        // read synchronously without the preload completing.
+        val observed = firstObserved.get()
+            ?: error("settings.value read never completed")
+        assertEquals(PERSISTED_FONT_SP, observed.terminalFontSizeSp, 0f)
     }
 
     /** Defaults read correctly after the off-main build (clean install). */

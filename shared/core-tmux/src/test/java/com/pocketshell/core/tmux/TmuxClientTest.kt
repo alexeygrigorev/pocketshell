@@ -1744,6 +1744,194 @@ class TmuxClientTest {
         }
     }
 
+    // ── Issue #1212: pre-registration buffer lifecycle hardening ──────────────
+
+    /**
+     * Issue #1212 (AC1) — a pane that dies before its pipe is ever registered
+     * must not retain its pre-registration replay buffer for the connection's
+     * lifetime. tmux announces the death via `%window-close @<w>`; the window's
+     * pane set is learned from its `%layout-change` layout, so on window-close
+     * the dead panes' buffers are released.
+     *
+     * Red→green: on base (no cleanup) the `%0` buffer survives window-close and
+     * still replays the doomed frame on a later registration; with the fix the
+     * buffer is released (count + bytes drop to 0) and the doomed frame is gone.
+     */
+    @Test
+    fun `pre-registration buffer is released when its window closes`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            val closeSeen = CompletableDeferred<Unit>()
+            val watcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.WindowClose && ev.windowId == "@1") {
+                        closeSeen.complete(Unit)
+                    }
+                }
+            }
+            delay(100)
+
+            // @1 owns pane %0 (a single-pane layout leaf `...,0`). %0 floods
+            // output before anyone registers outputFor("%0"), then @1 closes.
+            // The reader processes these in order on one loop, and window-close
+            // cleanup runs BEFORE the event reaches the bus — so once the
+            // watcher sees WindowClose, cleanup has already happened.
+            shell.feed("%layout-change @1 bffb,80x24,0,0,0\n")
+            shell.feed("%output %0 doomed\n")
+            shell.feed("%window-close @1\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { closeSeen.await() }
+            watcher.cancel()
+
+            // The buffer for %0 is gone (released on window-close).
+            assertEquals(0, client.preRegistrationBufferCountForTest())
+            assertEquals(0L, client.preRegistrationRetainedBytesForTest())
+
+            // Behavioural: registering %0 now replays nothing stale — the first
+            // frame the collector sees is the fresh live one, not "doomed".
+            val pane0 = scope.async { client.outputFor("%0").take(1).toList() }
+            delay(100)
+            shell.feed("%output %0 live\n")
+            val got = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane0.await() }
+            assertEquals(
+                listOf("live"),
+                got.map { String(it.data, StandardCharsets.US_ASCII) },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1212 (AC2) — the TOTAL retained pre-registration bytes and the
+     * number of distinct retained buffers are bounded across MANY panes, not
+     * just per pane. Without a global cap, N never-registered background panes
+     * each pin a full per-pane buffer (256 KB × N). Here 200 orphaned panes
+     * each flood 20 KB (4 MB attempted); the global caps hold the retained
+     * total under the byte cap AND the distinct-pane cap.
+     *
+     * Red→green: on base (no global cap) retained bytes ≈ 4 MB and count = 200;
+     * with the fix count ≤ the pane cap and bytes ≤ the total-byte cap.
+     */
+    @Test
+    fun `many orphaned panes are bounded by the global pre-registration caps`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            val paneCount = 200
+            val frameBytes = 20 * 1024
+            val payload = "x".repeat(frameBytes)
+
+            // A sentinel pane fed LAST: the single-threaded reader processes it
+            // only after every fat frame before it, so seeing the sentinel on
+            // the bus proves all 200 panes' output was processed.
+            val sentinelSeen = CompletableDeferred<Unit>()
+            val watcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.Output && ev.paneId == "%sentinel") {
+                        sentinelSeen.complete(Unit)
+                    }
+                }
+            }
+            delay(100)
+
+            for (i in 0 until paneCount) {
+                shell.feed("%output %p$i $payload\n")
+            }
+            shell.feed("%output %sentinel done\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sentinelSeen.await() }
+            watcher.cancel()
+
+            val retainedPanes = client.preRegistrationBufferCountForTest()
+            val retainedBytes = client.preRegistrationRetainedBytesForTest()
+
+            // Bounded distinct-pane count (+1 slack for the tiny sentinel pane).
+            assertTrue(
+                "retained pane buffers ($retainedPanes) must be bounded well below the $paneCount fed",
+                retainedPanes <= 64 + 1,
+            )
+            // Bounded aggregate bytes: far below the ~4 MB that would accrue
+            // unbounded, held at/under the 1 MB global byte cap.
+            assertTrue(
+                "retained bytes ($retainedBytes) must be bounded by the global byte cap",
+                retainedBytes <= 1024L * 1024L,
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1212 (AC3) — a pane pipe registered via [TmuxClient.outputFor]
+     * whose returned flow is NEVER collected must not wedge the client or pin
+     * its replay for the connection's lifetime. The replay job waits a bounded
+     * grace for the first subscriber, then abandons (releases) the replay and
+     * proceeds — so the client keeps serving other panes.
+     *
+     * Red→green: on base the job parks forever on `subscriptionCount.first{>0}`
+     * and the abandon diagnostic never fires (the wait below times out); with
+     * the fix the grace elapses, the diagnostic fires, and a different pane
+     * still works end-to-end.
+     */
+    @Test
+    fun `registered pane whose flow is never collected releases its replay and does not wedge`() = runBlocking {
+        val diagnostics = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields -> diagnostics += event to fields }
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, firstSubscriberReplayGraceMs = 200L)
+        try {
+            client.connect()
+
+            // Buffer a pre-registration frame for %0 before it registers.
+            val buffered = CompletableDeferred<Unit>()
+            val watcher = scope.async {
+                client.events.collect { ev ->
+                    if (ev is ControlEvent.Output && ev.paneId == "%0") buffered.complete(Unit)
+                }
+            }
+            delay(100)
+            shell.feed("%output %0 buffered\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { buffered.await() }
+            watcher.cancel()
+
+            // Register the pipe but NEVER collect the returned flow.
+            client.outputFor("%0")
+
+            // After the grace window with no collector, the replay is abandoned.
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                while (diagnostics.none { it.first == "tmux_client_preregistration_replay_abandoned" }) {
+                    delay(20)
+                }
+            }
+            val abandoned = diagnostics.first {
+                it.first == "tmux_client_preregistration_replay_abandoned"
+            }
+            assertEquals("%0", abandoned.second["pane"])
+
+            // Not wedged: a DIFFERENT pane still delivers output end-to-end.
+            val pane1 = scope.async { client.outputFor("%1").take(1).toList() }
+            delay(100)
+            shell.feed("%output %1 live1\n")
+            val got = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane1.await() }
+            assertEquals(
+                listOf("live1"),
+                got.map { String(it.data, StandardCharsets.US_ASCII) },
+            )
+        } finally {
+            TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
+            client.close()
+        }
+    }
+
     @Test
     fun `codex scale output flood cannot starve command response parsing`() = runBlocking {
         val shell = FakeShell()

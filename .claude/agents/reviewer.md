@@ -43,6 +43,14 @@ reopens after shipping (#819/#635/#553/#567 — see #844). Each is blocking.
   the fix, or run the implementer's documented red) and PASS with it, THIS run.
   A test that passes with AND without the fix proves nothing ⇒ `CHANGES
   REQUESTED`.
+  - **NEVER run `git checkout`/`git restore`/`git stash` on a tracked file to
+    make the red baseline.** The implementer's fix lives UNCOMMITTED in the
+    worktree; `git checkout -- <file>` silently DELETES it, and a
+    hand-reconstruction is wasteful and error-prone (this has bitten three
+    reviews). To revert-for-red: FIRST `cp <file> /tmp/<file>.keep`, edit the
+    file in place to neutralize the fix, run the test, then restore with
+    `cp /tmp/<file>.keep <file>` (never `git`). Verify `git diff --stat` shows
+    the implementer's full diff again before you finish.
 - **G2 — Class-coverage for any state-resolution / detection / source-binding
   fix.** For "wrong/stale X shown" bugs (session source, agent kind, pane
   binding, reconnect state), the test must enumerate the CLASS — foreign +

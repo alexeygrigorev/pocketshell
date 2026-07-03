@@ -115,6 +115,24 @@ public class SshLeaseManager(
         require(connectTimeoutMillis > 0) { "connectTimeoutMillis must be > 0" }
     }
 
+    /**
+     * Issue #1222 — the SINGLE liveness predicate the whole pool trusts. A
+     * session counts as live for pooling ONLY while it is BOTH transport-connected
+     * AND has not had its async [SshSession.close] initiated.
+     *
+     * The #1144 async `close()` leaves [SshSession.isConnected] == `true` for up to
+     * ~2 s while the `SSH_MSG_DISCONNECT` drains. Trusting [isConnected] alone kept
+     * a keepalive-dead / mid-drain transport as a warm-idle lease for up to 60 s,
+     * lost the `keepalive_dead` attribution (it surfaced `Idle`, not
+     * `Closed(KeepaliveDead)`), and handed the dying transport to a concurrent
+     * same-host acquire (→ `TransportClosedException` → spurious failed attach).
+     * [SshSession.isCloseInitiated] is the authoritative "going away" signal, so
+     * routing reuse / [hasLiveLease] / [hasLiveOrConnectingLease] / [release]
+     * through THIS one predicate closes the whole class in a single place (no dual
+     * path, hard-cut D22).
+     */
+    private fun SshSession.isLiveForLease(): Boolean = isConnected && !isCloseInitiated
+
     public suspend fun acquire(target: SshLeaseTarget): Result<SshLease> {
         val key = target.leaseKey
 
@@ -123,7 +141,7 @@ public class SshLeaseManager(
         // owner of a fresh connect.
         val decision = mutex.withLock {
             if (closed) return Result.failure(SshLeaseManagerClosedException())
-            val existing = entries[key]?.takeIf { it.session.isConnected }
+            val existing = entries[key]?.takeIf { it.session.isLiveForLease() }
             if (existing != null) {
                 existing.closeJob?.cancel()
                 existing.closeJob = null
@@ -186,7 +204,7 @@ public class SshLeaseManager(
         val reused = mutex.withLock {
             if (closed) return Result.failure(SshLeaseManagerClosedException())
             val entry = shared
-                .takeIf { entries[key] === it && it.session.isConnected }
+                .takeIf { entries[key] === it && it.session.isLiveForLease() }
                 ?: return@withLock null
             entry.closeJob?.cancel()
             entry.closeJob = null
@@ -245,7 +263,7 @@ public class SshLeaseManager(
                         return@withLock Result.failure(SshLeaseManagerClosedException())
                     }
                     val raced = entries[key]
-                    if (raced != null && raced.session.isConnected) {
+                    if (raced != null && raced.session.isLiveForLease()) {
                         // A live entry appeared for this key while we were dialing
                         // (e.g. a different code path acquired directly). Drop our
                         // redundant transport and reuse the live one; awaiters reuse
@@ -399,7 +417,7 @@ public class SshLeaseManager(
         key: SshLeaseKey,
         closeReason: SshLeaseCloseReason = SshLeaseCloseReason.Disconnected,
     ) {
-        if (entries[key]?.session?.isConnected == true) return
+        if (entries[key]?.session?.isLiveForLease() == true) return
         if (inFlightConnects.containsKey(key)) return
         if (lastPublishedState[key] != SshLeaseConnectionState.Connecting) return
         emitStateLocked(
@@ -429,7 +447,7 @@ public class SshLeaseManager(
     public suspend fun hasLiveLease(key: SshLeaseKey): Boolean =
         mutex.withLock {
             if (closed) return@withLock false
-            entries[key]?.session?.isConnected == true
+            entries[key]?.session?.isLiveForLease() == true
         }
 
     /**
@@ -450,7 +468,7 @@ public class SshLeaseManager(
     public suspend fun hasLiveOrConnectingLease(key: SshLeaseKey): Boolean =
         mutex.withLock {
             if (closed) return@withLock false
-            if (entries[key]?.session?.isConnected == true) return@withLock true
+            if (entries[key]?.session?.isLiveForLease() == true) return@withLock true
             inFlightConnects.containsKey(key)
         }
 
@@ -584,7 +602,13 @@ public class SshLeaseManager(
                 if (entry.refCount <= 0) return@withContext null
                 entry.refCount -= 1
                 if (entry.refCount > 0) return@withContext null
-                if (!entry.session.isConnected || !processStarted || idleTtlMillis == 0L || maxIdleLeases == 0) {
+                // Issue #1222: a session whose async close() has been INITIATED is
+                // NOT live (isLiveForLease()==false even while isConnected still
+                // transiently lies true during the ~2 s disconnect drain), so it
+                // takes the removal branch instead of being parked warm/idle. This
+                // is what stops a keepalive-dead / mid-drain transport from being
+                // retained for up to 60 s and handed to a concurrent acquirer.
+                if (!entry.session.isLiveForLease() || !processStarted || idleTtlMillis == 0L || maxIdleLeases == 0) {
                     entries.remove(key)
                     emitStateLocked(
                         key = key,
@@ -596,9 +620,18 @@ public class SshLeaseManager(
                             // resolving the #964 attribution ambiguity. Read the
                             // session's own cause so the lease layer never
                             // reaches up into the app (no layering violation).
+                            // Issue #1222: checked FIRST so a keepalive-dead
+                            // session released INSIDE the async-close window (when
+                            // isConnected still lies true) is still stamped
+                            // `keepalive_dead` on the transport EDGE, not lost as
+                            // an anonymous `Idle`.
                             entry.session.closeCause == SshSessionCloseCause.KeepaliveDead ->
                                 SshLeaseCloseReason.KeepaliveDead
-                            !entry.session.isConnected -> SshLeaseCloseReason.Disconnected
+                            // Issue #1222: a close-initiated OR already-disconnected
+                            // transport is an anonymous `Disconnected` (a plain
+                            // teardown reached mid-drain), distinct from an idle-TTL
+                            // expiry — the transport is gone, not merely unused.
+                            !entry.session.isLiveForLease() -> SshLeaseCloseReason.Disconnected
                             !processStarted -> SshLeaseCloseReason.ProcessStopped
                             else -> SshLeaseCloseReason.IdleExpired
                         },

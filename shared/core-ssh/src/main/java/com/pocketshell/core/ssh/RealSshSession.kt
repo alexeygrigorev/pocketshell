@@ -368,6 +368,19 @@ internal class RealSshSession(
         get() = !dispatcher.isClosed && client.isConnected && client.isAuthenticated
 
     /**
+     * Issue #1222 — the authoritative "close has begun" signal the lease pool
+     * routes its liveness through. Reads the SAME one-shot [closeStarted] guard
+     * [close] flips synchronously (via `compareAndSet(false, true)`) BEFORE it
+     * launches the async `SSH_MSG_DISCONNECT` teardown, so it is `true` the
+     * instant close is initiated — the entire ~2 s async-drain window during
+     * which [isConnected] still lies `true`. This is what lets
+     * [SshLeaseManager] evict a keepalive-dead / mid-drain transport instead of
+     * trusting the transiently-stale [isConnected] and parking the corpse warm.
+     */
+    override val isCloseInitiated: Boolean
+        get() = closeStarted.get()
+
+    /**
      * Issue #964 — the transport-liveness oracle the app-level `LivenessProbe`
      * defers to. True while the keepalive ([TransportKeepAlive]) has seen INBOUND
      * activity (its reply bumps [lastInboundActivityNanos]) within its

@@ -122,10 +122,23 @@ class SurfaceBlackModelIntactDiagnosticTest {
             pane.terminalState.surfaceIsBlackWhileModelHasContent(),
         )
 
+        val surfaceRepaintsBefore = pane.terminalState.surfaceRepaintRequestCountForTest()
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertFalse("a model-healthy pane is not healed (diagnostics only, no reseed)", healed)
+        assertFalse(
+            "a model-healthy pane is not MODEL-reseeded (no capture-pane swap) — the recovery is " +
+                "a surface repaint, not a model heal",
+            healed,
+        )
+        // Issue #1203: the auto-heal now RECOVERS this class with a SURFACE force-repaint
+        // (re-bind emulator + full-clip invalidate) instead of only fingerprinting it.
+        assertEquals(
+            "the auto-heal must request exactly one surface force-repaint to recover the " +
+                "surface-only-black the model reseed cannot touch",
+            surfaceRepaintsBefore + 1,
+            pane.terminalState.surfaceRepaintRequestCountForTest(),
+        )
         val event = sink.singleBlackFrameEvent()
         assertEquals("surface_black_model_intact", event.fields["class"])
         assertEquals("%1", event.fields["paneId"])
@@ -145,6 +158,215 @@ class SurfaceBlackModelIntactDiagnosticTest {
             "no stale_render_heal — the oracle never touched the healthy model",
             0,
             sink.eventsNamed("stale_render_heal").size,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1203 — RECOVERY red→green. The MANUAL Redraw forces a SURFACE repaint
+    // that recovers a surface-only-black (model intact, surface black); the model
+    // reseed alone (base) does NOT.
+    //
+    // RED (base, pre-fix): redrawActivePane only runs the model reseed
+    // (reseedActivePaneForReattach). The model already matches tmux, so the reseed
+    // restores nothing and the surface stays black — surfaceRepaintRequestCount stays 0
+    // (no surface repaint requested) and surfaceIsBlackWhileModelHasContent() stays true.
+    //
+    // GREEN (fixed): redrawActivePane ALSO fires requestSurfaceRepaint(); driving that
+    // request through the surface (as TerminalSurface's collector → onDraw content paint
+    // does) clears the surface-black.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun manualRedrawForcesSurfaceRepaintForSurfaceOnlyBlack() = runVmTest { sink ->
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%10")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%10" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // MODEL intact + capture matches tmux (oracle healthy), surface confirmed black.
+        renderDenseFrame(pane)
+        assertTrue(pane.terminalState.renderedNonBlankCharCount() > 0)
+        // Redraw's reseed pays a capture-pane; return the SAME dense frame so the
+        // non-destructive-swap guard would keep the model intact (nothing to restore).
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = denseFrameLines(), isError = false),
+        )
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = true, atMs = 1L)
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = false, atMs = 2L)
+        assertTrue(
+            "precondition: the surface is confirmed black while the model holds content",
+            pane.terminalState.surfaceIsBlackWhileModelHasContent(),
+        )
+
+        vm.redrawActivePane()
+        advanceUntilIdle()
+
+        // LOAD-BEARING (RED on base = 0): Redraw fired the surface force-repaint. Without
+        // the fix redrawActivePane only reseeds the model, which restores nothing here (the
+        // model already matches tmux) → this count stays 0 and the surface stays black.
+        assertTrue(
+            "manual Redraw must request a surface force-repaint to recover a surface-only-black " +
+                "(the model reseed alone recovers nothing here)",
+            pane.terminalState.surfaceRepaintRequestCountForTest() >= 1,
+        )
+
+        // The requested surface repaint drives the real production path
+        // (TerminalSurface's collector → view.forceSurfaceRepaint() → the next onDraw takes
+        // the CONTENT path and reports it via the paint-confirmation seam). We mirror that
+        // resulting content paint here to prove the recovery actually CLEARS the
+        // surface-black. On base (no fix) no repaint is requested, so the maintainer would
+        // never reach this content paint and the surface stays black.
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = true, atMs = 100L)
+        assertFalse(
+            "after Redraw's surface repaint drove a content paint, the surface is no longer black",
+            pane.terminalState.surfaceIsBlackWhileModelHasContent(),
+        )
+    }
+
+    @Test
+    fun manualRedrawDoesNotSpuriouslyRepaintAHealthySurface() = runVmTest { sink ->
+        // Redraw always fires ONE surface repaint (idempotent full-clip invalidate). This
+        // pins that a healthy surface is recovered by exactly ONE request, never a loop.
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%11")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%11" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        renderDenseFrame(pane)
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = denseFrameLines(), isError = false),
+        )
+        // A healthy, content-painted surface.
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = true, atMs = 2L)
+        assertFalse(pane.terminalState.surfaceIsBlackWhileModelHasContent())
+
+        vm.redrawActivePane()
+        advanceUntilIdle()
+
+        assertEquals(
+            "one surface repaint per Redraw tap — no thrash loop on a healthy pane",
+            1,
+            pane.terminalState.surfaceRepaintRequestCountForTest(),
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1203 — class coverage (G2): the AUTO-HEAL fires the surface repaint for an
+    // ALT-SCREEN / agent pane too (Claude/Codex idle alt-screen never re-emits %output),
+    // not just a shell pane. Same detector, different pane content.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun autoHealForcesSurfaceRepaintForAgentAltScreenPane() = runVmTest { sink ->
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%12")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%12" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // A sparse alt-screen agent frame that still MATCHES tmux (oracle healthy).
+        renderAgentAltScreenFrame(pane)
+        assertTrue(pane.terminalState.renderedNonBlankCharCount() > 0)
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = agentAltScreenLines(), isError = false),
+        )
+        assertFalse(
+            "precondition: the agent pane's model matches tmux (oracle healthy)",
+            pane.terminalState.visibleRenderLostFrameVsCapture(
+                agentAltScreenLines().joinToString("\n"),
+            ),
+        )
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = false, atMs = 3L)
+        assertTrue(pane.terminalState.surfaceIsBlackWhileModelHasContent())
+
+        val healed = vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+
+        assertFalse("no model reseed for an oracle-healthy agent pane", healed)
+        assertTrue(
+            "the auto-heal must request a surface force-repaint for a surface-only-black " +
+                "agent/alt-screen pane too (class coverage, not just shell panes)",
+            pane.terminalState.surfaceRepaintRequestCountForTest() >= 1,
+        )
+        val event = sink.singleBlackFrameEvent()
+        assertEquals("surface_black_model_intact", event.fields["class"])
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1203 — class coverage (G2): with MULTIPLE panes present, the auto-heal's
+    // surface repaint targets the ACTIVE VISIBLE pane (page 0) — the one the user is
+    // looking at after a reveal/switch — not a background pane. Proves the recovery is
+    // pane-local and reaches whichever pane is active, the on-device "black after switch".
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun autoHealForcesSurfaceRepaintOnActiveVisiblePaneWithMultiplePanes() = runVmTest { sink ->
+        val client = FakeTmuxClient().withTwoPaneRows("work", "%13", "%14")
+        val vm = connectVm(client)
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // The active visible pane is page 0 — the head of the published pane list.
+        val activePane = vm.panes.value.first()
+        val backgroundPane = vm.panes.value.first { it.paneId != activePane.paneId }
+
+        renderDenseFrame(activePane)
+        assertTrue(activePane.terminalState.renderedNonBlankCharCount() > 0)
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = denseFrameLines(), isError = false),
+        )
+        // The ACTIVE pane's surface goes black while its model is intact.
+        activePane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = false, atMs = 4L)
+        assertTrue(activePane.terminalState.surfaceIsBlackWhileModelHasContent())
+
+        vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+
+        assertTrue(
+            "the auto-heal must recover the surface-only-black on the ACTIVE visible pane",
+            activePane.terminalState.surfaceRepaintRequestCountForTest() >= 1,
+        )
+        assertEquals(
+            "the background pane must NOT be surface-repainted (the heal is pane-local to the " +
+                "active visible pane)",
+            0,
+            backgroundPane.terminalState.surfaceRepaintRequestCountForTest(),
+        )
+        assertEquals(
+            "surface_black_model_intact",
+            sink.singleBlackFrameEvent().fields["class"],
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1203 — a MODEL-healthy + SURFACE-healthy pane must NOT request a surface
+    // repaint from the auto-heal (no thrash on a genuinely-fine pane).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun autoHealDoesNotForceSurfaceRepaintWhenSurfaceIsHealthy() = runVmTest { sink ->
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%15")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%15" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        renderDenseFrame(pane)
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = denseFrameLines(), isError = false),
+        )
+        pane.terminalState.recordSurfaceFramePaintedForTest(paintedEmulatorContent = true, atMs = 5L)
+        assertFalse(pane.terminalState.surfaceIsBlackWhileModelHasContent())
+
+        vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+
+        assertEquals(
+            "a healthy surface must NOT trigger a surface repaint from the auto-heal",
+            0,
+            pane.terminalState.surfaceRepaintRequestCountForTest(),
         )
     }
 
@@ -409,6 +631,25 @@ class SurfaceBlackModelIntactDiagnosticTest {
         pane.terminalState.appendRemoteOutput(CLEAR_ONLY.toByteArray(Charsets.US_ASCII))
     }
 
+    /**
+     * A sparse alt-screen AGENT viewport (Claude/Codex idle) that still MATCHES tmux —
+     * fewer live rows than a shell frame, but enough non-blank content that the model
+     * grid holds a frame (oracle healthy). Used to prove the recovery covers agent panes.
+     */
+    private fun renderAgentAltScreenFrame(pane: TmuxPaneState) {
+        pane.terminalState.appendRemoteOutput(
+            buildString {
+                append(CLEAR_ONLY)
+                agentAltScreenLines().forEach { append(it).append("\r\n") }
+            }.toByteArray(Charsets.US_ASCII),
+        )
+    }
+
+    private fun agentAltScreenLines(): List<String> = buildList {
+        add("ISSUE1203-AGENT-ALT-SCREEN")
+        repeat(10) { add("claude idle alt-screen row $it with real agent content") }
+    }
+
     private fun FakeTmuxClient.captureCount(): Int =
         sentCommands.count { it.startsWith("capture-pane") }
 
@@ -429,6 +670,36 @@ class SurfaceBlackModelIntactDiagnosticTest {
         )
         cursorQueryResponses.addLast(
             CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+        )
+    }
+
+    private fun FakeTmuxClient.withTwoPaneRows(
+        sessionName: String,
+        firstPaneId: String,
+        secondPaneId: String,
+        title: String = sessionName,
+    ): FakeTmuxClient = apply {
+        responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "$firstPaneId\t@0\t\$0\t$sessionName\t$title\t0",
+                    "$secondPaneId\t@1\t\$0\t$sessionName\t$title\t0",
+                ),
+                isError = false,
+            ),
+        )
+        capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("$sessionName ready"), isError = false),
+        )
+        capturePaneResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("$sessionName ready"), isError = false),
+        )
+        cursorQueryResponses.addLast(
+            CommandResponse(number = 4L, output = listOf("0,0"), isError = false),
+        )
+        cursorQueryResponses.addLast(
+            CommandResponse(number = 5L, output = listOf("0,0"), isError = false),
         )
     }
 

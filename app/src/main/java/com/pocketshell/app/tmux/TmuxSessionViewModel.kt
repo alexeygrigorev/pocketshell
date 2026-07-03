@@ -4048,6 +4048,19 @@ public class TmuxSessionViewModel @Inject constructor(
             // any OTHER visible pane. skipWhenFreshlySeeded=false forces the recapture even
             // for a pane already seeded this attach — the whole point of a manual Redraw.
             reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+            // Issue #1203: the model reseed above recovers a MODEL-black pane (the grid
+            // lost tmux's frame). But the maintainer's "Redraw doesn't work" report is a
+            // SURFACE-only-black: the model grid already matches tmux, so the reseed
+            // restores NOTHING and the surface stays black. Redraw is architecturally
+            // incapable of recovering that with a model reseed alone. Fire an
+            // UNCONDITIONAL surface force-repaint too (re-bind the View's emulator +
+            // full-clip invalidate) so the manual escape hatch recovers BOTH the
+            // model-black AND the surface-only-black classes — the whole point of Redraw
+            // being the user's last-resort recovery. Cheap + idempotent: on a genuinely
+            // healthy pane it is one extra full-clip invalidate, no round-trip.
+            if (isCurrentRuntime(guard)) {
+                activeVisiblePane()?.terminalState?.requestSurfaceRepaint()
+            }
         }
     }
 
@@ -11586,13 +11599,27 @@ public class TmuxSessionViewModel @Inject constructor(
             // exact site the oracle short-circuits — ONLY when the paint-confirmation
             // seam says the surface is CONFIRMED black while the model holds content.
             // Rides this same already-paid capture tick: NO new poll/timer (#1164).
-            // Diagnostics only — no reseed/heal (#721 self-heals known surface-blanks).
             if (pane.terminalState.surfaceIsBlackWhileModelHasContent()) {
                 recordBlackFrameObserved(
                     pane,
                     BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT,
                     captureText,
                 )
+                // Issue #1203: the AUTO-HEAL recovery for this class. A model reseed
+                // restores nothing here (the model already matches tmux — the oracle is
+                // blind to this class by construction), so the recovery is a SURFACE
+                // force-repaint: re-bind the View's emulator + full-clip invalidate so
+                // the surface repaints what the model already holds. This is the
+                // self-heal without user action — the maintainer no longer has to tap
+                // Redraw for a surface-only-black.
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-surface-black-model-intact-heal pane=${pane.paneId} " +
+                        "window=${pane.windowId} session=${activeTarget?.sessionName} " +
+                        "status=${_connectionStatus.value} " +
+                        "rendered=${pane.terminalState.renderedNonBlankCharCount()}",
+                )
+                pane.terminalState.requestSurfaceRepaint()
             }
             return false
         }

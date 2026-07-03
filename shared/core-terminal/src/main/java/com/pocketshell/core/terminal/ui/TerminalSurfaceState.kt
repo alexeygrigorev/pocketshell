@@ -184,6 +184,57 @@ class TerminalSurfaceState(
     internal val fullRepaintRequests: SharedFlow<Unit> get() = _fullRepaintRequests.asSharedFlow()
 
     /**
+     * Issue #1203 — SURFACE force-repaint requests. Distinct from
+     * [fullRepaintRequests] (which the MODEL reseed [appendRemoteOutput] fires
+     * AFTER writing captured content into the buffer, to repaint the freshly
+     * seeded rows over a stale dirty cache): a signal here means "the MODEL grid
+     * is already intact, but the on-screen SURFACE is black — re-bind the View's
+     * emulator and force a full-clip repaint of what the model already holds".
+     *
+     * This is the recovery the sixth `black_frame_observed` class
+     * (`surface_black_model_intact`, #1192) needs and the model reseed cannot
+     * provide: the surface-only-black never diverges from tmux, so no `capture-pane`
+     * reseed touches it (spike #874 GAP-1). [TerminalSurface] collects this and
+     * calls [com.termux.view.TerminalView.forceSurfaceRepaint].
+     *
+     * `replay = 1` for the same late-subscribe reason as [fullRepaintRequests]
+     * (#879): a request fired during a re-create seed, before the fresh
+     * [TerminalSurface] binds its collector, must still reach the late subscriber.
+     */
+    private val _surfaceRepaintRequests = MutableSharedFlow<Unit>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    internal val surfaceRepaintRequests: SharedFlow<Unit> get() = _surfaceRepaintRequests.asSharedFlow()
+
+    @Volatile
+    private var surfaceRepaintRequestCount: Int = 0
+
+    /**
+     * Issue #1203 — request a SURFACE force-repaint of the bound [TerminalView]
+     * (re-bind emulator + full-clip invalidate) to recover a surface-only-black
+     * pane (model intact, surface black). Called by the tmux ViewModel from the
+     * manual Redraw escape hatch AND from the auto-heal when
+     * [surfaceIsBlackWhileModelHasContent] fingerprints the class the model-vs-tmux
+     * oracle is blind to. Idempotent-cheap: it rides the existing heal/redraw pass,
+     * adds no round-trip, and a couple of extra requests until the real `onDraw`
+     * repaints are harmless (the request is coalesced by the flow).
+     */
+    fun requestSurfaceRepaint() {
+        surfaceRepaintRequestCount += 1
+        _surfaceRepaintRequests.tryEmit(Unit)
+    }
+
+    /**
+     * Test-only (#1203): how many surface force-repaints have been requested. `public`
+     * (not `internal`) so the app-module tmux ViewModel tests — a different Gradle module
+     * — can assert the manual-Redraw / auto-heal recovery fired, mirroring the visibility
+     * of [recordSurfaceFramePaintedForTest].
+     */
+    public fun surfaceRepaintRequestCountForTest(): Int = surfaceRepaintRequestCount
+
+    /**
      * Callback fired when the embedded text-selection action mode's "Copy"
      * button is tapped. Issue #175 wires the [TerminalSurface] composable to
      * install a default sink that copies the selected text into the system

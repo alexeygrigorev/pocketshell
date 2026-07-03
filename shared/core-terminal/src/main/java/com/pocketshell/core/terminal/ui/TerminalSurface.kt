@@ -372,6 +372,20 @@ fun TerminalSurface(
         }
     }
 
+    // Issue #1203: a SURFACE force-repaint signal (the model grid is intact but the
+    // on-screen surface is black — the #1192 sixth class the model-vs-tmux oracle
+    // cannot see) re-binds the View's emulator and forces a full-clip repaint of
+    // what the model already holds. Unlike fullRepaintRequests (which follows a
+    // MODEL reseed), this recovers the surface WITHOUT a capture-pane round-trip —
+    // the recovery the model reseed is architecturally incapable of providing.
+    LaunchedEffect(state, terminalView) {
+        val view = terminalView ?: return@LaunchedEffect
+        state.surfaceRepaintRequests.collect {
+            runCatching { view.forceSurfaceRepaint() }
+                .onFailure { onLocalTerminalError?.invoke(it) }
+        }
+    }
+
     // If the caller installed an onKeyEvent slot, chain it onto the
     // user-supplied modifier so the Compose focus system routes key events
     // through it before the embedded TerminalView gets a chance. We tack

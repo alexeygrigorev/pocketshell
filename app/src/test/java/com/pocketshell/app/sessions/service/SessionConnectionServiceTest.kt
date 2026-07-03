@@ -83,54 +83,31 @@ class SessionConnectionServiceTest {
     }
 
     @Test
-    fun `port-forward active notification reads Port forwarding active with no count-down`() {
-        // Issue #1159 (Part 3): a port-forward pins the connection always-on — the snapshot
-        // carries portForwardActive=true and a null deadline, and the notification is worded
-        // for the forward with NO count-down chronometer (there is no teardown to count to).
+    fun `port-forward wording is never shown by the session FGS (single owner is ForwardingService)`() {
+        // Issue #1202 + #1198 (hard-cut, D22): the session FGS is SUPPRESSED while a
+        // port-forward is active — the ForwardingService FGS is the single owner of the
+        // port-forward notification, so this notification NEVER shows the port-forward wording.
+        // Even if a stale portForwardActive flag leaked into the snapshot, the title stays the
+        // plain "Session connected" hold (the #1159 Part 3 "Port forwarding active" branch is
+        // deleted). A live count-down still renders from the deadline.
+        val deadline = System.currentTimeMillis() + 90_000L
         val notification = buildServiceNotification(
             SessionConnectionSnapshot(
                 liveSessionCount = 1,
                 primaryHostName = "alpha",
-                disconnectAtWallClockMillis = null,
+                disconnectAtWallClockMillis = deadline,
                 portForwardActive = true,
             ),
         )
 
         assertEquals(
-            "Port forwarding active",
+            "Session connected",
             notification.extras.getCharSequence("android.title")?.toString(),
         )
-        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
         assertTrue(
-            "body must be worded for the forward, not a count-down: '$body'",
-            body.contains("port forwarding"),
-        )
-        assertFalse(
-            "a port-forward-pinned hold must NOT show a count-down chronometer",
+            "with a deadline the held session notification still counts down (the forward " +
+                "wording is owned by ForwardingService, not this FGS)",
             notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
-        )
-    }
-
-    @Test
-    fun `port-forward active suppresses the count-down even when a deadline is present`() {
-        // Defensive: even if a stale deadline leaks into the snapshot, port-forward-active
-        // must win and suppress the chronometer (the connection is pinned, not counting down).
-        val notification = buildServiceNotification(
-            SessionConnectionSnapshot(
-                liveSessionCount = 1,
-                primaryHostName = "alpha",
-                disconnectAtWallClockMillis = System.currentTimeMillis() + 90_000L,
-                portForwardActive = true,
-            ),
-        )
-
-        assertFalse(
-            "port-forward-active must suppress the count-down chronometer",
-            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
-        )
-        assertEquals(
-            "Port forwarding active",
-            notification.extras.getCharSequence("android.title")?.toString(),
         )
     }
 

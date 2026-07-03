@@ -91,7 +91,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.hosts.HostEditFromKebabE2eTest"
   "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest"
   "com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest"
-  "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest"
   "com.pocketshell.app.portfwd.ForwardingResumeOnLaunchE2eTest"
   "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"
   "com.pocketshell.app.projects.AgentLaunchCommandDockerTest"

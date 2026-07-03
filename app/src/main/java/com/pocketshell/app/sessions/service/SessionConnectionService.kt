@@ -225,21 +225,23 @@ class SessionConnectionService : Service() {
         // notification ONCE and never schedules a per-second update / wakeup. A
         // contentTextOverride (the initial "Connecting session") never counts down.
         //
-        // Issue #1159 (Part 3): a port-forward pins the connection always-on — there is no
-        // teardown to count down to, so the snapshot carries a null deadline and the
-        // notification is worded for the forward ("Port forwarding active") instead.
+        // Issue #1202 + #1198 (hard-cut, D22): this session FGS is SUPPRESSED while a
+        // port-forward is active (see [SessionServiceController.setPortForwardActive]) — the
+        // ForwardingService FGS is the single owner of the port-forward notification. So this
+        // notification NEVER renders the port-forward wording anymore; the #1159 Part 3
+        // "Port forwarding active" branch is deleted. This FGS only ever shows the plain
+        // "Session connected" hold with its bounded-grace count-down.
         val countdownDeadline =
-            if (contentTextOverride == null && !snapshot.portForwardActive) {
+            if (contentTextOverride == null) {
                 snapshot.disconnectAtWallClockMillis
             } else {
                 null
             }
 
-        val title = if (snapshot.portForwardActive) "Port forwarding active" else "Session connected"
+        val title = "Session connected"
 
         val detail = contentTextOverride
             ?: when {
-                snapshot.portForwardActive -> "Keeping $hostLabel connected for port forwarding"
                 countdownDeadline != null -> "Holding $hostLabel — disconnecting in"
                 else -> "Keeping $hostLabel connected in the background"
             }

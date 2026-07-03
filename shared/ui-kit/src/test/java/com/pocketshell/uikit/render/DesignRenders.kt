@@ -2058,11 +2058,14 @@ class DesignRenders {
      * Issue #1152: static mirror of the redesigned VOICE-RECORDING (not-locked)
      * composer bottom area. The old single row overflowed and clipped `Send` off
      * the right edge (audit D1); the maintainer directive is FIT EVERYTHING — keep
-     * the editing tools mounted, hide nothing. This mirrors the fix:
-     *  - recording surface: [00:14 timer · waveform] (Discard pulled out of it);
+     * the editing tools mounted, hide nothing. This mirrors the fix (with the #1245
+     * inline-lock move):
+     *  - recording surface: [00:14 timer · 🔒 inline lock toggle · waveform]
+     *    (Discard pulled out of it; #1245 moved the hands-free lock UP into it);
      *  - bottom row: the mounted [📎 {} /] tools group anchors the left, then a
-     *    weighted gap, then the four pills stacked as two right-aligned rows —
-     *    [Discard (outlined) · Lock (accent-outlined)] over [Insert · Send].
+     *    weighted gap, then the stop pills stacked as two right-aligned rows —
+     *    [Discard (outlined)] over [Insert · Send]. The old mystery-meat Lock pill
+     *    is gone from this cluster (#1245).
      *
      * Caveat (#555): the real recording row lives in the `app` module's
      * `SheetContent`, which the ui-kit harness can't import, so this mirrors its
@@ -2095,6 +2098,19 @@ class DesignRenders {
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
+                // Issue #1245: the hands-free lock is now an INLINE toggle on the
+                // recording/waveform row (attached to the recording it controls),
+                // an accent-bordered circle with the lock glyph — no longer a
+                // mystery-meat pill in the bottom Send/Discard cluster.
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(17.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "🔒", fontSize = 15.sp)
+                }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2149,7 +2165,9 @@ class DesignRenders {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Discard — outlined secondary pill (48dp).
+                        // Discard — outlined secondary pill (48dp). Issue #1245: the
+                        // Lock pill was removed from this cluster (it moved up to the
+                        // waveform row as an inline toggle); Discard stays put.
                         Box(
                             modifier = Modifier
                                 .height(48.dp)
@@ -2162,25 +2180,6 @@ class DesignRenders {
                             Text(
                                 text = "Discard",
                                 color = PocketShellColors.TextSecondary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        // Lock — accent-outlined pill (48dp).
-                        Row(
-                            modifier = Modifier
-                                .height(48.dp)
-                                .clip(RoundedCornerShape(22.dp))
-                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                                .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(text = "🔒", fontSize = 13.sp)
-                            Text(
-                                text = "Lock",
-                                color = PocketShellColors.Accent,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                             )

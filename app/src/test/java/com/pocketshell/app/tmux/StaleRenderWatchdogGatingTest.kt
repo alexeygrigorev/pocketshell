@@ -61,10 +61,18 @@ import java.io.InputStream
  *    again (immediate heal on return).
  *  - [stableForegroundPaneBacksOff]: a steady non-diverging pane widens 4s -> 8s ->
  *    16s so it stops hammering capture-pane.
- *  - [newStreamedOutputSnapsCadenceBackToHot]: fresh active-pane %output during a
- *    BACKED-OFF (16s) window WAKES the watchdog immediately — the redraw is captured
- *    within the HOT bound (≤4s), NOT deferred ~15s to the next backed-off tick (the
- *    #1166 heal-latency fix; the back-off is not purely poll-based).
+ *  - [healthyStreamingPaneBacksOffInsteadOfThrashing]: issue #1219 steady-heat fix —
+ *    a HEALTHY, continuously-STREAMING pane BACKS OFF instead of staying pinned at the
+ *    hot 4s cadence. RED on base (any %output reset the back-off -> ~15 captures/60s);
+ *    GREEN with the fix (~6 captures/60s). The #1164 "runs warm" lever.
+ *  - [healthyStreamingOutputDoesNotCutBackedOffWaitShort]: the #1219 wake gate — a
+ *    dense healthy pane's %output is IGNORED (no capture cuts the backed-off wait
+ *    short), the direct counterpart of the black case below.
+ *  - [fragmentsOverBlackStreamingPaneStillHealsWithinHotBound]: the LOAD-BEARING
+ *    black-recovery guard — a fragments-over-black (#966/#1138/#1214) redraw on a
+ *    STREAMING pane during a backed-off window STILL heals within ≤4s (its render is
+ *    locally suspect, so its %output wakes the watchdog). Proves the steady-heat
+ *    back-off did NOT blunt the oracle for a genuinely-black streaming pane.
  *  - [backedOffPartialBlackRedrawHealsWithinHotBound]: the #1138 no-black-screen bar —
  *    a partial-black redraw during a backed-off window heals within ≤4s, not up to 16s.
  *  - [divergingTickSnapsCadenceBackToHot]: a detected divergence (heal fired) snaps the
@@ -221,67 +229,195 @@ class StaleRenderWatchdogGatingTest {
     }
 
     // -------------------------------------------------------------------------
-    // (5) NEW STREAMED OUTPUT during a BACKED-OFF window WAKES the watchdog
-    //     IMMEDIATELY (issue #1166 heal-latency fix). The back-off is NOT purely
-    //     poll-based: a fresh active-pane %output must cut the long (16s) backed-
-    //     off wait short so the redraw is captured/diffed/healed within the HOT
-    //     bound (≤4s), NOT deferred ~15s to the next backed-off tick. This is the
-    //     no-black-screen-regression bar — the #1138 partial-black case has this
-    //     watchdog as its sole steady-state oracle.
+    // (5) STEADY-HEAT FIX (issue #1219) — a HEALTHY, continuously-STREAMING pane
+    //     must BACK OFF (4s -> 8s -> 16s) instead of thrashing capture-pane at the
+    //     hot 4s cadence forever. This is the #1164 "runs warm" lever: a live agent
+    //     pane emitting %output steadily paid an SSH capture-pane round-trip every 4s
+    //     during the heaviest-use foreground window.
     //
-    //     RED (base, poll-only back-off): setting the output stamp did not wake the
-    //     pending delay(16s), so no capture landed until t=28s -> the ≤4s assertion
-    //     below fails. GREEN (wake): the %output fires the wake, the backed-off
-    //     receive() returns at once, and the capture lands within the hot bound.
+    //     RED (base): ANY %output reset the back-off (stableTicks -> 0 via
+    //     `hadNewOutput`, and the wake cut every backed-off wait short), so a
+    //     streaming pane never left the hot 4s cadence -> ~15 captures over 60s ->
+    //     the `captures <= 8` assertion FAILS. GREEN (#1219): a CONFIDENTLY-DENSE
+    //     healthy render ignores the %output wakes and the oracle backs off, so the
+    //     same 60s window pays ~6 captures.
     // -------------------------------------------------------------------------
 
     @Test
-    fun newStreamedOutputSnapsCadenceBackToHot() = runVmTest {
+    fun healthyStreamingPaneBacksOffInsteadOfThrashing() = runVmTest {
         val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
-        val vm = armIdleWatchdog(client, paneId = "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
 
+        // Paint a DENSE, fully-rendered viewport (32 of 40 rows live) so the pane is
+        // CONFIDENTLY HEALTHY — a real continuously-streaming agent pane, NOT blank /
+        // partial-black / fragments-over-black.
+        pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        assertFalse(
+            "precondition: a dense pane must NOT read as a possible lost frame " +
+                "(else the wake gate would keep it hot)",
+            pane.terminalState.visibleRenderMayHaveLostFrame(),
+        )
+
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
-        vm.setPaneLastOutputAtMsForTest("%1", 0L)
+        // The watchdog captures return an EMPTY frame each tick (no queued response),
+        // so healActivePaneIfStaleRender no-ops (healed=false) and never repaints —
+        // the dense render is preserved as HEALTHY the whole window.
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
 
-        // Let it back off to the widest interval: captures at t=4s (stableTicks->1)
-        // and t=12s (->2); the loop is now parked in a 16s backed-off wait that,
-        // on base, would not fire again until t=28s.
+        // Continuously stream fresh %output on the ACTIVE pane once a second — faster
+        // than the hot 4s tick — driving the REAL output path end-to-end so the
+        // output -> wake wire is exercised. On base every one of these reset the
+        // back-off / cut the wait short, pinning the hot cadence.
+        val before = client.captureCount()
+        val windowMs = 60 * 1000L
+        var elapsed = 0L
+        while (elapsed < windowMs) {
+            advanceTimeBy(1000L)
+            runCurrent()
+            vm.recordPaneOutputActivityForTest("%1")
+            runCurrent()
+            elapsed += 1000L
+        }
+        val captures = client.captureCount() - before
+
+        // A hot 4s cadence over 60s pays ~15 captures; backed off (t=4,12,28,44,60)
+        // pays ~5-6. Assert the fix meaningfully cut the steady-state rate.
+        assertTrue(
+            "REGRESSION (#1219 steady-heat): a HEALTHY continuously-streaming pane " +
+                "must BACK OFF (4s->8s->16s), NOT thrash capture-pane at the hot 4s " +
+                "cadence. Over 60s a hot loop pays ~15 captures; backed off ~6. " +
+                "Observed $captures.",
+            captures <= 8,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // (5b) A FRAGMENTS-OVER-BLACK redraw on a STREAMING pane during a BACKED-OFF
+    //      window STILL HEALS within the hot bound (issue #1219 must NOT regress
+    //      the #1138/#966/#1214 black-screen recovery). A redraw on device arrives
+    //      AS %output, so once the render goes suspect (black) the next %output wakes
+    //      the backed-off watchdog -> the divergence is captured + healed within ≤4s,
+    //      not up to 16s later. This is the LOAD-BEARING black-recovery guard: it must
+    //      pass GREEN with the fix, proving the steady-heat back-off did not blunt the
+    //      oracle for a genuinely-black streaming pane.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun fragmentsOverBlackStreamingPaneStillHealsWithinHotBound() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // Let the watchdog back off to the widest (16s) interval — captures at t=4s,
+        // t=12s (empty capture => healed=false).
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
+
         val before = client.captureCount()
         advanceTimeBy(13 * 1000L)
         runCurrent()
         assertEquals("backed off to 2 captures by t=13s", 2, client.captureCount() - before)
 
-        // ~1s into the 16s backed-off window a fresh %output lands on the ACTIVE
-        // pane — drive the REAL output path ([recordVisiblePaneOutput]) end-to-end
-        // so the wire from output -> wake is exercised, not just the stamp.
+        // The agent overpaints its viewport into FRAGMENTS-OVER-BLACK — a CSI 2J
+        // clear then a handful of scattered live lines (the #966/#1214 class) — while
+        // tmux still holds the authoritative rich frame. On device this redraw arrives
+        // AS %output, which must WAKE the backed-off watchdog because the render is now
+        // locally suspect ([visibleRenderMayHaveLostFrame]).
+        pane.terminalState.appendRemoteOutput(
+            fragmentsOverBlackFrame().toByteArray(Charsets.US_ASCII),
+        )
+        assertTrue(
+            "precondition: a fragments-over-black render must read as a possible lost " +
+                "frame so the wake gate honors it",
+            pane.terminalState.visibleRenderMayHaveLostFrame(),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 90L, output = richFrameLines(), isError = false),
+        )
         val beforeWake = client.captureCount()
         vm.recordPaneOutputActivityForTest("%1")
 
-        // The wake cuts the backed-off wait short: a sub-hot advance (0.5s, far
-        // under both the 4s hot bound AND the ~15s remaining on the backed-off
-        // tick) already yields the capture. On base the poll-only back-off deferred
-        // it to t=28s, so 0.5s later NOTHING would have captured -> RED. GREEN: the
-        // wake fires the capture at once, well within the hot bound.
-        advanceTimeBy(500L)
-        runCurrent()
-        assertTrue(
-            "REGRESSION (#1166 heal-latency): a fresh %output during a BACKED-OFF " +
-                "(16s) window must WAKE the watchdog and capture WITHIN the hot bound " +
-                "(≤${STALE_RENDER_WATCHDOG_TICK_MS}ms — here at once), NOT wait out the " +
-                "remaining ~15s. Captured ${client.captureCount() - beforeWake} in 0.5s.",
-            client.captureCount() > beforeWake,
-        )
-
-        // The wake tick reset the back-off, so the very next tick is HOT again: a
-        // single 4s advance yields a further capture before any re-back-off widens.
-        val afterWakeCapture = client.captureCount()
+        // Within the HOT bound (≤4s) the heal must have fired — the capture that
+        // detects + repairs the fragments-over-black divergence lands now, NOT at
+        // the next backed-off tick ~15s later.
         advanceTimeBy(STALE_RENDER_WATCHDOG_TICK_MS + 100)
         runCurrent()
         assertTrue(
-            "after the wake the FOLLOWING tick fires at the hot 4s cadence (the " +
-                "back-off was reset), before an idle pane re-widens the interval.",
-            client.captureCount() > afterWakeCapture,
+            "REGRESSION (#1219 must not regress #1138/#966/#1214): a fragments-over-" +
+                "black redraw during a BACKED-OFF window on a STREAMING pane must be " +
+                "captured + healed within the hot bound (≤${STALE_RENDER_WATCHDOG_TICK_MS}" +
+                "ms), NOT up to 16s later. Captured ${client.captureCount() - beforeWake} " +
+                "within the hot bound.",
+            client.captureCount() > beforeWake,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // (5c) A HEALTHY streaming pane's %output does NOT cut a BACKED-OFF wait short
+    //      (issue #1219). The #1166 wake is now SCOPED to a suspect render: a dense
+    //      healthy pane's redraw is ignored so the full backed-off interval elapses,
+    //      the direct counterpart of (5b) proving the wake gate discriminates.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun healthyStreamingOutputDoesNotCutBackedOffWaitShort() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
+
+        // Back off to the widest (16s) interval: captures at t=4s, t=12s.
+        val before = client.captureCount()
+        advanceTimeBy(13 * 1000L)
+        runCurrent()
+        assertEquals("backed off to 2 captures by t=13s", 2, client.captureCount() - before)
+
+        // A fresh %output lands on the HEALTHY (dense) active pane ~1s into the 16s
+        // backed-off window. Because the render is NOT suspect, the wake must be
+        // IGNORED and the wait must run out — a sub-hot advance yields NO capture.
+        val beforeWake = client.captureCount()
+        vm.recordPaneOutputActivityForTest("%1")
+        advanceTimeBy(2 * 1000L)
+        runCurrent()
+        assertEquals(
+            "REGRESSION (#1219): a HEALTHY streaming pane's %output must NOT cut the " +
+                "backed-off wait short — no capture may land 2s into the 16s window. " +
+                "Captured ${client.captureCount() - beforeWake}.",
+            0,
+            client.captureCount() - beforeWake,
+        )
+
+        // The full backed-off interval still elapses and captures (heal net intact):
+        // the next capture lands at t=28s, not defeated, just deferred as intended.
+        advanceTimeBy(16 * 1000L)
+        runCurrent()
+        assertTrue(
+            "the backed-off tick still fires when the 16s interval elapses",
+            client.captureCount() > beforeWake,
         )
     }
 
@@ -453,6 +589,34 @@ class StaleRenderWatchdogGatingTest {
         repeat(27) { add("recovered context row $it") }
     }
 
+    /**
+     * A DENSE, confidently-healthy viewport (32 of the 80x40 pty's rows live) — a
+     * normally-painted streaming agent pane. Its live fraction (0.8) sits ABOVE the
+     * [visibleRenderMayHaveLostFrame] ceiling, so the #1219 wake gate reads it HEALTHY
+     * and lets the watchdog back off.
+     */
+    private fun denseHealthyFrame(): String = buildString {
+        append(CLEAR_ONLY)
+        repeat(32) { append("agent response line $it with real streamed content\r\n") }
+    }
+
+    /**
+     * A FRAGMENTS-OVER-BLACK viewport (#966/#1214): a CSI 2J clear then a handful of
+     * scattered live lines (>3 so it exercises the VISIBLE-only line-fraction leg of
+     * [visibleRenderMayHaveLostFrame], the class the ≤3-line partial-black misses) over
+     * an otherwise-black 40-row grid. Reads as a possible lost frame so the #1219 wake
+     * gate honors its %output and heals it within the hot bound. Modelled on the
+     * maintainer's #966 alt-screen pane — no dense scrollback masks the visible sparsity.
+     */
+    private fun fragmentsOverBlackFrame(): String = buildString {
+        append(CLEAR_ONLY)
+        append("24m 3 / 8 / 4 / 3 / 31\r\n")
+        append("scattered fragment A\r\n")
+        append("scattered fragment B\r\n")
+        append("scattered fragment C\r\n")
+        append("3\r\n")
+    }
+
     private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
@@ -579,5 +743,12 @@ class StaleRenderWatchdogGatingTest {
         override fun close() {
             closed = true
         }
+    }
+
+    private companion object {
+        // ESC[2J ESC[H — a full clear + home, the overpaint that wipes a viewport to
+        // black before a fresh (possibly fragments-over-black) paint. The `[` chars
+        // are preceded by a literal ESC (0x1B).
+        const val CLEAR_ONLY: String = "[2J[H"
     }
 }

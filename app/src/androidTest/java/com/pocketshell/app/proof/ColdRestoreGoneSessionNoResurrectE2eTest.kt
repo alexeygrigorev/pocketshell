@@ -17,7 +17,9 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
+import com.pocketshell.app.projects.STALE_SESSION_CONFIRM_TAG
 import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
+import com.pocketshell.app.projects.STALE_SESSION_GO_HOME_TAG
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.StaleSession
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -396,6 +398,89 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
     } }
 
     /**
+     * Issue #1155 REOPEN (2026-07-03) — the maintainer's exact dogfood path. Open
+     * a session, kill it on the computer, then 1–2 hours later just OPEN
+     * PocketShell so it COLD-RESTORES straight onto that previous session. Part B
+     * only wired the recovery dialog into the folder tree, which is never opened on
+     * this path, so the prompt was silently lost and an empty session was created.
+     *
+     * This is the delivery reproduction: it drives the SAME attach → background →
+     * kill-externally → recreate/cold-restore journey as
+     * [coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList], but asserts the
+     * user actually SEES the app-level "This session no longer exists — create in
+     * this folder, or go home?" recovery DIALOG (with the "Go to home" action), and
+     * that the session was NOT resurrected server-side. On base (tree-only owner)
+     * the dialog never appears on cold restore — this fails; with the app-level
+     * [com.pocketshell.app.tmux.StaleSessionPromptController] it appears.
+     */
+    @Test
+    fun coldRestoreToGoneSessionShowsRecreateDialogWithGoHome() { runBlocking {
+        val key = fixtureKey
+
+        // ---- Attach to the seeded session via the normal journey.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+
+        // ---- Background -> persist last session, then kill it on the server.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+        killRemoteSession(key)
+        assertTrue("session must be gone on the server after kill", !sessionAlive(key))
+
+        // ---- Cold-restore into the gone session (savedInstanceState != null).
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // ---- The app-level recovery DIALOG must appear (with the go-home action).
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val dialogShown = compose
+            .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val goHomeShown = compose
+            .onAllNodesWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val resurrected = sessionAlive(key)
+        writeText(
+            "cold-restore-recreate-dialog.txt",
+            buildString {
+                appendLine("restored_session=$SEEDED_SESSION")
+                appendLine("recreate_dialog_shown=$dialogShown")
+                appendLine("go_home_action_shown=$goHomeShown")
+                appendLine("session_resurrected_server_side=$resurrected")
+                appendLine("expected_recreate_dialog_shown=true")
+                appendLine("expected_go_home_action_shown=true")
+                appendLine("expected_session_resurrected=false")
+            },
+        )
+        assertTrue(
+            "REGRESSION (#1155 reopen): a cold restore onto a gone session must show " +
+                "the recovery dialog, not silently create an empty session",
+            dialogShown,
+        )
+        assertTrue(
+            "the cold-restore recovery dialog must offer a 'Go to home' action " +
+                "(there is no tree behind it on this path)",
+            goHomeShown,
+        )
+        assertTrue(
+            "a cold restore onto a gone session must NOT resurrect it server-side",
+            !resurrected,
+        )
+        Unit
+    } }
+
+    /**
      * Issue #1155 (Part B) blocker 3 — the maintainer's PRIMARY gesture. A NORMAL
      * TAP of a persisted session row whose tmux session was killed externally must
      * reach the "This session no longer exists — create a new session in this
@@ -463,6 +548,355 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             "tapping a gone session must NOT resurrect it server-side (no silent " +
                 "`new-session -A`)",
             !resurrected,
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1155 REOPEN (2026-07-03) blocker 1 — the "Go to home" recovery ACTION.
+     * The sibling `coldRestoreToGoneSessionShowsRecreateDialogWithGoHome` only
+     * asserts the go-home BUTTON is present; nothing tapped it or proved it
+     * navigates. This drives the tap and asserts the app actually lands on the host
+     * list (`popToHostList()`).
+     *
+     * It uses the OpenExisting tap path deliberately: after the gone preflight the
+     * navigator `back()`s to the FOLDER TREE (not the host list), so the dialog
+     * sits over the folder tree and the host row is NOT yet visible. Tapping "Go to
+     * home" must then `popToHostList()` — the host row appears. If `popToHostList()`
+     * is dropped from the dialog's dismiss handler the app stays on the folder tree
+     * and the host row never appears → this test fails (red→green on the action).
+     */
+    @Test
+    fun goHomeTapOnStaleDialogReturnsToHostList() { runBlocking {
+        val key = fixtureKey
+
+        // ---- (1) host -> folder list; the seeded session row is present.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+
+        // ---- (2) Kill the session server-side (external removal).
+        killRemoteSession(key)
+        assertTrue("session must be gone server-side after kill", !sessionAlive(key))
+
+        // ---- (3) TAP the still-shown persisted row -> OpenExisting preflight
+        // confirms gone -> back() to the folder tree + stale broadcast -> dialog.
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+
+        // Sanity: the dialog sits over the FOLDER TREE, so the host row is NOT
+        // visible yet. This is what makes the go-home nav load-bearing — the app is
+        // not already on the host list.
+        val onHostListBeforeGoHome = onHostList(hostRowTag)
+
+        // ---- (4) TAP "Go to home" -> popToHostList().
+        compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true).performClick()
+
+        // ---- The app must land on the host list, and the dialog is gone.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            onHostList(hostRowTag) &&
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+        }
+        val landedOnHostList = onHostList(hostRowTag)
+        val dialogGone = compose
+            .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isEmpty()
+        writeText(
+            "go-home-tap-nav.txt",
+            buildString {
+                appendLine("on_host_list_before_go_home=$onHostListBeforeGoHome")
+                appendLine("landed_on_host_list_after_go_home=$landedOnHostList")
+                appendLine("dialog_dismissed=$dialogGone")
+                appendLine("expected_on_host_list_before_go_home=false")
+                appendLine("expected_landed_on_host_list_after_go_home=true")
+                appendLine("expected_dialog_dismissed=true")
+            },
+        )
+        assertTrue(
+            "precondition: the dialog must sit over the folder tree (NOT the host " +
+                "list) so the go-home navigation is actually exercised",
+            !onHostListBeforeGoHome,
+        )
+        assertTrue(
+            "REGRESSION (#1155 reopen): tapping 'Go to home' on the stale-session " +
+                "dialog must popToHostList() — the host list should be shown",
+            landedOnHostList,
+        )
+        assertTrue("the stale-session dialog must be dismissed after 'Go to home'", dialogGone)
+        Unit
+    } }
+
+    /**
+     * Issue #1155 REOPEN (2026-07-03) blocker 2 — the "Create session" recovery
+     * ACTION. The sibling `openExistingTapOfGoneSessionShowsRecreateDialog` only
+     * asserts the dialog appears; nothing tapped "Create session" or proved a fresh
+     * session is created in the gone session's folder. This drives the tap and
+     * asserts:
+     *
+     *  - a fresh tmux session with the gone session's name is created server-side
+     *    (it was killed; after the tap `tmux has-session` succeeds again), and
+     *  - it is created in the STALE session's FOLDER — the recreated session's
+     *    `pane_current_path` equals the exact `folderPath` the app broadcast on the
+     *    production [SessionLifecycleSignals] stale signal (resolved to the host
+     *    home dir when that folder is null/blank), proving the `-c <folder>` routing
+     *    of `startDirectory = stalePrompt.folderPath`.
+     *
+     * It uses the OpenExisting tap path deliberately: after the gone preflight the
+     * navigator `back()`s to the FOLDER TREE, so the recovery dialog sits over the
+     * tree (not the session screen). Tapping "Create session" must then navigate to
+     * a FRESH session and create it in the folder. If the recreate lambda is broken
+     * (e.g. it drops to the list instead of navigating, or fails to pass the
+     * folder), no session is created / it lands in the wrong dir → this test fails
+     * (red→green on the action).
+     */
+    @Test
+    fun createSessionTapOnStaleDialogRecreatesInStaleFolder() { runBlocking {
+        val key = fixtureKey
+
+        // Subscribe to the production stale-session signal to capture the EXACT
+        // folder the app will recreate into (the `-c <folder>` under test).
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(ctx, TestAccessEntryPoint::class.java)
+        val staleEvents = java.util.Collections.synchronizedList(mutableListOf<StaleSession>())
+        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        collectorScope.launch {
+            entryPoint.sessionLifecycleSignals().staleSessions.collect { staleEvents.add(it) }
+        }
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (1) host -> folder list; the seeded session row is present.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+
+        // ---- (2) Kill the session server-side (external removal).
+        killRemoteSession(key)
+        assertTrue("session must be gone server-side after kill", !sessionAlive(key))
+
+        // ---- (3) TAP the still-shown persisted row -> OpenExisting preflight
+        // confirms gone -> back() to the folder tree + stale broadcast -> dialog.
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        assertTrue("session must still be gone before Create is tapped", !sessionAlive(key))
+
+        // The exact folder the production code will recreate into (== the
+        // StaleSessionPromptController prompt's folderPath).
+        val staleFolder = synchronized(staleEvents) {
+            staleEvents.firstOrNull { it.sessionName == SEEDED_SESSION }?.folderPath
+        }
+        collectorScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+
+        // ---- TAP "Create session" -> recreate a fresh session in the SAME folder.
+        compose.onNodeWithTag(STALE_SESSION_CONFIRM_TAG, useUnmergedTree = true).performClick()
+
+        // The recreate lambda must NAVIGATE to a fresh session screen (base != null,
+        // so it takes the navigate branch, not the go-home fallback). If the session
+        // screen never appears the recreate lambda didn't fire at all.
+        compose.waitUntil(timeoutMillis = CREATE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val sessionScreenShown = compose
+            .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+        // ---- The recreate must create a fresh session server-side. Poll until the
+        // new session exists (the UserTap connect runs `new-session -A -c <folder>`);
+        // a fresh SSH connect + attach + create can take a while on a cold emulator.
+        var recreated = false
+        val deadline = SystemClock.elapsedRealtime() + CREATE_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (sessionAlive(key)) { recreated = true; break }
+            delay(500)
+        }
+
+        // ---- Folder routing: the recreated session's working directory must equal
+        // the stale folder the app broadcast (null/blank -> host home dir).
+        val expectedPath = canonicalRemotePath(resolveExpectedFolder(key, staleFolder))
+        val recreatedPath = if (recreated) canonicalRemotePath(sessionCurrentPath(key)) else null
+        writeText(
+            "create-session-tap-recreate.txt",
+            buildString {
+                appendLine("stale_session=$SEEDED_SESSION")
+                appendLine("broadcast_folder_path=$staleFolder")
+                appendLine("session_screen_shown_after_create_tap=$sessionScreenShown")
+                appendLine("session_recreated_after_create_tap=$recreated")
+                appendLine("expected_recreated_folder=$expectedPath")
+                appendLine("actual_recreated_folder=$recreatedPath")
+                appendLine("expected_session_screen_shown=true")
+                appendLine("expected_session_recreated=true")
+            },
+        )
+        assertTrue(
+            "tapping 'Create session' must NAVIGATE to a fresh session screen " +
+                "(the recreate branch fired, not the go-home fallback)",
+            sessionScreenShown,
+        )
+        assertTrue(
+            "REGRESSION (#1155 reopen): tapping 'Create session' must recreate the " +
+                "gone session `$SEEDED_SESSION` server-side; has-session still fails",
+            recreated,
+        )
+        assertEquals(
+            "the recreated session must be created in the STALE session's folder " +
+                "(-c <folder> routing of startDirectory = stalePrompt.folderPath)",
+            expectedPath,
+            recreatedPath,
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1155 REOPEN (2026-07-03) blocker 2 on the COLD-RESTORE path — the
+     * maintainer's exact dogfood gesture for "Create session".
+     *
+     * The sibling [createSessionTapOnStaleDialogRecreatesInStaleFolder] proves the
+     * "Create session" action on the in-tree OpenExisting path; this drives the SAME
+     * recovery through the real cold-restore journey (attach → background → kill
+     * externally → recreate/cold-restore → recovery dialog → tap "Create session")
+     * and asserts the recovery actually recovers: a FRESH session with the gone name
+     * is created server-side IN the stale folder (its `pane_current_path` equals the
+     * broadcast `folderPath`) and the session screen is shown, not a blank.
+     *
+     * The recovery routes through the gateway create-in-folder path
+     * ([StaleSessionPromptController.createSessionInFolder] →
+     * `tmux create-detached` / `new-session -A -c <folder>`), so the create is
+     * deterministic regardless of the navigate outcome — it does NOT depend on the
+     * connect path's `new-session -A`, which the cold-restore `ColdRestore` trigger
+     * refuses to run (the #666 no-resurrect guard). That guard is precisely why a
+     * plain `navigate` back to the (dead) cold-restore destination — which the
+     * screen re-classifies as `ColdRestore` whenever the recovery destination equals
+     * `restoredTmuxDestination` (a persisted session with no `tmuxSessionId`) — was a
+     * silent NO-OP; the gateway create sidesteps it.
+     */
+    @Test
+    fun createSessionTapOnStaleDialogRecreatesInStaleFolderOnColdRestore() { runBlocking {
+        val key = fixtureKey
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(ctx, TestAccessEntryPoint::class.java)
+
+        // Capture the EXACT folder the app will recreate into (== the broadcast
+        // stale folderPath == the restored startDirectory) so the `-c <folder>`
+        // routing can be asserted.
+        val staleEvents = java.util.Collections.synchronizedList(mutableListOf<StaleSession>())
+        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        collectorScope.launch {
+            entryPoint.sessionLifecycleSignals().staleSessions.collect { staleEvents.add(it) }
+        }
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (1) Attach to the seeded session via the normal journey.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+
+        // ---- (2) Background -> onStop persists the last session (#177).
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (3) Kill the session on the server. It is now GONE.
+        killRemoteSession(key)
+        assertTrue("session must be gone on the server after kill", !sessionAlive(key))
+
+        // ---- (4) Cold-restore into the gone session (savedInstanceState != null).
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // ---- (5) The app-level recovery dialog must appear.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        assertTrue("session must still be gone before Create is tapped", !sessionAlive(key))
+
+        val staleFolder = synchronized(staleEvents) {
+            staleEvents.firstOrNull { it.sessionName == SEEDED_SESSION }?.folderPath
+        }
+        collectorScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+
+        // ---- (6) TAP "Create session" -> recreate a fresh session in the SAME folder.
+        compose.onNodeWithTag(STALE_SESSION_CONFIRM_TAG, useUnmergedTree = true).performClick()
+
+        // The recovery must NAVIGATE to a fresh session screen (attaches to the
+        // just-created session). If it re-enters the dead ColdRestore destination,
+        // the screen never attaches and no session is created.
+        compose.waitUntil(timeoutMillis = CREATE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val sessionScreenShown = compose
+            .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+        // ---- (7) The recreate must create a fresh session server-side.
+        var recreated = false
+        val deadline = SystemClock.elapsedRealtime() + CREATE_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (sessionAlive(key)) { recreated = true; break }
+            delay(500)
+        }
+
+        // ---- Folder routing: the recreated session's cwd must equal the stale folder.
+        val expectedPath = canonicalRemotePath(resolveExpectedFolder(key, staleFolder))
+        val recreatedPath = if (recreated) canonicalRemotePath(sessionCurrentPath(key)) else null
+        writeText(
+            "cold-restore-create-session-tap-recreate.txt",
+            buildString {
+                appendLine("stale_session=$SEEDED_SESSION")
+                appendLine("broadcast_folder_path=$staleFolder")
+                appendLine("session_screen_shown_after_create_tap=$sessionScreenShown")
+                appendLine("session_recreated_after_create_tap=$recreated")
+                appendLine("expected_recreated_folder=$expectedPath")
+                appendLine("actual_recreated_folder=$recreatedPath")
+                appendLine("expected_session_screen_shown=true")
+                appendLine("expected_session_recreated=true")
+            },
+        )
+        assertTrue(
+            "tapping 'Create session' on the COLD-RESTORE stale dialog must NAVIGATE " +
+                "to a fresh session screen (the recreate fired, not a ColdRestore no-op)",
+            sessionScreenShown,
+        )
+        assertTrue(
+            "REGRESSION (#1155 reopen): tapping 'Create session' on cold restore must " +
+                "recreate the gone session `$SEEDED_SESSION` server-side; has-session still fails",
+            recreated,
+        )
+        assertEquals(
+            "the cold-restore recreate must create in the STALE session's folder " +
+                "(-c <folder> routing of the broadcast folderPath)",
+            expectedPath,
+            recreatedPath,
         )
         Unit
     } }
@@ -622,6 +1056,37 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         return exec?.stdout?.contains("ALIVE") == true
     }
 
+    /** The working directory (`pane_current_path`) of the seeded session, or "". */
+    private suspend fun sessionCurrentPath(key: String): String {
+        val exec = runScript(
+            key,
+            "tmux display-message -p -t ${shellQuote(SEEDED_SESSION)} '#{pane_current_path}' 2>/dev/null",
+        )
+        return exec?.stdout?.trim().orEmpty()
+    }
+
+    /**
+     * The directory a recreate with [staleFolder] must land in: the folder itself
+     * when the app broadcast one, else the host home dir (a null/blank folderPath
+     * recreates with no `-c`, so `new-session -A` lands in `$HOME`).
+     */
+    private suspend fun resolveExpectedFolder(key: String, staleFolder: String?): String {
+        val folder = staleFolder?.trim().orEmpty()
+        if (folder.isNotEmpty() && folder != "~") return folder
+        val home = runScript(key, "printf %s \"\$HOME\"")?.stdout?.trim().orEmpty()
+        return home.ifEmpty { folder }
+    }
+
+    /**
+     * Resolve a remote path to its canonical form so the recreate assertion is not
+     * defeated by a symlinked home (`/home/x` vs `/root` vs a `realpath`ed cwd).
+     */
+    private suspend fun canonicalRemotePath(path: String): String {
+        if (path.isBlank()) return path
+        val exec = runScript(key = fixtureKey, script = "cd ${shellQuote(path)} 2>/dev/null && pwd -P || printf %s ${shellQuote(path)}")
+        return exec?.stdout?.trim()?.ifBlank { path } ?: path
+    }
+
     private suspend fun runScript(key: String, script: String) =
         SshConnection.connect(
             host = DEFAULT_HOST,
@@ -705,5 +1170,10 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
         const val LIFECYCLE_DRAIN_MS: Long = 750L
         const val RESTORE_TIMEOUT_MS: Long = 20_000L
+
+        // A fresh SSH connect + tmux attach + `new-session -A -c <folder>` after the
+        // recreate tap is slower than a restore probe (a brand-new connection, not a
+        // warm reattach), so the create-session recreate gets a longer window.
+        const val CREATE_TIMEOUT_MS: Long = 60_000L
     }
 }

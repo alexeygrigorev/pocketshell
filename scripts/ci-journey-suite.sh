@@ -560,6 +560,20 @@ JOURNEY_CLASSES=(
   # UNCONDITIONAL `reseedActivePaneForReattach`, not blank-only). Uses ONLY the
   # deterministic agents:2222 fixture (no toxiproxy) and does NOT self-skip on CI.
   "$FQCN_PREFIX.VoiceSendActivePaneStaysVisibleE2eTest"
+  # ADDED (#1214 — mostly-empty-model reveal-time leg of the #1208 fragments-over-black audit): the
+  # reveal/resize/switch nets gate an authoritative `capture-pane` diff on the cheap LOCAL pre-check
+  # `visibleRenderMayHaveLostFrame`, which before #1214 only flagged a live-fraction in (0.5, 0.75]
+  # or a ≤3-line partial-blank. A mostly-empty pane with >3 scattered live lines but live-fraction
+  # BELOW 0.5 read "healthy" at reveal → it REVEALED UNHEALED (fragments-over-black), only maybe
+  # caught ~4s later by the steady watchdog. This journey seeds a FULL 40-row banner, attaches,
+  # injects a mostly-empty model (local `CSI 2J`+`CSI H` + 5 scattered live lines — >3 lines and
+  # <0.5 fraction; the REMOTE tmux grid keeps the full banner → transport GUARANTEED LIVE), then
+  # drives the EXACT same-dimension (no-op) resize heal branch. RED on base (the sub-0.5 pane is
+  # skipped → banner never restored in the SHORT window); GREEN with #1214 (the widened pre-check
+  # flags it → the reveal-time heal re-captures the full banner AT reveal, not ~4s later). Uses ONLY
+  # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT
+  # self-skip on CI.
+  "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"
   # ADDED (#1153 — send-with-attachment half-black, v0.4.21 dogfood): a composer Send WITH AN
   # ATTACHMENT is ALWAYS multi-line (it appends an "Attached files:" block), so it takes the
   # bracketed-paste + submit branch and the alt-screen agent clear+redraws its WHOLE viewport; the

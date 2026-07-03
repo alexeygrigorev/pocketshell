@@ -388,7 +388,13 @@ class VoiceSendSameGridRevealHealTest {
                 isError = false,
             ),
         )
-        val fullFrame = (1..6).map { "$sessionName painted line $it" }
+        // Issue #1214: a GENUINELY DENSE pane — enough live lines to fill the visible grid well
+        // above the 0.75 live-fraction ceiling, so the #1214-widened reveal/resize pre-check
+        // ([TerminalSurfaceState.visibleRenderMayHaveLostFrame]) reads it confidently-full and
+        // skips the capture. A merely-sparse "painted" frame (a handful of lines on a tall grid)
+        // now legitimately pays ONE authoritative capture under #1214 — the point of THIS test is
+        // the #285 "a healthy DENSE pane must not spam tmux" no-op, which a dense frame models.
+        val fullFrame = (1..60).map { "$sessionName painted line $it" }
         repeat(4) {
             capturePaneResponses.addLast(
                 CommandResponse(number = 2L, output = fullFrame, isError = false),

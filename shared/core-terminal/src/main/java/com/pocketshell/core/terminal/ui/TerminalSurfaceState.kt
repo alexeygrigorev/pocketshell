@@ -967,20 +967,29 @@ class TerminalSurfaceState(
      * no-op-resize heal ([com.pocketshell.app.tmux.TmuxSessionViewModel.maybeHealActivePaneOnNoOpResize])
      * run to decide whether paying for an authoritative `capture-pane` diff (the unified
      * [visibleRenderLostFrameVsCapture] oracle) is worthwhile before revealing / after a keyboard
-     * toggle. It is TRUE when the rendered viewport is sparse/banded enough to POSSIBLY be a lost
-     * frame: fully blank, the ≤3-line partial-black, OR a black BAND whose live share of the
+     * toggle. It is TRUE when the rendered viewport is NOT confidently dense — POSSIBLY a lost
+     * frame: fully blank, the ≤3-line partial-black, OR any >3-line pane whose live share of the
      * visible rows is at most [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION].
      *
      * It fires for the SAME two states the pre-#1176 gates already captured for — fully blank OR
-     * the ≤3-line partial-black — PLUS the exact GAP the dead-zone left: a >3-line black BAND with
-     * MORE than half the visible rows live (so the pre-#1176 gates read it "painted") but still up
-     * to [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] of them — the band between the old 50%-line ceiling
-     * and a confidently-dense pane. A genuinely-sparse-but-correct SMALL pane (≤ half the rows live
-     * — a short prompt) is deliberately NOT flagged: the pre-#1176 no-op-resize contract pays
-     * nothing for it, and the steady-state watchdog remains its net. It does NOT confirm a lost
-     * frame — only the `capture-pane` diff can, since a sparse-but-correct pane looks identical
-     * locally — so a confidently-full pane (live rows ABOVE the ceiling) skips the capture entirely,
-     * and every flagged pane is confirmed against tmux by the unified oracle before any heal fires.
+     * the ≤3-line partial-black — PLUS every pane below the confidently-dense ceiling:
+     *  - the #1176 dead-zone BAND (a >3-line black band with MORE than half the visible rows live,
+     *    so the pre-#1176 gates read it "painted"), AND
+     *  - the #1214 mostly-empty MODEL (>3 scattered live lines but a live-fraction BELOW 0.5 — the
+     *    reveal-time leg of the photographed fragments-over-black).
+     *
+     * The #1214 change DROPPED the old 0.5 lower bound: a mostly-empty model with >3 live lines
+     * used to read "healthy" here and reveal UNHEALED (only the ≤16s-later steady watchdog could
+     * catch it). Paying ONE authoritative capture at reveal/resize is the deliberate cost — the
+     * unified oracle self-guards a genuinely-sparse-but-correct short prompt (Gate 2: capture must
+     * carry materially MORE than the render) and the #807 near-empty alt-screen void (Gate 1:
+     * capture must carry a real frame), so a FALSE pre-flag costs one wasted capture, NEVER a wrong
+     * heal or clear-to-black. It does NOT confirm a lost frame — only the `capture-pane` diff can,
+     * since a sparse-but-correct pane looks identical locally — so a confidently-full pane (live
+     * rows ABOVE the ceiling) skips the capture entirely, and every flagged pane is confirmed
+     * against tmux by the unified oracle before any heal fires. The steady-state watchdog's
+     * foreground/screen/back-off gates (#1166) are untouched — this widening is the reveal/resize
+     * LOCAL pre-check only.
      */
     fun visibleRenderMayHaveLostFrame(): Boolean {
         if (visibleScreenIsBlankOrPartiallyBlank()) return true
@@ -994,11 +1003,13 @@ class TerminalSurfaceState(
         val liveLines = renderedVisibleNonBlankLineCount()
         if (liveLines <= 0) return true
         val liveFraction = liveLines.toDouble() / visibleRows.toDouble()
-        // The #1176 dead-zone the pre-#1176 gates MISSED: MORE than half the rows live yet not
-        // confidently dense. Below the lower bound the pane is genuinely sparse (the pre-#1176
-        // no-op contract skips it — the "cheap no-op" for a short correct prompt); above the upper
-        // bound it is confidently full.
-        return liveFraction > MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION &&
+        // Flag every >3-line pane that is NOT confidently dense — its live share sits at or below
+        // the [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] ceiling. This covers BOTH the #1176 dead-zone
+        // band (0.5..0.75) AND the #1214 mostly-empty model (>3 live lines below 0.5). A ≤3-line
+        // pane is already handled by [visibleScreenIsBlankOrPartiallyBlank] above; a confidently-
+        // full pane (fraction above the ceiling) skips the capture. Every flagged pane is confirmed
+        // against tmux's authoritative capture by [visibleRenderLostFrameVsCapture] before any heal.
+        return liveLines > PARTIAL_BLANK_MAX_LIVE_LINES &&
             liveFraction <= MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION
     }
 
@@ -1405,20 +1416,14 @@ class TerminalSurfaceState(
          * is deliberately HIGHER than the send-heal cost-gate's [LOST_FRAME_MAX_LIVE_FRACTION]
          * (0.5) so the reveal/resize gates never MISS the #1176 dead-zone band the way the narrow
          * pre-check did.
+         *
+         * Issue #1214: the pre-#1176 0.5 LOWER bound (`MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION`) was
+         * DELETED here — a mostly-empty model (>3 live lines, live-fraction BELOW 0.5) used to read
+         * "healthy" and reveal UNHEALED, so the local gate now opens for EVERY >3-line pane at or
+         * below this ceiling. The unified oracle's Gate 1/Gate 2 self-guard a genuinely-sparse-but-
+         * correct pane, so a false pre-flag costs one wasted capture, never a wrong heal.
          */
         private const val MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION = 0.75
-
-        /**
-         * Issue #1176 (GAP C) — the LOWER bound of the [visibleRenderMayHaveLostFrame] band
-         * trigger. A >3-line pane with at most this live-fraction is genuinely SPARSE (a short
-         * correct prompt), NOT the dead-zone band the pre-#1176 no-op-resize gate missed — flagging
-         * it would break the "cheap no-op" contract (capturing a correct small pane on routine
-         * layout churn). The dead-zone is specifically the band with MORE than half the rows live
-         * (spike #874: >50% rows + >25% chars), so the local capture-gate only opens ABOVE this
-         * 0.5 boundary; the genuinely-sparse pane's net stays the steady-state watchdog + the
-         * send-heal path (whose own cost-gate is [LOST_FRAME_MAX_LIVE_FRACTION] = 0.5).
-         */
-        private const val MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION = 0.5
     }
 }
 

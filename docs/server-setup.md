@@ -89,5 +89,6 @@ package are bumped in lockstep on each release tag).
 |---|---|---|
 | "pocketshell not installed" / "server-side usage tracking unavailable" | `~/.local/bin` not on non-interactive SSH PATH | Step 2 (PATH above the `.bashrc` guard) |
 | `pocketshell: command not found` over `ssh host 'pocketshell ...'` | not installed, or PATH | Step 1 + Step 2 |
+| Usage panel shows a `quse`-not-installed / dependency error (NOT "pocketshell not installed") | pocketshell IS installed but its usage backend `quse` is missing (e.g. a dangling `~/.local/bin/quse` symlink); `pocketshell usage --json` prints pocketshell's own error at exit 0 | Install/repair `quse` (`uv tool install quse` or `pipx install quse`) — issue #1220. The app now surfaces pocketshell's own message rather than mislabelling it "pocketshell not installed". |
 | One provider shows an error, others OK | that provider's helper (e.g. `goz`) missing | install that helper, or ignore |
 | Worked before, broke after dotfile edit | PATH line moved below the guard | Step 2 |

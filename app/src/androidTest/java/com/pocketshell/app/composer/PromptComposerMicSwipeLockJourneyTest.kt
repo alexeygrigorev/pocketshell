@@ -231,6 +231,67 @@ class PromptComposerMicSwipeLockJourneyTest {
         compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
     }
 
+    /**
+     * Issue #1245: the hands-free lock affordance was mystery-meat sitting in the
+     * bottom Send/Discard cluster. It must now live INLINE on the recording/
+     * waveform row (attached to the recording it controls), NOT down in the
+     * bottom cluster next to Insert/Send.
+     *
+     * This asserts the geometry that encodes "moved up": the lock toggle
+     * ([COMPOSER_LOCK_RECORDING_TAG]) sits on the recording surface row — vertically
+     * aligned with the elapsed timer + waveform — and ENTIRELY ABOVE the bottom
+     * stop-action cluster (Insert / Send). On the unfixed layout the lock pill lived
+     * next to Discard in the bottom cluster (its top roughly level with the
+     * Insert/Send rows, far below the timer), so this test is RED on base and GREEN
+     * with the inline toggle. The tap-to-lock path itself is covered by
+     * [tapLockControlLocksRecordingHandsFree].
+     */
+    @Test
+    fun lockControlSitsOnWaveformRowAboveBottomCluster() {
+        val mic = FakeMicCapture()
+        val viewModel = newViewModel(mic)
+        renderComposer(viewModel)
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            viewModel.uiState.value.recording == RecordingState.Recording
+        }
+        compose.waitForIdle()
+
+        assertFalse(viewModel.uiState.value.recordingLocked)
+
+        val lock = compose.onNodeWithTag(COMPOSER_LOCK_RECORDING_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val timer = compose.onNodeWithTag(COMPOSER_TIMER_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val waveform = compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val insert = compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val send = compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+
+        // Vertically overlaps the timer/waveform (same row) — the lock is attached
+        // to the active recording, not floating below it.
+        val overlapsTimerRow =
+            lock.top < timer.bottom && lock.bottom > timer.top &&
+                lock.top < waveform.bottom && lock.bottom > waveform.top
+        assertTrue(
+            "Inline lock toggle is NOT on the recording/waveform row (#1245). " +
+                "lock=$lock timer=$timer waveform=$waveform",
+            overlapsTimerRow,
+        )
+
+        // Entirely ABOVE the bottom stop-action cluster (Insert / Send) — i.e. it
+        // is no longer a bottom-cluster pill.
+        assertTrue(
+            "Inline lock toggle is NOT above the bottom Insert/Send cluster (#1245). " +
+                "lock.bottom=${lock.bottom} insert.top=${insert.top} send.top=${send.top}",
+            lock.bottom <= insert.top && lock.bottom <= send.top,
+        )
+        WalkthroughScreenshotArtifacts.capture("issue-1245-lock-inline-on-waveform-row")
+    }
+
     @Test
     fun plainTapStartsRecordingWithoutLocking() {
         val mic = FakeMicCapture()

@@ -45,8 +45,11 @@ import org.junit.runner.RunWith
  *
  * The maintainer's directive is FIT EVERYTHING — never hide a control to make
  * room. The fix relays the recording states into a TWO-ROW layout (secondary row:
- * tools + Discard + Lock; primary row: Insert + Send) so EVERY control fits with
- * the editing tools still mounted.
+ * tools + Discard; primary row: Insert + Send) so EVERY control fits with the
+ * editing tools still mounted. (Issue #1245 later moved the hands-free Lock UP to
+ * the recording/waveform row as an inline toggle, so it is no longer a
+ * bottom-cluster pill; this test guards that the inline toggle also stays within
+ * the band.)
  *
  * ## What this proves (red → green, class-covering)
  *
@@ -54,7 +57,7 @@ import org.junit.runner.RunWith
  * NOT-LOCKED and LOCKED — pinned to a FIXED phone-width band, keyboard-UP (the
  * #780 synthetic-inset model), at font scale 1.0 AND 1.3 (the widest-content
  * case, since this is a width-overflow bug). It then asserts, for every
- * recording-row pill (Discard / Lock / Insert / Send) AND the editing-tools
+ * recording-row pill (Discard / Insert / Send) AND the editing-tools
  * group:
  *  1. the pill is fully within the band horizontally (no edge spill), AND
  *  2. the pill is NOT CRUSHED — its width stays at/above a not-a-sliver floor.
@@ -207,9 +210,13 @@ class PromptComposerRecordingRowFitProofTest {
         // is 70–102dp; base crushes the trailing `Send` to ~33dp, so a 56dp floor
         // cleanly separates crushed (red) from intact (green). The editing-tools
         // group is a fixed 3×40dp icon pill, so it uses the icon-width floor.
+        // Issue #1245: the hands-free Lock is no longer a bottom-cluster pill — it
+        // moved UP to the recording/waveform row as an inline toggle, so it is not
+        // part of this bottom-row fit check (its placement is proven by
+        // PromptComposerMicSwipeLockJourneyTest). The bottom row must still FIT
+        // Discard · Insert · Send with the tools group mounted (the #1152 guard).
         val pills = buildList {
             add(Triple("Discard", COMPOSER_CANCEL_RECORDING_TAG, LABELLED_PILL_MIN_DP))
-            if (!locked) add(Triple("Lock", COMPOSER_LOCK_RECORDING_TAG, LABELLED_PILL_MIN_DP))
             add(Triple("Insert", COMPOSER_TO_FIELD_TAG, LABELLED_PILL_MIN_DP))
             add(Triple("Send", COMPOSER_STOP_SEND_TAG, LABELLED_PILL_MIN_DP))
             // The editing tools group stays mounted during recording (the "fit
@@ -256,6 +263,20 @@ class PromptComposerRecordingRowFitProofTest {
             )
             // Additive brief-named guard: never off the WHOLE screen either.
             compose.assertNodeFullyWithinRoot(tag)
+        }
+
+        // Issue #1245: the inline hands-free lock toggle now rides the recording/
+        // waveform row (when not locked). Guard that it, too, stays fully within
+        // the band (never spills off the right edge into the waveform's neighbour
+        // area) at both font scales.
+        if (!locked) {
+            val lock = bounds(COMPOSER_LOCK_RECORDING_TAG)
+            assertTrue(
+                "Inline lock toggle spills off the band. lock=[${lock.left}..${lock.right}] " +
+                    "band=[${band.left}..${band.right}] font=$fontScale",
+                lock.right <= band.right + slopPx && lock.left >= band.left - slopPx,
+            )
+            compose.assertNodeFullyWithinRoot(COMPOSER_LOCK_RECORDING_TAG)
         }
     }
 

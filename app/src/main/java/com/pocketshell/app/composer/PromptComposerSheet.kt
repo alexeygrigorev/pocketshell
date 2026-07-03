@@ -233,6 +233,13 @@ public fun PromptComposerSheet(
     // Issue #900: UI/API plumbing for manual outbound retry. Tests may override
     // this seam, while production defaults to the owning VM.
     onRetryOutboundItem: ((String) -> Unit)? = null,
+    // Issue #585: open the composer WITH recording already started + locked
+    // hands-free. Set true only when the session launcher's hold+swipe-up ENTRY
+    // gesture opened this sheet; a plain-tap open leaves it false (no recording).
+    // The effect below fires ONCE per sheet open (a remembered latch guards it),
+    // starts recording through the same permission/API-key gate as the mic tap,
+    // and immediately locks it so releasing the finger keeps capturing.
+    autoStartRecording: Boolean = false,
 ) {
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
@@ -347,6 +354,57 @@ public fun PromptComposerSheet(
     // context) leaves the draft un-scoped.
     LaunchedEffect(composerTargetKey) {
         viewModel.onComposerTargetChanged(composerTargetKey)
+    }
+
+    // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
+    // sheet WITH recording already started + locked hands-free — one gesture, not
+    // "open then tap the mic". [autoStartRecording] carries that intent from the
+    // launcher; a plain-tap open leaves it false. This effect fires ONCE per sheet
+    // open (a remembered latch guards it against recomposition) and only starts
+    // from a clean Idle composer so it never interrupts an in-flight capture.
+    //
+    // Recording start runs through the SAME permission + API-key gate as the mic
+    // tap. On the common path (mic already granted, key present) it starts and
+    // locks synchronously; if the mic permission must be requested first, the
+    // grant callback ([permissionLauncher]) starts the capture and the lock-latch
+    // effect below locks it the moment capture goes live.
+    var autoStartRecordingConsumed by remember { mutableStateOf(false) }
+    var autoLockPending by remember { mutableStateOf(false) }
+    LaunchedEffect(autoStartRecording) {
+        if (!autoStartRecording || autoStartRecordingConsumed) return@LaunchedEffect
+        autoStartRecordingConsumed = true
+        if (viewModel.uiState.value.recording !=
+            PromptComposerViewModel.RecordingState.Idle
+        ) {
+            return@LaunchedEffect
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            // The grant callback fires onMicTap(); the latch effect then locks it.
+            autoLockPending = true
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return@LaunchedEffect
+        }
+        if (viewModel.needsOpenAiKeyForMicTap()) {
+            // Surface the key dialog; the user adds the key, then records manually.
+            showApiKeyDialog = true
+            return@LaunchedEffect
+        }
+        viewModel.onMicTap()
+        viewModel.lockRecording()
+    }
+    // Issue #585: when auto-start had to wait on the permission dialog, lock the
+    // recording as soon as the grant-driven capture actually goes live.
+    LaunchedEffect(state.recording, autoLockPending) {
+        if (autoLockPending &&
+            state.recording == PromptComposerViewModel.RecordingState.Recording
+        ) {
+            viewModel.lockRecording()
+            autoLockPending = false
+        }
     }
 
     // Issue #511 / #509: dismissing the composer (× button, scrim tap,

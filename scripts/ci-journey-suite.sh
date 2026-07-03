@@ -370,6 +370,17 @@ JOURNEY_CLASSES=(
   # drag detector. This was repeatedly emulator-green but device-broken, so the
   # focused journey is gate-wired per D31/G9; it uses no Docker fixture.
   "com.pocketshell.app.composer.PromptComposerMicSwipeLockJourneyTest"
+  # ADDED (#585 REOPENED — the TRUE desired behavior): the ENTRY gesture on the
+  # composer LAUNCHER button, not the mic inside the already-open sheet. Hold the
+  # launcher (SESSION_COMPOSER_LAUNCHER_TAG) + swipe UP → the Prompt Composer opens
+  # AND recording begins immediately, locked hands-free, in one gesture; a plain
+  # tap still opens the composer with NO recording. Drives the real
+  # ConversationComposerLauncherRow launcher + real PromptComposerSheet
+  # (autoStartRecording) inside its ModalBottomSheet so the launcher gesture
+  # competes with the same ancestor arbitration it does on device. RED on base (a
+  # launcher hold+swipe opens with NO recording); GREEN with the fix. This is the
+  # 7th reopen of #585 — gate-wired per D31/G9. No Docker fixture (fakes only).
+  "com.pocketshell.app.voice.ComposerLauncherHoldSwipeUpJourneyTest"
   # ADDED (#832 — durable per-session composer draft store): a draft authored in
   # session A and lost on a FAILED attachment-send (despite the "Your draft was
   # kept" banner) must survive. The ComposerDraftStore persists the per-session

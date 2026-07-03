@@ -439,6 +439,21 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#1206 — fresh Claude pane whose FIRST prewarm capture-pane comes back EMPTY on a
+  # busy shared -CC channel lands fragments-over-black instead of a painted grid). The prewarm
+  # seed is single-shot: seedPrewarmedPane returned on the empty/wedged first capture and only
+  # future incremental %output painted → the initial Claude TUI frame was unrecoverable. This
+  # journey seeds exactly two sessions (A attach + B prewarm target), opens the in-session
+  # switcher to fire prewarmLikelySwitchTargets, and uses a #780 synthetic injection
+  # (PrewarmSeedFaultTestOverride) to force B's FIRST seed capture EMPTY while the pane HAS
+  # content — the exact non-happy state the happy real-agent workbench structurally cannot
+  # enter. It HARD-asserts the fault was consumed by the prewarm seed path (the #1206 code
+  # path ran — no vacuous pass) AND that B lands on a PAINTED grid (its marker visible, not
+  # blank) after switching to it (the retry/deferred-reseed recovered the full grid). The clean
+  # red→green for the retry is at the JVM layer (TmuxSessionViewModelTest.prewarmSeedRetries*);
+  # this is the on-device GREEN acceptance (G4/G10). Deterministic agents:2222 only, no
+  # toxiproxy, no CI self-skip — belongs in this per-push subset.
+  "$FQCN_PREFIX.Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest"
   # ADDED (#1181 — BLACK terminal on tapping the connection notification / background→
   # foreground resume while the FGS keeps the connection ALIVE): a port-forward pin (#1159
   # Part 3) SUPPRESSES the bounded-grace teardown, so the VM never stashes a pendingReattach

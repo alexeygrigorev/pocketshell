@@ -279,6 +279,11 @@ internal data class CachedTmuxRuntime(
     val paneProducerJobs: Map<String, Job>,
     val paneInputQueues: Map<String, TmuxPaneInputQueue>,
     val paneInputJobs: Map<String, Job>,
+    // Issue #1206: background seed-recovery jobs (bounded capture retry + one
+    // deferred reseed on first live %output) carried from a prewarmed runtime so
+    // a promoted-but-still-parked recovery job is cancelled on cache eviction /
+    // deactivate (closeCachedRuntime) instead of leaking until whole-VM teardown.
+    val paneSeedRecoveryJobs: Map<String, Job> = emptyMap(),
     val paneAgentJobs: Map<String, Job>,
     val paneAgentInputs: Map<String, Triple<String, String, String>>,
     val agentConversations: Map<String, com.pocketshell.app.session.AgentConversationUiState>,
@@ -308,6 +313,11 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
     //
     // If a join times out we stop joining and fall through to the non-suspending
     // cleanup (queue close, producer detach, client close) so those still run.
+    // Issue #1206: cancel any parked seed-recovery job FIRST (a promoted
+    // prewarmed pane whose capture stayed empty parks on `outputFor().first()`).
+    // `cancel()` (not `cancelAndJoin`) — the parked flow-collect returns
+    // promptly on cancel and we must never block the bounded teardown on it.
+    paneSeedRecoveryJobs.values.forEach { it.cancel() }
     withTimeoutOrNull(detachTimeoutMs) {
         paneProducerJobs.values.forEach { it.cancelAndJoin() }
         paneInputJobs.values.forEach { it.cancelAndJoin() }

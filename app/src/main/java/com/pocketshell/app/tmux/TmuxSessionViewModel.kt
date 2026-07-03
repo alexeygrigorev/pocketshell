@@ -11504,20 +11504,28 @@ public class TmuxSessionViewModel @Inject constructor(
      *    round-trip entirely (0 captures/min while backgrounded or screen-off). On
      *    resume the back-off is reset so the FIRST foreground tick captures at the
      *    hot 4s cadence — a pane that changed while away heals right on return.
-     *  - **Back-off when stable.** A tick that finds NO divergence AND saw no new
-     *    streamed `%output` widens the next interval (4s → 8s → 16s, capped). ANY
-     *    detected divergence, new streamed output, session switch (fresh arm), or a
-     *    reconnecting band snaps the cadence back to 4s so a black/partial-black
-     *    pane heals within the same bound as today (#1138/#1153/#874).
-     *  - **Immediate wake on output (issue #1166 heal-latency fix).** The back-off
-     *    is NOT purely poll-based: a fresh active-pane `%output` fires
-     *    [staleRenderWatchdogWake] (see [recordVisiblePaneOutput]) and the loop
-     *    RACES its backed-off `delay(...)` against that wake (see
-     *    [awaitStaleRenderWatchdogTick]). So a redraw arriving ~1s into a 16s
-     *    backed-off window is captured/diffed/healed within the hot bound (≤4s),
-     *    not up to 16s later — the partial-black (#1138) case whose sole steady-
-     *    state oracle is this watchdog can never sit visibly broken for a whole
-     *    backed-off interval.
+     *  - **Back-off when HEALTHY (issue #1219 steady-heat fix).** A tick whose
+     *    authoritative capture-diff oracle finds NO divergence widens the next
+     *    interval (4s → 8s → 16s, capped) — EVEN while the pane is actively
+     *    streaming `%output`. Only a real detected divergence (the heal fired), a
+     *    session switch (fresh arm), or a reconnecting band snaps the cadence back
+     *    to 4s. Before #1219 ANY streamed `%output` reset the back-off, so a
+     *    continuously-streaming-but-CORRECT agent pane never left the hot 4s cadence
+     *    and paid a `capture-pane` round-trip every 4s forever (the #1164 "runs
+     *    warm" lever, the heaviest-use foreground window). A streaming-but-BLACK
+     *    pane still heals within the same bound (#1138/#1153/#874) via the suspect
+     *    wake below.
+     *  - **Immediate wake on a SUSPECT redraw (issue #1166 heal-latency fix, #1219
+     *    scoped).** The back-off is NOT purely poll-based: a fresh active-pane
+     *    `%output` fires [staleRenderWatchdogWake] (see [recordVisiblePaneOutput])
+     *    and the loop RACES its backed-off `delay(...)` against that wake (see
+     *    [awaitStaleRenderWatchdogTick]) — but honors it ONLY while the render looks
+     *    locally black/partial-black ([activeVisiblePaneRenderLooksSuspect]). So a
+     *    redraw that turns the pane black ~1s into a 16s backed-off window is
+     *    captured/diffed/healed within the hot bound (≤4s), not up to 16s later —
+     *    the partial-black (#1138) case whose sole steady-state oracle is this
+     *    watchdog can never sit visibly broken for a whole backed-off interval —
+     *    while a healthy streaming pane's output is ignored so it reaps the back-off.
      *  - **Arm-dedup.** [staleRenderWatchdogJob] is cancelled before each re-arm so
      *    rapid A→B→A switching can never stack multiple concurrent 4s loops.
      */
@@ -11535,15 +11543,15 @@ public class TmuxSessionViewModel @Inject constructor(
             var tick = 0
             // Issue #1166: consecutive stable ticks drive the back-off interval.
             var stableTicks = 0
-            // Issue #1166: the last `%output` wall-clock we saw for the active pane;
-            // a newer stamp means the pane streamed output since the previous tick,
-            // so we snap the cadence back to hot rather than backing off a live pane.
-            var lastSeenOutputAtMs = 0L
             while (tick < staleRenderWatchdogMaxTicks) {
                 // Issue #1166: wait out the (possibly backed-off) interval, but a
-                // fresh active-pane %output wake cuts a backed-off wait short so the
-                // redraw is captured within the hot bound, not the next long tick.
-                val wokenByOutput = awaitStaleRenderWatchdogTick(stableTicks)
+                // fresh active-pane %output wake cuts a backed-off wait short so a
+                // SUSPECT (locally black/partial-black) redraw is captured within the
+                // hot bound, not the next long tick. Issue #1219: a HEALTHY streaming
+                // pane's %output no longer cuts the wait short (see
+                // [awaitStaleRenderWatchdogTick]), so a correctly-rendering agent pane
+                // actually reaps the back-off instead of thrashing capture-pane at 4s.
+                awaitStaleRenderWatchdogTick(stableTicks)
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
@@ -11565,18 +11573,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
-                    // Issue #1166: did the pane stream NEW %output since last tick?
-                    val lastOutputAtMs = paneLastOutputAtMs[activePane.paneId] ?: 0L
-                    val hadNewOutput = lastOutputAtMs > lastSeenOutputAtMs
-                    lastSeenOutputAtMs = lastOutputAtMs
                     val healed = runCatching {
                         healActivePaneIfStaleRender(client, activePane, refreshGuard)
                     }.getOrDefault(false)
-                    // Back off ONLY a truly-idle, non-diverging pane; a divergence
-                    // (heal fired), fresh streamed output, OR an output WAKE that cut
-                    // the backed-off wait short (issue #1166) keeps the cadence at 4s.
-                    stableTicks =
-                        if (healed || hadNewOutput || wokenByOutput) 0 else stableTicks + 1
+                    // Issue #1219 (steady-heat fix): back off UNLESS the authoritative
+                    // heal oracle just found (and repaired) a divergence. Only a real
+                    // divergence — a black / partial-black / stale render vs tmux's grid
+                    // — snaps the cadence back to hot; a CONFIRMED-HEALTHY tick backs off
+                    // (4s -> 8s -> 16s) even when the pane is actively streaming %output.
+                    //
+                    // Before #1219 ANY new %output (or an output wake) reset the back-off,
+                    // so a continuously-streaming-but-correct agent pane never left the hot
+                    // 4s cadence and paid a capture-pane round-trip every 4s forever (the
+                    // #1164 "runs warm" lever). A streaming-but-BLACK pane still heals fast:
+                    // its render is locally suspect, so its %output wakes the backed-off
+                    // wait ([awaitStaleRenderWatchdogTick]) and this tick heals it hot.
+                    stableTicks = if (healed) 0 else stableTicks + 1
                 }
                 tick += 1
             }
@@ -11584,18 +11596,29 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #1166 (heal-latency fix): wait out the watchdog interval for the
-     * current run of [stableTicks] stable ticks, but make the wait WAKEABLE while
-     * backed off. Returns `true` when a fresh active-pane `%output` wake cut the
-     * wait short (the caller then re-checks the pane immediately and snaps the
-     * cadence back to hot), `false` when the full interval simply elapsed.
+     * Issue #1166 (heal-latency fix) + issue #1219 (steady-heat fix): wait out the
+     * watchdog interval for the current run of [stableTicks] stable ticks, but make
+     * the wait WAKEABLE while backed off — ONLY for a wake that arrives while the
+     * active pane's local render currently looks SUSPECT (black / partial-black).
+     * Returns `true` when a suspect-pane `%output` wake cut the wait short (the
+     * caller then re-checks the pane immediately so a black redraw heals within the
+     * hot bound), `false` when the full interval simply elapsed.
      *
      * At the HOT cadence (interval == [STALE_RENDER_WATCHDOG_TICK_MS]) there is
      * nothing to snap back to, so it drains any stale wake and plain-delays — the
      * churning-pane behavior is unchanged (still a capture every 4s, no extra
-     * captures from output bursts). Only a BACKED-OFF wait (8s/16s) races the
-     * delay against a wake, so a redraw during the long window is captured within
-     * the hot bound instead of being deferred to the next backed-off tick.
+     * captures from output bursts).
+     *
+     * Only a BACKED-OFF wait (8s/16s) races the delay against a wake:
+     *  - Issue #1166 (heal latency): a redraw on a locally-SUSPECT pane wakes at
+     *    once, so a black / partial-black frame (#1138/#966/#928) heals within the
+     *    hot bound instead of being deferred up to a whole backed-off interval.
+     *  - Issue #1219 (steady heat): a redraw on a HEALTHY (fully-rendered) pane is
+     *    IGNORED — the loop keeps waiting out the interval — so a continuously-
+     *    streaming-but-correct agent pane actually reaps the back-off instead of
+     *    being snapped hot on every %output. The authoritative capture-diff oracle
+     *    still runs when the interval elapses, catching any divergence a purely-
+     *    local check would miss; it just no longer fires every 4s on a hot pane.
      */
     private suspend fun awaitStaleRenderWatchdogTick(stableTicks: Int): Boolean {
         val interval = staleRenderWatchdogIntervalMs(stableTicks)
@@ -11606,15 +11629,50 @@ public class TmuxSessionViewModel @Inject constructor(
             delay(interval)
             return false
         }
-        // Backed off: whichever finishes first wins — the long delay OR a wake.
-        return withTimeoutOrNull(interval) { staleRenderWatchdogWake.receive() } != null
+        // Backed off: race the long delay against a SUSPECT wake. A healthy pane's
+        // wakes are consumed and ignored (keep waiting); the first wake that lands
+        // while the render looks locally black/partial-black cuts the wait short so
+        // the black redraw heals hot. If the interval elapses first, return false.
+        return withTimeoutOrNull(interval) {
+            while (true) {
+                staleRenderWatchdogWake.receive()
+                if (activeVisiblePaneRenderLooksSuspect()) break
+            }
+            true
+        } ?: false
+    }
+
+    /**
+     * Issue #1219: a cheap, IO-free local read of whether the active visible pane's
+     * render currently looks like it may have LOST tmux's frame (black / partial-black
+     * / scattered-fragments-over-black / surface-black). Used to decide whether a
+     * `%output` wake should cut a backed-off watchdog wait short: a SUSPECT pane wakes
+     * immediately so a black redraw heals within the hot bound (#1138/#966/#1214),
+     * while a confidently-dense HEALTHY streaming pane's output is ignored so it reaps
+     * the back-off (the #1164 steady-heat lever).
+     *
+     * It reuses [TerminalSurfaceState.visibleRenderMayHaveLostFrame] — the SAME cheap
+     * local pre-check the switch-reveal / no-op-resize heals (#1176/#1214) already run
+     * to decide whether an authoritative `capture-pane` diff is worthwhile — so this
+     * wake gate covers the whole fragments-over-black class (fully blank, ≤3-line
+     * partial-black, the #1176 dead-zone band, the #1214 mostly-empty model), NOT just
+     * the ≤3-line partial-black. It ORs the #1192 surface-black-model-intact class,
+     * which has a full model the frame predicate cannot see. Both are pure model/surface
+     * reads — no seed, no `capture-pane`. When wrong-positive the honored wake just runs
+     * the real capture-diff oracle a little sooner (a no-op heal), never a wrong heal.
+     */
+    private fun activeVisiblePaneRenderLooksSuspect(): Boolean {
+        val pane = activeVisiblePane() ?: return false
+        val state = pane.terminalState
+        return state.visibleRenderMayHaveLostFrame() ||
+            state.surfaceIsBlackWhileModelHasContent()
     }
 
     /**
      * Issue #1166: the stale-render watchdog interval for the given run of
-     * consecutive stable (no-divergence, no-new-output) ticks. A steady pane
-     * widens 4s → 8s → 16s (capped); [stableTicks] is reset to 0 on any
-     * divergence / new output / switch, snapping the next interval back to 4s.
+     * consecutive HEALTHY (no-divergence) ticks. A healthy pane widens 4s → 8s → 16s
+     * (capped) even while streaming; [stableTicks] is reset to 0 only on a real
+     * divergence / switch (issue #1219), snapping the next interval back to 4s.
      */
     @androidx.annotation.VisibleForTesting
     internal fun staleRenderWatchdogIntervalMs(stableTicks: Int): Long {

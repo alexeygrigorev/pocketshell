@@ -45,6 +45,8 @@ import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Background colour applied to the [TerminalView]'s parent surface. This is
@@ -353,9 +355,25 @@ fun TerminalSurface(
         // A Codex `%output` burst no longer turns into O(N) `onScreenUpdated()`
         // repaints on the UI thread. The coalescer never drops the final frame,
         // so the settled cursor/spinner state still paints after the burst.
-        coalescedRenderRequests.collect {
-            runCatching { view.onScreenUpdated() }
-                .onFailure { onLocalTerminalError?.invoke(it) }
+        //
+        // Issue #1260: collect on the Handler-based [Dispatchers.Main.immediate],
+        // NOT the LaunchedEffect's default Compose `AndroidUiDispatcher.Main`. The
+        // coalescer's `delay(16ms)` window is a timer, and AndroidUiDispatcher
+        // batches its dispatch to Choreographer frame boundaries — during a
+        // `%output` burst on a surface that is not otherwise invalidating, those
+        // frames stop, so the coalescer's delay never resumes and the repaint
+        // stalls for the whole burst (only the settled frame paints, at the end).
+        // #1216's `renderRequests` `replay = 1` exposed this: the priming
+        // emission that used to arrive DURING the burst (and kick the frame loop)
+        // now fires at composition on empty content, so nothing re-pumps the
+        // frame-gated dispatcher mid-burst. The main-thread Handler dispatcher is
+        // not frame-gated, so its `postDelayed` timer fires regardless — the
+        // emulator read still runs on the main thread, so this is thread-safe.
+        withContext(Dispatchers.Main.immediate) {
+            coalescedRenderRequests.collect {
+                runCatching { view.onScreenUpdated() }
+                    .onFailure { onLocalTerminalError?.invoke(it) }
+            }
         }
     }
 
@@ -492,14 +510,19 @@ fun TerminalSurface(
         // renderer/emulator, so it must run on the UI thread (the view is not
         // thread-safe); the win here is frame-gating the scan count, which is the
         // dominant per-tick cost during a burst. Only the diff is published.
-        coalescedRenderRequests.collect {
-            val fresh = runCatching { findVisibleUrls(view) }
-                .getOrElse { cause ->
-                    onLocalTerminalError?.invoke(cause)
-                    emptyList()
+        // Issue #1260: collect on the Handler-based [Dispatchers.Main.immediate]
+        // so the coalescer window resumes during a burst — see the repaint
+        // collector above for the full frame-gated-dispatcher rationale.
+        withContext(Dispatchers.Main.immediate) {
+            coalescedRenderRequests.collect {
+                val fresh = runCatching { findVisibleUrls(view) }
+                    .getOrElse { cause ->
+                        onLocalTerminalError?.invoke(cause)
+                        emptyList()
+                    }
+                if (fresh != visibleUrls) {
+                    visibleUrls = fresh
                 }
-            if (fresh != visibleUrls) {
-                visibleUrls = fresh
             }
         }
     }

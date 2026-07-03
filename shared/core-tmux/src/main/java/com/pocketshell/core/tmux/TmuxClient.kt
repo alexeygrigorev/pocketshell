@@ -1875,6 +1875,28 @@ internal class RealTmuxClient(
                         buffer.reset()
                     } else {
                         buffer.write(b.toInt())
+                        if (buffer.size() >= MAX_LINE_BUFFER_BYTES) {
+                            // Issue #1231 T2: an LF-starved stream (a binary MOTD
+                            // that lands before the `-CC` handshake, a degraded
+                            // non-control-mode byte stream, or a wedged server that
+                            // stops emitting LFs) would otherwise grow this buffer
+                            // one byte at a time with no ceiling until the process
+                            // OOMs — silently, with no diagnostic. Cap the
+                            // in-progress line: flush what we have as a (truncated)
+                            // line and reset, so framing stays bounded and the
+                            // overflow is observable. A truncated non-`%`-line just
+                            // parses to null downstream and is skipped.
+                            TmuxClientDiagnostics.record(
+                                "tmux_client_line_overflow",
+                                buildMap {
+                                    put("session", sessionName)
+                                    put("bytes", buffer.size())
+                                    put("maxBytes", MAX_LINE_BUFFER_BYTES)
+                                },
+                            )
+                            emit(takeLine(buffer))
+                            buffer.reset()
+                        }
                     }
                     i++
                 }
@@ -2591,6 +2613,16 @@ internal class RealTmuxClient(
 
         /** Initial per-line accumulation buffer. Grows as needed. */
         private const val DEFAULT_LINE_BUFFER_BYTES = 4096
+
+        /**
+         * Hard ceiling on a single in-progress LF-framed line (issue #1231
+         * T2). A legit `-CC` line — even a wide `%output` batch with escape
+         * sequences — is well under this; the cap only trips on an LF-starved
+         * stream, where without it the accumulation buffer grows unbounded to
+         * an OOM. On overflow the buffer is flushed-and-reset so framing stays
+         * bounded and the event is recorded via `tmux_client_line_overflow`.
+         */
+        private const val MAX_LINE_BUFFER_BYTES = 512 * 1024
 
         /** stdout read granularity for the control-mode reader. */
         private const val READ_CHUNK_BYTES = 8192

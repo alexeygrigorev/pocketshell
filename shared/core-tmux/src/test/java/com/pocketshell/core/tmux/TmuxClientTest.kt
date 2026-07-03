@@ -1746,6 +1746,78 @@ class TmuxClientTest {
         }
     }
 
+    /**
+     * Issue #1231 T2 — the LF-framing accumulation buffer in the reader loop
+     * must be bounded. An LF-starved stream (a binary MOTD before the `-CC`
+     * handshake, a degraded non-control-mode byte stream, or a wedged server
+     * that stops emitting LFs) grows the per-line `ByteArrayOutputStream` one
+     * byte at a time. Without a ceiling it grows until the process OOMs, with
+     * NO diagnostic. This test feeds ~1.5 MB with no LF and asserts the buffer
+     * is capped-and-reset (so it never grows to the full feed size), the
+     * `tmux_client_line_overflow` diagnostic fires repeatedly, and normal event
+     * framing resumes once an LF finally arrives.
+     *
+     * Red→green: on base (unbounded buffer) no diagnostic is ever recorded, so
+     * the `overflow.isNotEmpty()` assertion is RED.
+     */
+    @Test
+    fun `LF-starved stream caps the framing buffer and records overflow diagnostic`() = runBlocking {
+        // Mirrors the private TmuxClient.MAX_LINE_BUFFER_BYTES ceiling (512 KB).
+        val maxLineBytes = 512 * 1024
+        val diagnostics = Collections.synchronizedList(
+            mutableListOf<Pair<String, Map<String, Any?>>>(),
+        )
+        TmuxClientDiagnostics.install { event, fields -> diagnostics += event to fields }
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+
+            // Subscribe to the recovered pane's output BEFORE feeding so the
+            // post-overflow frame can't be missed in the subscribe race.
+            val recovered = scope.async {
+                client.outputFor("%0").first()
+            }
+            // Give the collector a tick to subscribe to the per-pane flow.
+            delay(200)
+
+            // Exactly 2× the cap of LF-free bytes → two clean flush-and-reset
+            // overflows that leave the buffer empty, so the trailing frame is
+            // framed cleanly. On the unbounded reader this all accumulates in
+            // ONE ever-growing line buffer that never resets (and would OOM in
+            // production); no overflow diagnostic is ever recorded.
+            val starved = "x".repeat(maxLineBytes * 2)
+            // Then a real, LF-terminated %output frame proves framing resumed.
+            shell.feed(starved + "%output %0 recovered\n")
+
+            // Barrier: the post-overflow frame must reach the pane output.
+            val frame = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { recovered.await() }
+            assertEquals("recovered", String(frame.data, StandardCharsets.US_ASCII))
+
+            val overflow = diagnostics.filter { it.first == "tmux_client_line_overflow" }
+            assertTrue(
+                "expected at least one tmux_client_line_overflow diagnostic; got none " +
+                    "(unbounded buffer would have OOMed instead of flushing)",
+                overflow.isNotEmpty(),
+            )
+            // Two fires over the 2× feed prove the buffer resets each time
+            // rather than growing unbounded to the full 1 MB.
+            assertTrue(
+                "expected the buffer to cap-and-reset repeatedly, got ${overflow.size} overflow(s)",
+                overflow.size >= 2,
+            )
+            // Each overflow flushed at exactly the ceiling — never the full feed.
+            overflow.forEach { (_, fields) ->
+                assertEquals(maxLineBytes, fields["maxBytes"])
+                assertEquals(maxLineBytes, fields["bytes"])
+            }
+        } finally {
+            TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
+            client.close()
+        }
+    }
+
     // ── Issue #1212: pre-registration buffer lifecycle hardening ──────────────
 
     /**

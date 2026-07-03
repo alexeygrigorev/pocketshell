@@ -1,10 +1,13 @@
 package com.pocketshell.core.tmux.protocol
 
+import com.pocketshell.core.tmux.TmuxClientDiagnosticSink
+import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,6 +25,20 @@ import org.junit.Test
  * byte lines directly.
  */
 class ControlEventStreamTest {
+
+    /** Captures the diagnostics [ControlEventStream] records via the process-local sink. */
+    private val diagnostics = mutableListOf<Pair<String, Map<String, Any?>>>()
+
+    init {
+        TmuxClientDiagnostics.install(
+            TmuxClientDiagnosticSink { event, fields -> diagnostics += event to fields },
+        )
+    }
+
+    @After
+    fun tearDown() {
+        TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
+    }
 
     /** Encode a list of fixture lines to the `Flow<ByteArray>` the stream wants. */
     private fun byteLines(lines: List<String>): Flow<ByteArray> =
@@ -345,6 +362,121 @@ class ControlEventStreamTest {
 
         assertArrayEquals(byteArrayOf(0xE2.toByte(), 0x94.toByte(), 0x80.toByte()), combined)
         assertEquals("─", String(combined, Charsets.UTF_8))
+    }
+
+    // --- issue #1231 T4: a never-closing / garbled %end block must not latch
+    //     the stream into a permanent silent freeze ---------------------------
+
+    @Test
+    fun `never-closing block is abandoned so output events resume after the bound`() = runTest {
+        // The maintainer's failure: a %begin opens a response block whose %end
+        // is truncated / garbled (fails parseBeginEnd), so it never matches the
+        // open block. On the unbounded code openBlock stays latched forever and
+        // EVERY subsequent line — including real %output — is swallowed as
+        // payload and never emitted, freezing all pane rendering permanently
+        // and invisibly to the black-screen / heal apparatus.
+        val payload = mutableListOf<String>()
+        val stream = ControlEventStream(
+            onResponsePayload = { _, line -> payload += line },
+            // Tiny bound so the fixture stays small; production ceiling is huge.
+            maxOpenBlockLines = 3,
+        )
+
+        val lines = listOf(
+            "%begin 1 5 0",
+            "%end 1 5",             // garbled %end (2 fields) → payload, block stays open
+            "%output %0 payload-b", // payload (block still open)
+            "%output %0 payload-c", // payload — reaches the 3-line bound
+            "%output %0 after-1",   // 4th inside-block line → abandon, re-parsed as Output
+            "%output %0 after-2",   // now outside the block → Output event
+            "%exit",
+        )
+
+        val events = stream.events(byteLines(lines)).toList()
+
+        // After the bound the block is abandoned and events flow again. On the
+        // unbounded (base) code, only %begin escapes — after-1/after-2/%exit are
+        // all swallowed as payload — so this assertion is RED without the fix.
+        val outputs = events.filterIsInstance<ControlEvent.Output>()
+        assertEquals(
+            "output events must resume after the never-closing block is abandoned",
+            2,
+            outputs.size,
+        )
+        assertTrue("session lifecycle events must resume too", events.any { it is ControlEvent.Exit })
+
+        // A diagnostic makes the stuck block observable and recoverable.
+        assertTrue(
+            "a tmux_control_block_abandoned diagnostic must be recorded",
+            diagnostics.any { it.first == "tmux_control_block_abandoned" },
+        )
+        val diag = diagnostics.first { it.first == "tmux_control_block_abandoned" }.second
+        assertEquals(5L, diag["commandNumber"])
+        assertEquals(3, diag["lines"])
+
+        // The three lines before the bound were still delivered as payload.
+        assertEquals(3, payload.size)
+    }
+
+    @Test
+    fun `open block over the byte ceiling is abandoned`() = runTest {
+        // Same latch class, tripped by bytes rather than line count: a block
+        // that stays under the line count but accumulates a huge payload.
+        val big = "x".repeat(2000)
+        val stream = ControlEventStream(
+            maxOpenBlockLines = 1_000_000,   // effectively unlimited by count
+            maxOpenBlockBytes = 4_000L,      // ~2 payload lines
+        )
+
+        val lines = listOf(
+            "%begin 1 9 0",
+            big,                    // ~2000 bytes payload
+            big,                    // ~4000 bytes → reaches the byte bound
+            "%output %0 resumed",   // over the ceiling → abandon, re-parsed as Output
+            "%exit",
+        )
+
+        val events = stream.events(byteLines(lines)).toList()
+
+        assertTrue(
+            "output must resume once the byte ceiling abandons the block",
+            events.any { it is ControlEvent.Output },
+        )
+        assertTrue(
+            "a tmux_control_block_abandoned diagnostic must be recorded",
+            diagnostics.any { it.first == "tmux_control_block_abandoned" },
+        )
+    }
+
+    @Test
+    fun `a normal large response under the default ceiling never abandons`() = runTest {
+        // Regression guard against false positives: a legit multi-line response
+        // (well under the production ceiling) round-trips as payload with the
+        // block closing cleanly and NO diagnostic recorded. Uses the default
+        // constructor bounds (MAX_OPEN_BLOCK_LINES / _BYTES).
+        val payload = mutableListOf<String>()
+        val stream = ControlEventStream(
+            onResponsePayload = { _, line -> payload += line },
+        )
+
+        val body = (1..500).map { "session $it: 1 windows" }
+        val lines = buildList {
+            add("%begin 1 7 0")
+            addAll(body)
+            add("%end 1 7 0")
+            add("%output %0 after")
+        }
+
+        val events = stream.events(byteLines(lines)).toList()
+
+        assertTrue(events[0] is ControlEvent.Begin)
+        assertTrue("the real %end must close the block", events[1] is ControlEvent.End)
+        assertTrue(events[2] is ControlEvent.Output)
+        assertEquals(500, payload.size)
+        assertTrue(
+            "no diagnostic may fire for a legit response",
+            diagnostics.none { it.first == "tmux_control_block_abandoned" },
+        )
     }
 
     private fun indexOfSubarray(haystack: ByteArray, needle: ByteArray): Int {

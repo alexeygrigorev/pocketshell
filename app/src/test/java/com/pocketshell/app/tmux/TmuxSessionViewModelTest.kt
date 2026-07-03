@@ -6757,8 +6757,15 @@ class TmuxSessionViewModelTest {
                 "local output overflow must not flip the tmux disconnected signal",
                 client.disconnectedSignal.value,
             )
-            assertTrue(
-                "overflowed pane should expose local terminal recovery instead of fake reconnect",
+            // Issue #1205: a backlog overflow no longer LATCHES the pane into a
+            // dead surfaceError card — it reseeds-and-reattaches the pane through
+            // the existing chokepoint (a transient burst costs one reseed, not the
+            // pane). The load-bearing invariant this test guards is unchanged: the
+            // overflow stays LOCAL (no reconnect, stable transport). The pane now
+            // self-heals rather than requiring "Recreate terminal".
+            assertFalse(
+                "Issue #1205: local output overflow must reseed-and-reattach the pane, " +
+                    "not latch it into a dead surfaceError card",
                 vm.panes.value.single().surfaceError,
             )
         } finally {
@@ -6894,11 +6901,15 @@ class TmuxSessionViewModelTest {
                 val overflow = diagnostics.eventsNamed("terminal_output_overflow").singleOrNull()
 
                 assertNotNull(
-                    "seed-gate live buffer overflow should become a local pane surface error",
+                    "seed-gate live buffer overflow should record the local backpressure event",
                     overflow,
                 )
-                assertTrue(
-                    "seed-gate live buffer overflow should mark the pane surface as errored",
+                // Issue #1205: the seed-gate overflow reseeds-and-reattaches the
+                // pane (same recovery as the backlog overflow) instead of latching
+                // it into a dead surfaceError card.
+                assertFalse(
+                    "Issue #1205: seed-gate overflow must reseed-and-reattach the pane, " +
+                        "not latch it into a dead surfaceError card",
                     vm.panes.value.single().surfaceError,
                 )
                 val overflowEvent = overflow!!
@@ -11882,7 +11893,15 @@ class TmuxSessionViewModelTest {
             .filter { it.role == ConversationRole.User && it.text == "previous user prompt" }
         assertEquals("Conversation should keep one optimistic user turn", 1, messages.size)
         assertEquals(MessageSendState.Pending, messages.single().sendState)
-        assertTrue("overflowed pane is shown as a surface error", vm.panes.value.single().surfaceError)
+        // Issue #1205: the overflow that fired mid-submit reseeds-and-reattaches
+        // the pane instead of latching it into a dead surfaceError card — and it
+        // must NOT disturb the in-flight Codex send (no reconnect, no duplicate
+        // prompt, one optimistic turn), which the assertions above already prove.
+        assertFalse(
+            "Issue #1205: overflow during a delayed submit must reseed-and-reattach the " +
+                "pane, not latch it into a dead surfaceError card",
+            vm.panes.value.single().surfaceError,
+        )
     }
 
     @Test

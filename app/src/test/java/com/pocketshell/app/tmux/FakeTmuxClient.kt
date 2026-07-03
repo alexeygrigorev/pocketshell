@@ -380,6 +380,19 @@ internal class FakeTmuxClient(
         )
     }
 
+    /**
+     * Issue #1205: records the panes whose backlog the recovery path asked to
+     * drain, so a test can assert the reseed-and-reattach recovery drained the
+     * stale burst before recapturing. The fake has no bounded channel, so the
+     * count is unused here; it returns 0 like a pane with no queued frames.
+     */
+    val drainedPaneBacklogs: MutableList<String> = mutableListOf()
+
+    override fun drainPaneOutputBacklog(paneId: String): Int {
+        drainedPaneBacklogs += paneId
+        return 0
+    }
+
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> =
         if (decoupleOutputForFromEvents) {
             emittedPaneOutputs.filter { it.paneId == paneId }

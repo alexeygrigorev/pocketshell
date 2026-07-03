@@ -1319,6 +1319,27 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerClients[paneId]?.let { System.identityHashCode(it) }
 
     /**
+     * Issue #1205 test seam: is [paneId]'s live-output producer currently attached
+     * and active? The overflow-recovery proof uses this to confirm the producer
+     * was REATTACHED after a reseed (live %output resumes), not left dead.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun paneProducerActiveForTest(paneId: String): Boolean =
+        paneProducerJobs[paneId]?.isActive == true
+
+    /**
+     * Issue #1205 test seam: is an overflow reseed-and-reattach recovery currently
+     * in flight for [paneId]? The connected exhaustion journey polls this to know
+     * a recovery cycle has fully COMPLETED (the in-flight slot released in its
+     * `finally`) before tripping the next overflow, so each trip is counted against
+     * [OVERFLOW_RECOVERY_MAX_ATTEMPTS] rather than de-duped as a still-in-flight
+     * burst signal — making the budget exhaustion deterministic on-device.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun paneOverflowRecoveryInFlightForTest(paneId: String): Boolean =
+        paneId in paneOverflowRecoveryInFlight
+
+    /**
      * Issue #895 (switch-while-black) test seam: force the inline connection
      * state to [ConnectionState.Attaching] so a regression test can drive a
      * passive drop while [inlineConnectionStatus] projects to
@@ -2525,6 +2546,21 @@ public class TmuxSessionViewModel @Inject constructor(
     // The SSH/tmux transport stays untouched the whole time.
     private val paneSurfaceRecoveryTimestamps: MutableMap<String, ArrayDeque<Long>> =
         ConcurrentHashMap()
+
+    // Issue #1205: per-pane sliding window of backlog/seed-gate overflow recovery
+    // attempts (reseed-and-reattach). Bounds a saturated channel to
+    // [OVERFLOW_RECOVERY_MAX_ATTEMPTS] reseeds inside [OVERFLOW_RECOVERY_WINDOW_MS]
+    // before the pane falls to the `surfaceError` card, so a burst that keeps
+    // overflowing after each reseed cannot loop into a reseed storm.
+    private val paneOverflowRecoveryTimestamps: MutableMap<String, ArrayDeque<Long>> =
+        ConcurrentHashMap()
+
+    // Issue #1205: panes with a reseed-and-reattach recovery currently in flight.
+    // A single overflow BURST fires the overflow signal many times (once per
+    // dropped frame); this de-dups the burst to ONE recovery per pane so we don't
+    // launch a reseed per dropped event. Cleared when the recovery job completes.
+    private val paneOverflowRecoveryInFlight: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
 
     /**
      * Open the SSH transport, spawn `tmux -CC` against [sessionName], and
@@ -5800,6 +5836,8 @@ public class TmuxSessionViewModel @Inject constructor(
         panePortDetectorClients.clear()
         panePortDetectorGenerations.clear()
         paneSurfaceRecoveryTimestamps.clear()
+        paneOverflowRecoveryTimestamps.clear()
+        paneOverflowRecoveryInFlight.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
         conversationLoadWatchdogJobs.values.forEach { it.cancel() }
@@ -5932,6 +5970,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneSeedRecoveryJobs.clear()
         paneSeedRecoveryJobs.putAll(runtime.paneSeedRecoveryJobs)
         paneSurfaceRecoveryTimestamps.clear()
+        paneOverflowRecoveryTimestamps.clear()
+        paneOverflowRecoveryInFlight.clear()
         paneAgentJobs.clear()
         // Issue #793: drop any pending load watchdogs from the prior runtime so
         // a restored, already-populated conversation row is not flipped to
@@ -10129,6 +10169,8 @@ public class TmuxSessionViewModel @Inject constructor(
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
+            paneOverflowRecoveryTimestamps.remove(paneId)
+            paneOverflowRecoveryInFlight.remove(paneId)
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
@@ -10367,13 +10409,74 @@ public class TmuxSessionViewModel @Inject constructor(
         return port
     }
 
+    /**
+     * Issue #1205: the synchronous verdict the overflow handlers get from
+     * [beginPaneOverflowRecovery] and record on the `terminal_output_overflow`
+     * diagnostic, deciding what the handler does next.
+     */
+    private enum class OverflowRecoveryDecision {
+        /** Reseed-and-reattach this pane (within the retry budget). */
+        RESEED,
+
+        /** Budget exhausted — fall to the actionable `surfaceError` card. */
+        EXHAUSTED,
+
+        /** A recovery is already running for this pane — drop the burst signal. */
+        IN_FLIGHT,
+    }
+
+    /**
+     * Issue #1205: a pane's delivery backlog (or the 2 MB seed gate) overflowed
+     * under a sustained high-output burst. The KDoc on
+     * [TmuxClient.outputBacklogOverflows] already prescribes the correct
+     * recovery: this is a LOCAL rendering/ingestion backpressure signal, NOT a
+     * transport disconnect, so the pane must recover by RESEEDING from
+     * `capture-pane` — a transient burst costs one reseed, not the pane.
+     *
+     * Before #1205 the FIRST dropped frame cancelled the producer, detached the
+     * pane, and latched `surfaceError` — a permanently dead pane the blank/stale
+     * watchdog and heal oracle both early-return on, so nothing self-heals and
+     * the user must tap "Recreate terminal". This routes both overflow classes
+     * through the existing [reseedActivePaneForReattach]-family machinery
+     * ([drainPaneOutputBacklog] → [seedPaneFromCapture] →
+     * [attachTerminalProducerForPane]) with a bounded retry budget
+     * ([OVERFLOW_RECOVERY_MAX_ATTEMPTS] within [OVERFLOW_RECOVERY_WINDOW_MS]) so
+     * a still-saturated channel can't loop into a reseed storm — after the
+     * budget the pane lands on the same `surfaceError` card as a LAST resort.
+     */
+    private fun beginPaneOverflowRecovery(paneId: String): OverflowRecoveryDecision {
+        // De-dup a burst: a single overflow fires the signal once per DROPPED
+        // frame. If a recovery is already running for this pane, drop the
+        // duplicate. The running job clears the flag on completion; only then can
+        // a genuinely-new overflow re-trigger and be counted against the budget,
+        // so a still-in-flight recovery can never be pre-empted into the card.
+        if (paneId in paneOverflowRecoveryInFlight) return OverflowRecoveryDecision.IN_FLIGHT
+        val now = SystemClock.elapsedRealtime()
+        val attempts = paneOverflowRecoveryTimestamps.getOrPut(paneId) { ArrayDeque() }
+        val recent = synchronized(attempts) {
+            while (attempts.isNotEmpty() && now - attempts.first() > OVERFLOW_RECOVERY_WINDOW_MS) {
+                attempts.removeFirst()
+            }
+            attempts.size
+        }
+        if (recent >= OVERFLOW_RECOVERY_MAX_ATTEMPTS) return OverflowRecoveryDecision.EXHAUSTED
+        // Reserve the in-flight slot atomically so a concurrent burst signal
+        // (the seed-gate path can fire from a producer-feed thread) can't also
+        // start a second recovery for the same pane.
+        if (!paneOverflowRecoveryInFlight.add(paneId)) return OverflowRecoveryDecision.IN_FLIGHT
+        synchronized(attempts) { attempts.addLast(now) }
+        return OverflowRecoveryDecision.RESEED
+    }
+
     private fun handleTerminalOutputBacklogOverflow(overflow: TmuxOutputBacklogOverflow) {
         val existing = paneRows[overflow.paneId] ?: return
         if (existing.surfaceError) return
+        val decision = beginPaneOverflowRecovery(overflow.paneId)
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             "tmux-terminal-output-backlog-overflow pane=${overflow.paneId} " +
-                "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value}",
+                "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value} " +
+                "recovery=${decision.name.lowercase()}",
         )
         DiagnosticEvents.record(
             "connection",
@@ -10384,6 +10487,11 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "pane_output_backlog",
             "classification" to "local_terminal_renderer_backpressure",
             "reconnect" to false,
+            // Issue #1205: the recovery outcome DECISION on the existing event —
+            // reseed (auto-heal), exhausted (fell to the card), or in_flight
+            // (deduped burst). The async outcome lands on
+            // `terminal_output_overflow_recovery`.
+            "recovery" to decision.name.lowercase(),
             "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
@@ -10395,20 +10503,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "attempt" to activeAttachMilestone?.attempt,
             "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
-
-        paneProducerJobs.remove(overflow.paneId)?.cancel()
-        paneProducerClients.remove(overflow.paneId) // Issue #959
-        paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
-        panePortDetectorJobs.remove(overflow.paneId)?.cancel()
-        panePortDetectorClients.remove(overflow.paneId)
-        panePortDetectorGenerations.remove(overflow.paneId)
-        runCatching { existing.terminalState.detachExternalProducer() }
-
-        val errored = existing.copy(surfaceError = true)
-        paneRows[overflow.paneId] = errored
-        _panes.update { rows ->
-            rows.map { row -> if (row.paneId == overflow.paneId) errored else row }
-        }
+        dispatchPaneOverflowRecovery(overflow.paneId, source = "pane_output_backlog", decision = decision)
     }
 
     private fun handleTerminalSeedGateOverflow(
@@ -10417,11 +10512,13 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         val existing = paneRows[paneId] ?: return
         if (existing.surfaceError) return
+        val decision = beginPaneOverflowRecovery(paneId)
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             "tmux-terminal-seed-gate-overflow pane=$paneId " +
                 "pendingBytes=${overflow.pendingBytes} incomingBytes=${overflow.incomingBytes} " +
-                "maxBytes=${overflow.maxBytes} status=${_connectionStatus.value}",
+                "maxBytes=${overflow.maxBytes} status=${_connectionStatus.value} " +
+                "recovery=${decision.name.lowercase()}",
             overflow,
         )
         DiagnosticEvents.record(
@@ -10435,6 +10532,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "seed_gate_live_buffer",
             "classification" to "local_terminal_renderer_backpressure",
             "reconnect" to false,
+            "recovery" to decision.name.lowercase(),
             "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
@@ -10446,7 +10544,124 @@ public class TmuxSessionViewModel @Inject constructor(
             "attempt" to activeAttachMilestone?.attempt,
             "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
+        dispatchPaneOverflowRecovery(paneId, source = "seed_gate_live_buffer", decision = decision)
+    }
 
+    private fun dispatchPaneOverflowRecovery(
+        paneId: String,
+        source: String,
+        decision: OverflowRecoveryDecision,
+    ) {
+        when (decision) {
+            OverflowRecoveryDecision.RESEED -> launchPaneOverflowReseed(paneId, source)
+            OverflowRecoveryDecision.EXHAUSTED ->
+                latchPaneSurfaceError(paneId, source, outcome = "surface_error_retry_exhausted")
+            // A recovery for this pane is already running; the burst signal is a
+            // duplicate — drop it (the in-flight job will finish the reseed).
+            OverflowRecoveryDecision.IN_FLIGHT -> Unit
+        }
+    }
+
+    /**
+     * Issue #1205: reseed-and-reattach the overflowed pane through the existing
+     * chokepoint machinery — drain the stale burst backlog, recapture the
+     * authoritative server-side grid, and reattach a fresh producer — SILENTLY,
+     * with NO user action and WITHOUT touching the SSH/tmux transport (this is
+     * local renderer backpressure, not a disconnect). Mirrors
+     * [rebindVisiblePaneProducersToClient]'s producer teardown+reattach so a
+     * duplicate producer/input drain is never left behind. Releases the in-flight
+     * slot in a `finally` so the retry budget can re-arm.
+     */
+    private fun launchPaneOverflowReseed(paneId: String, source: String) {
+        val client = clientRef
+        val guard = client?.let { currentRuntimeGuardForClient(it) }
+        if (client == null || client.disconnected.value || guard == null) {
+            // Nothing live to reseed from (dropped / reconnecting). Fall to the
+            // actionable card and release the slot so a later live overflow can
+            // recover.
+            paneOverflowRecoveryInFlight.remove(paneId)
+            latchPaneSurfaceError(paneId, source, outcome = "surface_error_no_live_client")
+            return
+        }
+        bridgeScope.launch {
+            var reseeded = false
+            var drainedFrames = 0
+            var reattached = false
+            try {
+                val pane = paneRows[paneId] ?: return@launch
+                // 1. Detach the current (dropped / feed-failed) producer + its
+                //    output-activity, port-detector, and input drains — the same
+                //    teardown [rebindVisiblePaneProducersToClient] does before a
+                //    clean reattach, so nothing is left double-bound.
+                paneProducerJobs.remove(paneId)?.cancel()
+                paneProducerClients.remove(paneId)
+                paneOutputActivityJobs.remove(paneId)?.cancel()
+                panePortDetectorJobs.remove(paneId)?.cancel()
+                panePortDetectorClients.remove(paneId)
+                panePortDetectorGenerations.remove(paneId)
+                paneInputJobs.remove(paneId)?.cancel()
+                paneInputQueues.remove(paneId)?.close()
+                runCatching { pane.terminalState.detachExternalProducer() }
+                // 2. Drain the stale burst frames still queued in the pane's
+                //    channel so they can't replay to the fresh producer and
+                //    double-apply on top of the capture-pane snapshot.
+                drainedFrames = runCatching { client.drainPaneOutputBacklog(paneId) }.getOrDefault(0)
+                if (!isCurrentRuntime(guard) || client.disconnected.value) return@launch
+                // 3. Reattach a FRESH producer (new bridge + emulator, seed gate
+                //    CLOSED via awaitSeed) BEFORE reseeding: the seed must land on
+                //    the SAME bridge the live producer feeds. Live %output arriving
+                //    now buffers in order behind the closed gate — the #468 design.
+                attachTerminalProducerForPane(
+                    paneId = paneId,
+                    state = pane.terminalState,
+                    client = client,
+                )
+                reattached = paneProducerJobs[paneId]?.isActive == true
+                // 4. Reseed from tmux's authoritative server-side grid onto the
+                //    fresh bridge; [appendRemoteOutput] OPENS the seed gate so the
+                //    buffered live deltas flush in order after the snapshot. The
+                //    non-destructive swap keeps the last good frame if the capture
+                //    is momentarily near-blank.
+                reseeded = seedPaneFromCapture(client, pane, guard, recordMilestone = false)
+                // 5. If no snapshot ever landed (all retries near-blank/errored),
+                //    still OPEN the gate so buffered live output is flushed rather
+                //    than swallowed — the same fallback the cold-open seed uses
+                //    ([seedPrewarmedPane]/preload). Otherwise the reattached
+                //    producer would be gated forever.
+                if (!reseeded && isCurrentRuntime(guard)) {
+                    runCatching { pane.terminalState.openSeedGateWithoutSeed() }
+                }
+            } finally {
+                paneOverflowRecoveryInFlight.remove(paneId)
+                DiagnosticEvents.record(
+                    "connection",
+                    "terminal_output_overflow_recovery",
+                    "pane" to paneId,
+                    "source" to source,
+                    "outcome" to when {
+                        reseeded && reattached -> "reseeded_and_reattached"
+                        reattached -> "reattached_gate_opened"
+                        else -> "reseed_declined"
+                    },
+                    "reattached" to reattached,
+                    "drainedFrames" to drainedFrames,
+                    "generation" to connectGeneration,
+                    "status" to _connectionStatus.value.javaClass.simpleName,
+                )
+            }
+        }
+    }
+
+    /**
+     * Issue #1205: the LAST-RESORT actionable-error card — the pre-#1205
+     * latch-first behavior, now reached ONLY after the bounded reseed retry
+     * budget is exhausted (or there is no live client to reseed from). Tears the
+     * pane's producer/input drains down and flips it to `surfaceError` so the
+     * user recovers via "Recreate terminal".
+     */
+    private fun latchPaneSurfaceError(paneId: String, source: String, outcome: String) {
+        val existing = paneRows[paneId] ?: return
+        if (existing.surfaceError) return
         paneProducerJobs.remove(paneId)?.cancel()
         paneProducerClients.remove(paneId) // Issue #959
         paneOutputActivityJobs.remove(paneId)?.cancel()
@@ -10462,6 +10677,60 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) errored else row }
         }
+        // Issue #1205: the terminal PAGER renders `unifiedPanes`, NOT `_panes`
+        // directly, so the flipped-to-`surfaceError` row must be republished into
+        // the unified list or the user-visible "Recreate terminal" give-up card
+        // never appears — the pane just sits frozen with no recovery affordance.
+        // (An on-device exhaustion journey caught this; the JVM proof only asserts
+        // the `_panes` state, which the pager does not read.)
+        rebuildUnifiedPanes()
+        DiagnosticEvents.record(
+            "connection",
+            "terminal_output_overflow_recovery",
+            "pane" to paneId,
+            "source" to source,
+            "outcome" to outcome,
+            "generation" to connectGeneration,
+            "status" to _connectionStatus.value.javaClass.simpleName,
+        )
+    }
+
+    // Issue #1205 (test seam): drive the production seed-gate overflow handler
+    // directly. The backlog-overflow class is driven end-to-end through the real
+    // `outputBacklogOverflows` collector by a test emitting an overflow event;
+    // the seed-gate class originates from the terminal bridge's
+    // `onTerminalFeedFailure` callback, which a JVM test cannot raise without a
+    // real 2 MB feed, so this seam calls the SAME private handler the callback
+    // does. No production logic added.
+    internal fun handleTerminalSeedGateOverflowForTest(
+        paneId: String,
+        overflow: TerminalSeedGateOverflowException,
+    ) {
+        handleTerminalSeedGateOverflow(paneId, overflow)
+    }
+
+    // Issue #1205 (connected-journey test seam): trip the LIVE-output backlog
+    // overflow class the maintainer reported. A real 4096-deep `Channel` overflow
+    // needs a sustained burst outrunning the frame-budgeted drain — timing-
+    // dependent and flaky to force deterministically on the emulator (the #780
+    // reason to inject the failing state synthetically). This calls the SAME
+    // private handler the real `outputBacklogOverflows` collector calls
+    // ([handleTerminalOutputBacklogOverflow], wired at the `outputOverflowJob`
+    // collect), so everything downstream — `beginPaneOverflowRecovery`, the
+    // bounded-retry budget, `launchPaneOverflowReseed`'s drain → capture-pane
+    // reseed → producer reattach — runs on the REAL on-device path against the
+    // REAL client/transport. Only the trigger is synthetic. No production logic
+    // added; symmetric with [handleTerminalSeedGateOverflowForTest].
+    internal fun handleTerminalOutputBacklogOverflowForTest(
+        paneId: String,
+        droppedEvents: Int,
+    ) {
+        handleTerminalOutputBacklogOverflow(
+            com.pocketshell.core.tmux.TmuxOutputBacklogOverflow(
+                paneId = paneId,
+                droppedEvents = droppedEvents,
+            ),
+        )
     }
 
     /**
@@ -10603,6 +10872,8 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun recreateTerminalSurface(paneId: String) {
         val existing = paneRows[paneId] ?: return
         paneSurfaceRecoveryTimestamps.remove(paneId)
+        paneOverflowRecoveryTimestamps.remove(paneId)
+        paneOverflowRecoveryInFlight.remove(paneId)
         paneProducerJobs.remove(paneId)?.cancel()
         paneProducerClients.remove(paneId)
         paneOutputActivityJobs.remove(paneId)?.cancel()
@@ -18506,6 +18777,23 @@ internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
  * without stalling a genuinely-empty pane's reveal.
  */
 internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L
+
+/**
+ * Issue #1205: how many times a pane may be auto-recovered from a delivery
+ * backlog / seed-gate overflow (reseed-and-reattach) inside
+ * [OVERFLOW_RECOVERY_WINDOW_MS] before the recovery is abandoned and the pane
+ * falls to the actionable `surfaceError` card as a last resort. Bounds a
+ * saturated channel so a burst that keeps overflowing after each reseed cannot
+ * loop into a reseed storm. Two attempts, then the card.
+ */
+internal const val OVERFLOW_RECOVERY_MAX_ATTEMPTS: Int = 2
+
+/**
+ * Issue #1205: sliding window over which [OVERFLOW_RECOVERY_MAX_ATTEMPTS] is
+ * counted. A single transient burst costs one reseed; only a pane that keeps
+ * overflowing inside this window exhausts the budget and lands on the card.
+ */
+internal const val OVERFLOW_RECOVERY_WINDOW_MS: Long = 60_000L
 
 /**
  * Issue #989: the user-visible message shown when the manual Redraw kebab item is

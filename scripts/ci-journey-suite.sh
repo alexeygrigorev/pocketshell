@@ -528,6 +528,24 @@ JOURNEY_CLASSES=(
   # with the union predicate `visibleRenderLostFrameVsCapture`. Uses ONLY the deterministic
   # agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT self-skip on CI.
   "$FQCN_PREFIX.AgentAltScreenPartialBlackHealJourneyE2eTest"
+  # ADDED (#1205 — pane delivery-backlog / seed-gate OVERFLOW must self-heal, not latch a dead
+  # `surfaceError` card): per-pane `%output` delivery is a bounded `Channel(4096)` fed by
+  # non-blocking `trySend`; a sustained Claude alt-screen burst on a contended main thread
+  # overflows and drops. Before #1205 the FIRST dropped frame cancelled the producer, detached
+  # the pane, and latched `surfaceError` — a permanently dead pane the blank/stale watchdog and
+  # heal oracle early-return on, so the user had to tap "Recreate terminal" (the 2 MB seed-gate
+  # overflow latched the same way). This journey attaches a full-viewport banner, wipes the LIVE
+  # emulator to black (the REMOTE tmux grid keeps the banner → transport GUARANTEED LIVE), then
+  # trips a REAL overflow through the SAME private handler the `outputBacklogOverflows` collector
+  # calls (only the trigger is synthetic — the #780 model; a 4096-deep channel overflow can't be
+  # forced deterministically on swiftshader). GREEN: no dead surfaceError card, a FRESH
+  # capture-pane reseed restores the banner, the producer reattaches to the LIVE client, session
+  # stays Connected (renderer backpressure, no reconnect); RED on base (the pane latches
+  # surfaceError). Three tests class-cover backlog + seed-gate self-heal AND the bounded-retry
+  # EXHAUSTION give-up (a still-saturated channel lands on the Recreate-terminal card exactly once
+  # — no reseed storm). Deterministic agents:2222 only (state injected LOCALLY, no toxiproxy) and
+  # does NOT self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.PaneOutputOverflowRecoveryJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an

@@ -1691,16 +1691,18 @@ class TmuxClientTest {
             // 300 > the 256-event pre-registration cap → 44 evictions.
             val target = 300
             val cap = 256
-            val processed = CompletableDeferred<Unit>()
-            val seen = AtomicInteger(0)
-            val watcher = scope.async {
-                client.events.collect { ev ->
-                    if (ev is ControlEvent.Output && ev.paneId == "%9") {
-                        if (seen.incrementAndGet() == target) processed.complete(Unit)
-                    }
-                }
-            }
-            delay(100)
+
+            // Feed all 300 `%9` frames, then ONE sentinel frame for a different
+            // pane (`%8`). The tmux control reader processes lines strictly FIFO,
+            // so the sentinel is delivered only after every `%9` frame ahead of
+            // it has been buffered (with eviction). We synchronise on the sentinel
+            // arriving via the *reliable* per-pane pre-registration replay
+            // (`outputFor("%8")`) rather than the lossy global `client.events`
+            // SharedFlow: with replay=0 and a 256-event bus buffer, a flood of 300
+            // frames drops events whenever the bus collector lags under CI load —
+            // `seen` then never reaches 300 and the old `withTimeout` on it expired
+            // with a TimeoutCancellationException (#1252). The pre-registration
+            // buffer never drops the sentinel, so this barrier is load-independent.
             shell.feed(
                 buildString {
                     repeat(target) { i ->
@@ -1708,17 +1710,17 @@ class TmuxClientTest {
                         append(i)
                         append('\n')
                     }
+                    append("%output %8 sentinel\n")
                 },
             )
-            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { processed.await() }
-            watcher.cancel()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.outputFor("%8").first()
+            }
 
             // Register: only the newest `cap` survive; the oldest were evicted.
-            val paneEvents = scope.async {
+            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 client.outputFor("%9").take(cap).toList()
             }
-            delay(100)
-            val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { paneEvents.await() }
 
             // Bounded: exactly the cap survives, oldest evicted, order kept.
             assertEquals(cap, events.size)

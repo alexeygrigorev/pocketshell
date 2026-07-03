@@ -965,6 +965,148 @@ class SshLeaseManagerTest {
         )
     }
 
+    // --- #1222: lease liveness must NOT trust the transiently-stale isConnected --
+    // during the #1144 async close() window ------------------------------------
+    //
+    // The #1144 async close() flips RealSshSession.closeStarted SYNCHRONOUSLY but
+    // launches the SSH_MSG_DISCONNECT teardown off-caller, so isConnected keeps
+    // reporting true for up to ~2 s while the disconnect drains. The
+    // keepalive-dead scenario: flaky Wi-Fi -> half-open transport -> keepalive
+    // watchdog fires onKeepAliveDead -> async close() -> -CC EOF -> reconnect
+    // releases the poisoned lease INSIDE the close window. These three tests pin
+    // each documented failure, modelling the window with FakeSshSession's
+    // asyncCloseWindow flag (isConnected stays true while isCloseInitiated is
+    // true) — the state a healthy local transport cannot deterministically hold
+    // open (D33 synthetic-injection model).
+
+    @Test
+    fun `AC1 - release during the async-close window removes the entry instead of parking it warm`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 60_000)
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val collectJob = backgroundScope.launch { manager.stateEvents.toList(events) }
+        runCurrent()
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        runCurrent()
+
+        // The keepalive watchdog declared the peer dead and called close() on the
+        // session out-of-band: close is INITIATED but the transport still lies
+        // isConnected==true for the whole async-drain window.
+        session.asyncCloseWindow = true
+        session.close()
+        assertTrue("precondition: the modelled window keeps isConnected true", session.isConnected)
+        assertTrue("precondition: close is initiated", session.isCloseInitiated)
+
+        // The reconnect path releases the poisoned lease inside that window.
+        lease.release()
+        runCurrent()
+        collectJob.cancel()
+
+        // FIX: a close-initiated session is NEVER kept warm/idle — it is removed
+        // and a Closed edge is emitted. RED on base: release() trusts isConnected,
+        // keeps it warm, and emits Idle (the corpse sits for up to 60 s).
+        assertTrue(
+            "a close-initiated transport must be removed with a Closed edge, not parked warm",
+            events.any {
+                it.key == TARGET.leaseKey && it.state == SshLeaseConnectionState.Closed
+            },
+        )
+        assertFalse(
+            "a close-initiated transport must NOT be announced Idle (kept warm)",
+            events.any {
+                it.key == TARGET.leaseKey && it.state == SshLeaseConnectionState.Idle
+            },
+        )
+        assertFalse(
+            "the pool must not retain a close-initiated session as a live lease",
+            manager.hasLiveLease(TARGET.leaseKey),
+        )
+    }
+
+    @Test
+    fun `AC2 - keepalive-dead attribution reaches the edge even when released inside the close window`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(QueueLeaseConnector(session), idleTtlMillis = 60_000)
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val collectJob = backgroundScope.launch { manager.stateEvents.toList(events) }
+        runCurrent()
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        runCurrent()
+
+        // The keepalive watchdog (#945) NAMES the cause BEFORE close(), then the
+        // async close() begins — but isConnected still lies true (the window).
+        session.sessionCloseCause = SshSessionCloseCause.KeepaliveDead
+        session.asyncCloseWindow = true
+        session.close()
+        assertTrue("precondition: still isConnected during the async drain", session.isConnected)
+
+        lease.release()
+        runCurrent()
+        collectJob.cancel()
+
+        // FIX: the transport EDGE carries keepalive_dead. RED on base: isConnected
+        // is still true so release() parks the corpse warm (Idle) and the
+        // keepalive_dead attribution never reaches the reconnect trail (#964).
+        assertTrue(
+            "keepalive_dead must reach the Closed edge even inside the async-close window",
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.KeepaliveDead
+            },
+        )
+        assertFalse(
+            "a keepalive-dead close-window release must NOT surface as an anonymous Idle",
+            events.any {
+                it.key == TARGET.leaseKey && it.state == SshLeaseConnectionState.Idle
+            },
+        )
+    }
+
+    @Test
+    fun `AC3 - a concurrent same-host acquire during the close window dials FRESH, not the corpse`() = runTest {
+        val poisoned = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(poisoned, fresh)
+        val manager = leaseManager(connector, idleTtlMillis = 60_000)
+
+        val lease1 = manager.acquire(TARGET).getOrThrow()
+        assertSame("first acquire dials the poisoned transport", poisoned, lease1.session)
+        assertEquals("one handshake so far", 1, connector.connectCount)
+
+        // The keepalive-dead async close begins; isConnected still lies true.
+        poisoned.asyncCloseWindow = true
+        poisoned.close()
+        assertTrue("precondition: poisoned transport still lies isConnected", poisoned.isConnected)
+
+        // The read-only pool probes must exclude a close-initiated session so the
+        // attach flow shows a genuine cold Connecting overlay, not a warm attach.
+        assertFalse(
+            "hasLiveLease must exclude a close-initiated transport",
+            manager.hasLiveLease(TARGET.leaseKey),
+        )
+        assertFalse(
+            "hasLiveOrConnectingLease must exclude a close-initiated transport",
+            manager.hasLiveOrConnectingLease(TARGET.leaseKey),
+        )
+
+        // A concurrent same-host acquire (folder probe / agent-kind exec / the
+        // reconnect's own ensureLease) during the window.
+        val concurrent = manager.acquire(TARGET).getOrThrow()
+
+        // FIX: it dials a FRESH transport. RED on base: the reuse path trusts
+        // isConnected, hands back the dying corpse, connectCount stays 1, and the
+        // caller gets a TransportClosedException -> spurious failed attach.
+        assertSame("the concurrent acquire must get a FRESH transport", fresh, concurrent.session)
+        assertNotSame("the concurrent acquire must NOT be handed the corpse", poisoned, concurrent.session)
+        assertTrue("the fresh transport is a new connection", concurrent.isNewConnection)
+        assertEquals("a second, fresh handshake was performed", 2, connector.connectCount)
+
+        concurrent.release()
+    }
+
     @Test
     fun `release from replaced disconnected lease does not mutate active replacement`() = runTest {
         val first = FakeSshSession()
@@ -1141,8 +1283,23 @@ class SshLeaseManagerTest {
         // lease manager's close-reason attribution can be exercised.
         var sessionCloseCause: SshSessionCloseCause = SshSessionCloseCause.Unknown
 
+        // Issue #1222: model the #1144 async close() window. The real
+        // RealSshSession.close() flips its `closeStarted` guard SYNCHRONOUSLY but
+        // launches the SSH_MSG_DISCONNECT teardown off-caller, so `isConnected`
+        // keeps lying `true` for up to ~2 s while the disconnect drains. When
+        // [asyncCloseWindow] is true, [close] models exactly that: it flips
+        // [closeInitiated] but leaves [connected] untouched so [isConnected] stays
+        // true — the precise state where trusting `isConnected` alone kept the
+        // corpse warm. Default false so every pre-existing test keeps its
+        // synchronous close() (which sets [closed] and drops [isConnected]).
+        var asyncCloseWindow: Boolean = false
+        var closeInitiated: Boolean = false
+
         override val isConnected: Boolean
             get() = connected && !closed
+
+        override val isCloseInitiated: Boolean
+            get() = closeInitiated
 
         override val closeCause: SshSessionCloseCause
             get() = sessionCloseCause
@@ -1178,7 +1335,12 @@ class SshLeaseManagerTest {
 
         override fun close() {
             closeCount += 1
-            closed = true
+            // Issue #1222: close is initiated the instant close() is reached,
+            // exactly like RealSshSession's synchronous `closeStarted` flip.
+            closeInitiated = true
+            // In the async-close window the transport keeps reporting connected
+            // until its (modelled) disconnect drains — see [asyncCloseWindow].
+            if (!asyncCloseWindow) closed = true
         }
     }
 

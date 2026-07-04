@@ -745,6 +745,108 @@ class TmuxSessionScreenTest {
         assertTrue(!state.showsConversationTab)
     }
 
+    // ─── Issue #1158 (REOPENED chain #962→#975→#1057→#1158): the maintainer's ──
+    // REAL path — an agent launched DIRECTLY inside an existing shell session, so
+    // nothing recorded `@ps_agent_kind` (it stays `shell`), the confirmed-shell
+    // verdict is never cleared, and live detection never binds for the
+    // node-wrapped-Claude / Codex-`/proc` / Z.AI fleet. Every prior signal is
+    // false → the tab was gone for the session's whole life. The detection-
+    // INDEPENDENT alt-buffer signal ([altBufferAgent]) restores it: a full-screen
+    // agent TUI holds the alternate screen buffer for its run, which a plain shell
+    // at a prompt does not.
+    //
+    // RED→GREEN: on base — remove the `|| altBufferAgent` OR-term from
+    // `tmuxSessionTabState.showsConversationTab` — each alt-buffer case below FAILS
+    // (single "Terminal" pill, no toggle), exactly the maintainer's #1158 symptom.
+    // With the fix the term is present and they GREEN, while the plain-shell
+    // main-buffer no-flap control (#894/#815) stays GREEN either way. The alt-buffer
+    // signal is kind-AGNOSTIC (it reads the emulator, not `@ps_agent_kind`), so ONE
+    // case covers node-wrapped Claude, Codex, glm/Z.AI AND the missing-data
+    // kind=null fleet — they are indistinguishable at this gate; the parametrized
+    // sibling below locks that independence. ──────────────────────────────────────
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForAltBufferAgentOnShellRecordedSession() {
+        // The maintainer's EXACT reported path: `@ps_agent_kind=shell`
+        // (recordedAgentKind == false), confirmed-shell surface
+        // (presumedAgent == false), NO live detection, NO transcript content — yet
+        // the visible pane is on the ALTERNATE screen buffer (a full-screen agent
+        // TUI is running). The tab MUST be present. RED on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = false,
+            altBufferAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForAltBufferAgentOnForeignNullKindSession() {
+        // The missing-data (kind = null) fleet: a foreign session the app didn't
+        // launch, so there is no recorded kind AND no bindable transcript — but its
+        // visible pane is on the alt-buffer. The tab MUST be present. RED on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Terminal,
+            ),
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(null),
+            altBufferAgent = true,
+        )
+
+        assertTrue(state.showsConversationTab)
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+    }
+
+    @Test
+    fun tmuxSessionTabStateAltBufferSignalIsIndependentOfRecordedKindAcrossFleet() {
+        // Class coverage (G2): the alt-buffer signal alone shows the tab regardless
+        // of what (if anything) the tree recorded — node-wrapped Claude, Codex,
+        // glm/Z.AI AND the null/unknown foreign case — all reach the tab through the
+        // SAME kind-agnostic emulator read, with NO detection, NO content, NOT
+        // presumed-agent.
+        for (recordedKind in listOf(
+            SessionAgentKind.Shell, // agent launched inside a shell-recorded session
+            SessionAgentKind.Unknown,
+            null, // foreign session
+        )) {
+            val state = tmuxSessionTabState(
+                currentAgentConversation = null,
+                presumedAgent = false,
+                recordedAgentKind = tmuxSessionRecordedAgentKind(recordedKind),
+                altBufferAgent = true,
+            )
+            assertTrue(
+                "alt-buffer must force the tab for recordedKind=$recordedKind",
+                state.showsConversationTab,
+            )
+        }
+    }
+
+    @Test
+    fun tmuxSessionTabStateHidesConversationForPlainShellMainBufferNoFlapControl() {
+        // #894/#815 no-flap invariant: a plain interactive shell at a prompt — main
+        // buffer (altBufferAgent == false), confirmed-shell (presumedAgent ==
+        // false), no detection, no content, recorded shell — must show NO
+        // Conversation tab and must not flap. GREEN on base AND with the fix (the
+        // alt-buffer signal is POSITIVE-only).
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Shell),
+            altBufferAgent = false,
+        )
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
+    }
+
     @Test
     fun tmuxSessionRecordedAgentKindClassifiesEveryKind() {
         // The recorded-agent signal is true ONLY for the agent kinds and never

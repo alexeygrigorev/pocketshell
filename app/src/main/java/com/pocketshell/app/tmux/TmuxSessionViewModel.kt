@@ -2195,6 +2195,43 @@ public class TmuxSessionViewModel @Inject constructor(
         _confirmedShellPaneIds.asStateFlow()
 
     /**
+     * Issue #1158 (REOPENED chain #962→#975→#1057→#1158): the STICKY set of tmux
+     * session ids whose visible pane has been observed on the ALTERNATE screen
+     * buffer — the maintainer's real "agent launched directly inside an existing
+     * shell" case. That session records `@ps_agent_kind=shell`, so the
+     * confirmed-shell verdict is never cleared (live detection never binds for
+     * node-wrapped Claude / Codex `/proc` / Z.AI transcript-path fleets), and
+     * every other tab signal is false — the Conversation tab was gone for the
+     * session's whole life. A full-screen agent TUI holds the alternate buffer for
+     * its run, which [TerminalSurfaceState.isAlternateBufferActive] reports
+     * detection-INDEPENDENTLY.
+     *
+     * STICKY (latch): a session is only ever ADDED here, never removed within a
+     * runtime — once the tab has been shown it stays for the session's life even
+     * if the buffer later leaves alt-mode or detection drops, so a failed/again-
+     * null detection can't collapse the tab back to Terminal-only. Cleared only
+     * with the other per-runtime caches on park/restore/clear so a different
+     * session never inherits a stale latch.
+     *
+     * POSITIVE signal: a genuine plain shell at a prompt (main buffer) never
+     * enters this set, so the #894/#815 no-flap invariant holds.
+     */
+    private val altBufferAgentSessionIds: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+
+    /**
+     * Issue #1158: the per-pane projection of [altBufferAgentSessionIds] over the
+     * current pane rows, consumed by the screen to force the Conversation tab
+     * present on the visible pane. Mirrors [confirmedShellPaneIds]'s shape:
+     * republished whenever the pane set changes or a new alt-buffer sighting
+     * latches a session.
+     */
+    private val _altBufferAgentPaneIds: MutableStateFlow<Set<String>> =
+        MutableStateFlow(emptySet())
+    public val altBufferAgentPaneIds: StateFlow<Set<String>> =
+        _altBufferAgentPaneIds.asStateFlow()
+
+    /**
      * Issue #858: the active session's recorded NON-default profile label
      * (e.g. `"Claude (Z.AI)"`), read fresh from the host-side
      * `@ps_agent_profile` tmux user option alongside the kind. `null` for a
@@ -5854,6 +5891,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -5992,6 +6033,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // the `@ps_agent_kind` on the restored connection and re-derives it.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -10163,6 +10208,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // a pane added/removed by this reconcile picks up (or drops) its
         // session's durable shell verdict for the screen + seed gate.
         refreshConfirmedShellPaneIds()
+        // Issue #1158: republish the sticky alt-buffer agent signal so a pane
+        // added by this reconcile for an already-latched session keeps the
+        // Conversation tab (the latch is per-session; the pane id can rotate).
+        refreshAltBufferAgentPaneIds()
         rebuildUnifiedPanes()
         return newRows
     }
@@ -11553,6 +11602,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     tick += 1
                     continue
                 }
+                // Issue #1158: latch the visible pane's alt-buffer agent signal on
+                // the tick we already pay for (cheap local emulator read, no SSH
+                // round-trip, no new timer). Sticky — this is how the Conversation
+                // tab appears for an agent launched directly in a shell-recorded
+                // session where detection never binds.
+                noteActivePaneAltBufferState()
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
                     val healed = runCatching {
@@ -12553,6 +12608,71 @@ public class TmuxSessionViewModel @Inject constructor(
         if (_confirmedShellPaneIds.value != next) {
             _confirmedShellPaneIds.value = next
         }
+    }
+
+    /**
+     * Issue #1158: read the VISIBLE pane's alternate-screen-buffer state and, when
+     * active, LATCH its session into [altBufferAgentSessionIds] (sticky — never
+     * removed within the runtime). Cheap: a single local emulator read, no SSH
+     * round-trip — safe to call on the existing stale-render watchdog tick (no new
+     * timer, respects #1164/#1166). Republishes the per-pane projection only when a
+     * NEW session is latched, so steady-state ticks allocate nothing.
+     *
+     * A no-op for a plain shell on the main buffer (the #894/#815 no-flap
+     * invariant): nothing is latched, so the Conversation tab stays hidden.
+     */
+    private fun noteActivePaneAltBufferState() {
+        val pane = activeVisiblePane() ?: return
+        if (!pane.terminalState.isAlternateBufferActive()) return
+        val sessionId = pane.sessionId.trim()
+        if (sessionId.isEmpty()) return
+        if (altBufferAgentSessionIds.add(sessionId)) {
+            refreshAltBufferAgentPaneIds()
+        }
+    }
+
+    /**
+     * Issue #1158: recompute [altBufferAgentPaneIds] from the current pane rows and
+     * the sticky [altBufferAgentSessionIds] latch. Called after a new alt-buffer
+     * sighting and on pane reconcile so a pane added to a latched session picks up
+     * (and never drops) the signal.
+     */
+    private fun refreshAltBufferAgentPaneIds() {
+        val next = paneRows.values
+            .filter { altBufferAgentSessionIds.contains(it.sessionId.trim()) }
+            .map { it.paneId }
+            .toSet()
+        if (_altBufferAgentPaneIds.value != next) {
+            _altBufferAgentPaneIds.value = next
+        }
+    }
+
+    /**
+     * Issue #1158 test seam: drive the alt-buffer poll directly (the production
+     * caller is the stale-render watchdog tick, which a JVM unit test would have to
+     * stand up a whole runtime to reach) so a test can prove the sticky latch +
+     * per-pane projection deterministically against a synthetic alt-buffer state.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun noteActivePaneAltBufferStateForTest() {
+        noteActivePaneAltBufferState()
+    }
+
+    /**
+     * Issue #1158 connected-test seam (#780 synthetic-state model): force the REAL
+     * active pane's emulator alt-buffer verdict, then run the production latch poll.
+     * The tmux `-CC` control path does not reliably mirror a REMOTE pane's alternate
+     * screen buffer into the CLIENT emulator (the capture-pane seed replays the
+     * screen TEXT onto the main buffer, and an idle full-screen agent emits no fresh
+     * `%output` carrying the `?1049h` toggle), so a connected journey cannot enter
+     * the on-device alt-buffer state on its own. This injects that failing state
+     * synthetically on the REAL connected pane + real production tab gate, exactly
+     * as the maintainer's full-screen agent TUI would — with NO self-skip.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun forceActivePaneAltBufferForTest(active: Boolean) {
+        activeVisiblePane()?.terminalState?.setAlternateBufferActiveForTest(active)
+        noteActivePaneAltBufferState()
     }
 
     /**
@@ -17335,6 +17455,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         _agentConversations.value = emptyMap()
         // Issue #959 (#780 synthetic-injection seam): when the test forces the
         // pane-runtime-survives-teardown race, KEEP paneRows + their producers +
@@ -17491,6 +17615,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()

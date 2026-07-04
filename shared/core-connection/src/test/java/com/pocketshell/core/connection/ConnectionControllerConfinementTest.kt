@@ -6,15 +6,30 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Item 6 (#1234): the [ConnectionController] Main/single-thread confinement
+ * Item 6 (#1234): the [ConnectionController] single-confining-dispatcher
  * assertion. The controller's `submit`/`offerSeed` do unguarded read-modify-writes
- * of `_state.value` + the plain `graceDeadlineMs` var, safe ONLY because callers
- * are Main-confined. These tests prove the DEBUG-gated guard converts an
- * off-confinement call into a loud failure while leaving the confined happy path
- * (and release builds) behavior-identical.
+ * of `_state.value` + the plain `graceDeadlineMs` var, safe ONLY because a single
+ * confining dispatcher SERIALIZES the mutators so none ever overlap. These tests
+ * prove the DEBUG-gated guard converts a genuine CONCURRENT (off-confinement)
+ * mutation into a loud failure, while leaving the confined path — including the
+ * benign pool-thread migration a real dispatcher performs — behavior-identical.
+ *
+ * ## Round-2 modeling fix (CI regression)
+ * Round 1 keyed the guard off the first raw `Thread.id` and hard-failed any later
+ * call from a different thread. That tripped 5 `TmuxSessionViewModelTest` cases:
+ * under an `UnconfinedTestDispatcher` a confined `collect { submit(...) }` resumes
+ * inline on the foreign thread that emitted upstream, so a benign, still-serialized
+ * hand-off looks like a "different thread". A confining dispatcher is a
+ * *serialization* contract, not a fixed-thread one — so the guard now asserts the
+ * invariant that actually matters (no two mutators overlap), which passes benign
+ * migration and still catches a real racing mutation. See
+ * [sequential cross-thread hand-off does not trip the guard] (the regression) and
+ * [concurrent submit while a mutation is in progress trips the guard] (still armed).
  */
 class ConnectionControllerConfinementTest {
 
@@ -28,11 +43,10 @@ class ConnectionControllerConfinementTest {
             confinementAssertionsEnabled = confinementEnabled,
         )
 
-    /** submit() on the confining (owner) thread never trips — the happy path. */
+    /** Repeated same-thread mutator calls never trip — the happy path. */
     @Test
-    fun `submit on confined owner thread does not trip the guard`() {
-        val controller = controller() // constructed + used on this test thread
-        // Repeated same-thread calls: the first latches the owner, the rest match.
+    fun `submit on the confining thread does not trip the guard`() {
+        val controller = controller()
         val s1 = controller.submit(ConnectionEvent.Enter(host, target))
         val s2 = controller.submit(ConnectionEvent.Background)
         assertTrue("Enter -> Attaching/Connecting", s1 is ConnectionState.Attaching || s1 is ConnectionState.Connecting)
@@ -40,71 +54,200 @@ class ConnectionControllerConfinementTest {
     }
 
     /**
-     * submit() from a DIFFERENT thread than the confined owner hard-fails in a
-     * DEBUG build. The owner is latched by the first (test-thread) call; a second
-     * call marshalled onto a worker thread must trip the assertion.
+     * REGRESSION (the CI break this round fixes): a real dispatcher serializes its
+     * work but may run each task on a DIFFERENT pool thread. Driving the mutators
+     * SEQUENTIALLY from three distinct threads (each completing before the next
+     * starts — exactly what a serializing dispatcher, incl. an
+     * `UnconfinedTestDispatcher` resuming inline on the emitter thread, does) must
+     * NOT trip the guard. Round 1's raw-`Thread.id` latch failed here.
      */
     @Test
-    fun `submit off the confined owner thread trips the guard`() {
+    fun `sequential cross-thread hand-off does not trip the guard`() {
         val controller = controller()
-        // Latch the owner on the test thread.
+        // Three distinct threads, each joined before the next — no overlap.
+        val t1 = runOnOtherThread { controller.submit(ConnectionEvent.Enter(host, target)) }
+        val t2 = runOnOtherThread { controller.submit(ConnectionEvent.Background) }
+        val t3 = runOnOtherThread { controller.submit(ConnectionEvent.Foreground) }
+        assertNull("Enter on thread 1 must not trip", t1)
+        assertNull("Background on thread 2 (different id) must not trip", t2)
+        assertNull("Foreground on thread 3 (different id) must not trip", t3)
+        // State still progressed normally across the hand-off.
+        assertFalse("controller advanced past Idle", controller.state.value is ConnectionState.Idle)
+    }
+
+    /**
+     * STILL ARMED: a genuinely off-confinement mutation — a second thread entering
+     * a mutator while the first is still INSIDE one — is the real data race, and it
+     * hard-fails in a DEBUG build. We hold thread A inside `submit(Background)` (its
+     * reduce calls `clock.nowMs()`) via a latch, then race a second `submit` on this
+     * thread; the guard must throw an [IllegalStateException] naming the concurrency.
+     */
+    @Test
+    fun `concurrent submit while a mutation is in progress trips the guard`() {
+        val insideMutation = CountDownLatch(1)
+        val releaseMutation = CountDownLatch(1)
+        // A clock whose nowMs() (called inside submit(Background)'s reduce) parks
+        // thread A inside the guarded mutation until the racing call has happened.
+        val blockingClock = object : Clock {
+            @Volatile var blockOnce = true
+            override fun nowMs(): Long {
+                if (blockOnce) {
+                    blockOnce = false
+                    insideMutation.countDown()
+                    releaseMutation.await(5, TimeUnit.SECONDS)
+                }
+                return 0L
+            }
+        }
+        val controller = ConnectionController(
+            clock = blockingClock,
+            transport = FakeTransportPort(),
+            confinementAssertionsEnabled = true,
+        )
+        // Establish a target so Background reduces down the grace path (calls nowMs).
         controller.submit(ConnectionEvent.Enter(host, target))
 
-        val thrown = runOnOtherThread { controller.submit(ConnectionEvent.Background) }
+        val threadA = Thread { controller.submit(ConnectionEvent.Background) }
+        threadA.start()
+        assertTrue("thread A entered the mutation", insideMutation.await(5, TimeUnit.SECONDS))
 
-        assertNotNull("expected the guard to throw off-thread", thrown)
+        // Thread A now holds the latch INSIDE submit(Background); race a second call.
+        val thrown = runCatching { controller.submit(ConnectionEvent.Foreground) }.exceptionOrNull()
+
+        releaseMutation.countDown()
+        threadA.join(5_000)
+
+        assertNotNull("expected the guard to trip on the concurrent mutation", thrown)
         assertTrue(
             "expected IllegalStateException, got ${thrown!!::class.java}",
             thrown is IllegalStateException,
         )
         assertTrue(
-            "message should name submit + issue: ${thrown.message}",
-            thrown.message!!.contains("submit") && thrown.message!!.contains("#1234"),
+            "message should name submit + concurrency + issue: ${thrown.message}",
+            thrown.message!!.contains("submit") &&
+                thrown.message!!.contains("concurrently") &&
+                thrown.message!!.contains("#1234"),
         )
     }
 
-    /** offerSeed() is a confined mutator too and trips off the owner thread. */
+    /**
+     * The guard covers [ConnectionController.offerSeed] too: a concurrent offerSeed
+     * entering while a submit mutation is in progress trips. Same latch shape as the
+     * submit race, but the racing call is offerSeed.
+     */
     @Test
-    fun `offerSeed off the confined owner thread trips the guard`() {
-        val controller = controller()
-        controller.submit(ConnectionEvent.Enter(host, target)) // latch owner on test thread
+    fun `concurrent offerSeed while a mutation is in progress trips the guard`() {
+        val insideMutation = CountDownLatch(1)
+        val releaseMutation = CountDownLatch(1)
+        val blockingClock = object : Clock {
+            @Volatile var blockOnce = true
+            override fun nowMs(): Long {
+                if (blockOnce) {
+                    blockOnce = false
+                    insideMutation.countDown()
+                    releaseMutation.await(5, TimeUnit.SECONDS)
+                }
+                return 0L
+            }
+        }
+        val controller = ConnectionController(
+            clock = blockingClock,
+            transport = FakeTransportPort(),
+            confinementAssertionsEnabled = true,
+        )
+        controller.submit(ConnectionEvent.Enter(host, target))
 
-        val thrown = runOnOtherThread { controller.offerSeed(Seed(target, "%0", "frame")) }
+        val threadA = Thread { controller.submit(ConnectionEvent.Background) }
+        threadA.start()
+        assertTrue("thread A entered the mutation", insideMutation.await(5, TimeUnit.SECONDS))
 
-        assertNotNull("expected the guard to throw off-thread", thrown)
+        val thrown = runCatching { controller.offerSeed(Seed(target, "%0", "frame")) }.exceptionOrNull()
+
+        releaseMutation.countDown()
+        threadA.join(5_000)
+
+        assertNotNull("expected the guard to trip on the concurrent offerSeed", thrown)
         assertTrue(thrown is IllegalStateException)
-        assertTrue(thrown!!.message!!.contains("offerSeed"))
+        assertTrue(
+            "message should name offerSeed: ${thrown!!.message}",
+            thrown.message!!.contains("offerSeed"),
+        )
     }
 
     /**
      * Debug-gating: with the assertion DISABLED (release-build simulation,
-     * `BuildConfig.DEBUG == false`), an off-thread submit does NOT throw and the
-     * reduce result is identical to the confined path — the guard is a pure no-op.
+     * `BuildConfig.DEBUG == false`), even a genuine concurrent mutation does NOT
+     * throw — the guard is a pure no-op. The blocking mutation still completes and
+     * the racing call reduces normally.
      */
     @Test
-    fun `disabled guard is a no-op off-thread (release build)`() {
-        val controller = controller(confinementEnabled = false)
+    fun `disabled guard is a no-op under concurrency (release build)`() {
+        val insideMutation = CountDownLatch(1)
+        val releaseMutation = CountDownLatch(1)
+        val blockingClock = object : Clock {
+            @Volatile var blockOnce = true
+            override fun nowMs(): Long {
+                if (blockOnce) {
+                    blockOnce = false
+                    insideMutation.countDown()
+                    releaseMutation.await(5, TimeUnit.SECONDS)
+                }
+                return 0L
+            }
+        }
+        val controller = ConnectionController(
+            clock = blockingClock,
+            transport = FakeTransportPort(),
+            confinementAssertionsEnabled = false,
+        )
         controller.submit(ConnectionEvent.Enter(host, target))
 
-        val thrown = runOnOtherThread { controller.submit(ConnectionEvent.Background) }
+        val threadA = Thread { controller.submit(ConnectionEvent.Background) }
+        threadA.start()
+        assertTrue(insideMutation.await(5, TimeUnit.SECONDS))
 
-        assertNull("release build must not assert on off-thread calls", thrown)
-        assertTrue("state still transitioned normally", controller.state.value is ConnectionState.Backgrounded)
+        val thrown = runCatching { controller.submit(ConnectionEvent.Foreground) }.exceptionOrNull()
+
+        releaseMutation.countDown()
+        threadA.join(5_000)
+
+        assertNull("release build must not assert on a concurrent call", thrown)
     }
 
     /**
      * The default guard (no explicit flag) follows `BuildConfig.DEBUG`. Under
-     * `testDebugUnitTest` that is true, so a default-constructed controller trips
-     * off-thread — proving production wiring is armed in debug, not just when a
-     * test forces the flag on.
+     * `testDebugUnitTest` that is true, so a default-constructed controller is armed
+     * and trips on a concurrent mutation — proving production wiring is armed in
+     * debug, not just when a test forces the flag on.
      */
     @Test
     fun `default guard follows BuildConfig DEBUG and is armed under debug tests`() {
         assertTrue("this suite must run under the debug variant", BuildConfig.DEBUG)
-        val controller = ConnectionController(clock = FakeClock(), transport = FakeTransportPort())
+        val insideMutation = CountDownLatch(1)
+        val releaseMutation = CountDownLatch(1)
+        val blockingClock = object : Clock {
+            @Volatile var blockOnce = true
+            override fun nowMs(): Long {
+                if (blockOnce) {
+                    blockOnce = false
+                    insideMutation.countDown()
+                    releaseMutation.await(5, TimeUnit.SECONDS)
+                }
+                return 0L
+            }
+        }
+        // Default constructor: confinementAssertionsEnabled defaults to BuildConfig.DEBUG.
+        val controller = ConnectionController(clock = blockingClock, transport = FakeTransportPort())
         controller.submit(ConnectionEvent.Enter(host, target))
 
-        val thrown = runOnOtherThread { controller.submit(ConnectionEvent.Background) }
+        val threadA = Thread { controller.submit(ConnectionEvent.Background) }
+        threadA.start()
+        assertTrue(insideMutation.await(5, TimeUnit.SECONDS))
+
+        val thrown = runCatching { controller.submit(ConnectionEvent.Foreground) }.exceptionOrNull()
+
+        releaseMutation.countDown()
+        threadA.join(5_000)
 
         assertNotNull("default (debug) guard should be armed", thrown)
         assertTrue(thrown is IllegalStateException)
@@ -124,6 +267,45 @@ class ConnectionControllerConfinementTest {
         events.forEach { guarded.submit(it); unguarded.submit(it) }
         assertEquals(unguarded.state.value, guarded.state.value)
         assertFalse(guarded.state.value is ConnectionState.Idle)
+    }
+
+    // --- Direct guard-level unit checks (precise, no reducer plumbing) ---
+
+    /** A reentrant same-thread guarded call (nested) must not trip. */
+    @Test
+    fun `reentrant same-thread guarded call is allowed`() {
+        val guard = ThreadConfinementGuard(enabled = true)
+        val result = guard.guarded("outer") {
+            guard.guarded("inner") { "ok" }
+        }
+        assertEquals("ok", result)
+        // And the latch was released: a fresh single call still works afterwards.
+        assertEquals("again", guard.guarded("after") { "again" })
+    }
+
+    /** Two threads inside the guard at once trip; the guard releases after. */
+    @Test
+    fun `guard trips on true concurrent entry and recovers`() {
+        val guard = ThreadConfinementGuard(enabled = true)
+        val inside = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holder = Thread {
+            guard.guarded("holder") {
+                inside.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+        }
+        holder.start()
+        assertTrue(inside.await(5, TimeUnit.SECONDS))
+
+        val thrown = runCatching { guard.guarded("racer") { } }.exceptionOrNull()
+
+        release.countDown()
+        holder.join(5_000)
+
+        assertTrue("racer must trip while holder is inside", thrown is IllegalStateException)
+        // After the holder exits, the latch is free again — no permanent lock-out.
+        assertEquals("free", guard.guarded("after") { "free" })
     }
 
     /** Run [block] on a fresh worker thread; return the throwable it raised, or null. */

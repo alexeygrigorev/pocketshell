@@ -9956,6 +9956,114 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─── Issue #1158 (REOPENED chain #962→#975→#1057→#1158) — the STICKY ────────
+    // alt-buffer agent latch. The maintainer launches `claude`/`codex` DIRECTLY
+    // inside a shell-recorded session, so `@ps_agent_kind` stays `shell`, the
+    // confirmed-shell verdict is never cleared, and live detection never binds for
+    // the node-wrapped-Claude / Codex-`/proc` / Z.AI fleet. The detection-
+    // INDEPENDENT alt-buffer signal restores the Conversation tab and, once shown,
+    // must STAY for the session's life (a later detection drop / buffer flip must
+    // not collapse it). ─────────────────────────────────────────────────────────
+
+    @Test
+    fun altBufferAgentLatchesShellRecordedSessionAndIsStickyAcrossBufferFlip() = runTest(scheduler) {
+        // A single held surface state so the test can drive the active pane's
+        // alt-buffer verdict synthetically (the #780 model — CI has no real curses
+        // agent). The factory returns the SAME instance the (single) pane uses.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // The maintainer's exact state: the session is a CONFIRMED shell
+        // (`@ps_agent_kind=shell`) — nothing else will ever show the tab.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "precondition: the session is a confirmed shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        assertTrue(
+            "precondition: no alt-buffer sighting yet → tab still hidden (RED on base)",
+            "%0" !in vm.altBufferAgentPaneIds.value,
+        )
+
+        // The agent (claude/codex/glm — kind-agnostic) goes full-screen: the pane's
+        // emulator switches to the ALTERNATE screen buffer. The watchdog tick reads
+        // it (driven here directly) and LATCHES the session.
+        surface.setAlternateBufferActiveForTest(true)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#1158: the alt-buffer sighting latches the session → Conversation tab shown",
+            "%0" in vm.altBufferAgentPaneIds.value,
+        )
+
+        // STICKY: the agent leaves the alt-buffer (exits a full-screen view / drops
+        // detection). The tab MUST stay for the rest of the session.
+        surface.setAlternateBufferActiveForTest(false)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#1158 sticky: a later buffer flip / detection drop must NOT collapse the tab",
+            "%0" in vm.altBufferAgentPaneIds.value,
+        )
+    }
+
+    @Test
+    fun altBufferAgentSurvivesReattachPaneIdRotation() = runTest(scheduler) {
+        // Sticky across the real reattach path: tmux re-attach assigns a NEW pane
+        // id under the SAME session ($0). The latch is per-SESSION, so the new pane
+        // id inherits the Conversation tab without needing a fresh alt-buffer
+        // sighting — the maintainer's long-lived sessions keep the tab across
+        // reconnects.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        surface.setAlternateBufferActiveForTest(true)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue("precondition: latched on the original pane id", "%0" in vm.altBufferAgentPaneIds.value)
+
+        // Reattach: same session $0, new pane id %7. No fresh alt-buffer read.
+        surface.setAlternateBufferActiveForTest(false)
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "work", paneIndex = 0, sessionName = "work"),
+            ),
+        )
+        runCurrent()
+        assertTrue(
+            "#1158 sticky: the new pane id under the latched session keeps the tab",
+            "%7" in vm.altBufferAgentPaneIds.value,
+        )
+        assertTrue("old pane id is gone", "%0" !in vm.altBufferAgentPaneIds.value)
+    }
+
+    @Test
+    fun plainShellOnMainBufferNeverLatchesNoFlap() = runTest(scheduler) {
+        // #894/#815 no-flap adjacency: a plain interactive shell sitting at a prompt
+        // is on the MAIN buffer, so the alt-buffer poll never latches it → NO
+        // Conversation tab. The alt-buffer signal is POSITIVE-only.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        // Main buffer (the emulator override defaults to null → the real read, and a
+        // stub emulator with no alt-screen reports false; assert false explicitly).
+        surface.setAlternateBufferActiveForTest(false)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#894 no-flap: a main-buffer shell never latches → tab stays hidden",
+            "%0" !in vm.altBufferAgentPaneIds.value,
+        )
+    }
+
     @Test
     fun notShellVerdictDoesNotClobberLiveRowNoYank() = runTest(scheduler) {
         // #815 no-yank invariant (class coverage): the #874 re-seed must NOT

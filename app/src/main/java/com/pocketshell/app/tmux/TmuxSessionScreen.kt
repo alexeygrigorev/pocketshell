@@ -68,6 +68,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -1596,22 +1597,24 @@ public fun TmuxSessionScreen(
             // flush but the resulting [TmuxSessionTabState] is structurally equal,
             // so the body is not invalidated.
             // Issue #1158: the active session's RECORDED agent kind
-            // (`@ps_agent_kind`, collected above at [currentSessionRecordedKind])
-            // projected to a stable boolean so it can force the Conversation tab
-            // present for a recorded agent even when live detection /
-            // transcript-source binding never bound. Independent of the
-            // per-pane `presumedAgent` gate so a recorded Codex / Z.AI-Claude
-            // session shows the toggle regardless of the fragile binding.
-            val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
-            val tabState by remember(surfaceConversationPaneId, presumedAgent, recordedAgentKind) {
-                derivedStateOf {
-                    tmuxSessionTabState(
-                        surfaceConversationPaneId?.let { agentConversationsState.value[it] },
-                        presumedAgent,
-                        recordedAgentKind,
-                    )
-                }
-            }
+            // (`@ps_agent_kind`) AND the sticky alt-buffer agent signal are both
+            // folded into [rememberTmuxSessionTabState], an extracted @Composable,
+            // so the `recordedAgentKind` projection, the `altBufferAgentPaneIds`
+            // collectAsState, the `altBufferAgent` derivation and the
+            // `derivedStateOf` remember all live in THAT small method's register
+            // frame instead of this enormous body. That is the R2 fix: the extra
+            // locals had inflated [TmuxSessionScreen]'s method past ART's dex
+            // verifier register limit (`v273` VerifyError) and crashed the session
+            // screen at class load. Same recomposition semantics as the previous
+            // inline block — the returned [State] is read via `by` here so the
+            // derived-state read stays attributed to this caller's restart scope.
+            val tabState by rememberTmuxSessionTabState(
+                viewModel = viewModel,
+                surfaceConversationPaneId = surfaceConversationPaneId,
+                presumedAgent = presumedAgent,
+                currentSessionRecordedKind = currentSessionRecordedKind,
+                agentConversationsState = agentConversationsState,
+            )
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
                     // Issue #778: honour a Conversation tap whenever the tab is
@@ -3759,6 +3762,64 @@ internal fun tmuxSessionShouldPromoteSettledCachedPane(
 }
 
 /**
+ * Issue #1158 (R2 ART VerifyError fix): the session's Terminal/Conversation
+ * [TmuxSessionTabState], derived in its OWN @Composable so the alt-buffer wiring
+ * does not inflate the enormous [TmuxSessionScreen] method past ART's dex
+ * verifier register limit.
+ *
+ * The reviewer found that adding the `altBufferAgentPaneIds` collectAsState, the
+ * `altBufferAgent` local and the extra `remember(...)` key directly into the
+ * mega-composable body tipped its method past the ART verifier's register
+ * ceiling (`VerifyError ... copy1 v273<-...`), so the session screen — the app's
+ * MAIN screen — crashed at class load on-device (invisible to the JVM verifier).
+ * Extracting the derivation here moves ALL of that register pressure
+ * (`recordedAgentKind` projection, `altBufferAgentPaneIds` collectAsState,
+ * `altBufferAgent` derivation, the `derivedStateOf` remember) into this small
+ * method's own frame, letting [TmuxSessionScreen] verify again.
+ *
+ * Behaviour is IDENTICAL to the previous inline block: it returns a
+ * [State]<[TmuxSessionTabState]> which the caller reads via `by`, so the
+ * derived-state read stays attributed to the caller's restart scope and the tab
+ * chrome still stays OFF the 60ms agent-streaming flush (#1085). The alt-buffer
+ * signal is a detection-INDEPENDENT positive agent signal (see
+ * [TmuxSessionViewModel.altBufferAgentPaneIds]); a plain shell on the main buffer
+ * never latches it, preserving the #894/#815 no-flap invariant.
+ */
+@Composable
+private fun rememberTmuxSessionTabState(
+    viewModel: TmuxSessionViewModel,
+    surfaceConversationPaneId: String?,
+    presumedAgent: Boolean,
+    currentSessionRecordedKind: SessionAgentKind?,
+    agentConversationsState: State<Map<String, AgentConversationUiState>>,
+): State<TmuxSessionTabState> {
+    val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
+    // Issue #1158: the STICKY set of pane ids whose emulator has been seen on the
+    // ALTERNATE screen buffer — the detection-independent positive agent signal
+    // that keeps the Conversation tab reachable for an agent launched directly
+    // inside a shell-recorded session (where `@ps_agent_kind=shell`, the
+    // confirmed-shell verdict is never cleared, and live detection never binds).
+    val altBufferAgentPaneIds by viewModel.altBufferAgentPaneIds.collectAsState()
+    val altBufferAgent = surfaceConversationPaneId != null &&
+        surfaceConversationPaneId in altBufferAgentPaneIds
+    return remember(
+        surfaceConversationPaneId,
+        presumedAgent,
+        recordedAgentKind,
+        altBufferAgent,
+    ) {
+        derivedStateOf {
+            tmuxSessionTabState(
+                surfaceConversationPaneId?.let { agentConversationsState.value[it] },
+                presumedAgent,
+                recordedAgentKind,
+                altBufferAgent,
+            )
+        }
+    }
+}
+
+/**
  * Issue #1158 (recurrence of #962/#1057): whether the tree has RECORDED this
  * session as a known agent kind (Claude / Codex / OpenCode), independent of
  * whether live agent-detection or conversation-source binding has succeeded.
@@ -3797,6 +3858,7 @@ internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,
     presumedAgent: Boolean = false,
     recordedAgentKind: Boolean = false,
+    altBufferAgent: Boolean = false,
 ): TmuxSessionTabState {
     // The Conversation tab exists for a live-detected agent OR a presumed
     // agent (#716). Issue #778: the active index now follows the user's
@@ -3846,9 +3908,22 @@ internal fun tmuxSessionTabState(
     // the user reaches the existing Placeholder/Failed surface
     // ([tmuxSessionConversationSurface]) — the whole tab is NEVER collapsed on a
     // source-binding hiccup.
+    //
+    // Issue #1158 (REOPENED — the maintainer still can't reach conversations when
+    // an agent is launched DIRECTLY inside an existing shell session, so nothing
+    // ever recorded `@ps_agent_kind` and live detection never binds for the
+    // node-wrapped-Claude / Codex-`/proc` / Z.AI fleet). [altBufferAgent] is a
+    // detection-INDEPENDENT positive agent signal: the visible pane's emulator is
+    // on the ALTERNATE screen buffer, which a full-screen agent TUI holds for its
+    // whole run while a plain shell at a prompt does not. It is fed STICKY from the
+    // VM ([TmuxSessionViewModel.altBufferAgentPaneIds]) — once a pane/session has
+    // been seen on the alt-buffer the tab stays for the session's life even if the
+    // buffer later leaves alt-mode or detection drops. Because it is a POSITIVE
+    // signal, a genuine plain interactive shell (main buffer) still shows NO
+    // Conversation tab, preserving the #894/#815 no-flap invariant.
     val showsConversationTab =
         hasLiveDetection || presumedAgent || hasConversationContent ||
-            userOpenedConversation || recordedAgentKind
+            userOpenedConversation || recordedAgentKind || altBufferAgent
     return TmuxSessionTabState(
         labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
         selectedIndex = if (showsConversationTab && userOpenedConversation) 1 else 0,

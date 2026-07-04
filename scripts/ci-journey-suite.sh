@@ -943,6 +943,19 @@ JOURNEY_CLASSES=(
   #     second kind in the class (Codex), covering the recurrence #962/#975 missed by
   #     only proving vanilla Claude. (Fast JVM sibling: TmuxSessionScreenTest
   #     .tmuxSessionTabStateShowsConversationForRecorded{Claude,Codex,ZaiClaude,OpenCode}*.)
+  #   - conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession
+  #     (#1158 REOPENED — the maintainer's EXACT dogfood path): an agent launched
+  #     DIRECTLY inside an existing shell tmux session (NOT the `pocketshell agent`
+  #     wrapper), so `@ps_agent_kind` stays `shell`, the confirmed-shell verdict is
+  #     never cleared, and live detection never binds — every prior signal false, the
+  #     toggle GONE for the session's life. The detection-INDEPENDENT alt-buffer
+  #     signal (a full-screen agent TUI holds the alternate screen buffer) restores
+  #     it, STICKY. The pane's alt-buffer state is injected synthetically on the REAL
+  #     connected pane (#780 model — tmux -CC cannot mirror a remote alt-buffer into
+  #     the client emulator), hard-failing (no assumeTrue). RED on base (no
+  #     `|| altBufferAgent`): the toggle stays absent even with the alt-buffer set.
+  #     (Fast JVM siblings: TmuxSessionScreenTest.tmuxSessionTabStateShowsConversation
+  #     ForAltBufferAgent* + TmuxSessionViewModelTest.altBufferAgent*.)
   # It uses ONLY agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that
   # tests.yml already brings up, and does NOT self-skip on CI (no assumeTrue /
   # assumeFalse(isRunningOnCi())). Lives under com.pocketshell.app.tmux.

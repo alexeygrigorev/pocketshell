@@ -693,6 +693,49 @@ class TerminalSurfaceState(
         }
     }
 
+    /**
+     * Issue #1158 — true when the attached emulator is currently on the ALTERNATE
+     * screen buffer (the `smcup`/`?1049h` full-screen mode). A full-screen agent
+     * TUI (Claude Code / Codex / OpenCode and other curses apps) switches the
+     * terminal to the alternate buffer for its whole run; a plain scrolling shell
+     * sitting at a prompt stays on the MAIN buffer. The tmux ViewModel reads this
+     * as a detection-INDEPENDENT positive agent signal so the Conversation tab
+     * appears for an agent launched directly inside a shell-recorded session —
+     * where the `@ps_agent_kind` record says `shell`, the confirmed-shell verdict
+     * is never cleared (live detection can't bind for node-wrapped Claude / Codex
+     * `/proc` / Z.AI transcript-path fleets), and every other tab signal is false.
+     *
+     * A POSITIVE signal only: a genuine plain shell on the main buffer reads false,
+     * so the #894/#815 no-flap invariant holds (a fresh shell at a prompt never
+     * flashes the Conversation tab). Returns false when no emulator is attached yet,
+     * and treats a mid-resize throw as "unknown" (false) so a transient never
+     * spuriously latches the tab.
+     */
+    fun isAlternateBufferActive(): Boolean {
+        alternateBufferOverrideForTest?.let { return it }
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        return try {
+            emulator.isAlternateBufferActive
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Test-only seam (#1158): force the alternate-buffer verdict reported by
+     * [isAlternateBufferActive] WITHOUT standing up a real emulator on the JVM.
+     * A `null` override (the default) restores the real emulator read. Lets a JVM
+     * unit test drive a pane onto/off the alt-buffer synthetically (the #780
+     * synthetic-state model — CI has no real curses agent) so the sticky-latch
+     * behaviour is deterministically reproducible.
+     */
+    @Volatile
+    private var alternateBufferOverrideForTest: Boolean? = null
+
+    fun setAlternateBufferActiveForTest(active: Boolean?) {
+        alternateBufferOverrideForTest = active
+    }
+
     // -------------------------------------------------------------------------
     // Issue #1192 — SURFACE-paint confirmation seam (distinct from the MODEL grid).
     //

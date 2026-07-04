@@ -1,6 +1,7 @@
 package com.pocketshell.app.session
 
 import android.util.Log
+import com.pocketshell.app.conversation.TRUNCATED_LINE_SYSTEM_NOTE_TAG
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentDetector
 import com.pocketshell.core.agents.AgentKind
@@ -406,7 +407,7 @@ internal fun parseTranscriptTailLines(
             out += ConversationEvent.SystemNote(
                 id = "ps-truncated-line-$truncationOrdinal",
                 agent = agent,
-                tag = "truncated",
+                tag = TRUNCATED_LINE_SYSTEM_NOTE_TAG,
                 content = truncationPlaceholderText(truncatedBytes),
             )
             truncationOrdinal++
@@ -1488,7 +1489,7 @@ public class AgentConversationRepository internal constructor(
     ): List<ConversationEvent> {
         if (detection.isOpenCodeSqlite()) {
             val output = exportOpenCodeSqliteRows(session, detection, maxMessages = maxLines)
-            return OpenCodeReader().parseSqliteJsonRows(output)
+            return parseOpenCodeRowsWithTruncation(output)
         }
         if (detection.agent == AgentKind.Codex) {
             return readCodexInitialEvents(session, detection, maxLines)
@@ -1540,7 +1541,7 @@ public class AgentConversationRepository internal constructor(
         val budget = maxMessages.coerceAtLeast(1)
         if (detection.isOpenCodeSqlite()) {
             val output = exportOpenCodeSqliteRows(session, detection, maxMessages = budget)
-            val events = OpenCodeReader().parseSqliteJsonRows(output)
+            val events = parseOpenCodeRowsWithTruncation(output)
             // The SQL LIMIT is on the `message` table; distinct message ids in
             // the window approximate "rows read". If we filled the limit there
             // are (very likely) older messages we did not pull.
@@ -1633,11 +1634,18 @@ public class AgentConversationRepository internal constructor(
         // same exec is what lets the cold-open path drop the standalone
         // `lineCount` round-trip without losing the tail-start position.
         val sentinel = "@@PS_CODEX_WINDOW@@"
+        // Issue #1267: byte-bound the Codex cold-open read the same way #1225
+        // bounded the Claude flat-JSONL tail. The Codex read goes through
+        // `pocketshell agent-log`, so the clamp lives there (`--max-line-bytes`):
+        // a multi-MB rollout line (inline base64 image / huge tool_result) is
+        // replaced server-side by a compact truncation marker, so its bytes never
+        // cross SSH into the phone's heap. The marker is rendered as a visible
+        // note by [parseTranscriptTailLines] below.
         val output = session.exec(
             "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0; " +
                 "printf '%s\\n' $sentinel; " +
                 "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
-                "--json --tail $boundedMaxLines 2>/dev/null || true",
+                "--json --tail $boundedMaxLines --max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES 2>/dev/null || true",
         ).stdout
         val splitLines = output.split("\n")
         val sentinelIndex = splitLines.indexOf(sentinel)
@@ -1652,8 +1660,11 @@ public class AgentConversationRepository internal constructor(
             output
         }
         val lines = parseAgentLogEnvelopeLines(envelopeOutput)
-        val parser = CodexParser()
-        val events = lines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        // Issue #1267: route the envelope lines through the truncation-aware
+        // parser so an over-cap line (clamped to a marker by `--max-line-bytes`)
+        // becomes a VISIBLE SystemNote instead of a line the CodexParser silently
+        // fails to parse and drops.
+        val events = parseTranscriptTailLines(CodexParser(), AgentKind.Codex, lines.asSequence())
         return CodexWindow(events = events, rawLineCount = lines.size, sourceLineCount = sourceLineCount)
     }
 
@@ -1948,8 +1959,54 @@ public class AgentConversationRepository internal constructor(
             LEFT JOIN part p ON p.message_id = m.id
             ORDER BY m.time_created, m.id, p.time_created, p.id;
         """.trimIndent().replace("\n", " ")
-        return session.exec("sqlite3 -readonly ${shellQuote(dbPath)} ${shellQuote(query)} 2>/dev/null || true")
+        // Issue #1267: byte-bound the OpenCode read. `json_object(...)` emits one
+        // JSON object per row on its own line (newlines inside values are escaped
+        // as `\n`), so the SAME per-line `awk` byte clamp #1225 used for the
+        // Claude flat-JSONL tail is the format-appropriate bound here: a row whose
+        // `part_data`/`message_data` is a multi-MB tool result / inline image is
+        // replaced server-side by a compact truncation marker, so its bytes never
+        // cross SSH into the phone's heap. The cold-open reads render that marker
+        // as a visible note via [parseOpenCodeRowsWithTruncation].
+        return session.exec(
+            "sqlite3 -readonly ${shellQuote(dbPath)} ${shellQuote(query)} 2>/dev/null | " +
+                "${transcriptLineClampPipe()} 2>/dev/null || true",
+        )
             .stdout
+    }
+
+    /**
+     * Issue #1267: parse an OpenCode SQLite export whose rows may include a
+     * per-line truncation marker emitted by [transcriptLineClampPipe] (an
+     * over-cap row byte-clamped server-side). Each marker line becomes a VISIBLE
+     * [ConversationEvent.SystemNote] (never silently dropped — the oversized JSON
+     * is gone, so feeding the fragment to [OpenCodeReader] would just vanish the
+     * message), and the remaining rows are parsed normally. Ids are ordinal-stable
+     * within a read so re-reads reconcile the same placeholder. The fast path
+     * (no marker present) is byte-identical to the previous direct
+     * [OpenCodeReader.parseSqliteJsonRows] call.
+     */
+    private fun parseOpenCodeRowsWithTruncation(output: String): List<ConversationEvent> {
+        if (!output.contains(LINE_TRUNCATION_SENTINEL)) {
+            return OpenCodeReader().parseSqliteJsonRows(output)
+        }
+        val keptRows = ArrayList<String>()
+        val truncationNotes = ArrayList<ConversationEvent>()
+        var truncationOrdinal = 0
+        for (line in output.lineSequence()) {
+            val truncatedBytes = truncatedLineByteCountOrNull(line)
+            if (truncatedBytes != null) {
+                truncationNotes += ConversationEvent.SystemNote(
+                    id = "ps-truncated-line-$truncationOrdinal",
+                    agent = AgentKind.OpenCode,
+                    tag = TRUNCATED_LINE_SYSTEM_NOTE_TAG,
+                    content = truncationPlaceholderText(truncatedBytes),
+                )
+                truncationOrdinal++
+            } else {
+                keptRows += line
+            }
+        }
+        return OpenCodeReader().parseSqliteJsonRows(keptRows.joinToString("\n")) + truncationNotes
     }
 
     private suspend fun readCodexInitialEvents(
@@ -1963,13 +2020,16 @@ public class AgentConversationRepository internal constructor(
         val boundedMaxLines = (maxLines * JSONL_RAW_LINES_PER_EVENT)
             .coerceAtLeast(maxLines)
             .coerceAtLeast(1)
+        // Issue #1267: byte-bound the Codex cold-open read via the tool-side
+        // `--max-line-bytes` clamp (the Codex counterpart of #1225's Claude
+        // flat-JSONL clamp), then render any resulting truncation marker as a
+        // visible note through [parseTranscriptTailLines].
         val output = session.exec(
             "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
-                "--json --tail $boundedMaxLines 2>/dev/null || true",
+                "--json --tail $boundedMaxLines --max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES 2>/dev/null || true",
         ).stdout
         val lines = parseAgentLogEnvelopeLines(output)
-        val parser = CodexParser()
-        return lines.asSequence().flatMap { parser.parseLine(it) }.toList()
+        return parseTranscriptTailLines(CodexParser(), AgentKind.Codex, lines.asSequence())
     }
 
     /**

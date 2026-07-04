@@ -2340,8 +2340,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // The crash class: closing the attached/last session → the gateway kill
     // destroys tmux → the live `-CC` control client EOFs → that EOF fans out
     // to several `bridgeScope.launch {}` collectors (client.events →
-    // onControlEvent, client.disconnected, per-pane output/port, agent tail /
-    // detection / conversation watchdog) AT THE SAME MOMENT the scopes are
+    // structural reconcile, client.disconnected, per-pane output/port, agent
+    // tail / detection / conversation watchdog) AT THE SAME MOMENT the scopes are
     // torn down. A SupervisorJob isolates SIBLING cancellation but does NOT
     // swallow a child's exception — so a single unguarded suspend-IO call that
     // throws (e.g. `SshException: SSH session is not connected`, the captured
@@ -7960,6 +7960,12 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    // Issue #1224: fed by the per-pane [TmuxClient.outputFor] tap
+    // ([recordVisiblePaneOutput]), NOT by `%output` on the structural
+    // [TmuxClient.events] bus. `%output` is no longer multiplexed onto that
+    // shared bus — a dense output burst used to fill it and silently drop a
+    // burst-tail structural event (`%window-close` / `%session-changed`). The
+    // first-visible-output milestone now rides the pane's own output stream.
     private fun logFirstPaneOutput(event: ControlEvent.Output) {
         val milestone = activeAttachMilestone ?: return
         if (milestone.firstPaneOutputLogged) return
@@ -8016,8 +8022,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // are OFFERED into it; a Codex `/new` storm of N of them collapses to
         // ~1 reconcile per frame on [reconcileDispatcher], so the UI thread is
         // no longer head-of-line-blocked behind N `list-panes`/`capture-pane`
-        // round-trips (the ANR). `%output` and everything else still flow
-        // through `onControlEvent` synchronously on the collector.
+        // round-trips (the ANR). Issue #1224: `%output` no longer rides the
+        // events bus at all — it is delivered via the per-pane `outputFor` pipes.
         layoutChangeCoalescer?.stop()
         layoutCoalescerScope?.cancel()
         // The coalescer drain loop gets its OWN child Job parented to
@@ -8051,14 +8057,13 @@ public class TmuxSessionViewModel @Inject constructor(
 
         val job = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.events.collect { event ->
-                // Structural events drive a `list-panes` reconcile; route them
-                // through the coalescer (non-blocking offer) so a burst collapses
-                // to ~1 off-main reconcile per frame. Everything else
-                // (notably `%output`) keeps the existing synchronous path.
+                // Issue #1224: [TmuxClient.events] carries STRUCTURAL events only
+                // now (`%output` is off the shared bus). Structural events drive a
+                // `list-panes` reconcile; route them through the coalescer
+                // (non-blocking offer) so a burst collapses to ~1 off-main
+                // reconcile per frame. No non-structural event needs handling here.
                 if (LayoutChangeCoalescer.isStructural(event)) {
                     coalescer.offer(event)
-                } else {
-                    onControlEvent(event)
                 }
             }
         }
@@ -9825,29 +9830,6 @@ public class TmuxSessionViewModel @Inject constructor(
             dao.getByHostId(hostId).collectLatest { roots ->
                 _projectRoots.value = roots
             }
-        }
-    }
-
-    /**
-     * Process one NON-structural event from the bus.
-     *
-     * Issue #576 (Slice A of #792): the structural events
-     * ([ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
-     * [ControlEvent.LayoutChange] / [ControlEvent.PaneModeChanged]) that each
-     * trigger a session-scoped `list-panes` reconcile are NOT handled here —
-     * the collector in [bindClientObservers] routes them through
-     * [layoutChangeCoalescer] instead, so a Codex `%layout-change` storm
-     * collapses to ~1 off-main reconcile per frame rather than N synchronous
-     * main-thread reconciles (the ANR). [LayoutChangeCoalescer.isStructural]
-     * is the single source of truth for that classification. This function
-     * handles the remaining events (notably `%output` logging).
-     */
-    private suspend fun onControlEvent(event: ControlEvent) {
-        when (event) {
-            is ControlEvent.Output -> {
-                logFirstPaneOutput(event)
-            }
-            else -> Unit
         }
     }
 

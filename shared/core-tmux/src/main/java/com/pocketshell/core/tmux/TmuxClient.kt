@@ -79,10 +79,14 @@ public interface TmuxClient : AutoCloseable {
      *
      * Hot — backed by a shared flow inside the implementation so that
      * multiple subscribers see the same events without re-reading the SSH
-     * stream. Per-pane `%output` events flow here too (they are
-     * [ControlEvent.Output] instances) but most callers will subscribe
-     * via the dedicated [outputFor] demux instead so they don't have to
-     * filter the whole bus.
+     * stream.
+     *
+     * Issue #1224: this bus carries STRUCTURAL control events only
+     * (`%window-close`, `%session-changed`, `%layout-change`, `%window-add`,
+     * `%exit`, …). Per-pane `%output` is deliberately NOT multiplexed here —
+     * subscribe to the dedicated [outputFor] demux for pane bytes. Copying every
+     * high-rate `%output` onto this shared bus used to let an output burst fill
+     * the buffer and silently drop a burst-tail structural event.
      */
     public val events: Flow<ControlEvent>
 
@@ -812,11 +816,17 @@ internal class RealTmuxClient(
             Dispatchers.IO,
     )
 
-    // Shared flow of all events. extraBufferCapacity absorbs short bursts
-    // without blocking the reader. Pane `%output` is emitted to this bus on a
-    // best-effort basis from [emitOutput]; the per-pane terminal stream is the
-    // authoritative output path, and it must never let diagnostic/global event
-    // collectors starve the control reader.
+    // Shared flow of STRUCTURAL events. extraBufferCapacity absorbs short
+    // bursts without blocking the reader.
+    //
+    // Issue #1224: pane `%output` is NO LONGER emitted onto this bus. It used to
+    // be (best-effort, so the ViewModel could log first-frame-per-pane), which
+    // meant a dense output burst filled the 256-slot buffer and could silently
+    // drop a burst-tail structural event (`%window-close` / `%session-changed`)
+    // — leaving a stale window node or wrong active session in the UI. Output
+    // now rides ONLY the per-pane [outputFor] pipes (the ViewModel's
+    // first-visible-output log taps that stream); this bus carries structural
+    // events ONLY, so an output burst can never crowd them out.
     //
     // replay = 0 because subscribers only care about events that arrive
     // after they start collecting; tmux's structural state (sessions /
@@ -2118,27 +2128,17 @@ internal class RealTmuxClient(
     }
 
     private fun emitOutput(event: ControlEvent.Output) {
+        // The authoritative per-pane render path. Issue #1224: `%output` is NO
+        // LONGER copied onto the structural [eventBus]. That shared 256-slot bus
+        // silently dropped a burst-tail `%window-close` / `%session-changed`
+        // under output volume (a GC-stalled collector let 256 output copies fill
+        // the buffer, so the trailing structural event's `tryEmit` failed and was
+        // lost — leaving a stale window node / wrong active session). The ONLY
+        // consumer of output on the bus was the first-visible-output milestone
+        // log, which is fed instead by the ViewModel's existing per-pane
+        // [outputFor] tap. Output now rides ONLY the per-pane pipes here, so an
+        // output burst can never crowd out a structural event.
         deliverToPaneStream(event)
-        if (!eventBus.tryEmit(event)) {
-            val dropped = eventBusDroppedEvents.incrementAndGet()
-            if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
-                TmuxClientDiagnostics.record(
-                    "tmux_client_eventbus_overflow",
-                    commonDiagnosticFields() + mapOf(
-                        "session" to sessionName,
-                        "pane" to event.paneId,
-                        "bytes" to event.data.size,
-                        "droppedEvents" to dropped,
-                        "capacity" to EVENT_BUFFER,
-                    ),
-                )
-            }
-            Log.w(
-                ISSUE_105_DIAG_TAG,
-                "tmux-output-eventbus-drop pane=${event.paneId} bytes=${event.data.size} " +
-                    "droppedEvents=$dropped capacity=$EVENT_BUFFER",
-            )
-        }
     }
 
     /**

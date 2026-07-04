@@ -247,6 +247,26 @@ class HostListViewModel internal constructor(
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
+    /**
+     * Issue #1241: the landing app-bar glance pill. The most-constraining
+     * provider percent across every cached host, or null when there is no
+     * usable reading yet (the pill is then hidden). Reads the SAME cached
+     * [UsageScheduler.snapshots] the warning banners + per-card badges consult
+     * — NO new fetch cadence (D21-compliant). The warn-threshold gate is read
+     * from settings so the pill's severity tint stays in sync with the other
+     * in-app usage surfaces.
+     */
+    val usageGlancePill: StateFlow<com.pocketshell.app.usage.UsageGlancePillState?> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        com.pocketshell.app.usage.usageGlancePillState(
+            snapshots = snapshots,
+            warnPercent = settings.usageWarnThresholdPercent.toDouble(),
+        )
+    }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
+
     // Issue #483 introduced a per-host usage summary chip (`usageSummaries`)
     // rendered under each host card; issue #506 dropped that chip because it
     // read as a cryptic floating row. Usage is reachable per-host via the

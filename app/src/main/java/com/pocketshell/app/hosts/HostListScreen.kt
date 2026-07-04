@@ -197,6 +197,10 @@ fun HostListScreen(
     val usageWarningProviders by viewModel.usageWarningProviders.collectAsState()
     val dismissedBanners by viewModel.dismissedBanners.collectAsState()
     val forwardingIndicator by forwardingIndicatorViewModel.state.collectAsState()
+    // Issue #1241: the glanceable most-constraining usage percent, read from
+    // the SAME cached scheduler snapshots the warning banners use (no new
+    // fetch). Null while there's no usable reading — the pill is then hidden.
+    val usageGlancePill by viewModel.usageGlancePill.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
 
@@ -364,6 +368,11 @@ fun HostListScreen(
                 onSettingsClick = onOpenSettings,
                 forwardingIndicator = forwardingIndicator,
                 onForwardingIndicatorClick = onOpenPortForwarding,
+                // Issue #1241: the glance pill only lights up when there's a
+                // cached reading AND a Usage route is wired (mirrors the
+                // banner / kebab gate).
+                usageGlancePill = usageGlancePill,
+                onOpenUsage = onOpenUsage,
             )
 
             // The landing body is one scrolling hosts-first list. Live
@@ -983,19 +992,32 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
  * from the caller's live state.
  */
 @Composable
-private fun HostsAppBar(
+internal fun HostsAppBar(
     hostCount: Int,
     activeSessionCount: Int,
     onSettingsClick: () -> Unit = {},
     forwardingIndicator: com.pocketshell.app.portfwd.ForwardingIndicatorState =
         com.pocketshell.app.portfwd.ForwardingIndicatorState(),
     onForwardingIndicatorClick: () -> Unit = {},
+    // Issue #1241: the glanceable usage pill. Null (or a null route) hides it.
+    usageGlancePill: com.pocketshell.app.usage.UsageGlancePillState? = null,
+    onOpenUsage: (() -> Unit)? = null,
 ) {
     ScreenHeader(
         title = "Hosts",
         subtitle = hostsHeaderSubtitle(hostCount, activeSessionCount),
         modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
         trailing = {
+            // Issue #1241: the most-constraining usage percent, tapping into
+            // UsageScreen. Leftmost of the trailing affordances so the number
+            // is the first thing scanned; the shared trailing Row's inter-item
+            // spacing keeps it clear of the forwarding pill + Settings gear.
+            if (usageGlancePill != null && onOpenUsage != null) {
+                com.pocketshell.app.usage.UsageGlancePill(
+                    state = usageGlancePill,
+                    onClick = onOpenUsage,
+                )
+            }
             // Issue #446: the global "ports forwarding" indicator only appears
             // while ≥1 host is actively auto-forwarding. Tapping it opens the
             // port-forward panel entry (same chooser as the QS tile +

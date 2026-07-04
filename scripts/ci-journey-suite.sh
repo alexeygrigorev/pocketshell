@@ -1580,6 +1580,23 @@ JOURNEY_CLASSES=(
   # fixture tests.yml already brings up (no toxiproxy / new port), and does NOT
   # self-skip on CI. Lives under com.pocketshell.app.tmux, so it carries its FQCN.
   "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest#cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut"
+  # ADDED (#1241): the landing app-bar usage GLANCE PILL on-device proof. The
+  # routine non-warning "how much have I burned this week" question was 2-3 taps
+  # deep (Settings->Diagnostics / in-session kebab); this small most-constraining-
+  # percent pill surfaces it on the landing app bar next to Settings and taps into
+  # UsageScreen. This connected UI test composes the PRODUCTION HostsAppBar in the
+  # real PocketShellTheme and asserts: the percent renders, the pill is HIDDEN with
+  # no data / no route, tapping routes to Usage, a stale reading renders honestly
+  # ("cached from HH:mm"), and the pill + Settings gear are BOTH fully within the
+  # window root (the #418 declutter / no-crowd guard — assertNodeFullyWithinRoot,
+  # not a bare assertIsDisplayed). Pure Compose-rule UI test (like EnvScreenE2eTest):
+  # no Docker fixture / SSH / tmux / toxiproxy / port, so it needs NO tests.yml
+  # service change, is deterministic on the CI swiftshader AVD, and does NOT
+  # self-skip on CI. The pure state-derivation backstop (most-constraining pick,
+  # hidden-when-no-data, kind, stale flag) is the per-push Unit-job
+  # UsageGlancePillStateTest. It lives under com.pocketshell.app.usage, so it
+  # carries its FQCN directly.
+  "com.pocketshell.app.usage.UsageGlancePillE2eTest"
 )
 
 # ---------------------------------------------------------------------------

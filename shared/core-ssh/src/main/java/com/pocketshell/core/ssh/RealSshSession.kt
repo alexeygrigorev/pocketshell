@@ -263,6 +263,29 @@ internal class RealSshSession(
     internal fun lastOutboundActivityNanosForTest(): Long = lastOutboundActivityNanos
 
     /**
+     * Issue #1284 — deterministically enter the #1222 async-close RACE WINDOW that
+     * broke the #680 heal-matcher gate on CI. Flips the synchronous [closeStarted]
+     * guard exactly as [close] does as its FIRST action, but WITHOUT launching the
+     * async transport drain — so the transport stays live ([isConnected] still lies
+     * `true`: dispatcher open, client connected) while close has been INITIATED.
+     *
+     * This is the exact state a real exec-after-close lands in when the
+     * `Dispatchers.IO` teardown coroutine is scheduled late (the loaded-CI path):
+     * on fast local hardware the drain wins the race and closes the dispatcher
+     * before exec runs, so the natural gate test
+     * (`execOnAClosedSessionThrowsExactStaleChannelMessage`) cannot be made to fail
+     * locally. This seam injects the failing state synthetically (the #780 model)
+     * so `execInCloseInitiatedRaceWindowThrowsExactStaleChannelMessage` reproduces
+     * the regression red→green DETERMINISTICALLY on any host. NOT part of the public
+     * [SshSession] surface. Because it leaves [closeStarted] set, a later [close] on
+     * the same session is a contract no-op; the owning test relies on the shared
+     * Testcontainers container teardown to reclaim the leaked transport.
+     */
+    internal fun enterCloseInitiatedRaceWindowForTest() {
+        closeStarted.set(true)
+    }
+
+    /**
      * Issue #985/#983 — single-flight guard for the keepalive reply wait. Holds
      * the throwaway [awaitKeepAliveReply] `retrieve()` coroutine launched for the
      * most recent ping that has NOT yet completed (the reply has not landed and the
@@ -1950,7 +1973,22 @@ internal class RealSshSession(
     }
 
     private fun ensureConnected() {
-        if (!isConnected) throw SshException("SSH session is not connected")
+        // Issue #1284 — after the #1222 async close(), the transport drain runs on
+        // a Dispatchers.IO coroutine ([closeScope]). Between close() RETURNING
+        // (which synchronously flips [closeStarted] → [isCloseInitiated] == `true`
+        // as its FIRST action) and that coroutine marking the dispatcher closed +
+        // disconnecting the client, [isConnected] still lies `true` (dispatcher
+        // open, client connected — the #1222-documented ~2s window). An exec that
+        // lands in that window (the CI-slow path) must STILL classify the session
+        // as gone: consult the authoritative close-initiated signal so
+        // exec-after-close RELIABLY throws the EXACT "SSH session is not connected"
+        // heal-matcher text (#680 / EPIC #687 Phase-1 gate,
+        // `execOnAClosedSessionThrowsExactStaleChannelMessage`) instead of racing
+        // ahead onto the still-live transport and returning a bogus result or a
+        // transient "Failed to open exec channel" message. [isConnected] /
+        // [SshLeaseManager.isLiveForLease] semantics are intentionally left
+        // unchanged (#1222) — this only tightens the exec/shell/upload pre-check.
+        if (isCloseInitiated || !isConnected) throw SshException("SSH session is not connected")
     }
 
     /**

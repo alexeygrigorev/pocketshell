@@ -935,6 +935,63 @@ class SshIntegrationTest {
         )
     }
 
+    /**
+     * Issue #1284 (regression, DETERMINISTIC) — the #1222 async-close race that
+     * broke the #680 heal-matcher gate on the batched-on-`main` Docker integration
+     * job, reproduced without any host-timing dependence.
+     *
+     * `execOnAClosedSessionThrowsExactStaleChannelMessage` above exercises the same
+     * contract but only fails when the `Dispatchers.IO` transport-drain coroutine is
+     * scheduled AFTER the follow-up `exec` — the loaded-CI ordering. On fast local
+     * hardware the drain wins that race and closes the dispatcher first, so exec
+     * hits `TransportClosedException` (also the canonical text) and the gate can
+     * never be made to fail locally. That masking is exactly how #1222 shipped
+     * green in isolation while red on CI.
+     *
+     * Here we inject the failing state synthetically (the #780 model): connect a
+     * REAL session, then enter the exact #1222 window — close INITIATED
+     * (`closeStarted` = true, so `isCloseInitiated` == true) but the transport NOT
+     * yet drained (`isConnected` still lies `true`: dispatcher open, client
+     * connected). In that window a pre-#1284 `exec` sails past `ensureConnected()`
+     * (which only consulted the lying `isConnected`), opens a channel on the
+     * still-live transport, and RETURNS A REAL RESULT — silently breaking the
+     * cross-module heal matcher (no exception at all, or a transient
+     * "Failed to open exec channel" if the drain lands mid-open), the CI failure.
+     * The #1284 fix makes `ensureConnected()` also consult `isCloseInitiated`, so
+     * exec in this window RELIABLY throws the exact
+     * "SSH session is not connected" text. Runs on any host.
+     */
+    @Test
+    fun execInCloseInitiatedRaceWindowThrowsExactStaleChannelMessage() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        // Enter the #1222 async-close window deterministically: close initiated but
+        // transport still live (isConnected == true, isCloseInitiated == true).
+        val real = session as RealSshSession
+        real.enterCloseInitiatedRaceWindowForTest()
+        assertTrue("precondition: transport must still be live in the race window", session.isConnected)
+        assertTrue("precondition: close must be initiated in the race window", session.isCloseInitiated)
+
+        val ex = runCatching { session.exec("whoami") }.exceptionOrNull()
+        assertTrue(
+            "exec in the #1222 close-initiated window must throw (not race ahead onto the " +
+                "still-live transport and return a result); got: $ex",
+            ex is SshException,
+        )
+        assertTrue(
+            "exec in the #1222 close-initiated window must produce the exact #680 heal-matcher " +
+                "text \"SSH session is not connected\"; got: ${ex?.message}",
+            ex?.message?.contains("SSH session is not connected", ignoreCase = true) == true,
+        )
+    }
+
     // ---- Issue #654: share-upload auth path against a passphrase key ----
 
     /**

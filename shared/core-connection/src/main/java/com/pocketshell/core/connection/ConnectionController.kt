@@ -26,13 +26,41 @@ import kotlinx.coroutines.flow.asStateFlow
  * "within grace" == `clock.nowMs() < graceDeadline && transport.isWarm(host)`.
  * No timer runs while Backgrounded (D21); the deadline is a stored value compared
  * on the next foreground, never a scheduled wakeup.
+ *
+ * ## Threading contract — Main/single-thread confined (issue #1234, item 6)
+ *
+ * This controller is a NON-thread-safe reducer. [submit] performs an unguarded
+ * read-modify-write of [state] and mutates the plain [graceDeadlineMs] `var`;
+ * nothing here synchronizes. It is correct ONLY because every mutator
+ * ([submit] and the reduce helpers it drives, plus [offerSeed]) is invoked from
+ * a SINGLE confining thread — in production the Main/UI dispatcher the VM adapter
+ * marshals all connection events onto. An off-confinement caller would race the
+ * `graceDeadlineMs`/`_state.value` updates and silently corrupt lifecycle state.
+ *
+ * To keep that contract honest, DEBUG builds install a [ThreadConfinementGuard]:
+ * the first confined-mutator call captures the owning thread, and any later call
+ * from a different thread hard-fails immediately instead of corrupting state
+ * silently. In release builds the guard is a no-op (zero overhead) — the guard
+ * documents + enforces the existing contract without changing any behavior.
  */
 class ConnectionController(
     private val clock: Clock,
     private val transport: TransportPort,
     private val maxReconnectAttempts: Int = DEFAULT_MAX_RECONNECT_ATTEMPTS,
     private val graceMs: Long = DEFAULT_GRACE_MS,
+    // Item 6 (#1234): debug-gated thread-confinement assertion. Defaults to
+    // `BuildConfig.DEBUG` so the guard is active under `testDebugUnitTest` and
+    // developer debug builds, and a no-op in release. Injectable so a test can
+    // pin it on/off deterministically regardless of the build variant.
+    confinementAssertionsEnabled: Boolean = BuildConfig.DEBUG,
 ) {
+    /**
+     * Enforces the Main/single-thread confinement contract in DEBUG builds. It
+     * touches NO controller state and only reads the current thread, so it can
+     * never change reducer behavior — it only converts a silent off-confinement
+     * data race into a loud [IllegalStateException] during development.
+     */
+    private val confinement = ThreadConfinementGuard(confinementAssertionsEnabled)
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
 
     /** The single honest connection-state source. The VM maps this 1:1 to its
@@ -53,7 +81,13 @@ class ConnectionController(
     /** Id-tagged seeds that survived the drop-by-id check (current target only). */
     val seeds: Flow<Seed> = _seeds.asSharedFlow()
 
-    /** Grace deadline stored on Background; null when not backgrounded. No timer. */
+    /**
+     * Grace deadline stored on Background; null when not backgrounded. No timer.
+     *
+     * A plain `var` with NO synchronization — it is read-modified-written only
+     * from within [submit]'s reduce path, so it relies on the Main/single-thread
+     * confinement contract documented on the class (issue #1234, item 6).
+     */
     private var graceDeadlineMs: Long? = null
 
     /** Current target id — the drop-by-id reference for events and seeds. */
@@ -68,8 +102,13 @@ class ConnectionController(
      * for convenience (also published on [state]). Events whose target id does not
      * match the current target are dropped (return current state unchanged) — the
      * one place that rule lives.
+     *
+     * MUST be called from the controller's single confining (Main) thread: it
+     * does an unguarded read-modify-write of [state] and mutates [graceDeadlineMs]
+     * (issue #1234, item 6). DEBUG builds assert this via [confinement].
      */
     fun submit(event: ConnectionEvent): ConnectionState {
+        confinement.checkConfined("submit")
         val next = reduce(_state.value, event)
         if (next !== _state.value || next != _state.value) {
             _state.value = next
@@ -82,8 +121,12 @@ class ConnectionController(
      * Offer a freshly captured pane seed. Re-emitted on [seeds] ONLY if its id
      * matches the current target; a seed for a superseded/non-current target is
      * dropped. Returns true if accepted (emitted), false if dropped.
+     *
+     * A confined mutator: shares the controller's single-thread contract with
+     * [submit] (issue #1234, item 6). DEBUG builds assert it via [confinement].
      */
     fun offerSeed(seed: Seed): Boolean {
+        confinement.checkConfined("offerSeed")
         if (seed.targetId != currentTargetId) {
             return false
         }
@@ -333,4 +376,53 @@ fun ConnectionState.hostOrNull(): HostKey? = when (this) {
     is ConnectionState.Reconnecting -> host
     is ConnectionState.Gone -> host
     is ConnectionState.Unreachable -> host
+}
+
+/**
+ * Debug-only Main/single-thread confinement guard for [ConnectionController]
+ * (issue #1234, item 6).
+ *
+ * The controller's mutators ([ConnectionController.submit] / [offerSeed]) are
+ * NOT thread-safe: they read-modify-write `_state.value` and the plain
+ * `graceDeadlineMs` `var` without synchronization, correct only under the
+ * contract that a SINGLE (Main) thread ever drives them. This guard makes that
+ * contract enforceable in development: on the first confined call it captures the
+ * owning thread; any later confined call from a different thread hard-fails with
+ * an [IllegalStateException] instead of silently corrupting lifecycle state.
+ *
+ * When [enabled] is false (release builds, `BuildConfig.DEBUG == false`) it is a
+ * zero-work no-op — it never touches controller state and only ever reads the
+ * current thread, so it cannot alter reducer behavior on any build.
+ */
+internal class ThreadConfinementGuard(private val enabled: Boolean) {
+    @Volatile
+    private var ownerThreadId: Long = UNSET
+    @Volatile
+    private var ownerThreadName: String? = null
+
+    /**
+     * Assert the current thread is the confined owner. The first call latches the
+     * owner; later calls from any other thread throw. No-op when [enabled] is
+     * false. [operation] names the caller for the failure message.
+     */
+    fun checkConfined(operation: String) {
+        if (!enabled) return
+        val current = Thread.currentThread()
+        if (ownerThreadId == UNSET) {
+            ownerThreadId = current.id
+            ownerThreadName = current.name
+            return
+        }
+        check(current.id == ownerThreadId) {
+            "ConnectionController.$operation() ran off its confined owner thread: " +
+                "expected '${ownerThreadName}' (id=$ownerThreadId) but was " +
+                "'${current.name}' (id=${current.id}). The controller is a " +
+                "non-thread-safe reducer — all mutators must be Main/single-thread " +
+                "confined (issue #1234, item 6)."
+        }
+    }
+
+    private companion object {
+        private const val UNSET: Long = -1L
+    }
 }

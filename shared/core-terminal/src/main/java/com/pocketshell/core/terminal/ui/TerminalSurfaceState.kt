@@ -164,6 +164,48 @@ class TerminalSurfaceState(
     internal val renderRequests: SharedFlow<Unit> get() = _renderRequests.asSharedFlow()
 
     /**
+     * Issue #1286 — true when the frame-budgeted VT-append drain still has
+     * unparsed `%output` bytes buffered in the bridge's process→terminal queue
+     * (`availableProcessOutputBytes() > 0`). During a Codex `%output` burst this
+     * stays true for the whole burst; [TerminalSurface] gates its per-frame
+     * repaint on `!renderDrainBacklogged()` so the append drain owns the main
+     * thread and finishes the burst tail instead of the on-main repaint starving
+     * it into the ANR — and the settled frame paints the moment the drain catches
+     * up (so the pane never stays stale/blank, the #1286 black-screen face).
+     *
+     * Returns `false` when no bridge is attached — a plain-SSH surface feeds the
+     * emulator synchronously (no frame-budgeted queue to back up) and every unit
+     * test without a real bridge — so those paths are UNCHANGED and the gate is
+     * inert without a drain to prioritise. Read on the main looper (the coalescer
+     * collector site), matching the [MainThreadDrainScheduler]'s own read.
+     */
+    fun renderDrainBacklogged(): Boolean {
+        renderDrainBackloggedOverrideForTest?.let { return it }
+        return (bridge?.pendingProcessOutputBytes() ?: 0) > 0
+    }
+
+    /**
+     * Test-only seam (#1286, the #780 synthetic-state model): force the value
+     * [renderDrainBacklogged] reports, WITHOUT needing a real bridge whose drain
+     * actually falls behind. The maintainer's on-device freeze only occurs when the
+     * drain genuinely backlogs under a heavy burst + the composer/IME amplifier; on
+     * the fast CI/dev x86 emulator the drain NEVER falls behind, so the real
+     * `availableProcessOutputBytes()` stays 0 and the drain-priority window would
+     * never engage — a connected proof would pass vacuously with or without the fix.
+     * Injecting the backlogged state here lets the on-device proof drive the terminal
+     * into the exact state where the drain-priority window is the load-bearing thing,
+     * so neutralising the production widening makes the proof go RED. A `null`
+     * override (the default) restores the real bridge-queue read — production is
+     * UNCHANGED (this seam is never touched outside tests).
+     */
+    @Volatile
+    private var renderDrainBackloggedOverrideForTest: Boolean? = null
+
+    fun setRenderDrainBackloggedOverrideForTest(backlogged: Boolean?) {
+        renderDrainBackloggedOverrideForTest = backlogged
+    }
+
+    /**
      * Force-full-repaint requests (PocketShell #721). Unlike [renderRequests]
      * — which feed the #469 dirty-region path and repaint only changed rows —
      * a signal here means "the EXISTING screen content must be redrawn from the

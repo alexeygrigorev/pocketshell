@@ -288,7 +288,28 @@ fun TerminalSurface(
     // the URL scan, and the SmartSelection/FilePath/EngineCommand overlays, so
     // every per-render scan is gated, not just the repaint. Remembered per
     // `state` so the operator (and its conflating channel) survives recomposition.
-    val coalescedRenderRequests = remember(state) { state.renderRequests.coalescePerFrame() }
+    //
+    // Issue #1286: give the frame-budgeted VT-append drain main-thread priority
+    // while a `%output` burst is draining. When the drain queue is backlogged
+    // (`renderDrainBacklogged()`), the coalescer WIDENS its window to
+    // [DRAIN_PRIORITY_WINDOW_MS] so the per-frame repaint (and the affordance
+    // extraction the same signal drives) fires ~4× less often — handing the append
+    // drain more contiguous main-thread frames to finish the burst instead of the
+    // on-main repaint/onDraw starving it into the ANR. It does NOT suppress the
+    // repaint: the screen keeps updating (~15fps) during the burst and tappable
+    // affordances keep refreshing, so this fixes the freeze AND avoids a
+    // frozen/blank-during-burst regression; the settled frame still paints once the
+    // drain catches up (the #1286 black-screen face). Reverts to the base ~60fps
+    // window the instant the drain drains. Inert without a bridge (plain SSH): the
+    // predicate is `false`, so the base window is always used and behaviour is
+    // unchanged.
+    val coalescedRenderRequests = remember(state) {
+        state.renderRequests.coalescePerFrame(
+            backlogWindowMs = {
+                if (state.renderDrainBacklogged()) DRAIN_PRIORITY_WINDOW_MS else RENDER_FRAME_WINDOW_MS
+            },
+        )
+    }
 
     LaunchedEffect(terminalKeyboardMode, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
@@ -381,9 +402,21 @@ fun TerminalSurface(
     // RESEED repaints every row regardless of cache state.
     LaunchedEffect(state, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
-        state.fullRepaintRequests.collect {
-            runCatching { view.forceFullRepaint() }
-                .onFailure { onLocalTerminalError?.invoke(it) }
+        // Issue #1286 (black-screen face): collect the reattach/reseed force-repaint
+        // on the Handler-based [Dispatchers.Main.immediate], NOT the LaunchedEffect's
+        // default frame-gated AndroidUiDispatcher.Main — same rationale as the #1260
+        // repaint collector. On a beyond-grace reattach the pane is re-seeded WHILE a
+        // `%output` burst may still be draining; the Choreographer frames the
+        // frame-gated dispatcher batches to can stall for the whole burst, so the seed
+        // repaint would never fire and the freshly seeded rows stay black (the
+        // blank-pane-on-attach the maintainer reported, exercised by
+        // PreExistingMultiWindowSeedE2eTest). The main-looper immediate dispatcher is
+        // not frame-gated, so the seed repaint lands regardless of the burst.
+        withContext(Dispatchers.Main.immediate) {
+            state.fullRepaintRequests.collect {
+                runCatching { view.forceFullRepaint() }
+                    .onFailure { onLocalTerminalError?.invoke(it) }
+            }
         }
     }
 
@@ -395,9 +428,15 @@ fun TerminalSurface(
     // the recovery the model reseed is architecturally incapable of providing.
     LaunchedEffect(state, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
-        state.surfaceRepaintRequests.collect {
-            runCatching { view.forceSurfaceRepaint() }
-                .onFailure { onLocalTerminalError?.invoke(it) }
+        // Issue #1286 (black-screen face): as with [fullRepaintRequests] above, collect
+        // the surface force-repaint on the non-frame-gated [Dispatchers.Main.immediate]
+        // so a surface-only-black recovery still fires while a `%output` burst has the
+        // Choreographer frame loop stalled.
+        withContext(Dispatchers.Main.immediate) {
+            state.surfaceRepaintRequests.collect {
+                runCatching { view.forceSurfaceRepaint() }
+                    .onFailure { onLocalTerminalError?.invoke(it) }
+            }
         }
     }
 

@@ -28,6 +28,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Item 6 (#1234): the ConnectionController thread-confinement assertion is
+    // debug-gated via `BuildConfig.DEBUG`, so the generated BuildConfig is
+    // required. Under `testDebugUnitTest` (the per-push gate) DEBUG is true, so
+    // the guard is active — every existing single-thread test exercises the
+    // "on-confined-thread does not trip" path for free.
+    buildFeatures {
+        buildConfig = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

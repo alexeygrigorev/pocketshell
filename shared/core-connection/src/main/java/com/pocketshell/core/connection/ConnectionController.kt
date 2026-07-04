@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The pure-JVM connection lifecycle state machine (EPIC #687 Phase-2, slice 1).
@@ -26,13 +27,49 @@ import kotlinx.coroutines.flow.asStateFlow
  * "within grace" == `clock.nowMs() < graceDeadline && transport.isWarm(host)`.
  * No timer runs while Backgrounded (D21); the deadline is a stored value compared
  * on the next foreground, never a scheduled wakeup.
+ *
+ * ## Threading contract — single confining dispatcher (issue #1234, item 6)
+ *
+ * This controller is a NON-thread-safe reducer. [submit] performs an unguarded
+ * read-modify-write of [state] and mutates the plain [graceDeadlineMs] `var`;
+ * nothing here synchronizes. It is correct ONLY because every mutator
+ * ([submit] and the reduce helpers it drives, plus [offerSeed]) is driven from a
+ * SINGLE confining DISPATCHER — in production the Main/UI dispatcher the VM
+ * adapter marshals all connection events onto. That dispatcher *serializes* the
+ * mutators, so no two ever overlap; an off-confinement caller that races the
+ * reducer would corrupt the `graceDeadlineMs`/`_state.value` updates silently.
+ *
+ * To keep that contract honest, DEBUG builds install a [ThreadConfinementGuard]
+ * that asserts the load-bearing invariant a confining dispatcher provides:
+ * **no two mutator calls run concurrently.** It latches an owner for the duration
+ * of each mutation and hard-fails if a second thread enters a mutator while the
+ * first is still inside — the genuine data race. It deliberately does NOT key off
+ * a fixed `Thread.id`: a real dispatcher (the Main dispatcher over its lifetime,
+ * and every coroutine test dispatcher — including an `UnconfinedTestDispatcher`
+ * that resumes a confined `collect { submit() }` inline on a foreign emitter
+ * thread) legitimately serializes work across DIFFERENT pool threads, and that
+ * benign migration must pass. In release builds the guard is a no-op (zero
+ * overhead) — it documents + enforces the existing contract, changing no behavior.
  */
 class ConnectionController(
     private val clock: Clock,
     private val transport: TransportPort,
     private val maxReconnectAttempts: Int = DEFAULT_MAX_RECONNECT_ATTEMPTS,
     private val graceMs: Long = DEFAULT_GRACE_MS,
+    // Item 6 (#1234): debug-gated dispatcher-confinement assertion. Defaults to
+    // `BuildConfig.DEBUG` so the guard is active under `testDebugUnitTest` and
+    // developer debug builds, and a no-op in release. Injectable so a test can
+    // pin it on/off deterministically regardless of the build variant.
+    confinementAssertionsEnabled: Boolean = BuildConfig.DEBUG,
 ) {
+    /**
+     * Enforces the single-confining-dispatcher contract in DEBUG builds by
+     * asserting no two mutators overlap. It touches NO controller state and only
+     * reads the current thread id, so it can never change reducer behavior — it
+     * only converts a silent concurrent (off-confinement) mutation into a loud
+     * [IllegalStateException] during development.
+     */
+    private val confinement = ThreadConfinementGuard(confinementAssertionsEnabled)
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
 
     /** The single honest connection-state source. The VM maps this 1:1 to its
@@ -53,7 +90,13 @@ class ConnectionController(
     /** Id-tagged seeds that survived the drop-by-id check (current target only). */
     val seeds: Flow<Seed> = _seeds.asSharedFlow()
 
-    /** Grace deadline stored on Background; null when not backgrounded. No timer. */
+    /**
+     * Grace deadline stored on Background; null when not backgrounded. No timer.
+     *
+     * A plain `var` with NO synchronization — it is read-modified-written only
+     * from within [submit]'s reduce path, so it relies on the single-confining-
+     * dispatcher contract documented on the class (issue #1234, item 6).
+     */
     private var graceDeadlineMs: Long? = null
 
     /** Current target id — the drop-by-id reference for events and seeds. */
@@ -68,26 +111,35 @@ class ConnectionController(
      * for convenience (also published on [state]). Events whose target id does not
      * match the current target are dropped (return current state unchanged) — the
      * one place that rule lives.
+     *
+     * MUST be driven from the controller's single confining (Main) dispatcher: it
+     * does an unguarded read-modify-write of [state] and mutates [graceDeadlineMs]
+     * (issue #1234, item 6). DEBUG builds assert no mutator overlaps via
+     * [confinement].
      */
-    fun submit(event: ConnectionEvent): ConnectionState {
+    fun submit(event: ConnectionEvent): ConnectionState = confinement.guarded("submit") {
         val next = reduce(_state.value, event)
         if (next !== _state.value || next != _state.value) {
             _state.value = next
         }
         _revealGate.value = revealFor(next)
-        return _state.value
+        _state.value
     }
 
     /**
      * Offer a freshly captured pane seed. Re-emitted on [seeds] ONLY if its id
      * matches the current target; a seed for a superseded/non-current target is
      * dropped. Returns true if accepted (emitted), false if dropped.
+     *
+     * A confined mutator: shares the controller's single-dispatcher contract with
+     * [submit] (issue #1234, item 6). DEBUG builds assert no mutator overlaps via
+     * [confinement].
      */
-    fun offerSeed(seed: Seed): Boolean {
+    fun offerSeed(seed: Seed): Boolean = confinement.guarded("offerSeed") {
         if (seed.targetId != currentTargetId) {
-            return false
+            return@guarded false
         }
-        return _seeds.tryEmit(seed)
+        _seeds.tryEmit(seed)
     }
 
     private fun reduce(current: ConnectionState, event: ConnectionEvent): ConnectionState =
@@ -333,4 +385,90 @@ fun ConnectionState.hostOrNull(): HostKey? = when (this) {
     is ConnectionState.Reconnecting -> host
     is ConnectionState.Gone -> host
     is ConnectionState.Unreachable -> host
+}
+
+/**
+ * Debug-only dispatcher-confinement guard for [ConnectionController]
+ * (issue #1234, item 6).
+ *
+ * The controller's mutators ([ConnectionController.submit] / [offerSeed]) are
+ * NOT thread-safe: they read-modify-write `_state.value` and the plain
+ * `graceDeadlineMs` `var` without synchronization, correct only under the
+ * contract that they are driven from a SINGLE confining DISPATCHER (in production
+ * the Main/UI dispatcher the VM marshals every connection event onto). The
+ * load-bearing invariant that dispatcher guarantees, and the ONLY thing that
+ * keeps the unguarded read-modify-writes safe, is that **no two mutator calls
+ * ever run concurrently** — a single confining dispatcher serializes them.
+ *
+ * ## Why this asserts NO-CONCURRENT-MUTATION, not raw-thread identity
+ * A confining dispatcher is a *serialization* contract, NOT a fixed-thread one.
+ * A dispatcher (the production Main dispatcher over its lifetime, and every
+ * coroutine test dispatcher) may legitimately run its serialized work on
+ * DIFFERENT pool threads at different times — and, under an
+ * `UnconfinedTestDispatcher`, may even resume a confined `collect { submit(...) }`
+ * body *inline on the foreign thread that emitted upstream*. All of those are
+ * still confined: the calls never OVERLAP. Keying the guard off the first raw
+ * `Thread.id` (round 1) wrongly flagged that benign pool-thread migration as a
+ * violation and tripped 5 `TmuxSessionViewModelTest` cases. So the guard asserts
+ * the invariant that actually matters: it latches an owner for the DURATION of a
+ * mutation and hard-fails only if a SECOND thread enters a mutator while the
+ * first is still inside it — the genuine data race that corrupts lifecycle state.
+ * Sequential hand-off across pool threads (a real dispatcher) passes; a real
+ * off-confinement caller that races the reducer trips.
+ *
+ * When [enabled] is false (release builds, `BuildConfig.DEBUG == false`) it is a
+ * zero-work no-op — it never touches controller state and only ever reads the
+ * current thread, so it cannot alter reducer behavior on any build.
+ */
+internal class ThreadConfinementGuard(private val enabled: Boolean) {
+    // The thread currently executing a mutator, or UNSET when none is. A CAS
+    // UNSET -> current on entry latches the owner for the mutation's duration;
+    // the matching exit releases it back to UNSET. AtomicLong so a concurrent
+    // second entrant observes the in-progress owner atomically.
+    private val activeThreadId = AtomicLong(UNSET)
+    // Reentrancy depth for the owner thread (a mutator that re-enters a mutator
+    // on the same thread must not release the latch early). Only ever read/written
+    // by the owner thread while it holds the latch, so it needs no synchronization.
+    private var reentrancyDepth: Int = 0
+
+    /**
+     * Run [body] as a confined mutation. No-op wrapper when [enabled] is false.
+     * If another thread is already inside a mutator when this call enters, that is
+     * a genuine concurrent (off-confinement) mutation and hard-fails with an
+     * [IllegalStateException]; sequential calls — including ones that migrate
+     * across a dispatcher's pool threads — pass. [operation] names the caller for
+     * the failure message.
+     */
+    fun <T> guarded(operation: String, body: () -> T): T {
+        if (!enabled) return body()
+        val currentId = Thread.currentThread().id
+        val reentrant = activeThreadId.get() == currentId
+        if (!reentrant) {
+            if (!activeThreadId.compareAndSet(UNSET, currentId)) {
+                val holder = activeThreadId.get()
+                throw IllegalStateException(
+                    "ConnectionController.$operation() ran concurrently with another " +
+                        "mutator: thread '${Thread.currentThread().name}' (id=$currentId) " +
+                        "entered while thread id=$holder was still inside a mutation. The " +
+                        "controller is a non-thread-safe reducer — all mutators must be " +
+                        "confined to a single serializing (Main) dispatcher so they never " +
+                        "overlap (issue #1234, item 6)."
+                )
+            }
+            reentrancyDepth = 1
+        } else {
+            reentrancyDepth++
+        }
+        try {
+            return body()
+        } finally {
+            if (--reentrancyDepth == 0) {
+                activeThreadId.set(UNSET)
+            }
+        }
+    }
+
+    private companion object {
+        private const val UNSET: Long = -1L
+    }
 }

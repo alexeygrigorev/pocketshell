@@ -114,6 +114,7 @@ import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.ConversationToolArgsSection
 import com.pocketshell.app.conversation.ConversationToolCardExpansion
+import com.pocketshell.app.conversation.conversationTimelineVisibleEvents
 import com.pocketshell.app.conversation.filterConversationRows
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
 import com.pocketshell.app.conversation.runningToolCallIds
@@ -5643,9 +5644,11 @@ internal fun TmuxConversationPane(
     // [filterConversationRows] call STAYS (it also does tool-result pairing +
     // the searched-tool-call expansion merge) but is fed an empty query, so it
     // never filters out rows — every event is shown.
+    // Issue #176/#1267: honour the system-notes preference, but the byte-clamp
+    // truncation marker (#1225) stays visible even when notes are off — see
+    // [conversationTimelineVisibleEvents].
     val visibleEvents = remember(events, showSystemNotes) {
-        val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
-        if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
+        conversationTimelineVisibleEvents(events, showSystemNotes)
     }
     val toolResultPairing = remember(visibleEvents) { visibleEvents.toolResultPairing() }
     val filteredConversation = remember(visibleEvents, toolResultPairing) {

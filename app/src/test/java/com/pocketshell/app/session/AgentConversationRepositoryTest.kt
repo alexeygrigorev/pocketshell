@@ -2921,6 +2921,225 @@ class AgentConversationRepositoryTest {
         assertEquals(listOf("first", "second"), messages)
     }
 
+    // ===================================================================
+    // Issue #1267: extend the #1225 byte-bound to the Codex AND OpenCode
+    // cold-open reads (a G2 class-coverage gap — they use different read
+    // mechanisms than the Claude flat-JSONL tail). A multi-MB single line
+    // (huge tool_result / inline image) must degrade to a VISIBLE marker,
+    // per agent kind, instead of ballooning the read or vanishing.
+    // ===================================================================
+
+    @Test
+    fun codexReadInitialEventsByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // The Codex read goes through `pocketshell agent-log`, so the clamp is the
+        // tool-side `--max-line-bytes` flag; the giant envelope line is degraded
+        // server-side to a marker. FakeSshSession emulates that server clamp.
+        val hugeText = "A".repeat(5 * 1024 * 1024) // ~5 MB, >> MAX_TRANSCRIPT_LINE_BYTES
+        val codexLines = listOf(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"look at this"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"$hugeText"}]}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m3","role":"assistant","content":[{"type":"output_text","text":"seen"}]}}""",
+        )
+        val session = FakeSshSession(
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxLines = 20,
+        )
+
+        // RED on base: the Codex read passes no byte cap to the tool.
+        val command = session.execCommands.single { it.contains("pocketshell agent-log --engine codex") }
+        assertTrue(
+            "the Codex cold-open must byte-clamp server-side via --max-line-bytes; got: $command",
+            command.contains("--max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES"),
+        )
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no Codex cold-open event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized Codex line must degrade to a visible truncation note",
+            events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("look at this"))
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("seen"))
+    }
+
+    @Test
+    fun codexReadEventsWindowByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed Codex cold-open (readEventsWindow) folds
+        // the agent-log call into its exec and must byte-clamp it too.
+        val hugeText = "B".repeat(4 * 1024 * 1024)
+        val codexLines = listOf(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"dump it"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"$hugeText"}]}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m3","role":"assistant","content":[{"type":"output_text","text":"done"}]}}""",
+        )
+        val session = FakeSshSession(
+            wcOutput = "3\n",
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val command = session.execCommands.single { it.contains("pocketshell agent-log --engine codex") }
+        assertTrue(
+            "the windowed Codex read must byte-clamp via --max-line-bytes; got: $command",
+            command.contains("--max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed Codex event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized Codex line must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("dump it"))
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("done"))
+    }
+
+    @Test
+    fun openCodeReadInitialEventsByteClampsAMultiMegabyteRowToAVisibleTruncationMarker() = runTest {
+        // The OpenCode read is a `sqlite3` export, one JSON object per line, so
+        // the SAME per-line `awk` byte clamp #1225 used for Claude is the
+        // format-appropriate bound. A row whose `part_data` is a multi-MB tool
+        // result must degrade to a visible marker, not balloon the read.
+        val hugePart = "D".repeat(4 * 1024 * 1024)
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "hello"),
+                    openCodeRow(2, hugePart),
+                    openCodeRow(3, "bye"),
+                ),
+            ),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, openCodeDetection())
+
+        // RED on base: the OpenCode sqlite export is not piped through the clamp.
+        val command = session.execCommands.single { it.contains("sqlite3 -readonly") }
+        assertTrue(
+            "the OpenCode cold-open must byte-clamp each row server-side; got: $command",
+            command.contains(LINE_TRUNCATION_SENTINEL) && command.contains("awk"),
+        )
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no OpenCode cold-open event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        val note = events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" }
+        assertNotNull("the oversized OpenCode row must degrade to a visible truncation note", note)
+        assertEquals(AgentKind.OpenCode, note!!.agent)
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("hello"))
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("bye"))
+    }
+
+    @Test
+    fun openCodeReadEventsWindowByteClampsAMultiMegabyteRowToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed OpenCode cold-open (readEventsWindow) must
+        // byte-clamp too.
+        val hugePart = "E".repeat(4 * 1024 * 1024)
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "first"),
+                    openCodeRow(2, hugePart),
+                    openCodeRow(3, "third"),
+                ),
+            ),
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = openCodeDetection(),
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val command = session.execCommands.single { it.contains("sqlite3 -readonly") }
+        assertTrue(
+            "the windowed OpenCode read must byte-clamp each row server-side; got: $command",
+            command.contains(LINE_TRUNCATION_SENTINEL) && command.contains("awk"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed OpenCode event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized OpenCode row must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("first"))
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("third"))
+    }
+
+    @Test
+    fun openCodeReadInitialEventsLeavesANormalTranscriptUnchangedByTheByteClamp() = runTest {
+        // Counter-pin: a normal OpenCode transcript (every row well under the cap)
+        // is byte-clamped harmlessly — same messages, NO spurious marker.
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "run the tests"),
+                    openCodeRow(2, "all green"),
+                ),
+            ),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, openCodeDetection())
+
+        assertTrue(
+            "a normal OpenCode transcript must not produce any truncation marker",
+            events.none { it is ConversationEvent.SystemNote && it.tag == "truncated" },
+        )
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertEquals(listOf("run the tests", "all green"), messages)
+        assertTrue(
+            session.execCommands.single { it.contains("sqlite3 -readonly") }.contains(LINE_TRUNCATION_SENTINEL),
+        )
+    }
+
     private fun estimatedEventBytes(event: ConversationEvent): Long = when (event) {
         is ConversationEvent.Message ->
             event.text.toByteArray(Charsets.UTF_8).size.toLong() +
@@ -3104,13 +3323,17 @@ class AgentConversationRepositoryTest {
                 // raw-file line count (the follow cursor) without a separate
                 // lineCount exec.
                 command.contains("@@PS_CODEX_WINDOW@@") ->
-                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n$agentLogOutput"
+                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n${applyAgentLogEnvelopeClamp(command, agentLogOutput)}"
                 command.contains("wc -l < ") -> wcOutput
-                command.contains("pocketshell agent-log") -> agentLogOutput
+                command.contains("pocketshell agent-log") -> applyAgentLogEnvelopeClamp(command, agentLogOutput)
                 command.trimStart().startsWith("tail -n") -> applyLineClamp(command, jsonlTailOutput)
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
-                    sqliteOutputs.removeFirstOrNull() ?: sqliteOutput
+                    // Issue #1267: the OpenCode read now pipes the sqlite output
+                    // through the same server-side per-line byte clamp; emulate it
+                    // so an over-cap row degrades to the sentinel exactly as on the
+                    // real host (identity for normal small rows).
+                    applyLineClamp(command, sqliteOutputs.removeFirstOrNull() ?: sqliteOutput)
                 }
                 else -> ""
             }
@@ -3133,6 +3356,30 @@ class AgentConversationRepositoryTest {
                 val bytes = line.toByteArray(Charsets.UTF_8).size
                 if (bytes > cap) "@@PS_LINE_TRUNCATED@@$bytes" else line
             }
+        }
+
+        // Issue #1267: faithfully emulate the SERVER-SIDE `pocketshell agent-log
+        // --max-line-bytes N` clamp (agent_log.py `_clamp_line_bytes`). The Codex
+        // read goes through the tool, not the `awk` pipe, so the byte clamp lives
+        // in the tool: each element of the envelope's `lines` array whose UTF-8
+        // byte length exceeds N is replaced by `@@PS_LINE_TRUNCATED@@<bytes>`
+        // before the envelope is serialised. When the command does NOT carry
+        // `--max-line-bytes` (base code), the envelope is returned unchanged and a
+        // multi-MB line balloons the read exactly as on-device — a genuine
+        // red->green. A blank/unparseable envelope is passed through untouched.
+        private fun applyAgentLogEnvelopeClamp(command: String, envelope: String): String {
+            val cap = Regex("--max-line-bytes (\\d+)").find(command)
+                ?.groupValues?.get(1)?.toIntOrNull() ?: return envelope
+            val json = runCatching { JSONObject(envelope) }.getOrNull() ?: return envelope
+            val lines = json.optJSONArray("lines") ?: return envelope
+            val clamped = JSONArray()
+            for (index in 0 until lines.length()) {
+                val line = lines.optString(index)
+                val bytes = line.toByteArray(Charsets.UTF_8).size
+                clamped.put(if (bytes > cap) "@@PS_LINE_TRUNCATED@@$bytes" else line)
+            }
+            json.put("lines", clamped)
+            return json.toString()
         }
 
         private fun emulatedFoldedClaudePath(command: String): String {

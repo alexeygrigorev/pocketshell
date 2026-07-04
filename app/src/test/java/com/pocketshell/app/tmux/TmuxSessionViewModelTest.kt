@@ -1611,6 +1611,10 @@ class TmuxSessionViewModelTest {
             sessionName = "work",
             client = client,
         )
+        // Issue #1224: the first-visible-output milestone is fed by the per-pane
+        // outputFor tap (recordVisiblePaneOutput), NOT by %output on the
+        // structural events bus. The fake's outputFor reads emittedEvents, so
+        // emitting a pane %output here drives that tap.
         client.emittedEvents.emit(ControlEvent.Output("%0", "live".toByteArray()))
         advanceUntilIdle()
 

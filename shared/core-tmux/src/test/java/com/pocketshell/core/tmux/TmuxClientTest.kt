@@ -1493,7 +1493,7 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `outputFor delivers pane output before saturated global event subscribers`() = runBlocking {
+    fun `outputFor delivers pane output while the structural event collector is parked`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope)
@@ -1502,6 +1502,10 @@ class TmuxClientTest {
         try {
             client.connect()
 
+            // A parked structural-event collector — models a GC-stalled ViewModel
+            // subscriber on the events bus. Issue #1224: `%output` is no longer
+            // copied onto this bus, so a stalled collector here can NEVER starve
+            // the per-pane render path ([outputFor]).
             val globalCollector = scope.async {
                 client.events.collect {
                     firstGlobalEventSeen.complete(Unit)
@@ -1516,10 +1520,11 @@ class TmuxClientTest {
             val feedJob = scope.async {
                 shell.feed(
                     buildString {
-                        // EVENT_BUFFER is 256. With the global collector parked on
-                        // the first event, these background writes fill the shared
-                        // bus so the following target emit would suspend if
-                        // outputFor still depended on eventBus filtering.
+                        // One structural event parks the collector, then a heavy
+                        // output flood well past EVENT_BUFFER (256). Post-#1224 the
+                        // flood never touches the events bus, so the parked
+                        // collector cannot stall %target's per-pane delivery.
+                        append("%session-changed \$0 main\n")
                         repeat(257) { index ->
                             append("%output %noise noisy-")
                             append(index)
@@ -1541,6 +1546,79 @@ class TmuxClientTest {
             globalCollector.cancel()
         } finally {
             releaseGlobalCollector.complete(Unit)
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1224 (regression, red→green core). Structural events must NOT be
+     * droppable by high-rate `%output` volume.
+     *
+     * Before #1224 every `%output` was copied onto the shared 256-slot
+     * [RealTmuxClient.events] bus purely so the ViewModel could log first-frame.
+     * A dense output burst behind a briefly-stalled collector filled that buffer,
+     * so a `%window-close` at the burst tail was silently dropped ([tryEmit]
+     * returns false when full) — leaving a stale window node in the tree until
+     * some later structural event happened to re-trigger a reconcile.
+     *
+     * Here a structural-event collector is parked for the whole flood while 1000
+     * `%output` frames (≫ the 256 buffer) are fed followed by a trailing
+     * `%window-close @7`. A per-pane sentinel (delivered via [outputFor], which
+     * bypasses the events bus on BOTH base and fix) is the reader-progress
+     * barrier. On base the window-close was dropped → the collector never sees it
+     * (RED). With the fix `%output` is off the bus entirely, so the window-close
+     * is the only thing on it and is delivered (GREEN).
+     */
+    @Test
+    fun `trailing window-close survives an output flood behind a stalled collector`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        val windowCloseSeen = CompletableDeferred<String>()
+        val floodDrained = CompletableDeferred<Unit>()
+        try {
+            client.connect()
+
+            // Park the structural collector for the ENTIRE flood window: it takes
+            // its first event, then blocks on `floodDrained`. On base this lets
+            // the reader's 256-slot bus buffer fill with %output copies while the
+            // window-close is tryEmit'd into a full buffer (dropped).
+            val collector = scope.async {
+                client.events.collect { ev ->
+                    floodDrained.await()
+                    if (ev is ControlEvent.WindowClose && ev.windowId == "@7") {
+                        windowCloseSeen.complete(ev.windowId)
+                    }
+                }
+            }
+            delay(100) // let the collector subscribe to the hot bus
+
+            // Flood far past EVENT_BUFFER (256), then the trailing window-close.
+            shell.feed(
+                buildString {
+                    repeat(1000) { index ->
+                        append("%output %0 frame-")
+                        append(index)
+                        append('\n')
+                    }
+                    append("%window-close @7\n")
+                },
+            )
+            // Reader-progress barrier that works on BOTH base and fix: a per-pane
+            // sentinel delivered via outputFor (never the lossy events bus). Once
+            // it arrives, the reader has processed PAST the window-close line.
+            shell.feed("%output %barrier done\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
+
+            // Release the parked collector and drain the buffered events. On base
+            // the window-close is gone (dropped under the flood) → this times out
+            // (RED). With the fix it is delivered (GREEN).
+            floodDrained.complete(Unit)
+            val closed = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { windowCloseSeen.await() }
+            assertEquals("@7", closed)
+            collector.cancel()
+        } finally {
+            floodDrained.complete(Unit)
             client.close()
         }
     }
@@ -1568,25 +1646,16 @@ class TmuxClientTest {
         try {
             client.connect()
 
-            // Subscribe to the GLOBAL bus first so we can prove the reader
-            // actually processed the pre-registration %output frames BEFORE
-            // anyone calls outputFor("%0"). The global bus emits regardless of
-            // whether a per-pane pipe exists, so this synchronisation works on
-            // both base (drop) and the fixed (replay) code.
-            val preRegProcessed = CompletableDeferred<Unit>()
-            val seen = AtomicInteger(0)
-            val globalWatcher = scope.async {
-                client.events.collect { ev ->
-                    if (ev is ControlEvent.Output && ev.paneId == "%0") {
-                        if (seen.incrementAndGet() == 2) preRegProcessed.complete(Unit)
-                    }
-                }
-            }
-            delay(100) // let the global collector attach
-
-            // %output for %0 BEFORE its per-pane pipe is registered.
-            shell.feed("%output %0 before-one\n%output %0 before-two\n")
-            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { preRegProcessed.await() }
+            // Issue #1224: `%output` is no longer on the global events bus, so we
+            // synchronise reader progress on a per-pane SENTINEL delivered via
+            // outputFor (the pre-registration replay path) instead. The
+            // single-threaded reader is strictly FIFO, so once the sentinel frame
+            // arrives, both %0 pre-registration frames ahead of it were buffered.
+            // This barrier is load-independent and works on base AND fix.
+            // %output for %0 BEFORE its per-pane pipe is registered, then a
+            // sentinel frame for a different pane.
+            shell.feed("%output %0 before-one\n%output %0 before-two\n%output %barrier ready\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
 
             // Now register the pane pipe and collect. On base, before-one/two
             // are gone (dropped at the no-pipe site) so this never reaches 3
@@ -1598,7 +1667,6 @@ class TmuxClientTest {
             shell.feed("%output %0 after-one\n")
 
             val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { paneEvents.await() }
-            globalWatcher.cancel()
 
             assertEquals(
                 listOf("before-one", "before-two", "after-one"),
@@ -1629,25 +1697,17 @@ class TmuxClientTest {
             val pane0 = scope.async { client.outputFor("%0").take(1).toList() }
             delay(100)
 
-            // Confirm the reader processed the background %1 frames via the
-            // global bus before we switch (register outputFor("%1")).
-            val bgProcessed = CompletableDeferred<Unit>()
-            val bgSeen = AtomicInteger(0)
-            val globalWatcher = scope.async {
-                client.events.collect { ev ->
-                    if (ev is ControlEvent.Output && ev.paneId == "%1") {
-                        if (bgSeen.incrementAndGet() == 2) bgProcessed.complete(Unit)
-                    }
-                }
-            }
-            delay(100)
-
+            // Issue #1224: `%output` is no longer on the global events bus, so
+            // synchronise reader progress on a per-pane SENTINEL delivered via
+            // outputFor (the FIFO reader guarantees the background %1 frames ahead
+            // of the sentinel were buffered by the time it arrives).
             shell.feed(
                 "%output %0 live0\n" +
                     "%output %1 bg-one\n" +
-                    "%output %1 bg-two\n",
+                    "%output %1 bg-two\n" +
+                    "%output %barrier ready\n",
             )
-            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { bgProcessed.await() }
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
 
             // User switches to %1 — first registration replays the buffered
             // background frames in order.
@@ -1657,7 +1717,6 @@ class TmuxClientTest {
 
             val p0 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane0.await() }
             val p1 = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { pane1.await() }
-            globalWatcher.cancel()
 
             assertEquals(listOf("live0"), p0.map { String(it.data, StandardCharsets.US_ASCII) })
             assertEquals(
@@ -1902,25 +1961,16 @@ class TmuxClientTest {
             val frameBytes = 20 * 1024
             val payload = "x".repeat(frameBytes)
 
-            // A sentinel pane fed LAST: the single-threaded reader processes it
-            // only after every fat frame before it, so seeing the sentinel on
-            // the bus proves all 200 panes' output was processed.
-            val sentinelSeen = CompletableDeferred<Unit>()
-            val watcher = scope.async {
-                client.events.collect { ev ->
-                    if (ev is ControlEvent.Output && ev.paneId == "%sentinel") {
-                        sentinelSeen.complete(Unit)
-                    }
-                }
-            }
-            delay(100)
-
             for (i in 0 until paneCount) {
                 shell.feed("%output %p$i $payload\n")
             }
+            // A sentinel pane fed LAST: the single-threaded reader processes it
+            // only after every fat frame before it. Issue #1224: `%output` is no
+            // longer on the events bus, so we synchronise on the sentinel's
+            // per-pane delivery via outputFor (the FIFO reader guarantees all 200
+            // panes' output was processed by the time it arrives).
             shell.feed("%output %sentinel done\n")
-            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { sentinelSeen.await() }
-            watcher.cancel()
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%sentinel").first() }
 
             val retainedPanes = client.preRegistrationBufferCountForTest()
             val retainedBytes = client.preRegistrationRetainedBytesForTest()
@@ -1965,17 +2015,12 @@ class TmuxClientTest {
         try {
             client.connect()
 
-            // Buffer a pre-registration frame for %0 before it registers.
-            val buffered = CompletableDeferred<Unit>()
-            val watcher = scope.async {
-                client.events.collect { ev ->
-                    if (ev is ControlEvent.Output && ev.paneId == "%0") buffered.complete(Unit)
-                }
-            }
-            delay(100)
-            shell.feed("%output %0 buffered\n")
-            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { buffered.await() }
-            watcher.cancel()
+            // Buffer a pre-registration frame for %0 before it registers. Issue
+            // #1224: `%output` is no longer on the events bus, so synchronise on a
+            // per-pane SENTINEL (delivered via outputFor) — the FIFO reader
+            // guarantees %0's frame was buffered by the time the sentinel arrives.
+            shell.feed("%output %0 buffered\n%output %barrier ready\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
 
             // Register the pipe but NEVER collect the returned flow.
             client.outputFor("%0")
@@ -3321,8 +3366,10 @@ class TmuxClientTest {
     fun `output events are not lost between begin and end response framing`() = runBlocking {
         // tmux can interleave `%output` (a notification) with response
         // payload as long as it's not inside the response block. We make
-        // sure ordinary events still flow through cleanly after a
-        // sendCommand cycle.
+        // sure ordinary pane output still flows through cleanly after a
+        // sendCommand cycle. Issue #1224: `%output` is delivered via the
+        // per-pane [outputFor] pipe (no longer the structural events bus), so we
+        // assert both the pre-block and post-block frames land on %0's stream.
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope)
@@ -3333,9 +3380,7 @@ class TmuxClientTest {
             }
 
             val collected = scope.async {
-                // Response framing markers stay internal; output notifications
-                // still flow around the response block.
-                client.events.take(2).toList()
+                client.outputFor("%0").take(2).toList()
             }
             delay(100)
 
@@ -3356,8 +3401,8 @@ class TmuxClientTest {
             assertEquals(listOf("row"), r.output)
             val events = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { collected.await() }
             assertEquals(2, events.size)
-            assertTrue(events[0] is ControlEvent.Output)
-            assertTrue(events[1] is ControlEvent.Output)
+            assertEquals("before", String(events[0].data, StandardCharsets.US_ASCII))
+            assertEquals("after", String(events[1].data, StandardCharsets.US_ASCII))
         } finally {
             client.close()
         }

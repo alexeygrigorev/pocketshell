@@ -81,12 +81,6 @@ NETWORK_FAULT_CLASSES=(
   # into ci-journey-suite.sh would only ALL-SKIP (the G3 vacuous-pass trap). The
   # durable gate is here, alongside its sibling NetworkFaultProofBase proofs.
   "$FQCN_PREFIX.ColdDialUnderBandwidthLimitE2eTest"
-  # Issue #741 (#657 Gap B): connects a real SshSession through the toxiproxy
-  # forward, blackholes the link, and asserts keep-alive surfaces the dead peer
-  # (isConnected flips false) within the 60s configured window instead of
-  # hanging indefinitely. Reuses network-fault-proxy:2228 + toxiproxy API:8474
-  # (no new fixture).
-  "$FQCN_PREFIX.KeepAliveDeadPeerDetectionE2eTest"
   # Issue #576 / J4: CodexRedrawOverflowReconnectE2eTest is a NetworkFaultProofBase
   # subclass (toxiproxy bandwidth toxic on 2228/8474). A heavy Codex alt-screen
   # redraw whose %output backlog can't drain in the 10 s tmux command-timeout

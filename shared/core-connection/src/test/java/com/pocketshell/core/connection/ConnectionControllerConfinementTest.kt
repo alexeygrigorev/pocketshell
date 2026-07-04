@@ -214,44 +214,19 @@ class ConnectionControllerConfinementTest {
         assertNull("release build must not assert on a concurrent call", thrown)
     }
 
-    /**
-     * The default guard (no explicit flag) follows `BuildConfig.DEBUG`. Under
-     * `testDebugUnitTest` that is true, so a default-constructed controller is armed
-     * and trips on a concurrent mutation — proving production wiring is armed in
-     * debug, not just when a test forces the flag on.
-     */
-    @Test
-    fun `default guard follows BuildConfig DEBUG and is armed under debug tests`() {
-        assertTrue("this suite must run under the debug variant", BuildConfig.DEBUG)
-        val insideMutation = CountDownLatch(1)
-        val releaseMutation = CountDownLatch(1)
-        val blockingClock = object : Clock {
-            @Volatile var blockOnce = true
-            override fun nowMs(): Long {
-                if (blockOnce) {
-                    blockOnce = false
-                    insideMutation.countDown()
-                    releaseMutation.await(5, TimeUnit.SECONDS)
-                }
-                return 0L
-            }
-        }
-        // Default constructor: confinementAssertionsEnabled defaults to BuildConfig.DEBUG.
-        val controller = ConnectionController(clock = blockingClock, transport = FakeTransportPort())
-        controller.submit(ConnectionEvent.Enter(host, target))
-
-        val threadA = Thread { controller.submit(ConnectionEvent.Background) }
-        threadA.start()
-        assertTrue(insideMutation.await(5, TimeUnit.SECONDS))
-
-        val thrown = runCatching { controller.submit(ConnectionEvent.Foreground) }.exceptionOrNull()
-
-        releaseMutation.countDown()
-        threadA.join(5_000)
-
-        assertNotNull("default (debug) guard should be armed", thrown)
-        assertTrue(thrown is IllegalStateException)
-    }
+    // NOTE: the default-constructor path (confinementAssertionsEnabled defaults to
+    // BuildConfig.DEBUG) is variant-DEPENDENT, so it cannot live in this common
+    // `src/test/` suite (which compiles into BOTH testDebugUnitTest and
+    // testReleaseUnitTest — a single `assertTrue(BuildConfig.DEBUG)` would hard-fail
+    // under the release task, the CI break this round fixes). The two halves of that
+    // contract are asserted in the variant-specific source sets so BOTH variants stay
+    // meaningfully green with real coverage:
+    //   - src/testDebug/.../ConnectionControllerConfinementDefaultDebugTest.kt
+    //       proves the default guard is ARMED under debug (BuildConfig.DEBUG == true)
+    //       and trips on a concurrent mutation — production wiring is armed in debug.
+    //   - src/testRelease/.../ConnectionControllerConfinementDefaultReleaseTest.kt
+    //       proves the default guard is a NO-OP under release (BuildConfig.DEBUG ==
+    //       false) — zero overhead in shipped builds.
 
     /** The guard is state-touch-free: enabling it does not alter reduce outputs. */
     @Test

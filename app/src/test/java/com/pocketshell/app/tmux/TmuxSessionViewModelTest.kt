@@ -18542,7 +18542,16 @@ class TmuxSessionViewModelTest {
         @Volatile
         var closed: Boolean = false
 
-        val execCommands = mutableListOf<String>()
+        // Issue #1289: exec() appends to this list from a real Dispatchers.IO
+        // thread (the recorded-kind read runs off-Main), while test-thread
+        // `awaitCondition` predicates walk it via Kotlin `.count { }` / `.any { }`
+        // (an iterator walk). A plain ArrayList throws ConcurrentModificationException
+        // on that concurrent iterate+append — the flake that red-blocked the
+        // pre-release confidence gate under `--no-parallel --max-workers=2`. A
+        // CopyOnWriteArrayList iterates over a stable snapshot and copies on append,
+        // so no predicate read can ever race the exec() append. Class-covering: this
+        // makes EVERY execCommands read across the suite race-safe, not just one test.
+        val execCommands: MutableList<String> = java.util.concurrent.CopyOnWriteArrayList()
         private var cardGetIndex: Int = 0
 
         // Issue #793: let a paging test reprogram the window the fake returns.

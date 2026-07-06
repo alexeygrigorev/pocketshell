@@ -232,6 +232,27 @@ class PaneOutputOverflowRecoveryTest {
             System.identityHashCode(client),
             vm.paneProducerClientIdentityForTest("%1"),
         )
+        // Issue #1297: the swap must FREEZE %output delivery across the producer
+        // teardown/reattach so frames in the gap are held (not dropped into the
+        // zero-subscriber pipe), and THAW it afterwards so live output resumes.
+        assertTrue(
+            "the overflow reseed must pause %output delivery across the swap (#1297)",
+            client.outputDeliveryPauseCalls.contains("%1"),
+        )
+        assertTrue(
+            "the overflow reseed must resume %output delivery after the swap (#1297)",
+            client.outputDeliveryResumeCalls.contains("%1"),
+        )
+        // On a SUCCESSFUL reseed the snapshot is authoritative, so the held
+        // pre-capture frames are dropped: the pane's backlog is drained TWICE —
+        // once before the swap (step 2) and once after the successful capture
+        // (step 4) — so they can't double-apply on top of the fresh grid (#1297).
+        assertEquals(
+            "a successful overflow reseed must drain the pane backlog twice " +
+                "(pre-swap + post-successful-capture) so held frames can't double-apply",
+            2,
+            client.drainedPaneBacklogs.count { it == "%1" },
+        )
     }
 
     // -----------------------------------------------------------------------

@@ -10618,6 +10618,17 @@ public class TmuxSessionViewModel @Inject constructor(
             var reseeded = false
             var drainedFrames = 0
             var reattached = false
+            // Issue #1297: FREEZE %output delivery across the whole producer swap.
+            // The teardown (step 1) tears the sole pane collector down and step 3
+            // reattaches a fresh one; every %output emitted in that gap used to be
+            // emitted into the zero-subscriber (replay = 0) pipe and vanish, so
+            // recovery leaned SOLELY on the step-4 capture (the same SPOF this
+            // issue closes). With delivery paused the frames are HELD in the
+            // bounded backlog: on a successful capture the snapshot is
+            // authoritative and the (pre-capture, now-stale) held frames are
+            // dropped so they can't double-apply; on a FAILED capture they are
+            // replayed to the fresh producer on resume instead of being lost.
+            runCatching { client.pauseOutputDelivery(paneId) }
             try {
                 val pane = paneRows[paneId] ?: return@launch
                 // 1. Detach the current (dropped / feed-failed) producer + its
@@ -10640,8 +10651,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(guard) || client.disconnected.value) return@launch
                 // 3. Reattach a FRESH producer (new bridge + emulator, seed gate
                 //    CLOSED via awaitSeed) BEFORE reseeding: the seed must land on
-                //    the SAME bridge the live producer feeds. Live %output arriving
-                //    now buffers in order behind the closed gate — the #468 design.
+                //    the SAME bridge the live producer feeds. Delivery is still
+                //    PAUSED here, so the fresh collector receives nothing yet —
+                //    the held frames wait for the capture outcome (step 4/5).
                 attachTerminalProducerForPane(
                     paneId = paneId,
                     state = pane.terminalState,
@@ -10654,15 +10666,30 @@ public class TmuxSessionViewModel @Inject constructor(
                 //    non-destructive swap keeps the last good frame if the capture
                 //    is momentarily near-blank.
                 reseeded = seedPaneFromCapture(client, pane, guard, recordMilestone = false)
+                if (reseeded) {
+                    // Issue #1297: the snapshot is authoritative — the held frames
+                    // are all PRE-capture (already reflected server-side in the
+                    // snapshot), so DROP them before the resume so they cannot
+                    // double-apply on top of the fresh grid.
+                    drainedFrames +=
+                        runCatching { client.drainPaneOutputBacklog(paneId) }.getOrDefault(0)
+                }
                 // 5. If no snapshot ever landed (all retries near-blank/errored),
                 //    still OPEN the gate so buffered live output is flushed rather
                 //    than swallowed — the same fallback the cold-open seed uses
                 //    ([seedPrewarmedPane]/preload). Otherwise the reattached
-                //    producer would be gated forever.
+                //    producer would be gated forever. On resume (finally) the held
+                //    frames then replay to the fresh producer through this open
+                //    gate — the #1297 belt so recovery isn't solely the capture.
                 if (!reseeded && isCurrentRuntime(guard)) {
                     runCatching { pane.terminalState.openSeedGateWithoutSeed() }
                 }
             } finally {
+                // Issue #1297: THAW delivery last. On success the backlog was just
+                // drained (nothing stale replays); on failure the held frames now
+                // replay to the fresh producer through the opened gate. Always
+                // resume so a pane is never left frozen, even on an early return.
+                runCatching { client.resumeOutputDelivery(paneId) }
                 paneOverflowRecoveryInFlight.remove(paneId)
                 DiagnosticEvents.record(
                     "connection",

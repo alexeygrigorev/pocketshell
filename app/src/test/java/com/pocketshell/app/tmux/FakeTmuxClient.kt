@@ -408,6 +408,24 @@ internal class FakeTmuxClient(
         return 0
     }
 
+    /**
+     * Issue #1297: records the panes whose `%output` delivery the overflow-reseed
+     * swap froze/thawed, so a test can assert the swap paused delivery before the
+     * producer teardown and resumed it afterwards (so a collector gap holds frames
+     * instead of dropping them, and recovery doesn't depend solely on the
+     * capture).
+     */
+    val outputDeliveryPauseCalls: MutableList<String> = mutableListOf()
+    val outputDeliveryResumeCalls: MutableList<String> = mutableListOf()
+
+    override fun pauseOutputDelivery(paneId: String) {
+        outputDeliveryPauseCalls += paneId
+    }
+
+    override fun resumeOutputDelivery(paneId: String) {
+        outputDeliveryResumeCalls += paneId
+    }
+
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> =
         if (decoupleOutputForFromEvents) {
             emittedPaneOutputs.filter { it.paneId == paneId }

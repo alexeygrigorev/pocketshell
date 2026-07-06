@@ -106,13 +106,22 @@ re-derive from report 3 on #1208.
 
 ### Also in release scope
 
-- **#1288 Cluster C** (open): v0.4.23's async-close predicates can fail a
-  reconnect-window seed ("SSH session is not connected" during the ~2s drain)
-  ⇒ never-seeded black after a network blip. Distinct from the watchdog
-  cluster; do not conflate.
-- **#1296 / PR #1299** (honest paint confirmation): reviewer-APPROVED with
-  red→green. If PR #1299 is not yet merged when you start, merge it first
-  (cheap required checks only; JVM-provable per issue non-goals).
+- **#1296 / PR #1299** (honest paint confirmation): MERGED (`15d0dffe`).
+- **#1294 / PR #1303** (three-state heal watchdog): reviewer-APPROVED, in
+  merge. Once it lands, #1295 and #1300 (line-hash oracle) become
+  dispatchable — both edit the watchdog/oracle region #1294 owns.
+
+### NOT a black-screen cause (ruled out 2026-07-06)
+
+- **#1288** was investigated as suspect #3 (async-close seed failure →
+  never-seeded black on reconnect). **Disproven at the code level** (see the
+  #1288 comment 2026-07-06): `capture-pane` seeds ride the persistent `-CC`
+  shell via `TmuxClient.captureWithCursor` and never call `ensureConnected()`,
+  so the async-close predicate changes cannot black a pane that way. #1288
+  remains a real fault-gate blocker for a green `fault_verdict`, but it is a
+  separate D28 scoping call — **do NOT fold it into the black-screen patch, and
+  do NOT open a seed-black issue on the async-close premise.** The real
+  remaining on-device black-screen cause is the steady-watchdog gap **#1295**.
 
 ## Diagnostics disambiguation (ask the maintainer once per incident)
 

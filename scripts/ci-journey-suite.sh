@@ -133,6 +133,18 @@ JOURNEY_CLASSES=(
   # self-skip on CI.
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
+  # Issue #666 REOPEN (2026-07-06): a session killed on the host must NOT be
+  # RESURRECTED when the app REATTACHES to it (lifecycle/reconnect path) with the
+  # tmux SERVER still alive. The prior fix only guarded the process-death
+  # cold-restore path; the reattach path still fell through to `new-session -A`
+  # (attach-OR-create) and recreated the killed session — the maintainer's exact
+  # dogfood report. This journey seeds a KEEPALIVE session so the server survives
+  # the target kill (the server-alive-session-gone branch, distinct from #998's
+  # dead-server), attaches, kills only the target, backgrounds past grace, and
+  # foregrounds (a LifecycleReattach reconnect). It asserts the target is NOT
+  # recreated, the server stayed alive (keepalive present), and the app drops to
+  # the session list. Runs on agents:2222; does NOT self-skip on CI.
+  "$FQCN_PREFIX.LifecycleReattachGoneSessionNoResurrectE2eTest"
   # Issue #998: a remote tmux SERVER death (host reboot / OOM / `kill-server`)
   # must NOT be silently resurrected via `new-session -A` into a blank
   # "Connected" session. This journey attaches, `tmux kill-server`s the whole

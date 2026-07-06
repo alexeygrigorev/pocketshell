@@ -1695,6 +1695,43 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1308: re-arm EVERY resendable outbound row for the current composer
+     * target back to [OutboundState.Queued] in ONE action — the batch equivalent
+     * of tapping each row's Retry. After a drop/black-screen leaves several sends
+     * `Failed`/queued, this lets the user re-send the whole backlog with a single
+     * tap instead of one row at a time.
+     *
+     * Order + no-duplicate contract (reusing the existing store primitives):
+     *  - Iterates [OutboundQueueStore.itemsFor], which is sorted oldest-first by
+     *    [OutboundItem.createdAtMs], so the re-arm preserves original FIFO
+     *    (oldest-composed-first) order.
+     *  - Re-arms only the resendable states (`Queued`/`Failed`) via
+     *    [OutboundQueueStore.requeueForRetry] — the SAME per-item primitive the
+     *    single-row Retry uses — so no second deliverable row is ever minted.
+     *  - Leaves `InFlight` rows untouched: they are actively being delivered, and
+     *    re-arming one to `Queued` is exactly the double-send this must not cause.
+     *  - Leaves `Uploading` rows untouched: their attachment upload is in
+     *    progress. A `Delivered` row is already pruned and never resurrected.
+     *
+     * This does NOT itself force a send. Re-arming the rows to `Queued` and
+     * refreshing the snapshot lets the SAME auto-send drain the screen already
+     * runs ([retryNextOutboundItem] on every queue-snapshot change while the
+     * session is live) deliver them one at a time in FIFO order — immediately
+     * when the session is live, or on reconnect if currently disconnected (the
+     * #900/#971 auto-send-on-reconnect path, unchanged).
+     *
+     * Returns the re-armed ids oldest-first, for observability/testing.
+     */
+    public fun resendAllQueued(): List<String> {
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val rearmedIds = outboundQueueStore.itemsFor(target)
+            .filter { it.state == OutboundState.Queued || it.state == OutboundState.Failed }
+            .mapNotNull { outboundQueueStore.requeueForRetry(it.id)?.id }
+        if (rearmedIds.isNotEmpty()) refreshOutboundQueueItemsFor(target)
+        return rearmedIds
+    }
+
+    /**
      * Issue #900: process-death / lost-callback recovery. If a row was left
      * [OutboundState.InFlight] longer than the send watchdog window, move it
      * back to [OutboundState.Queued] so the next foreground/reconnect flush can

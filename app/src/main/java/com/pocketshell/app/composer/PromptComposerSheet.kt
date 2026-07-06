@@ -233,6 +233,10 @@ public fun PromptComposerSheet(
     // Issue #900: UI/API plumbing for manual outbound retry. Tests may override
     // this seam, while production defaults to the owning VM.
     onRetryOutboundItem: ((String) -> Unit)? = null,
+    // Issue #1308: batch "Resend all" for the expanded unsent-prompts surface.
+    // Tests may override this seam; production defaults to the owning VM's
+    // resendAllQueued, which re-arms every resendable row to Queued in FIFO order.
+    onResendAllOutbound: (() -> Unit)? = null,
     // Issue #585: open the composer WITH recording already started + locked
     // hands-free. Set true only when the session launcher's hold+swipe-up ENTRY
     // gesture opened this sheet; a plain-tap open leaves it false (no recording).
@@ -519,6 +523,7 @@ public fun PromptComposerSheet(
             onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
             onDeleteOutboundItem = viewModel::discardOutboundItem,
             onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
+            onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueued(); Unit },
             agentKind = agentKind,
         )
     }
@@ -630,6 +635,7 @@ internal fun SheetContent(
     onToggleOutboundQueue: () -> Unit = {},
     onDeleteOutboundItem: (String) -> Unit = {},
     onRetryOutboundItem: (String) -> Unit = {},
+    onResendAllOutbound: () -> Unit = {},
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -1175,6 +1181,7 @@ internal fun SheetContent(
                     onToggle = onToggleOutboundQueue,
                     onDelete = onDeleteOutboundItem,
                     onRetry = onRetryOutboundItem,
+                    onResendAll = onResendAllOutbound,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -2738,6 +2745,7 @@ private fun OutboundQueueBanner(
     onToggle: () -> Unit,
     onDelete: (String) -> Unit,
     onRetry: (String) -> Unit,
+    onResendAll: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2790,6 +2798,45 @@ private fun OutboundQueueBanner(
                     .height(1.dp)
                     .background(PocketShellColors.BorderSoft),
             )
+            // Issue #1308: batch "Resend all" — re-arm EVERY resendable row
+            // (Queued/Failed) at once, in FIFO order, instead of tapping each
+            // row's Retry. Shown ONLY when at least TWO rows are actually
+            // resendable: a single resendable row already has its own tap-to-retry,
+            // so a batch affordance there would be the #971/#987 double-affordance
+            // confusion. Rows still delivering (InFlight/Uploading) are not counted.
+            val resendableCount = items.count {
+                it.state == OutboundState.Queued || it.state == OutboundState.Failed
+            }
+            if (resendableCount >= 2) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(6.dp))
+                        .clickable(
+                            role = androidx.compose.ui.semantics.Role.Button,
+                            onClick = onResendAll,
+                        )
+                        .padding(vertical = 10.dp)
+                        .testTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Resend all ($resendableCount)",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .height(1.dp)
+                        .background(PocketShellColors.BorderSoft),
+                )
+            }
             items.forEach { item ->
                 OutboundQueueRow(
                     item = item,
@@ -3557,6 +3604,9 @@ internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle
 internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
 internal const val COMPOSER_OUTBOUND_QUEUE_BANNER_TAG = "prompt-composer-outbound-queue"
 internal const val COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG = "prompt-composer-outbound-queue-toggle"
+// Issue #1308: batch "Resend all" button, shown in the expanded queue banner
+// only when >= 2 rows are resendable.
+internal const val COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG = "prompt-composer-outbound-queue-resend-all"
 
 /**
  * Issue #688: status text shown on a pending row while its retry round-trip

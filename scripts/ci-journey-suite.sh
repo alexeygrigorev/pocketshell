@@ -336,6 +336,16 @@ JOURNEY_CLASSES=(
   # retry callbacks in the same per-push androidTest lane as the send-feedback
   # composer proofs. Pure Compose, no Docker fixture.
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  # ADDED (#1308): batch "Resend all" for the queued backlog. The presence/absence
+  # + callback + within-root containment of the new button live in
+  # PromptComposerOutboundQueueTest above; this class is its keyboard-UP occlusion
+  # sibling — it composes the production SheetContent with the queue expanded and
+  # >= 2 Failed rows under a SYNTHETIC ime() inset (the #780 model — deterministic
+  # on CI swiftshader, no real keyboard, HARD-asserts the inset applied, no
+  # assumeTrue skip) and asserts the Resend all button stays ABOVE the keyboard via
+  # the #657/F1 assertNodeFullyAboveImeOrKeyboard containment helper. Pure Compose,
+  # no Docker fixture. Carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.ComposerResendAllImeProofTest"
   # PROMOTED (#746): the composer "Not sent" DISCARD + draft session-scoping
   # journey. The maintainer's dogfood report: a "Not sent" draft authored in one
   # session had no Discard control (only Send + the close ×, which PRESERVES the

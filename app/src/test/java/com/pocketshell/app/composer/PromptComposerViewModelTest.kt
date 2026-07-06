@@ -4147,6 +4147,107 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun resendAllQueuedRearmsFailedAndQueuedRowsToQueuedInFifoOrderWithoutMintingDuplicates() = runTest {
+        // Issue #1308: the batch "Resend all" — with several unsent prompts queued
+        // after a drop, one action re-arms EVERY resendable (Queued/Failed) row to
+        // Queued in original FIFO order, reusing requeueForRetry, WITHOUT minting a
+        // second deliverable row and WITHOUT disturbing a row still on the wire
+        // (InFlight/Uploading), which would be the AC2 double-send.
+        val queue = InMemoryOutboundQueueStore()
+        val failed1 = queue.enqueue(sessionKey = "1/a", cleanText = "oldest failed", createdAtMs = 1L)
+            .let { queue.markFailed(it.id, lastError = "connection lost", lastAttemptAtMs = 10L)!! }
+        val queued2 = queue.enqueue(sessionKey = "1/a", cleanText = "middle queued", createdAtMs = 2L)
+        val failed3 = queue.enqueue(sessionKey = "1/a", cleanText = "newest failed", createdAtMs = 3L)
+            .let { queue.markFailed(it.id, lastError = "connection lost", lastAttemptAtMs = 10L)!! }
+        val inFlight = queue.enqueue(sessionKey = "1/a", cleanText = "on the wire", createdAtMs = 4L)
+            .let { queue.markInFlight(it.id)!! }
+        val uploading = queue.enqueue(sessionKey = "1/a", cleanText = "uploading now", createdAtMs = 5L)
+            .let { queue.markUploading(it.id)!! }
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        vm.onComposerTargetChanged("1/a")
+        val rowCountBefore = queue.itemsFor("1/a").size
+
+        val rearmed = vm.resendAllQueued()
+
+        // FIFO: oldest-composed-first, only the resendable (Queued/Failed) rows.
+        assertEquals(listOf(failed1.id, queued2.id, failed3.id), rearmed)
+        // Every resendable row is now clean Queued (error cleared) — no sibling minted.
+        assertEquals(OutboundState.Queued, queue.item(failed1.id)!!.state)
+        assertNull(queue.item(failed1.id)!!.lastError)
+        assertEquals(OutboundState.Queued, queue.item(queued2.id)!!.state)
+        assertEquals(OutboundState.Queued, queue.item(failed3.id)!!.state)
+        // AC2: rows still on the wire are untouched (re-arming them is the double-send).
+        assertEquals(OutboundState.InFlight, queue.item(inFlight.id)!!.state)
+        assertEquals(OutboundState.Uploading, queue.item(uploading.id)!!.state)
+        // No duplicate rows minted — same five ids, same order.
+        assertEquals(rowCountBefore, queue.itemsFor("1/a").size)
+        assertEquals(
+            listOf(failed1.id, queued2.id, failed3.id, inFlight.id, uploading.id),
+            vm.outboundQueueItems.value.map { it.id },
+        )
+        // AC4: a re-armed row stays individually retryable (still exact-claimable).
+        assertEquals(OutboundState.InFlight, queue.claim(failed1.id)!!.state)
+    }
+
+    @Test
+    fun resendAllQueuedThenAutoDrainDeliversFifoAndCountDecrementsToZero() = runTest {
+        // Issue #1308 (AC1 + AC4): after Resend all re-arms the backlog to Queued,
+        // the SAME auto-send drain (retryNextOutboundItem, one-at-a-time) delivers
+        // them oldest-first and the visible unsent count decrements to zero.
+        val queue = InMemoryOutboundQueueStore()
+        val first = queue.enqueue(sessionKey = "1/a", cleanText = "first", createdAtMs = 1L)
+            .let { queue.markFailed(it.id, lastError = "lost", lastAttemptAtMs = 10L)!! }
+        val second = queue.enqueue(sessionKey = "1/a", cleanText = "second", createdAtMs = 2L)
+            .let { queue.markFailed(it.id, lastError = "lost", lastAttemptAtMs = 10L)!! }
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/a")
+
+        assertEquals(listOf(first.id, second.id), vm.resendAllQueued())
+
+        // Drain #1 claims the OLDEST re-armed row (FIFO), delivery prunes it.
+        // `runCurrent()` (not advanceUntilIdle) runs the collector WITHOUT advancing
+        // virtual time to the send watchdog's timeout, so delivery is deterministic.
+        assertEquals(first.id, vm.retryNextOutboundItem())
+        runCurrent()
+        assertEquals(first.id, sent.single().outboundQueueItemId)
+        vm.markSendDelivered(sent.single())
+        assertNull(queue.item(first.id))
+        assertEquals(listOf(second.id), vm.outboundQueueItems.value.map { it.id })
+
+        // Drain #2 delivers the last row — the unsent count reaches zero.
+        assertEquals(second.id, vm.retryNextOutboundItem())
+        runCurrent()
+        assertEquals(second.id, sent.last().outboundQueueItemId)
+        vm.markSendDelivered(sent.last())
+        assertNull(queue.item(second.id))
+        assertTrue(vm.outboundQueueItems.value.isEmpty())
+    }
+
+    @Test
+    fun resendAllQueuedWithNoResendableRowsIsANoOp() = runTest {
+        // Guard: a single in-flight row (nothing resendable) yields no re-arm and
+        // no snapshot churn — the button gate (>= 2 resendable) has a VM twin here.
+        val queue = InMemoryOutboundQueueStore()
+        val inFlight = queue.enqueue(sessionKey = "1/a", cleanText = "on the wire", createdAtMs = 1L)
+            .let { queue.markInFlight(it.id)!! }
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        vm.onComposerTargetChanged("1/a")
+
+        assertTrue(vm.resendAllQueued().isEmpty())
+        assertEquals(OutboundState.InFlight, queue.item(inFlight.id)!!.state)
+    }
+
+    @Test
     fun requeueStaleOutboundInFlightUsesWatchdogCutoffBeforeRetryNext() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val now = 500_000L

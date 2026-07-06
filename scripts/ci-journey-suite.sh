@@ -595,6 +595,25 @@ JOURNEY_CLASSES=(
   # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT
   # self-skip on CI.
   "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"
+  # ADDED (#1302/#1208 — the COMPOSITE recovery journey, the campaign's acceptance gate that
+  # PROVES the reconciler ends the maintainer's fragments-over-black once and for all). The
+  # maintainer's residual black (recurred 2026-07-06 AFTER v0.4.23) needs three ingredients the
+  # old happy fixture cannot produce (G10): a mostly-empty model, an idle Claude that repaints
+  # ONLY a spinner (so it can never self-heal a lost grid), and a recovery layer that is not
+  # healing the pane. This journey drives the REAL idle-incremental fixture
+  # (tests/docker/agent-fixtures/idle-incremental-claude.sh, reuses agents:2222) into
+  # fragments-over-black on the LIVE emulator, then asserts the visible pane converges to
+  # AUTHORITATIVE tmux content via the PERIODIC reconciler alone (no explicit reveal/resize/
+  # switch/heal trigger). Within-run RED->GREEN (#780 synthetic): RED = the reconciler is
+  # suppressed (auto-arm off + watchdog cancelled) -> the pane STAYS fragments-over-black for a
+  # full reconcile window (the maintainer's unhealable persistent black; a fresh capture-pane
+  # proves tmux's grid still holds the banner the render lost — the authoritative count-diff);
+  # GREEN = re-arm the reconciler -> it ticks on its own cadence and converges the pane to the
+  # full banner, transport stays Connected, no reconnect surface. A busy-agent lane
+  # (busy-agent-burst.sh) proves the merged #1297 wedge-proof lane reconciles under -CC
+  # saturation. Deterministic agents:2222 only (state injected LOCALLY, no toxiproxy) and does
+  # NOT self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest"
   # ADDED (#1153 — send-with-attachment half-black, v0.4.21 dogfood): a composer Send WITH AN
   # ATTACHMENT is ALWAYS multi-line (it appends an "Attached files:" block), so it takes the
   # bracketed-paste + submit branch and the alt-screen agent clear+redraws its WHOLE viewport; the

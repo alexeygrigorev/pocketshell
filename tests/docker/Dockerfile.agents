@@ -22,6 +22,18 @@ COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
 # compose healthcheck. The private key is a committed test fixture.
 COPY tests/docker/test_key /root/test_key
 COPY tests/docker/agent-bin/ /usr/local/bin/
+# Issue #1302/#1208: the recovery-journey fixture scripts ship here too. They
+# REUSE this `agents` service (host port 2222) — NO new service/port is needed:
+# the composite recovery journey seeds a tmux session whose new-session PAYLOAD
+# runs one of these scripts, e.g.
+#   sh /opt/pocketshell-agent-fixtures/idle-incremental-claude.sh <MARKER> 40
+#   sh /opt/pocketshell-agent-fixtures/busy-agent-burst.sh <MARKER> 40
+#   * idle-incremental-claude.sh — paints a full TUI frame once, then repaints
+#     only a spinner line in place (idle Claude that can never self-heal a lost
+#     grid; recovery must come from the reconciler).
+#   * busy-agent-burst.sh — saturates the `-CC` channel with heavy repaint bursts
+#     (the #1297 capture-wedge state), alternating with a stable authoritative
+#     banner so convergence stays assertable.
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
 COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts

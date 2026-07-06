@@ -426,10 +426,6 @@ class DeadZoneBandRevealResizeHealTest {
             "dead-zone band cleared the old 0.5 LINE ceiling (> 50% rows live)",
             s.visibleScreenLooksSparseForSendHeal(),
         )
-        assertFalse(
-            "dead-zone band cleared the old 0.25 CHAR ceiling (> 25% of tmux's chars)",
-            s.visibleScreenDivergesFromCapture(FULL_FRAME.joinToString("\n")),
-        )
         assertTrue(
             "the #1176 local capture-gate catches the band (worth a capture-diff)",
             s.visibleRenderMayHaveLostFrame(),

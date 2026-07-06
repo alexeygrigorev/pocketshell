@@ -28,17 +28,17 @@ import java.io.OutputStream
  * pane lost stay black. The pane is on the ALTERNATE screen (Codex/Claude run a full-screen
  * TUI), and an alt-screen frame is SPARSE: a header + a large blank conversation area + an
  * input/status line. So its non-blank content is small, and the surviving status line is a
- * LARGE fraction of it — ABOVE the #966 25% divergence ceiling. The v0.4.18 steady-state
- * stale-render watchdog's ONLY heal predicate was [visibleScreenDivergesFromCapture], so it
- * read the pane "healthy" and never fired — the pane sat mostly-black on a LIVE transport.
+ * LARGE fraction of it — ABOVE the #966 25% divergence ceiling the pre-#1176 scalar oracle used,
+ * so that scalar read the pane "healthy" and never fired — the pane sat mostly-black on a LIVE
+ * transport.
  *
- * ## RED → GREEN (D33/G1/G10)
+ * ## GREEN (D33/G1/G10)
  *
  * Each test drives a REAL emulator onto the alternate screen into the exact partial-black
  * state, then pins:
- *  - RED gap: the OLD predicate [visibleScreenDivergesFromCapture] returns FALSE against the
- *    agent's authoritative full alt-screen capture (so the watchdog would SKIP the heal).
- *  - GREEN fix: the union predicate [visibleRenderLostFrameVsCapture] returns TRUE (heal fires).
+ *  - GREEN fix: the per-line-hash predicate [visibleRenderLostFrameVsCapture] returns TRUE — the
+ *    render reproduces only the surviving status line, missing the rest of tmux's content lines,
+ *    so the heal fires.
  *
  * ## Class coverage (D32-G2) — the whole class, not the one reported instance
  *  - alt-screen partial-black (status-line-only) against a full agent frame → heals (the bug).
@@ -146,17 +146,10 @@ class TerminalSurfaceStateAgentPartialBlackTest {
             state.visibleScreenIsPartiallyBlank(),
         )
 
-        // RED: the old divergence oracle reads the pane "healthy" — the surviving status
-        // line exceeds 25% of the sparse alt-screen frame, so the v0.4.18 watchdog SKIPS it.
-        assertFalse(
-            "RED (#1138): the #966 divergence oracle MISSES the alt-screen partial-black — " +
-                "its surviving band exceeds the 25% ceiling of the sparse agent frame",
-            state.visibleScreenDivergesFromCapture(fullAgentAltCapture()),
-        )
-
-        // GREEN: the union predicate heals it — tmux holds materially more (the full frame).
+        // GREEN: the per-line-hash oracle heals it — the render reproduces only the surviving
+        // status line, missing the rest of tmux's authoritative content lines.
         assertTrue(
-            "GREEN (#1138): the union predicate must detect the alt-screen partial-black " +
+            "GREEN (#1138/#1300): the per-line-hash oracle must detect the alt-screen partial-black " +
                 "against the agent's authoritative full capture and heal it",
             state.visibleRenderLostFrameVsCapture(fullAgentAltCapture()),
         )
@@ -184,16 +177,10 @@ class TerminalSurfaceStateAgentPartialBlackTest {
                 "the ≤3-line partial-black the pre-#1153 case (b) required",
             state.visibleScreenIsPartiallyBlank(),
         )
-        // RED gap: the #966 divergence oracle reads the >3-line band "healthy" (its surviving
-        // content exceeds the 25% ceiling of the full frame), so the pre-#1153 union missed it.
-        assertFalse(
-            "RED (#1153): the #966 divergence oracle MISSES the >3-line half-black band",
-            state.visibleScreenDivergesFromCapture(fullAgentFrame()),
-        )
-        // GREEN: the widened union predicate heals it — the render lost most of the frame tmux
-        // still holds, and its live share of the visible rows is below the ceiling.
+        // GREEN: the per-line-hash oracle heals it — the render lost most of the content lines
+        // tmux still holds (the black band's rows are missing from the render).
         assertTrue(
-            "GREEN (#1153): the widened union predicate must heal a >3-line half-black band " +
+            "GREEN (#1153/#1300): the per-line-hash oracle must heal a >3-line half-black band " +
                 "against tmux's authoritative full frame",
             state.visibleRenderLostFrameVsCapture(fullAgentFrame()),
         )

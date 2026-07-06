@@ -1028,20 +1028,30 @@ internal class RealTmuxClient(
                     )
                     throw TmuxServerDeadException()
                 }
-                // Server alive but the target session is gone. On the explicit
-                // reattach path (`createIfMissing && probeServerLiveness`) a
-                // single missing session is the #666 not-the-#998 case: the
-                // server is up, so `new-session -A` recreating that one session
-                // is the correct reconnect behaviour — fall through and attach.
-                // Only the attach-only cold-restore path (`!createIfMissing`)
-                // must refuse to recreate a gone session.
-                if (!createIfMissing) {
-                    Log.i(
-                        ISSUE_105_DIAG_TAG,
-                        "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode}",
-                    )
-                    throw TmuxSessionNotFoundException(resolvedSessionName)
-                }
+                // Server alive but the TARGET session is gone. Issue #666 REOPEN
+                // (2026-07-06): a session that no longer exists at reattach time
+                // ENDED — a reattach must NEVER recreate it. Previously ONLY the
+                // attach-only cold-restore path (`!createIfMissing`) refused to
+                // recreate here; the reattach path (`createIfMissing &&
+                // probeServerLiveness`: LifecycleReattach / AutoReconnect /
+                // Reconnect / NetworkReconnect) FELL THROUGH to `new-session -A`
+                // (attach-OR-create) and silently resurrected the killed session —
+                // the exact dogfood bug ("I removed it on the computer, but the app
+                // created it again"). We hard-cut that branch (D22): whenever the
+                // preflight ran (`!createIfMissing || probeServerLiveness`) and the
+                // specific session is gone on a LIVE server, throw
+                // [TmuxSessionNotFoundException] so the caller drops to the list —
+                // identically for cold-restore AND every reattach. The only path
+                // that legitimately create-if-missing is the explicit user "new
+                // session" intent (`createIfMissing && !probeServerLiveness`), which
+                // never enters this preflight at all.
+                Log.i(
+                    ISSUE_105_DIAG_TAG,
+                    "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode} " +
+                        "createIfMissing=$createIfMissing probeServerLiveness=$probeServerLiveness " +
+                        "— refusing to recreate, dropping to list",
+                )
+                throw TmuxSessionNotFoundException(resolvedSessionName)
             }
         }
         // Open the SSH shell and launch the reader. We do not synchronously

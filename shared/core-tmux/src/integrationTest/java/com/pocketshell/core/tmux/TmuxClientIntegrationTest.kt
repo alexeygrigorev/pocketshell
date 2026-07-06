@@ -302,6 +302,75 @@ class TmuxClientIntegrationTest {
     }
 
     @Test
+    fun `reattach to a session killed on a live server refuses to recreate it`() = runBlocking {
+        // Issue #666 REOPEN (2026-07-06) — the real-tmux proof. A session killed
+        // on the host must NOT be resurrected when the app REATTACHES to it
+        // (probeServerLiveness=true, createIfMissing=true) with the tmux SERVER
+        // still alive. On base the `has-session` preflight saw the server alive
+        // but the target gone and FELL THROUGH to `new-session -A`, recreating it.
+        //
+        // A KEEPALIVE session keeps the real tmux server alive after the target is
+        // killed, so this exercises the server-alive-session-gone branch (the #666
+        // case) and NOT the dead-server branch (#998). The fix must throw
+        // [TmuxSessionNotFoundException] (not [TmuxServerDeadException]) and never
+        // create the gone session.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val stamp = System.nanoTime()
+                val keepalive = "keepalive-$stamp"
+                val target = "gone-$stamp"
+                // Keep the server alive; ensure the target does NOT exist.
+                session.exec("tmux new-session -d -s '$keepalive' 'sleep 600'")
+                session.exec("tmux kill-session -t '$target' >/dev/null 2>&1 || true")
+                assertEquals(
+                    "keepalive must be alive so the server stays up",
+                    0,
+                    session.exec("tmux has-session -t '$keepalive'").exitCode,
+                )
+                assertFalse(
+                    "target must be gone before the reattach",
+                    session.exec("tmux has-session -t '$target'").exitCode == 0,
+                )
+
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = target,
+                    createIfMissing = true,
+                    probeServerLiveness = true,
+                )
+                val thrown = client.use { runCatching { it.connect() }.exceptionOrNull() }
+
+                // A gone SESSION on a LIVE server is session-ended, NOT server-death.
+                assertTrue(
+                    "expected TmuxSessionNotFoundException for a gone reattach, got $thrown",
+                    thrown is TmuxSessionNotFoundException,
+                )
+                assertFalse(
+                    "a gone session on a live server must NOT be classified server-death",
+                    thrown is TmuxServerDeadException,
+                )
+                // The killed session must NOT have been recreated by the reattach.
+                assertFalse(
+                    "REGRESSION (#666 reopen): the reattach RECREATED the killed session " +
+                        "`$target` on a live server (`new-session -A`) — it must refuse",
+                    session.exec("tmux has-session -t '$target'").exitCode == 0,
+                )
+                // The server stayed alive (keepalive present) — the #666 branch.
+                assertEquals(
+                    "the keepalive must still be alive (server stayed up — the #666 branch)",
+                    0,
+                    session.exec("tmux has-session -t '$keepalive'").exitCode,
+                )
+                session.exec("tmux kill-session -t '$keepalive' >/dev/null 2>&1 || true")
+                Unit
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `sendCommand error response surfaces with isError true`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {

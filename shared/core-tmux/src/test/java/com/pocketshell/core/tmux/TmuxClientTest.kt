@@ -321,11 +321,21 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `reattach preflight to an ALIVE server with a gone session still reattaches (recreates that one session)`() = runBlocking {
-        // Server alive (`can't find session: work`, exit 1) on the reattach path
-        // is the #666 case, NOT #998: the server is up, so `new-session -A`
-        // recreating that one session is the correct reconnect behaviour. We must
-        // NOT throw server-death here, and we MUST attach.
+    fun `reattach preflight to an ALIVE server with a gone session REFUSES to recreate`() = runBlocking {
+        // Issue #666 REOPEN (2026-07-06): the maintainer killed a session on the
+        // host, backgrounded briefly, came back — and the app RECREATED the killed
+        // session. Root cause: the reattach path (`createIfMissing=true` +
+        // `probeServerLiveness=true`, used by LifecycleReattach / AutoReconnect /
+        // Reconnect / NetworkReconnect) ran the `has-session` preflight, saw the
+        // server alive but the ONE target session gone, and FELL THROUGH to
+        // `tmux -CC new-session -A` — attach-OR-create — which resurrected it.
+        //
+        // A session that no longer exists at reattach time ENDED; a reattach must
+        // NEVER recreate it. Server alive (`can't find session: work`, exit 1) with
+        // the specific session gone is the #666 case (NOT the #998 dead-SERVER
+        // case): it must throw [TmuxSessionNotFoundException] so the ViewModel
+        // drops to the list, exactly like the attach-only cold-restore path. It
+        // must NOT open a shell and must NOT write any `new-session` line.
         val shell = FakeShell()
         val session = FakeSession(
             shell,
@@ -341,18 +351,26 @@ class TmuxClientTest {
             probeServerLiveness = true,
         )
         try {
-            client.connect()
-            withTimeout(2_000) {
-                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-            }
+            val thrown = runCatching { client.connect() }.exceptionOrNull()
+            // A gone session on the reattach path is session-ended, NOT server-death.
+            assertTrue(
+                "expected TmuxSessionNotFoundException for a gone session on reattach, got $thrown",
+                thrown is TmuxSessionNotFoundException,
+            )
+            assertFalse(
+                "a gone SESSION (server alive) must NOT be classified server-death",
+                thrown is TmuxServerDeadException,
+            )
+            // The preflight ran exactly the has-session probe...
             assertEquals(
                 listOf("tmux has-session -t 'work'"),
                 session.execCommands.toList(),
             )
-            // A live server still attaches with the normal control-mode spawn.
-            assertEquals(
-                "tmux -CC new-session -A -s 'work'\n",
-                shell.stdinAsString(),
+            // ...and we NEVER wrote a `new-session` line, so the killed session
+            // could not be resurrected via `new-session -A` on the reattach path.
+            assertTrue(
+                "no creating command may be written for a gone reattach, got `${shell.stdinAsString()}`",
+                shell.stdinBytes().isEmpty(),
             )
         } finally {
             client.close()

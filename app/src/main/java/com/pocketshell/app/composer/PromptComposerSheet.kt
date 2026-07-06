@@ -1885,6 +1885,16 @@ private fun DiscardRecordingButton(
 private val ComposerActionPillRadius = 22.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
 
+// Genuine sub-ladder "micro role" geometry: the outbound-queue action buttons
+// (the per-row Resend affordance and the #1308 "Resend all" banner) use a
+// 6dp radius (design-system.md "Radius, Elevation, And Borders" — "Micro role
+// badges | 3-6dp"), smaller than the named ladder rungs (8/14/20/28dp). 6dp
+// matches the sibling per-row queue button; named here (vs an inline literal)
+// so it stays one intentional token rather than off-ladder drift. See
+// docs/design-system.md.
+private val ComposerQueueButtonRadius = 6.dp
+private val ComposerQueueButtonShape = RoundedCornerShape(ComposerQueueButtonRadius)
+
 // Issue #1152: one baseline HEIGHT for EVERY recording-row pill (Discard / Lock /
 // Insert / Send) so the row reads as a single deliberate control ladder instead
 // of the old 40/44/48dp mix (audit D4). 48dp is the design-system tapTargetMin,
@@ -2812,8 +2822,8 @@ private fun OutboundQueueBanner(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(PocketShellColors.Accent, RoundedCornerShape(6.dp))
+                        .clip(ComposerQueueButtonShape)
+                        .background(PocketShellColors.Accent, ComposerQueueButtonShape)
                         .clickable(
                             role = androidx.compose.ui.semantics.Role.Button,
                             onClick = onResendAll,

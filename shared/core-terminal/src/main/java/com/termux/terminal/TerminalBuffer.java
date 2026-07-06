@@ -65,6 +65,25 @@ public final class TerminalBuffer {
         return mScreenRows;
     }
 
+    /**
+     * Issue #1296: does ANY currently VISIBLE screen row (0..mScreenRows,
+     * scrollback excluded) carry a non-blank cell? A cheap, allocation-free
+     * early-exit scan (returns on the first non-blank row) — unlike
+     * {@link #getVisibleScreenText()} it builds no string, so it is safe to call
+     * every frame from the {@link com.termux.view.TerminalView#onDraw} render
+     * path. Used by the paint-confirmation seam to decide whether a frame that
+     * bound a non-null emulator actually rendered CONTENT (true) or is effectively
+     * blank/black (false) — {@code mEmulator != null} alone is NOT proof of a
+     * painted frame.
+     */
+    public boolean hasNonBlankVisibleRow() {
+        for (int row = 0; row < mScreenRows; row++) {
+            TerminalRow line = mLines[externalToInternalRow(row)];
+            if (line != null && !line.isBlank()) return true;
+        }
+        return false;
+    }
+
     public String getTranscriptTextWithoutJoinedLines() {
         return getSelectedText(0, -getActiveTranscriptRows(), mColumns, mScreenRows, false).trim();
     }

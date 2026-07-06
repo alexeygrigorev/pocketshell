@@ -1438,7 +1438,21 @@ public final class TerminalView extends View {
 
                 // render the text selection handles
                 renderTextSelection();
-                paintedEmulatorContent = true;
+
+                // Issue #1296: only count this frame as a CONTENT paint when it
+                // actually rendered non-black glyph coverage. `mEmulator != null` is
+                // NOT enough: after forceSurfaceRepaint() (#1203) re-binds mEmulator,
+                // the NEXT onDraw on a 0-size / offscreen / still-blank surface would
+                // otherwise record a bogus content paint, flipping
+                // surfaceIsBlackWhileModelHasContent() false and silencing BOTH the
+                // heal oracle's surface-black detector AND the %output suspect-wake path
+                // while the pane sits visually black. Require nonzero view dimensions
+                // AND the emulator screen carrying at least one non-blank VISIBLE row
+                // (a model-level check — no PixelCopy/pixel readback, #1296 non-goal). A
+                // bound emulator that paints zero-size or fully-blank output records a
+                // BLANK paint so the watchdog/wake path stays armed and keeps retrying.
+                paintedEmulatorContent =
+                    getWidth() > 0 && getHeight() > 0 && mEmulator.getScreen().hasNonBlankVisibleRow();
             }
         } catch (Throwable t) {
             // Issues #966/#967: widen from RuntimeException to Throwable. An

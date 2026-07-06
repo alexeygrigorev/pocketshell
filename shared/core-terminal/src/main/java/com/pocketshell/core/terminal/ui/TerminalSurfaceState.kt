@@ -455,6 +455,22 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #1301 (reconciler reseed race): close the seed gate so subsequent live
+     * `%output` bytes are BUFFERED (in arrival order) behind it instead of reaching the
+     * emulator, until [appendRemoteOutput] (via `seedThenOpenGate`) or
+     * [openSeedGateWithoutSeed] flushes them. The continuous reconciler wraps its reseed
+     * capture+apply in `closeSeedGate()` … apply … `openSeedGateWithoutSeed()` so a NEWER
+     * in-flight `%output` delta that races the (older) `capture-pane` snapshot is buffered
+     * and re-applied ON TOP of the snapshot (newest-wins), instead of being clobbered by
+     * the snapshot's `CSI 2J` clear — the capture-clobbers-newer-delta race. Idempotent;
+     * no-op when no producer/bridge is attached or the gate is already closed. Mirrors the
+     * #468 seed-gate discipline the cold-open + overflow reseed already use.
+     */
+    fun closeSeedGate() {
+        bridge?.closeSeedGate()
+    }
+
+    /**
      * Issue #468: open the seed gate without applying a snapshot, flushing any
      * buffered live `%output` in order. Called when the `capture-pane` seed
      * never arrives (capture failed, older tmux) so live output is never

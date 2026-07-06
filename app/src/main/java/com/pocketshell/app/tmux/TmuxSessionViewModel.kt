@@ -11853,10 +11853,12 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #1166: the stale-render watchdog interval for the given run of
-     * consecutive HEALTHY (no-divergence) ticks. A healthy pane widens 4s → 8s → 16s
-     * (capped) even while streaming; [stableTicks] is reset to 0 only on a real
-     * divergence / switch (issue #1219), snapping the next interval back to 4s.
+     * Issue #1166 + #1301: the continuous reconciler's interval for the given run of
+     * consecutive HEALTHY (no-divergence) ticks. A verified-clean pane cools
+     * 4s → 8s → 16s → 30s (capped) even while streaming; [stableTicks] is reset to 0 on
+     * any real divergence / switch (issue #1219) or FAILED/UNVERIFIED verification (issue
+     * #1294), snapping the next interval back to 4s. The 30s ceiling (#1301) roughly halves
+     * the idle-pane steady-state capture rate vs the v0.4.23 16s ceiling (the #1164 lever).
      */
     @androidx.annotation.VisibleForTesting
     internal fun staleRenderWatchdogIntervalMs(stableTicks: Int): Long {
@@ -12264,6 +12266,26 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             pane.terminalState.requestSurfaceRepaint()
         }
+        // Issue #1301 (capture-clobbers-newer-delta race): QUIESCE live `%output`
+        // delivery around the reconcile capture+apply — but ONLY for a pane whose render
+        // already looks SUSPECT (black / partial-black / mostly-empty / surface-black),
+        // i.e. one we are about to reseed. Closing the seed gate buffers any NEWER
+        // in-flight delta (in arrival order) instead of letting it paint the emulator and
+        // then be wiped by the (older) snapshot's `CSI 2J` clear; [appendRemoteOutput]'s
+        // `seedThenOpenGate` re-applies the buffered deltas ON TOP of the snapshot
+        // (newest-wins). A HEALTHY (dense, correctly-rendering) pane is NOT quiesced — its
+        // gate stays OPEN so its steady live output never buffers, preserving the
+        // #1219/#1164 steady-heat back-off with zero added stutter. The gate is REOPENED
+        // in the `finally` on EVERY exit (healthy / unverified / healed), flushing any
+        // buffered delta so live output is never swallowed (#468 fail-safe). This is the
+        // #1298 design §5 "quiesce-around-apply" widened to the whole capture+apply window
+        // for a suspect pane (strictly stronger, deterministically testable, and — since
+        // the target class is the idle non-repainting pane with NO concurrent deltas —
+        // free there; a busy suspect pane briefly buffers then flushes in order).
+        val quiesceLiveDeltas =
+            surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+        if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
+        try {
         val combined = runCatching {
             withContext(seedIoDispatcher) {
                 client.captureWithCursor(
@@ -12390,6 +12412,18 @@ public class TmuxSessionViewModel @Inject constructor(
             return HealOutcome.Unverified
         }
         return HealOutcome.Healed
+        } finally {
+            // Issue #1301 (fail-safe): if we quiesced above, REOPEN the seed gate on EVERY
+            // exit — the HEALED path already opened it (via `seedThenOpenGate`, an idempotent
+            // no-op flush here), while the HEALTHY / UNVERIFIED / capture-failed / cancelled /
+            // surface-write-error paths never applied a snapshot, so this flushes any delta
+            // buffered during the capture window (in order) and opens the gate. Without this a
+            // suspect pane that scored HEALTHY/UNVERIFIED would be left with the gate CLOSED,
+            // silently swallowing all future live `%output` — a far worse bug than the race.
+            if (quiesceLiveDeltas) {
+                runCatching { pane.terminalState.openSeedGateWithoutSeed() }
+            }
+        }
     }
 
     private suspend fun seedPaneFromCaptureOnce(
@@ -19340,19 +19374,30 @@ internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
 internal const val STALE_RENDER_WATCHDOG_TICK_MS: Long = 4_000L
 
 /**
- * Issue #1166 (battery/heat): the stale-render watchdog interval ceiling. A stable
- * foreground pane backs off 4s → 8s → 16s (each stable tick doubles the interval,
- * capped here) so an idle pane stops paying ~15 `capture-pane` round-trips/min; any
- * divergence / new streamed output / switch snaps the cadence back to
- * [STALE_RENDER_WATCHDOG_TICK_MS] so a churning/agent pane heals as fast as before.
+ * Issue #1166 (battery/heat) + issue #1301 (reconciler cool ceiling): the continuous
+ * full-frame reconciler's interval ceiling. A verified-clean (HEALTHY) foreground pane
+ * cools 4s → 8s → 16s → 30s (each consecutive HEALTHY tick doubles the interval, capped
+ * here) so an idle pane stops paying ~15 `capture-pane` round-trips/min; any divergence /
+ * new streamed output / switch / UNVERIFIED tick snaps the cadence back to
+ * [STALE_RENDER_WATCHDOG_TICK_MS] so a churning/agent/suspect pane reconciles as fast as
+ * before.
+ *
+ * Issue #1301: raised 16s → 30s (with [STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS] 2 → 3)
+ * so a fully-idle HEALTHY pane's steady-state capture rate drops from one/16s (~3.75/min,
+ * the v0.4.23 baseline) to one/30s (~2/min) — a ~47% reduction that is the #1164 battery
+ * answer to promoting the event-only heal into a continuous reconciler. Per #1294 the
+ * ceiling is reached ONLY by consecutive CONFIRMED-healthy ticks; a FAILED (UNVERIFIED)
+ * verification never advances the back-off, so a wedged black pane can never cool to 30s.
  */
-internal const val STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS: Long = 16_000L
+internal const val STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS: Long = 30_000L
 
 /**
- * Issue #1166: the number of interval doublings from [STALE_RENDER_WATCHDOG_TICK_MS]
- * to reach [STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS] (4s → 8s → 16s = 2 doublings).
+ * Issue #1166 + #1301: the number of interval doublings from [STALE_RENDER_WATCHDOG_TICK_MS]
+ * to reach [STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS] (4s → 8s → 16s → 30s = 3 doublings, the
+ * fourth doubling 4s<<3 = 32s coerced down to the 30s ceiling). Reached after 3 consecutive
+ * HEALTHY ticks.
  */
-internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 2
+internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 3
 
 /**
  * Issue #966/#967: upper bound on stale-render watchdog ticks for the runtime's

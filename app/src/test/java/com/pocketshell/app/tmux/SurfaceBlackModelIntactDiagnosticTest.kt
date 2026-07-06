@@ -126,9 +126,10 @@ class SurfaceBlackModelIntactDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertFalse(
-            "a model-healthy pane is not MODEL-reseeded (no capture-pane swap) — the recovery is " +
-                "a surface repaint, not a model heal",
+        assertEquals(
+            "a model-healthy pane is not MODEL-reseeded (no capture-pane swap) — it is HEALTHY; " +
+                "the recovery is a surface repaint, not a model heal",
+            HealOutcome.Healthy,
             healed,
         )
         // Issue #1203: the auto-heal now RECOVERS this class with a SURFACE force-repaint
@@ -284,7 +285,7 @@ class SurfaceBlackModelIntactDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertFalse("no model reseed for an oracle-healthy agent pane", healed)
+        assertEquals("no model reseed for an oracle-healthy agent pane", HealOutcome.Healthy, healed)
         assertTrue(
             "the auto-heal must request a surface force-repaint for a surface-only-black " +
                 "agent/alt-screen pane too (class coverage, not just shell panes)",
@@ -490,7 +491,7 @@ class SurfaceBlackModelIntactDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertTrue("the render lost the frame → the heal fires", healed)
+        assertEquals("the render lost the frame → the heal fires", HealOutcome.Healed, healed)
         val event = sink.singleBlackFrameEvent()
         assertEquals(
             "the lost_after_paint class is unchanged — the surface branch never runs when " +

@@ -25,6 +25,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -372,9 +373,10 @@ class PartialBlackPaneHealTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertTrue(
+        assertEquals(
             "REGRESSION (#1138): the steady-state watchdog must heal a partial-black " +
                 "alt-screen agent pane. On base the divergence-only predicate skipped it.",
+            HealOutcome.Healed,
             healed,
         )
         assertTrue(
@@ -418,9 +420,11 @@ class PartialBlackPaneHealTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertFalse(
+        assertEquals(
             "OVER-HEAL GUARD (#1138/#807): when tmux's alt-screen capture is ALSO near-empty " +
-                "there is no lost frame to restore — the watchdog must NOT heal",
+                "there is no lost frame to restore — the watchdog reads the pane HEALTHY and " +
+                "must NOT heal",
+            HealOutcome.Healthy,
             healed,
         )
         assertTrue(

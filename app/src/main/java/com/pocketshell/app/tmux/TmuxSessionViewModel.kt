@@ -3927,6 +3927,11 @@ public class TmuxSessionViewModel @Inject constructor(
             // this attach — the live client never re-attached, so the pane stays in
             // panesSeededThisAttach and a skip would leave the surface black (#1181).
             reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+            // Issue #1295: the pinned beyond-grace foreground resume is another one-shot reseed
+            // that armed NO steady watchdog. On a port-forward-pinned "always-on" connection the
+            // original connect-time watchdog may have hit its lifetime tick-ceiling across a long
+            // session, so re-arm the single lifetime net here too (arm-dedup keeps it singular).
+            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
         }
     }
 
@@ -4066,6 +4071,17 @@ public class TmuxSessionViewModel @Inject constructor(
             // dropped if the runtime/target was superseded mid-flight (the guard),
             // so a late seed for a switched-away session can never paint.
             reseedActivePaneForReattach(guard)
+            // Issue #1295: the within-grace reseed-only reattach is a ONE-SHOT reseed that
+            // (pre-#1295) armed NO steady stale-render watchdog — it relied on the original
+            // connect-time watchdog having SURVIVED. But that watchdog can be gone (a
+            // superseded runtime exited its loop, a prior disconnect-recovery left it dead,
+            // the lifetime tick-ceiling elapsed), and Claude repaints only incrementally after
+            // reveal, so an idle pane that later diverges on such a runtime had NO post-reveal
+            // net and stayed black FOREVER. Re-arm the single lifetime net here so the
+            // reattached runtime always has exactly one live watchdog. [armActivePaneStaleRenderWatchdog]
+            // cancels any prior loop before launching (arm-dedup), so this can never stack a
+            // second concurrent watchdog even when the connect-time one is still alive.
+            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
         }
     }
 
@@ -5704,6 +5720,22 @@ public class TmuxSessionViewModel @Inject constructor(
             runtime = cached,
             trigger = trigger,
         )
+        // Issue #1295: the WARM cached-runtime activation (a fast switch BACK to a cached
+        // session — the A→B→A return) restores a LIVE-attached runtime but, unlike the
+        // cold/fast-switch reveal (`:6545`/`:7041`), armed NO steady stale-render watchdog:
+        // [launchCachedRuntimeRemoteRefresh] below only reconciles panes + refreshes size, it
+        // never arms the lifetime net. An idle Claude pane on a warm-switched-back session that
+        // later diverges would then have NO post-reveal recovery net and stay BLACK forever —
+        // the exact #1295 unarmed-watchdog class. Arm the single lifetime net for the
+        // reactivated runtime now (the cached active pane is already non-blank from its cached
+        // frame, so the stale-render oracle can fire; arm-dedup keeps it singular, so the
+        // switch can never stack a second loop for the reactivated runtime).
+        val activationGuard = RuntimeRefreshGuard(
+            generation = generation,
+            target = target,
+            client = cached.client,
+        )
+        if (isCurrentRuntime(activationGuard)) armActivePaneStaleRenderWatchdog(activationGuard)
         StartupTiming.mark(
             "tmux-runtime-cache-hit",
             "attempt" to attempt,
@@ -10963,6 +10995,16 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1295 (test seam): expose the production [isCurrentRuntime] predicate so a JVM
+     * test can assert, after a GENUINE session switch (supersede), that a runtime guard
+     * captured before the switch is no longer current (its generation/client/session was
+     * superseded) — the exact predicate every arm/heal call site gates on. Test-only.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isCurrentRuntimeForTest(guard: RuntimeRefreshGuard): Boolean =
+        isCurrentRuntime(guard)
+
+    /**
      * Issue #722 (characterization test seam): build a [RuntimeRefreshGuard]
      * pinned to the live client/target but stamped with a SUPERSEDED generation
      * (current `connectGeneration - 1`), modelling a guard captured BEFORE a
@@ -11075,6 +11117,27 @@ public class TmuxSessionViewModel @Inject constructor(
         } finally {
             connectedBlankWatchdogAutoArmEnabled = previousAutoArm
         }
+    }
+
+    /**
+     * Issue #1295 (test seam): drop the inline [ConnectionState] to a TRANSIENT
+     * `Reconnecting` band while KEEPING the runtime (`activeTarget`/`clientRef` intact),
+     * so a JVM test can drive the disconnect-recovery blank-watchdog case where the band
+     * is still settling on a live client. Sets `_connectionState` directly (no controller
+     * drive) so `inlineConnectionStatus` reads not-Connected on the next watchdog tick.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun forceInlineReconnectingBandForTest() {
+        val target = activeTarget ?: return
+        _connectionState = ConnectionState.Reconnecting(
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            attempt = 1,
+            maxAttempts = 3,
+            retryDelayMs = 1_000L,
+            reason = "test transient band (#1295)",
+        )
     }
 
     /**
@@ -11417,7 +11480,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                    // Issue #1295 (disconnect-recovery re-arm gap): a TRANSIENT reconnecting
+                    // band during the blank window (a disconnect-recovery still settling on a
+                    // still-live client + current runtime) must NOT strand the recovered
+                    // runtime watchdog-less. On the silent-reattach / reconnect nets
+                    // (surfaceErrorOnExhaustion=false) hand off the LIFETIME stale-render
+                    // watchdog before exiting — it itself tolerates the transient band (it
+                    // continues, healing once Connected resumes), so an idle pane that later
+                    // diverges is still caught. Before #1295 this bare-exited, leaving the
+                    // recovered runtime with NO post-reveal net (permanent black on a live
+                    // transport). The cold/switch ATTACH reveal (surfaceErrorOnExhaustion=true)
+                    // keeps its bare exit: its still-Seeding reveal is owned by the reveal gate,
+                    // not this net, and a not-Connected there is a genuine attach failure.
+                    if (!surfaceErrorOnExhaustion) armActivePaneStaleRenderWatchdog(refreshGuard)
+                    return@launch
+                }
                 val activePane = activeVisiblePane()
                 if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
                     // A frame landed (seed or live %output) — drop the loading
@@ -11617,6 +11695,20 @@ public class TmuxSessionViewModel @Inject constructor(
                 noteActivePaneAltBufferState()
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
+                    // Issue #1295 (deliverable 1) — the POSITIVE watchdog-liveness heartbeat.
+                    // We have passed every gate above, so at THIS point the watchdog is proven
+                    // ARMED + running, the runtime is CURRENT + live-attached (isCurrentRuntime),
+                    // the app is FOREGROUNDED + screen-on (shouldRunStaleRenderWatchdogCapture),
+                    // and a visible pane is on screen. Fingerprint that fact into the exportable
+                    // ring BEFORE the heal capture (so the heartbeat lands even when the capture
+                    // is UNVERIFIED). Its ABSENCE alongside foreground+live evidence is the
+                    // positive signature of the #1295 unarmed-watchdog bug.
+                    recordWatchdogLiveness(
+                        pane = activePane,
+                        refreshGuard = refreshGuard,
+                        tick = tick,
+                        backedOff = stableTicks > 0,
+                    )
                     val outcome = runCatching {
                         healActivePaneIfStaleRender(client, activePane, refreshGuard)
                     }.getOrDefault(HealOutcome.Unverified)
@@ -12070,6 +12162,40 @@ public class TmuxSessionViewModel @Inject constructor(
             BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED,
             captureText = null,
             unverifiedStreak = unverifiedStreak,
+        )
+    }
+
+    /**
+     * Issue #1295 — emit the POSITIVE watchdog-liveness heartbeat ([WATCHDOG_LIVENESS_EVENT]).
+     * Called once per steady stale-render watchdog tick AFTER every gate has passed (runtime
+     * current + foregrounded + screen-on + a visible pane), so the heartbeat certifies exactly
+     * "an armed watchdog is ticking over a live-attached, foregrounded, visible pane". The
+     * runtime identity is [refreshGuard]'s `generation` + the live client identity hash, so an
+     * export can correlate the heartbeat to the same runtime the reconnect trail names, and its
+     * ABSENCE (while the export otherwise shows foreground+live) convicts the unarmed-watchdog
+     * bug. Rides the tick that already runs — no new poll/timer/round-trip.
+     */
+    private fun recordWatchdogLiveness(
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard,
+        tick: Int,
+        backedOff: Boolean,
+    ) {
+        DiagnosticEvents.record(
+            "terminal",
+            WATCHDOG_LIVENESS_EVENT,
+            "paneId" to pane.paneId,
+            "windowId" to pane.windowId,
+            "session" to activeTarget?.sessionName,
+            // Runtime identity — the same (generation, client) pair the reconnect/heal trail
+            // carries, so an export can bind the heartbeat to a specific attached runtime.
+            "generation" to refreshGuard.generation,
+            "clientHash" to System.identityHashCode(refreshGuard.client),
+            "atMs" to SystemClock.elapsedRealtime(),
+            "tick" to tick,
+            "foreground" to isProcessForegroundForCleared(),
+            "screenOn" to isScreenInteractive(),
+            "backedOff" to backedOff,
         )
     }
 
@@ -19137,6 +19263,23 @@ internal const val BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT: String = "surfa
  * #1294 mechanism. Rides the watchdog tick that already paid the capture; no new poll.
  */
 internal const val BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED: String = "heal_capture_unverified"
+
+/**
+ * Issue #1295 — the POSITIVE watchdog-liveness heartbeat. Emitted on each ARMED,
+ * foregrounded, visible-pane steady stale-render watchdog tick over a live-attached
+ * runtime (fields: `paneId`, `windowId`, `session`, `generation` + `clientHash` = the
+ * runtime identity, `atMs` = monotonic timestamp, `tick`, `foreground`, `screenOn`,
+ * `backedOff`). It is the diagnostics PREREQUISITE for #1295: every `black_frame_observed`
+ * class is emitted only from INSIDE a watchdog tick / the reveal gate, so when the steady
+ * watchdog is UNARMED (the #1295 bug) the export contains ZERO events — indistinguishable
+ * from recording-off / ring-eviction / backgrounded. The ABSENCE of this heartbeat while an
+ * export otherwise shows a foregrounded visible pane on a live-attached runtime is the
+ * POSITIVE signature that convicts the unarmed-watchdog state. Rides the tick that already
+ * runs; no new poll/timer/round-trip (it fires BEFORE the tick's capture, so it is present
+ * even when the capture itself is UNVERIFIED). Redacted like the other terminal events (only
+ * `session` is host-identifying, as it already is on `stale_render_heal`).
+ */
+internal const val WATCHDOG_LIVENESS_EVENT: String = "watchdog_liveness"
 
 /**
  * Issue #693/#661: backoff between active-pane reveal-gate seed retries.

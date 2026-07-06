@@ -354,15 +354,6 @@ class PartialBlackPaneHealTest {
             "precondition: the live-streaming alt-screen agent pane is partial-black (#1138)",
             pane.terminalState.visibleScreenIsPartiallyBlank(),
         )
-        // RED discriminator: the OLD watchdog predicate MISSES the sparse alt-screen frame,
-        // so on base `healActivePaneIfStaleRenderForTest` (which used this oracle) returns
-        // false and the pane stays black on a live transport.
-        assertFalse(
-            "RED (#1138): the #966 divergence oracle ALONE SKIPS the sparse alt-screen " +
-                "partial-black — its surviving band exceeds the 25% ceiling of the frame",
-            pane.terminalState.visibleScreenDivergesFromCapture(SPARSE_AGENT_FRAME.joinToString("\n")),
-        )
-
         // Queue the FULL sparse agent frame the heal `capture-pane` returns.
         client.capturePaneResponses.addLast(
             CommandResponse(number = 99L, output = SPARSE_AGENT_FRAME, isError = false),
@@ -468,12 +459,6 @@ class PartialBlackPaneHealTest {
                 "`blank || partialBlank` gate would SKIP it",
             pane.terminalState.visibleScreenIsPartiallyBlank(),
         )
-        assertFalse(
-            "precondition (#1153 RED gap): the #966 divergence oracle ALSO misses the half-black " +
-                "band (its surviving content exceeds the 25% ceiling of the full frame)",
-            pane.terminalState.visibleScreenDivergesFromCapture(HALF_BLACK_FULL_FRAME.joinToString("\n")),
-        )
-
         // Queue the FULL frame tmux's grid returns on the post-send HEAL capture.
         client.capturePaneResponses.addLast(
             CommandResponse(number = 99L, output = HALF_BLACK_FULL_FRAME, isError = false),

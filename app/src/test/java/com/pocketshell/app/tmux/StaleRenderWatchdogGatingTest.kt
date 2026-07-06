@@ -77,7 +77,10 @@ import java.io.InputStream
  *    a partial-black redraw during a backed-off window heals within ≤4s, not up to 16s.
  *  - [divergingTickSnapsCadenceBackToHot]: a detected divergence (heal fired) snaps the
  *    cadence back to 4s so the following ticks stay hot (#1138/#1153 heal preservation).
- *  - [staleRenderWatchdogIntervalCurve]: the pure back-off curve (4/8/16, capped).
+ *  - [staleRenderWatchdogIntervalCurve]: the pure back-off curve (4/8/16/30, capped —
+ *    issue #1301 raised the cool ceiling 16s -> 30s).
+ *  - [idleHealthyPaneCoolCeilingCutsCaptureRateVsBaseline]: issue #1301 battery — the 30s
+ *    cool ceiling cuts an idle HEALTHY pane's 120s capture count 8 -> 6 vs the v0.4.23 16s.
  *  - [rapidRearmCancelsPriorWatchdogLoop]: arm-dedup — a second arm cancels the first
  *    loop so rapid A->B->A switching can't stack concurrent 4s loops.
  */
@@ -95,7 +98,11 @@ class StaleRenderWatchdogGatingTest {
     }
 
     // -------------------------------------------------------------------------
-    // (1) Back-off curve — the pure interval function. 4s -> 8s -> 16s, capped.
+    // (1) Back-off curve — the pure interval function. 4s -> 8s -> 16s -> 30s, capped.
+    //     Issue #1301: the cool ceiling was raised 16s -> 30s (3 doublings) so an idle
+    //     HEALTHY pane's steady-state capture rate roughly halves (one/30s vs one/16s),
+    //     the #1164 battery answer to the continuous reconciler. RED on base (16s cap at
+    //     >=2 stable ticks); GREEN with the widened ceiling.
     // -------------------------------------------------------------------------
 
     @Test
@@ -103,9 +110,19 @@ class StaleRenderWatchdogGatingTest {
         val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%1"))
         assertEquals("0 stable ticks -> hot 4s", 4_000L, vm.staleRenderWatchdogIntervalMs(0))
         assertEquals("1 stable tick -> 8s", 8_000L, vm.staleRenderWatchdogIntervalMs(1))
-        assertEquals("2 stable ticks -> 16s (cap)", 16_000L, vm.staleRenderWatchdogIntervalMs(2))
-        assertEquals("3 stable ticks -> capped 16s", 16_000L, vm.staleRenderWatchdogIntervalMs(3))
-        assertEquals("many stable ticks -> capped 16s", 16_000L, vm.staleRenderWatchdogIntervalMs(50))
+        assertEquals("2 stable ticks -> 16s", 16_000L, vm.staleRenderWatchdogIntervalMs(2))
+        assertEquals(
+            "REGRESSION (#1301): 3 stable ticks -> 30s cool ceiling (was 16s). A verified-" +
+                "clean idle pane must cool to the 20-30s ceiling so its capture rate drops " +
+                "~50% vs v0.4.23.",
+            30_000L,
+            vm.staleRenderWatchdogIntervalMs(3),
+        )
+        assertEquals(
+            "many stable ticks -> capped 30s (4s<<3 = 32s coerced to the 30s ceiling)",
+            30_000L,
+            vm.staleRenderWatchdogIntervalMs(50),
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -243,6 +260,56 @@ class StaleRenderWatchdogGatingTest {
                 "a flat 4s cadence would pay. Observed $captures.",
             2,
             captures,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // (4b) BATTERY (issue #1301, criterion 2) — the 30s cool ceiling measurably cuts
+    //      the steady-state capture rate of an IDLE HEALTHY pane vs the v0.4.23 16s
+    //      ceiling. Over a 120s idle window the new curve pays 6 captures
+    //      (t=4,12,28,58,88,118); the old 16s ceiling paid 8 (t=4,12,28,44,60,76,92,108).
+    //      RED on base (16s ceiling => 8 > 6); GREEN with the widened ceiling (=> 6).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun idleHealthyPaneCoolCeilingCutsCaptureRateVsBaseline() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        // A DENSE, confidently-healthy idle viewport: each tick's empty capture scores
+        // HEALTHY (a non-urgent no-op), so the pane cools all the way to the ceiling.
+        pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        assertFalse(
+            "precondition: the idle pane is confidently DENSE (not suspect), so it cools",
+            pane.terminalState.visibleRenderMayHaveLostFrame(),
+        )
+
+        vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        vm.setPaneLastOutputAtMsForTest("%1", 0L)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
+
+        val before = client.captureCount()
+        // Captures land at t=4,12,28,58,88,118 (cool ceiling 30s). advanceTimeBy (NOT
+        // advanceUntilIdle, which would run the loop to maxTicks).
+        advanceTimeBy(120 * 1000L + 100)
+        runCurrent()
+
+        val captures = client.captureCount() - before
+        assertTrue(
+            "REGRESSION (#1301 battery / criterion 2): an IDLE HEALTHY pane must cool to " +
+                "the 20-30s ceiling so its steady-state capture rate is measurably <= the " +
+                "v0.4.23 baseline. Over 120s the 30s ceiling pays 6 captures; the OLD 16s " +
+                "ceiling paid 8. Observed $captures (must be <= 6).",
+            captures <= 6,
         )
     }
 

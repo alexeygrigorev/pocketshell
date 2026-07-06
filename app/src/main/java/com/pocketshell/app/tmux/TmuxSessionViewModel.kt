@@ -11574,6 +11574,11 @@ public class TmuxSessionViewModel @Inject constructor(
             var tick = 0
             // Issue #1166: consecutive stable ticks drive the back-off interval.
             var stableTicks = 0
+            // Issue #1294: consecutive UNVERIFIED heal ticks (capture timeout/error/empty/
+            // mutex-starved). Recorded into the exportable diagnostics so a shared log can
+            // tell a genuinely-idle backed-off pane from a pane whose heal captures are
+            // WEDGED while it is black. Reset on any confirming (HEALTHY/HEALED) tick.
+            var unverifiedStreak = 0
             while (tick < staleRenderWatchdogMaxTicks) {
                 // Issue #1166: wait out the (possibly backed-off) interval, but a
                 // fresh active-pane %output wake cuts a backed-off wait short so a
@@ -11591,6 +11596,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // watchdog alive but skip the heal until Connected resumes. Reset
                     // the back-off so the resume tick captures at the hot cadence.
                     stableTicks = 0
+                    unverifiedStreak = 0
                     tick += 1
                     continue
                 }
@@ -11599,6 +11605,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // reset the back-off so the first tick after resume captures hot.
                 if (!shouldRunStaleRenderWatchdogCapture()) {
                     stableTicks = 0
+                    unverifiedStreak = 0
                     tick += 1
                     continue
                 }
@@ -11610,22 +11617,43 @@ public class TmuxSessionViewModel @Inject constructor(
                 noteActivePaneAltBufferState()
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
-                    val healed = runCatching {
+                    val outcome = runCatching {
                         healActivePaneIfStaleRender(client, activePane, refreshGuard)
-                    }.getOrDefault(false)
-                    // Issue #1219 (steady-heat fix): back off UNLESS the authoritative
-                    // heal oracle just found (and repaired) a divergence. Only a real
-                    // divergence — a black / partial-black / stale render vs tmux's grid
-                    // — snaps the cadence back to hot; a CONFIRMED-HEALTHY tick backs off
-                    // (4s -> 8s -> 16s) even when the pane is actively streaming %output.
+                    }.getOrDefault(HealOutcome.Unverified)
+                    // Issue #1294 (three-state scoring — the load-bearing fix): score the
+                    // tick by WHICH of the three oracle outcomes it was, never conflating a
+                    // capture FAILURE with a confirmed-healthy tick.
                     //
-                    // Before #1219 ANY new %output (or an output wake) reset the back-off,
-                    // so a continuously-streaming-but-correct agent pane never left the hot
-                    // 4s cadence and paid a capture-pane round-trip every 4s forever (the
-                    // #1164 "runs warm" lever). A streaming-but-BLACK pane still heals fast:
-                    // its render is locally suspect, so its %output wakes the backed-off
-                    // wait ([awaitStaleRenderWatchdogTick]) and this tick heals it hot.
-                    stableTicks = if (healed) 0 else stableTicks + 1
+                    //  - HEALTHY: the authoritative capture CONFIRMED the render matches tmux.
+                    //    This — and ONLY this — earns the #1219 steady-heat back-off (4s -> 8s
+                    //    -> 16s), even while the pane streams %output (the #1164 "runs warm"
+                    //    lever). Before #1294 a capture FAILURE was scored identically here, so
+                    //    consecutive failures throttled the watchdog to 16s exactly while the
+                    //    pane was black and a Claude burst had the -CC capture mutex wedged.
+                    //  - HEALED: the oracle found + repaired a real divergence (black / partial-
+                    //    black / stale render vs tmux's grid). Snap the cadence back to hot so a
+                    //    just-blacked pane is re-checked at 4s (#1138/#1153 heal preservation).
+                    //  - UNVERIFIED: the capture could NOT confirm health (timeout / error /
+                    //    empty-on-live-transport / mutex-starved). Keep the HOT cadence — never
+                    //    throttle — so a black pane whose heal captures are wedged keeps retrying
+                    //    at 4s until the mutex frees and the heal lands, instead of backing off
+                    //    to 16s while the user stares at a black pane. Record the streak into the
+                    //    exportable diagnostics (#1175) so an export tells "blind" from "idle".
+                    when (outcome) {
+                        HealOutcome.Healthy -> {
+                            stableTicks += 1
+                            unverifiedStreak = 0
+                        }
+                        HealOutcome.Healed -> {
+                            stableTicks = 0
+                            unverifiedStreak = 0
+                        }
+                        HealOutcome.Unverified -> {
+                            stableTicks = 0
+                            unverifiedStreak += 1
+                            recordHealCaptureUnverified(activePane, unverifiedStreak)
+                        }
+                    }
                 }
                 tick += 1
             }
@@ -11759,10 +11787,10 @@ public class TmuxSessionViewModel @Inject constructor(
      * without waiting on the watchdog cadence.
      */
     @androidx.annotation.VisibleForTesting
-    internal suspend fun healActivePaneIfStaleRenderForTest(): Boolean {
-        val client = clientRef ?: return false
-        val activePane = activeVisiblePane() ?: return false
-        val target = activeTarget ?: return false
+    internal suspend fun healActivePaneIfStaleRenderForTest(): HealOutcome {
+        val client = clientRef ?: return HealOutcome.Unverified
+        val activePane = activeVisiblePane() ?: return HealOutcome.Unverified
+        val target = activeTarget ?: return HealOutcome.Unverified
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
             target = target,
@@ -11988,14 +12016,19 @@ public class TmuxSessionViewModel @Inject constructor(
         pane: TmuxPaneState,
         blackClass: String,
         captureText: String?,
+        // Issue #1294: present only on the [BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED]
+        // class — the count of consecutive UNVERIFIED heal ticks (capture timeout / error /
+        // empty / mutex-starved) the watchdog has seen without a confirming capture. It lets
+        // a shared-log export distinguish a genuinely-healthy pane that BACKED OFF (watchdog
+        // throttled, unverifiedStreak absent) from a pane whose heal captures are WEDGED
+        // (watchdog BLIND, unverifiedStreak climbing) — the exact #1294 mechanism.
+        unverifiedStreak: Int? = null,
     ) {
         val nowMs = SystemClock.elapsedRealtime()
         val lastSeedAtMs = paneLastSeedAtMs[pane.paneId]
         val lastOutputAtMs = paneLastOutputAtMs[pane.paneId]
         val state = pane.terminalState
-        DiagnosticEvents.record(
-            "terminal",
-            BLACK_FRAME_OBSERVED_EVENT,
+        val fields = mutableListOf<Pair<String, Any?>>(
             "class" to blackClass,
             "paneId" to pane.paneId,
             "windowId" to pane.windowId,
@@ -12003,7 +12036,8 @@ public class TmuxSessionViewModel @Inject constructor(
             "renderedChars" to state.renderedNonBlankCharCount(),
             // Byte count of the authoritative capture this observation was judged
             // against; 0 when the capture was empty/errored (the capture_empty /
-            // never_seeded classes) or unavailable at the site (the reveal gate).
+            // never_seeded / heal_capture_unverified classes) or unavailable at the
+            // site (the reveal gate).
             "captureBytes" to (captureText?.length ?: 0),
             "visibleRows" to state.visibleRowCount(),
             // -1 means the field is unavailable (never seeded / never streamed output).
@@ -12014,15 +12048,38 @@ public class TmuxSessionViewModel @Inject constructor(
             "screenOn" to isScreenInteractive(),
             "partialBlank" to state.visibleScreenIsPartiallyBlank(),
         )
+        if (unverifiedStreak != null) {
+            fields += "unverifiedStreak" to unverifiedStreak
+        }
+        DiagnosticEvents.record("terminal", BLACK_FRAME_OBSERVED_EVENT, *fields.toTypedArray())
+    }
+
+    /**
+     * Issue #1294: record a watchdog tick whose authoritative `capture-pane` could NOT
+     * confirm the render's health (a [HealOutcome.Unverified] outcome — capture timeout,
+     * error response, empty-on-live-transport, or mutex-starved by a concurrent burst).
+     * Rides the existing exportable `black_frame_observed` ring (#1175 conventions) under a
+     * dedicated class + an `unverifiedStreak` field, so an export can tell an idle healthy
+     * pane that legitimately backed off from a pane whose heal captures are WEDGED while it
+     * is black (the #1294 "watchdog blind, not throttled" distinction). Emitted from the
+     * watchdog tick that already paid the capture — no new poll/timer/round-trip.
+     */
+    private fun recordHealCaptureUnverified(pane: TmuxPaneState, unverifiedStreak: Int) {
+        recordBlackFrameObserved(
+            pane,
+            BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED,
+            captureText = null,
+            unverifiedStreak = unverifiedStreak,
+        )
     }
 
     private suspend fun healActivePaneIfStaleRender(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
-    ): Boolean {
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
-        if (client.disconnected.value) return false
+    ): HealOutcome {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
+        if (client.disconnected.value) return HealOutcome.Unverified
         // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
         // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
         // decision: it only fires when tmux's grid HAS substantial content while
@@ -12031,6 +12088,29 @@ public class TmuxSessionViewModel @Inject constructor(
         // a few scattered fragments (#966), or a post-burst clear. The heal is
         // idempotent (a full clear+repaint of tmux's authoritative grid), so even
         // if the blank watchdog also fires it just re-paints identical content.
+        //
+        // Issue #1294: the SURFACE-BLACK detector/heal runs FIRST — BEFORE and
+        // INDEPENDENT of the `capture-pane` round-trip below. A surface-only black (the
+        // MODEL grid is intact but the on-screen SURFACE is confirmed black, spike #874
+        // GAP-1) recovers with a PURE surface repaint that needs NO tmux content — so a
+        // wedged / timed-out capture must never gate it. Before #1294 this #1203 auto-heal
+        // sat INSIDE the capture-success branch, behind the empty/errored early-return, so
+        // a Claude burst that starved the shared capture mutex (the exact window a pane
+        // goes black) blocked the one recovery that never needed a capture at all. The
+        // repaint fires here on the surface-black signal; its exportable FINGERPRINT is
+        // recorded below where the authoritative captureBytes is known (or, when the
+        // capture then fails, in the capture-failed branch with captureBytes unknown).
+        val surfaceBlack = pane.terminalState.surfaceIsBlackWhileModelHasContent()
+        if (surfaceBlack) {
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-surface-black-model-intact-heal pane=${pane.paneId} " +
+                    "window=${pane.windowId} session=${activeTarget?.sessionName} " +
+                    "status=${_connectionStatus.value} " +
+                    "rendered=${pane.terminalState.renderedNonBlankCharCount()}",
+            )
+            pane.terminalState.requestSurfaceRepaint()
+        }
         val combined = runCatching {
             withContext(seedIoDispatcher) {
                 client.captureWithCursor(
@@ -12040,17 +12120,36 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }.getOrNull()
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
         val captureResponse = combined?.capture
         if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
-            // Issue #1175: capture-pane came back empty/errored on a LIVE transport.
-            // Fingerprint it ONLY when the render is actually degenerate (a healthy
-            // pane whose capture momentarily failed is NOT a black screen — stay
-            // silent so healthy ticks never record). A never-seeded pane (no seed has
-            // ever landed) is the distinct `never_seeded` class; otherwise this is the
-            // server-side `capture_empty` class. Rides the heal's existing capture — no
-            // new round-trip, no new poll.
-            if (pane.terminalState.renderedNonBlankCharCount() == 0 ||
+            // Issue #1294: the `capture-pane` round-trip could NOT confirm the render against
+            // tmux's grid — it timed out, errored, or came back EMPTY on a live transport (or
+            // was starved out by a concurrent burst holding the shared capture mutex). The
+            // surface repaint above already fired if the surface was black, so a
+            // surface-only-black recovers even on this path.
+            //
+            // The scoring turns on whether the LOCAL render currently looks LOST (black /
+            // partial-black / mostly-empty / surface-black — the same cheap local pre-check
+            // [visibleRenderMayHaveLostFrame] the suspect-wake gate uses):
+            //  - render LOOKS LOST → this is the #1294 UNVERIFIED case: we NEEDED this capture
+            //    to heal a suspect pane and could not get it. The watchdog MUST keep the hot
+            //    cadence (never throttle) so a black pane whose heal captures are wedged by a
+            //    Claude burst keeps retrying at 4s until the mutex frees — instead of scoring
+            //    the failure as a healthy tick and backing off to 16s (the exact bug).
+            //  - render looks HEALTHY → a momentarily-empty/failed capture over a confidently-
+            //    dense render is a non-urgent no-op; scoring it HEALTHY preserves the #1219 /
+            //    #1164 battery back-off (criterion 3 — do not regress the steady-heat lever).
+            val renderLooksLost = surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+            // Issue #1175: fingerprint the observed frame when it is degenerate so an export
+            // sees WHICH class of black it was — no new round-trip, it rides this same (failed)
+            // capture tick. A surface-only-black whose capture failed is the #1192 class
+            // (captureBytes unknown → 0); an empty capture over a degenerate render is the
+            // server-side `capture_empty`, or `never_seeded` when no seed ever landed. A healthy
+            // pane whose capture momentarily blipped stays silent here.
+            if (surfaceBlack) {
+                recordBlackFrameObserved(pane, BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT, captureText = null)
+            } else if (pane.terminalState.renderedNonBlankCharCount() == 0 ||
                 pane.terminalState.visibleScreenIsBlankOrPartiallyBlank()
             ) {
                 val blackClass = if (paneLastSeedAtMs[pane.paneId] == null) {
@@ -12060,7 +12159,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 recordBlackFrameObserved(pane, blackClass, captureText = null)
             }
-            return false
+            return if (renderLooksLost) HealOutcome.Unverified else HealOutcome.Healthy
         }
         val captureText = captureResponse.output.joinToString(separator = "\n")
         // The discriminating check: tmux carries a real frame but the local render
@@ -12076,37 +12175,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // guarded), restoring the FULL viewport from tmux's authoritative capture.
         if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) {
             // Issue #1192: the MODEL grid did NOT lose tmux's frame — the heal oracle,
-            // comparing model-vs-tmux, calls this pane HEALTHY and returns without
-            // touching the grid. But the on-screen SURFACE can still be black while the
-            // model is intact (a surface-only black never diverges from tmux by
-            // construction, spike #874 GAP-1), so it emits NONE of the five #1175
-            // classes above. Fingerprint that ONE otherwise-invisible class here — the
-            // exact site the oracle short-circuits — ONLY when the paint-confirmation
-            // seam says the surface is CONFIRMED black while the model holds content.
-            // Rides this same already-paid capture tick: NO new poll/timer (#1164).
-            if (pane.terminalState.surfaceIsBlackWhileModelHasContent()) {
+            // comparing model-vs-tmux, calls this pane HEALTHY. The authoritative capture
+            // CONFIRMED the render, so this is [HealOutcome.Healthy] — the ONLY outcome that
+            // earns the #1219 back-off. But the on-screen SURFACE can still be black while
+            // the model is intact (a surface-only black never diverges from tmux by
+            // construction, spike #874 GAP-1), so it emits NONE of the five #1175 classes.
+            // The #1203 surface repaint already fired above (issue #1294 moved it out from
+            // behind the capture); fingerprint that ONE otherwise-invisible class here where
+            // the authoritative captureBytes is known. Rides this same already-paid capture
+            // tick: NO new poll/timer (#1164).
+            if (surfaceBlack) {
                 recordBlackFrameObserved(
                     pane,
                     BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT,
                     captureText,
                 )
-                // Issue #1203: the AUTO-HEAL recovery for this class. A model reseed
-                // restores nothing here (the model already matches tmux — the oracle is
-                // blind to this class by construction), so the recovery is a SURFACE
-                // force-repaint: re-bind the View's emulator + full-clip invalidate so
-                // the surface repaints what the model already holds. This is the
-                // self-heal without user action — the maintainer no longer has to tap
-                // Redraw for a surface-only-black.
-                Log.i(
-                    ISSUE_145_RECONNECT_TAG,
-                    "tmux-surface-black-model-intact-heal pane=${pane.paneId} " +
-                        "window=${pane.windowId} session=${activeTarget?.sessionName} " +
-                        "status=${_connectionStatus.value} " +
-                        "rendered=${pane.terminalState.renderedNonBlankCharCount()}",
-                )
-                pane.terminalState.requestSurfaceRepaint()
             }
-            return false
+            return HealOutcome.Healthy
         }
         // Issue #1175: the render LOST tmux's frame (capture carries materially more
         // than the render). Fingerprint the observed black frame BEFORE the heal
@@ -12146,9 +12231,12 @@ public class TmuxSessionViewModel @Inject constructor(
         } catch (cause: Throwable) {
             if (cause is CancellationException) throw cause
             reportTerminalSurfaceFailure(pane.paneId, cause)
-            return false
+            // Issue #1294: the divergence was real but the surface write failed — the heal
+            // did not complete, so this is UNVERIFIED (keep the hot cadence to retry), not a
+            // confirmed-healthy back-off.
+            return HealOutcome.Unverified
         }
-        return true
+        return HealOutcome.Healed
     }
 
     private suspend fun seedPaneFromCaptureOnce(
@@ -14379,7 +14467,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // re-seed ONLY when the render is materially less than the authoritative frame.
                 val healed = runCatching {
                     healActivePaneIfStaleRender(client, activePane, guard)
-                }.getOrDefault(false)
+                }.getOrDefault(HealOutcome.Unverified) == HealOutcome.Healed
                 if (healed) {
                     Log.i(
                         ISSUE_145_RECONNECT_TAG,
@@ -18990,6 +19078,30 @@ internal const val ACTIVE_PANE_REVEAL_SEED_ATTEMPTS: Int = 5
  */
 internal const val BLACK_FRAME_OBSERVED_EVENT: String = "black_frame_observed"
 
+/**
+ * Issue #1294 — the three-state result of the stale-render heal oracle
+ * ([TmuxSessionViewModel.healActivePaneIfStaleRender]). It replaces the old boolean that
+ * conflated a capture FAILURE with a confirmed-healthy tick, which let the watchdog score
+ * consecutive capture failures identically to consecutive healthy ticks and back off to 16s
+ * exactly while the pane was black and the shared `-CC` capture mutex was wedged by a Claude
+ * burst. Only [Healthy] earns the #1219 back-off; [Unverified] keeps the hot cadence.
+ */
+internal enum class HealOutcome {
+    /** A real divergence was found and the model grid was re-seeded from tmux. Resets back-off. */
+    Healed,
+
+    /** The authoritative `capture-pane` CONFIRMED the render matches tmux. The ONLY outcome that backs off. */
+    Healthy,
+
+    /**
+     * The `capture-pane` round-trip could NOT confirm the render's health: it timed out,
+     * errored, came back empty on a live transport, or was starved out by a concurrent burst
+     * holding the shared capture mutex. Keeps the HOT cadence — never throttles — so a black
+     * pane whose heal captures are wedged keeps retrying at 4s instead of backing off to 16s.
+     */
+    Unverified,
+}
+
 /** Server-side black: capture-pane also empty/errored while the render is degenerate. */
 internal const val BLACK_FRAME_CLASS_CAPTURE_EMPTY: String = "capture_empty"
 
@@ -19015,6 +19127,16 @@ internal const val BLACK_FRAME_CLASS_PARTIAL_BLANK: String = "partial_blank"
  * self-heals every known surface-blank trigger; this is the safety-net for an UNKNOWN one).
  */
 internal const val BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT: String = "surface_black_model_intact"
+
+/**
+ * Issue #1294 — a watchdog heal tick whose authoritative `capture-pane` could NOT confirm the
+ * render (a [HealOutcome.Unverified] outcome: timeout / error / empty-on-live-transport /
+ * mutex-starved). Carries an `unverifiedStreak` field (the run of consecutive such ticks) so a
+ * shared-log export distinguishes a genuinely-idle pane that BACKED OFF (watchdog throttled)
+ * from a pane whose heal captures are WEDGED while it is black (watchdog BLIND) — the exact
+ * #1294 mechanism. Rides the watchdog tick that already paid the capture; no new poll.
+ */
+internal const val BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED: String = "heal_capture_unverified"
 
 /**
  * Issue #693/#661: backoff between active-pane reveal-gate seed retries.

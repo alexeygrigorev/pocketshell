@@ -204,13 +204,31 @@ class StaleRenderWatchdogGatingTest {
     @Test
     fun stableForegroundPaneBacksOff() = runVmTest {
         val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
-        val vm = armIdleWatchdog(client, paneId = "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
 
+        // Issue #1294: model a CONFIRMED-healthy idle pane — a DENSE, fully-rendered viewport
+        // (not the 1-line "work ready" partial-blank, which now reads SUSPECT and correctly
+        // stays hot). Each watchdog tick's empty capture over a confidently-dense render scores
+        // HEALTHY (a non-urgent no-op), so the #1219/#1164 battery back-off (4s->8s->16s) holds.
+        pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+        assertFalse(
+            "precondition: the idle pane is confidently DENSE (not suspect), so an empty " +
+                "capture scores HEALTHY and the pane backs off",
+            pane.terminalState.visibleRenderMayHaveLostFrame(),
+        )
+
+        vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
-        // No streamed output -> the pane is fully idle/stable (empty capture queue
-        // -> healActivePaneIfStaleRender no-ops, healed=false every tick).
         vm.setPaneLastOutputAtMsForTest("%1", 0L)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
 
         val before = client.captureCount()
         // Captures land at t=4s (#1, stableTicks->1), t=12s (#2, ->2), t=28s (#3, cap).
@@ -220,9 +238,9 @@ class StaleRenderWatchdogGatingTest {
 
         val captures = client.captureCount() - before
         assertEquals(
-            "REGRESSION (#1166): a STABLE foreground pane must back off (4s->8s->16s). " +
-                "Over 20s it should capture 2 times (t=4s, t=12s), NOT the 5 a flat 4s " +
-                "cadence would pay. Observed $captures.",
+            "REGRESSION (#1166/#1294): a STABLE (confirmed-healthy) foreground pane must back " +
+                "off (4s->8s->16s). Over 20s it should capture 2 times (t=4s, t=12s), NOT the 5 " +
+                "a flat 4s cadence would pay. Observed $captures.",
             2,
             captures,
         )
@@ -318,8 +336,16 @@ class StaleRenderWatchdogGatingTest {
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
 
+        // Issue #1294: the pane STREAMS a DENSE, confidently-healthy frame first — the "S" in
+        // "STREAMING pane". Each backoff-phase tick's empty capture over this dense render
+        // scores HEALTHY (a non-urgent no-op), so the pane backs off (a partial-blank pane
+        // would now correctly stay hot). The fragments-over-black redraw below then makes it
+        // suspect.
+        pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
         // Let the watchdog back off to the widest (16s) interval — captures at t=4s,
-        // t=12s (empty capture => healed=false).
+        // t=12s (empty capture over a confidently-dense render => HEALTHY no-op).
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
@@ -438,6 +464,15 @@ class StaleRenderWatchdogGatingTest {
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
 
+        // Issue #1294: the backoff phase must be CONFIRMED-healthy so the pane backs off. The
+        // render is the connect seed ("work ready"); return a MATCHING capture on every backoff
+        // tick so the oracle reads HEALTHY (empty captures would now score UNVERIFIED and keep
+        // the pane hot). A sticky default (not a dense frame) is used deliberately: a dense
+        // frame would pollute the scrollback and defeat the ≤3-line partial-black detection the
+        // redraw below relies on.
+        client.defaultCaptureResponse =
+            CommandResponse(number = 80L, output = listOf("work ready"), isError = false)
+
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setPaneLastOutputAtMsForTest("%1", 0L)
         vm.setProcessForegroundForClearedForTest(true)
@@ -493,6 +528,14 @@ class StaleRenderWatchdogGatingTest {
         val pane = vm.panes.value.single { it.paneId == "%1" }
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
+
+        // Issue #1294: the backoff phase must be CONFIRMED-healthy so the pane backs off. Return
+        // a MATCHING capture ("work ready", the connect-seed render) on every backoff tick so the
+        // oracle reads HEALTHY (empty captures would now score UNVERIFIED and keep it hot). A
+        // sticky default (not a dense frame) is used so the scrollback stays clean for the
+        // ≤3-line partial-black drive below.
+        client.defaultCaptureResponse =
+            CommandResponse(number = 80L, output = listOf("work ready"), isError = false)
 
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setPaneLastOutputAtMsForTest("%1", 0L)

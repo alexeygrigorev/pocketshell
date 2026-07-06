@@ -26,6 +26,7 @@ import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
+import com.pocketshell.app.tmux.HealOutcome
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -262,7 +263,9 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
      * healActivePaneIfStaleRenderForTest]. Returns whether the heal fired.
      */
     private fun driveStaleRenderHeal(): Boolean {
-        var result = false
+        // Issue #1294: the oracle now returns a three-state [HealOutcome]; "the heal fired"
+        // is the HEALED outcome (a real divergence found + repaired).
+        var result: HealOutcome = HealOutcome.Unverified
         val latch = java.util.concurrent.CountDownLatch(1)
         launchedActivity?.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
@@ -273,7 +276,7 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         }
         latch.await(RESTORE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        return result
+        return result == HealOutcome.Healed
     }
 
     private fun activePaneBlankOrPartiallyBlank(): Boolean {

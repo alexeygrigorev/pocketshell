@@ -147,6 +147,19 @@ internal class FakeTmuxClient(
     val capturePaneResponses: ArrayDeque<CommandResponse> = ArrayDeque()
 
     /**
+     * Issue #1294: sticky fallback for `capture-pane` when [capturePaneResponses] is empty.
+     * The default when this is `null` is an EMPTY success response — which the #1294 heal
+     * oracle now scores UNVERIFIED (an empty capture cannot CONFIRM the render). A test that
+     * needs a REPEATED confirmed-healthy tick (a matching frame on every backoff tick, not a
+     * one-shot from the FIFO) sets this to the frame that MATCHES the render, so the oracle
+     * reads HEALTHY and the watchdog backs off (the #1219 battery lever), without polluting
+     * the scrollback with a dense frame (which would defeat ≤3-line partial-black detection).
+     * Explicitly-queued [capturePaneResponses] still take precedence (checked first).
+     */
+    @Volatile
+    var defaultCaptureResponse: CommandResponse? = null
+
+    /**
      * Issue #259: replies to the `display-message -p ... '#{cursor_x},#{cursor_y}'`
      * cursor query the seed path issues after a `capture-pane`. Defaults to a
      * single `0,0` reply (cursor home) so tests that do not care about the seed
@@ -350,11 +363,13 @@ internal class FakeTmuxClient(
             }
         }
         if (cmd.startsWith("capture-pane")) {
-            return capturePaneResponses.removeFirstOrNull() ?: CommandResponse(
-                number = 0L,
-                output = emptyList(),
-                isError = false,
-            )
+            return capturePaneResponses.removeFirstOrNull()
+                ?: defaultCaptureResponse
+                ?: CommandResponse(
+                    number = 0L,
+                    output = emptyList(),
+                    isError = false,
+                )
         }
         // Issue #259: the seed path issues `display-message -p ... cursor_x,cursor_y`
         // right after `capture-pane`. Serve it from a dedicated queue so it

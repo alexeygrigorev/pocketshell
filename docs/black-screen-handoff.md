@@ -1,10 +1,21 @@
 # Black-screen elimination — handoff for the implementing agent
 
+> **STATUS 2026-07-06: SHIPPED to `main`.** The full recovery layer + the
+> continuous reconciler are merged: #1296, #1294, #1300, #1295, #1297, #1301,
+> and the emulator-proven regression backstop #1302. The reconciler decision
+> #1298 is implemented and closed. Any lost grid on a foregrounded pane now
+> self-heals within one reconcile interval regardless of cause, at *lower* idle
+> battery than v0.4.23. Campaign summary + honest boundary: issue #1208. The
+> only remaining release gate is the nightly connection-core fault-verdict
+> (#1288, a separate non-black-screen issue). The queue below is retained as the
+> historical brief — every item in it is now DONE.
+
 Written 2026-07-06 by the analysis orchestrator, on maintainer instruction:
 the maintainer's #1 problem is persistent black terminal panes on Claude Code
 sessions ("I can't work because of them"). This session's job was analysis +
-documentation; **a different agent implements the remaining fixes.** This doc
-is that agent's complete brief. Read it top to bottom before touching code.
+documentation; the fixes were then implemented across #1294–#1302 (the
+"different agent implements" plan below was superseded when the maintainer
+directed this orchestrator to continue through implementation).
 
 ## TL;DR for the implementer
 

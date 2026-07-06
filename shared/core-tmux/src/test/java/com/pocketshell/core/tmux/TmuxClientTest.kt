@@ -18,6 +18,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
@@ -705,85 +706,91 @@ class TmuxClientTest {
         }
     }
 
+    /**
+     * Issue #1297: an [SshSession.exec] handler that simulates the remote shell
+     * running the single heal-capture exec (`tmux display-message … ; printf
+     * '%s\n' '<MARKER>' ; tmux capture-pane …`). It extracts the sentinel token
+     * straight from the command (so the test never hard-codes the production
+     * marker constant) and assembles the combined stdout the shell would produce:
+     * `<cursor>\n<MARKER>\n<capture lines…>`.
+     */
+    private fun healExecHandler(
+        cursor: String?,
+        captureLines: List<String>,
+        exitCode: Int = 0,
+        stderr: String = "",
+        delayMs: Long = 0L,
+    ): suspend (String) -> ExecResult = { command ->
+        if (delayMs > 0L) delay(delayMs)
+        val marker = command.substringAfter("printf '%s\\n' '").substringBefore("'")
+        val stdout = buildString {
+            if (cursor != null) {
+                append(cursor)
+                append('\n')
+            }
+            append(marker)
+            append('\n')
+            for (line in captureLines) {
+                append(line)
+                append('\n')
+            }
+        }
+        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+    }
+
     @Test
-    fun `captureWithCursor sends one chained command and drains both response blocks`() = runBlocking {
-        // Issue #640: the seed needs capture + cursor in ONE wire round-trip.
-        // tmux -CC answers a `capture-pane ; display-message` request with TWO
-        // separate begin/end blocks, so captureWithCursor must write ONE chained
-        // line and correlate both blocks under one single-flight acquisition.
+    fun `captureWithCursor runs on the exec lane and returns capture and cursor`() = runBlocking {
+        // Issue #1297: the heal/seed capture runs on a DEDICATED exec channel
+        // (not the -CC control shell). One exec carries display-message +
+        // capture-pane, split on a sentinel line, and the parsed result exposes
+        // the pane lines and the cursor.
         val shell = FakeShell()
-        val session = FakeSession(shell)
+        val session = FakeSession(
+            shell,
+            execHandler = healExecHandler(cursor = "4,2", captureLines = listOf("line-one", "line-two")),
+        )
         val client = RealTmuxClient(session, scope)
         try {
             client.connect()
-            withTimeout(2_000) {
-                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-            }
-            shell.resetStdin()
-
-            val result = scope.async {
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 client.captureWithCursor("%3", scrollbackLines = 200)
             }
-            withTimeout(2_000) {
-                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-            }
-            // Exactly ONE chained line on the wire (one round-trip), carrying
-            // both the capture and the cursor query.
-            assertEquals(
-                "capture-pane -p -e -S -200 -t %3 ; " +
-                    "display-message -p -t %3 '#{cursor_x},#{cursor_y}'\n",
-                shell.stdinAsString(),
-            )
-
-            // tmux answers with two sequential blocks: capture, then cursor.
-            shell.feed(
-                "%begin 1700000000 10 0\n" +
-                    "line-one\n" +
-                    "line-two\n" +
-                    "%end 1700000000 10 0\n" +
-                    "%begin 1700000000 11 0\n" +
-                    "4,2\n" +
-                    "%end 1700000000 11 0\n",
-            )
-
-            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertFalse(combined.capture.isError)
             assertEquals(listOf("line-one", "line-two"), combined.capture.output)
             assertEquals("4,2", combined.cursorReply)
+
+            // Proof it ran on an exec channel — NOT the -CC control shell. Nothing
+            // was written to the -CC stdin for the capture, and the exec command
+            // carries both pane-targeted tmux sub-commands.
+            val execCmd = session.execCommands.single { it.contains("capture-pane") }
+            assertTrue(
+                "exec must carry the pane-targeted capture-pane",
+                execCmd.contains("tmux capture-pane -p -e -S -200 -t '%3'"),
+            )
+            assertTrue(
+                "exec must carry the pane-targeted cursor query",
+                execCmd.contains("tmux display-message -p -t '%3' '#{cursor_x},#{cursor_y}'"),
+            )
         } finally {
             client.close()
         }
     }
 
     @Test
-    fun `captureWithCursor degrades to null cursor when only the capture block returns`() = runBlocking {
-        // Issue #640/#259: a missing/failed cursor block must NOT fail the
+    fun `captureWithCursor degrades to null cursor when display-message yields nothing`() = runBlocking {
+        // Issue #640/#259/#1297: a missing/empty cursor reply must NOT fail the
         // capture — the seed degrades to no explicit cursor restore.
         val shell = FakeShell()
-        val session = FakeSession(shell)
-        val client = RealTmuxClient(session, scope, commandTimeoutMs = 300L)
+        val session = FakeSession(
+            shell,
+            execHandler = healExecHandler(cursor = null, captureLines = listOf("only-capture")),
+        )
+        val client = RealTmuxClient(session, scope)
         try {
             client.connect()
-            withTimeout(2_000) {
-                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-            }
-            shell.resetStdin()
-
-            val result = scope.async {
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
                 client.captureWithCursor("%3", scrollbackLines = 200)
             }
-            withTimeout(2_000) {
-                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-            }
-
-            // Only the capture block returns; the cursor block never arrives.
-            shell.feed(
-                "%begin 1700000000 10 0\n" +
-                    "only-capture\n" +
-                    "%end 1700000000 10 0\n",
-            )
-
-            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { result.await() }
             assertFalse(combined.capture.isError)
             assertEquals(listOf("only-capture"), combined.capture.output)
             assertNull(combined.cursorReply)
@@ -793,68 +800,84 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `captureWithCursor with a short seed timeout fires BELOW the full command ceiling on a wedged channel`() =
-        runBlocking {
-            // Issue #926: the attach/switch/reattach seed passes a SHORT ceiling
-            // (timeoutMs ≈ 2.5 s in production) so a wedged-but-alive `-CC`
-            // channel makes the seed fall through to the blank watchdog FAST,
-            // instead of parking the full per-command `commandTimeoutMs` (10 s in
-            // production) — the #895 freeze. Here the full ceiling is a generous
-            // 30 s and the seed ceiling is 250 ms; the wedged capture (no response
-            // ever fed) must surface a best-effort failure within the SHORT bound,
-            // proving the seed timeout is honoured and clamps below the command
-            // ceiling.
-            val shell = FakeShell()
-            val session = FakeSession(shell)
-            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
-            try {
-                client.connect()
-                withTimeout(2_000) {
-                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
-                }
-                shell.resetStdin()
-
-                // No response is ever fed, so the capture block never completes;
-                // the seed ceiling (250 ms) — NOT the 30 s command ceiling — must
-                // fire. Bounding the await at 5 s proves it fired well below 30 s.
-                val startedAtMs = System.currentTimeMillis()
-                val thrown = runCatching {
-                    withTimeout(5_000) {
-                        client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = 250L)
-                    }
-                }.exceptionOrNull()
-                val elapsedMs = System.currentTimeMillis() - startedAtMs
-
-                assertTrue(
-                    "the wedged seed must surface a TmuxClientException from the short " +
-                        "ceiling, not hang to the 30 s command ceiling (was $thrown)",
-                    thrown is TmuxClientException,
-                )
-                assertTrue(
-                    "the seed must time out within ~the short ceiling, NEVER the full " +
-                        "command ceiling (elapsed ${elapsedMs}ms)",
-                    elapsedMs < 5_000L,
-                )
-            } finally {
-                client.close()
+    fun `captureWithCursor surfaces an error response when the pane is gone`() = runBlocking {
+        // Issue #1297 (§4 req 5 — distinct failure signal): a non-zero exec exit
+        // (pane/session gone) must surface as an ERROR CommandResponse, not a
+        // thrown timeout — so the caller distinguishes "gone" from "wedged".
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = healExecHandler(
+                cursor = null,
+                captureLines = emptyList(),
+                exitCode = 1,
+                stderr = "can't find pane: %9",
+            ),
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.captureWithCursor("%9", scrollbackLines = 200)
             }
+            assertTrue("a gone pane must surface as an error response", combined.capture.isError)
+            assertEquals(listOf("can't find pane: %9"), combined.capture.output)
+        } finally {
+            client.close()
         }
+    }
 
     @Test
-    fun `captureWithCursor timeout before begin quarantines all late batch blocks`() = runBlocking {
-        // A combined capture writes TWO tmux commands in one line. If the line
-        // has reached tmux but neither reply block has begun before the timeout,
-        // both late blocks must be reserved as stale; otherwise the first late
-        // capture block can bind to the next unrelated command.
+    fun `captureWithCursor exec lane times out on a wedged transport within the short ceiling`() = runBlocking {
+        // Issue #926/#1297: a genuinely wedged/half-open transport (the exec never
+        // returns) must surface a TmuxClientException within the SHORT seed
+        // ceiling, never the full 30 s command ceiling — so a heal capture on a
+        // dead link falls through fast instead of parking.
         val shell = FakeShell()
-        val session = FakeSession(shell)
-        val timeoutGate = DeterministicCommandTimeoutGate()
-        val client = RealTmuxClient(
-            session,
-            scope,
-            commandTimeoutMs = 100L,
-            commandTimeoutGate = timeoutGate,
+        val neverReturns = CompletableDeferred<ExecResult>()
+        val session = FakeSession(shell, execHandler = { neverReturns.await() })
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+        try {
+            client.connect()
+            val startedAtMs = System.currentTimeMillis()
+            val thrown = runCatching {
+                withTimeout(5_000) {
+                    client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = 250L)
+                }
+            }.exceptionOrNull()
+            val elapsedMs = System.currentTimeMillis() - startedAtMs
+            assertTrue(
+                "a wedged exec must surface a TmuxClientException from the short " +
+                    "ceiling, not hang to the 30 s command ceiling (was $thrown)",
+                thrown is TmuxClientException,
+            )
+            assertTrue(
+                "the heal capture must time out within ~the short ceiling (elapsed ${elapsedMs}ms)",
+                elapsedMs < 5_000L,
+            )
+            neverReturns.cancel()
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `heal capture completes on the exec lane while the -CC sendMutex is wedged`() = runBlocking {
+        // Issue #1297 (acceptance criterion 1, red→green): a busy Claude agent
+        // wedges the ONE per-host sendMutex, so a heal capture behind it used to
+        // time out at the 2.5 s ceiling exactly when a pane was black
+        // (#470/#835). On BASE (mutex-based captureWithCursor) this test fails —
+        // the capture can't acquire the wedged mutex within 2.5 s and throws.
+        // With the fix the capture runs on a DEDICATED exec channel and returns
+        // fast, independent of the wedged -CC mutex.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = healExecHandler(cursor = "1,1", captureLines = listOf("healed")),
         )
+        // A large command ceiling so the wedging command holds the mutex for the
+        // whole test.
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
         try {
             client.connect()
             withTimeout(2_000) {
@@ -862,46 +885,115 @@ class TmuxClientTest {
             }
             shell.resetStdin()
 
-            val timedOut = scope.async {
-                runCatching { client.captureWithCursor("%3", scrollbackLines = 200) }
-            }
+            // WEDGE the sendMutex: a sendCommand that is written but never
+            // answered holds the mutex for its whole 30 s ceiling (the "capture
+            // behind a busy agent" symptom).
+            val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
             withTimeout(2_000) {
-                while (!shell.stdinAsString().contains("capture-pane")) { yield(); delay(10) }
+                while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
             }
-            timeoutGate.fireNextTimeout()
+
+            val startedAtMs = System.currentTimeMillis()
+            val combined = withTimeout(5_000) {
+                client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = 2_500L)
+            }
+            val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+            assertEquals(listOf("healed"), combined.capture.output)
+            assertEquals("1,1", combined.cursorReply)
             assertTrue(
-                "combined capture must time out before any reply block begins",
-                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { timedOut.await() }.isFailure,
+                "the heal capture must complete well under the 2.5 s mutex-acquire " +
+                    "ceiling (elapsed ${elapsedMs}ms) — proving it did NOT wait on the " +
+                    "wedged sendMutex",
+                elapsedMs < 2_000L,
             )
-            shell.resetStdin()
+            wedger.cancel()
+        } finally {
+            client.close()
+        }
+    }
 
-            val next = scope.async { client.sendCommand("list-sessions") }
-            withTimeout(2_000) {
-                while (shell.stdinAsString() != "list-sessions\n") { yield(); delay(10) }
+    @Test
+    fun `pauseOutputDelivery holds output across a collector gap so a fresh collector recovers them`() =
+        runBlocking {
+            // Issue #1297 (acceptance criterion 2, red→green): the overflow-reseed
+            // producer swap tears the sole pane collector down and reattaches a
+            // fresh one. On BASE the %output emitted in that gap is emitted into
+            // the zero-subscriber (replay = 0) flow and lost, so a re-subscribing
+            // collector recovers NOTHING. With the fix, pausing delivery across
+            // the swap HOLDS the frames in the bounded backlog and they replay to
+            // the fresh collector in order on resume.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            try {
+                client.connect()
+                // Attach the sole collector so the pane pipe exists and is live.
+                val firstCollector = scope.launch { client.outputFor("%7").collect { } }
+                delay(150)
+                // Freeze delivery, THEN detach the sole collector (mirrors the
+                // overflow reseed order: pause before the producer teardown).
+                client.pauseOutputDelivery("%7")
+                firstCollector.cancelAndJoin()
+
+                // Emit N frames into the collector gap.
+                shell.feed(
+                    "%output %7 gap-one\n" +
+                        "%output %7 gap-two\n" +
+                        "%output %7 gap-three\n",
+                )
+                // Let the reader parse them into the (paused) backlog.
+                delay(250)
+
+                // Re-subscribe a fresh collector, then thaw — held frames drain in
+                // arrival order to the fresh collector.
+                val recovered = scope.async { client.outputFor("%7").take(3).toList() }
+                delay(100)
+                client.resumeOutputDelivery("%7")
+
+                val frames = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { recovered.await() }
+                assertEquals(
+                    "every %output emitted during the collector gap must replay in order",
+                    listOf("gap-one", "gap-two", "gap-three"),
+                    frames.map { String(it.data, StandardCharsets.US_ASCII) },
+                )
+            } finally {
+                client.close()
             }
+        }
 
+    @Test
+    fun `output emitted during an unpaused collector gap is dropped`() = runBlocking {
+        // Issue #1297: documents the SPOF the pause closes. WITHOUT the delivery
+        // pause, %output emitted while the sole collector is detached vanishes
+        // into the zero-subscriber flow — a re-subscribing collector recovers
+        // none of it. This is the base behaviour the overflow-reseed swap relied
+        // on the capture to paper over; `pauseOutputDelivery` is the opt-in fix.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val firstCollector = scope.launch { client.outputFor("%8").collect { } }
+            delay(150)
+            // Detach WITHOUT pausing.
+            firstCollector.cancelAndJoin()
             shell.feed(
-                "%begin 1700000000 10 0\n" +
-                    "late-capture\n" +
-                    "%end 1700000000 10 0\n" +
-                    "%begin 1700000000 11 0\n" +
-                    "9,4\n" +
-                    "%end 1700000000 11 0\n",
+                "%output %8 lost-one\n" +
+                    "%output %8 lost-two\n",
             )
-            repeat(10) { yield(); delay(10) }
-            shell.feed(
-                "%begin 1700000000 12 0\n" +
-                    "next-session\n" +
-                    "%end 1700000000 12 0\n",
-            )
-
-            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { next.await() }
+            delay(250)
+            // Re-subscribe and prove the gap frames are gone: a fresh sentinel is
+            // the only thing delivered.
+            val recovered = scope.async { client.outputFor("%8").take(1).toList() }
+            delay(100)
+            shell.feed("%output %8 after-resubscribe\n")
+            val frames = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { recovered.await() }
             assertEquals(
-                "late combined-capture blocks must not bind to the next command",
-                12L,
-                response.number,
+                "unpaused gap frames are dropped; only post-resubscribe output survives",
+                listOf("after-resubscribe"),
+                frames.map { String(it.data, StandardCharsets.US_ASCII) },
             )
-            assertEquals(listOf("next-session"), response.output)
         } finally {
             client.close()
         }

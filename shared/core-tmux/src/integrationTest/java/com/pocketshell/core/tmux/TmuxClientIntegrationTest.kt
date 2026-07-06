@@ -419,4 +419,147 @@ class TmuxClientIntegrationTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun `captureWithCursor exec lane captures real pane content and cursor`() = runBlocking {
+        // Issue #1297: the heal/seed capture now runs on a DEDICATED exec channel
+        // (SshSession.exec), not the -CC control shell. Prove the exec lane
+        // captures a real tmux pane's content and cursor against a real server —
+        // the connection-core contract the unit tests (fake exec) can't verify.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = "it-${System.nanoTime()}",
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val paneId = withTimeout(10_000) {
+                        it.sendCommand("display-message -p \"#{pane_id}\"")
+                    }.output.firstOrNull()?.trim().orEmpty()
+                    assertTrue("pane id must resolve; got '$paneId'", paneId.startsWith("%"))
+
+                    val marker = "PS_HEAL_CAPTURE_${System.nanoTime()}"
+                    // Print the marker into the pane and wait until tmux has it on
+                    // the server-side grid (observed via %output) before capturing.
+                    val buffer = java.lang.StringBuilder()
+                    val collector = scope.launch {
+                        it.outputFor(paneId).collect { evt ->
+                            synchronized(buffer) { buffer.append(String(evt.data, Charsets.UTF_8)) }
+                        }
+                    }
+                    delay(200)
+                    withTimeout(10_000) {
+                        it.sendCommand("send-keys -t $paneId 'echo $marker' Enter")
+                    }
+                    val deadline = System.currentTimeMillis() + 10_000
+                    while (System.currentTimeMillis() < deadline &&
+                        !synchronized(buffer) { buffer.toString() }.contains(marker)
+                    ) {
+                        delay(50)
+                    }
+                    collector.cancel()
+
+                    // Capture on the exec lane with the production short ceiling.
+                    val combined = withTimeout(10_000) {
+                        it.captureWithCursor(paneId, scrollbackLines = 200, timeoutMs = 2_500L)
+                    }
+                    assertFalse(
+                        "exec-lane capture must not be an error; got ${combined.capture.output}",
+                        combined.capture.isError,
+                    )
+                    val captureText = combined.capture.output.joinToString("\n")
+                    assertTrue(
+                        "exec-lane capture must contain the marker echoed into the pane; got:\n$captureText",
+                        captureText.contains(marker),
+                    )
+                    assertNotNull(
+                        "exec-lane capture must return a cursor reply",
+                        combined.cursorReply,
+                    )
+                    assertTrue(
+                        "cursor reply must be `x,y`; got '${combined.cursorReply}'",
+                        Regex("""\d+,\d+""").matches(combined.cursorReply!!.trim()),
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `captureWithCursor exec lane succeeds while the -CC channel streams a burst`() = runBlocking {
+        // Issue #1297 (G10 real-path, no emulator): the "capture behind a busy
+        // agent" symptom (#470/#835) — a heal capture whose reply is head-of-line
+        // blocked behind a flood of %output on the -CC reader. With the capture on
+        // an INDEPENDENT exec channel it returns while the burst streams on the
+        // -CC channel. Reproduces the busy-agent burst fixture at the Docker level.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = "it-${System.nanoTime()}",
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val paneId = withTimeout(10_000) {
+                        it.sendCommand("display-message -p \"#{pane_id}\"")
+                    }.output.firstOrNull()?.trim().orEmpty()
+                    assertTrue("pane id must resolve; got '$paneId'", paneId.startsWith("%"))
+
+                    // Keep the -CC reader busy: subscribe and drive a large output
+                    // burst into the pane so %output frames flood the control
+                    // channel while we capture.
+                    val burstBytes = java.util.concurrent.atomic.AtomicLong(0)
+                    val collector = scope.launch {
+                        it.outputFor(paneId).collect { evt -> burstBytes.addAndGet(evt.data.size.toLong()) }
+                    }
+                    delay(200)
+                    // `seq` on alpine floods tens of thousands of lines through the
+                    // pane; the shell echoes each through %output on the -CC reader.
+                    withTimeout(10_000) {
+                        it.sendCommand("send-keys -t $paneId 'seq 1 200000' Enter")
+                    }
+                    // Wait until the burst is actively streaming on the -CC channel.
+                    val burstDeadline = System.currentTimeMillis() + 10_000
+                    while (System.currentTimeMillis() < burstDeadline && burstBytes.get() < 50_000L) {
+                        delay(20)
+                    }
+                    assertTrue(
+                        "the -CC channel must actually be streaming a burst; sawBytes=${burstBytes.get()}",
+                        burstBytes.get() >= 50_000L,
+                    )
+
+                    // Capture on the exec lane WHILE the burst streams. It must
+                    // return (not time out) within the short ceiling.
+                    val startedAt = System.currentTimeMillis()
+                    val combined = withTimeout(10_000) {
+                        it.captureWithCursor(paneId, scrollbackLines = 200, timeoutMs = 2_500L)
+                    }
+                    val elapsed = System.currentTimeMillis() - startedAt
+                    collector.cancel()
+                    assertFalse(
+                        "exec-lane capture must succeed during a -CC burst; got ${combined.capture.output}",
+                        combined.capture.isError,
+                    )
+                    assertTrue(
+                        "exec-lane capture must return content during a -CC burst",
+                        combined.capture.output.isNotEmpty(),
+                    )
+                    assertTrue(
+                        "exec-lane capture must return within the short ceiling during a burst " +
+                            "(elapsed ${elapsed}ms)",
+                        elapsed < 5_000L,
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
 }

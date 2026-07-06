@@ -163,6 +163,10 @@ EMULATOR_SERIAL="unknown"
 APP_WALKTHROUGH_INSTALL_STATUS="not_run"
 FINAL_INSTALL_STATUS="not_run"
 ISSUE_261_STALE_DB_STATUS="not_run"
+# Issue #1314: step 12 (core-terminal burst proof) runs non-fatally so a slow-AVD
+# timing red no longer front-gates the #1302 journey; its captured result is
+# folded into the final verdict after the downstream stages run.
+CONNECTED_TERMINAL_INPUT_STATUS="not_run"
 ISSUE_261_STALE_DB_LOGCAT="$RUN_DIR/issue-261-stale-db-launch-logcat.log"
 STEP_NAMES=()
 STEP_STATUSES=()
@@ -248,6 +252,7 @@ write_summary() {
     printf 'Docker compose file: %s\n' "$COMPOSE_FILE"
     printf 'Docker profile/service: agents\n'
     printf 'Docker SSH target: 127.0.0.1:2222\n'
+    printf 'Connected core-terminal burst proof (step 12, non-fatal — issue #1314): %s\n' "$CONNECTED_TERMINAL_INPUT_STATUS"
     printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
     printf 'Issue #261 cold-reset stale DB launch status: %s\n' "$ISSUE_261_STALE_DB_STATUS"
@@ -1366,7 +1371,24 @@ run_bash_step "emulator-readiness" \
   "$(emulator_readiness_script)"
 update_emulator_serial
 
-run_bash_step "connected-terminal-input" "$(core_terminal_connected_input_script)"
+# Issue #1314: the heavy core-terminal burst proof (step 12) is a slow-AVD,
+# throughput-sensitive check that historically FRONT-GATED — via the `set -e`
+# abort on this bare step — the release-critical stages that follow it: the
+# #1302 black-screen recovery journey, the EmulatorDockerSshSmokeTest
+# walkthroughs, and the visual-audit. A single timing red here left every one of
+# them `not_run`, so no release gate could ever produce clean journey evidence.
+# Run it NON-FATALLY: capture the result, keep going so the downstream product-
+# validation phases still run and produce their evidence, and fold the result
+# back into the final gate verdict below (a real red still FAILS the gate — just
+# not before the journey stages ran). This is the de-front-gate half of #1314;
+# the deterministic half is the poll-to-deadline final-marker wait in
+# CodexAppendBurstMainThreadProofTest.
+if run_bash_step "connected-terminal-input" "$(core_terminal_connected_input_script)"; then
+  CONNECTED_TERMINAL_INPUT_STATUS="passed"
+else
+  CONNECTED_TERMINAL_INPUT_STATUS="failed"
+  printf 'WARN: connected-terminal-input (step 12) FAILED; continuing to the downstream #1302 journey + walkthroughs + visual-audit so their evidence is still produced. The gate will still FAIL at the end (issue #1314).\n' >&2
+fi
 
 run_step "build-app-test-apks" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-app-test-apks" -- \
@@ -1409,6 +1431,16 @@ run_step "build-debug-apk" \
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 
 run_step "update-install-debug-apk" "$ROOT_DIR/scripts/install-update-apk.sh" "$APK_PATH"
+
+# Issue #1314: fold the deferred step-12 (connected-terminal-input) result into
+# the final verdict. If it failed, the gate FAILS here — AFTER the downstream
+# #1302 journey + walkthroughs + visual-audit produced their evidence — so a
+# real core-terminal red is never lost, but a step-12 red never again masks the
+# release-critical journey stages by aborting before them.
+if [[ "$CONNECTED_TERMINAL_INPUT_STATUS" == "failed" ]]; then
+  FAILING_STEP="connected-terminal-input"
+  fail "connected-terminal-input (step 12) failed; the downstream #1302 journey + walkthroughs + visual-audit were still run for evidence (issue #1314). See the connected-terminal-input step log."
+fi
 
 GATE_RESULT="PASS"
 GATE_RESULT_MESSAGE="PASS: pre-release confidence gate completed"

@@ -2089,23 +2089,22 @@ class DesignRenders {
     }
 
     /**
-     * Issue #1152: static mirror of the redesigned VOICE-RECORDING (not-locked)
-     * composer bottom area. The old single row overflowed and clipped `Send` off
-     * the right edge (audit D1); the maintainer directive is FIT EVERYTHING — keep
-     * the editing tools mounted, hide nothing. This mirrors the fix (with the #1245
-     * inline-lock move):
-     *  - recording surface: [00:14 timer · 🔒 inline lock toggle · waveform]
-     *    (Discard pulled out of it; #1245 moved the hands-free lock UP into it);
-     *  - bottom row: the mounted [📎 {} /] tools group anchors the left, then a
-     *    weighted gap, then the stop pills stacked as two right-aligned rows —
-     *    [Discard (outlined)] over [Insert · Send]. The old mystery-meat Lock pill
-     *    is gone from this cluster (#1245).
+     * Issue #1245: static mirror of the VOICE-RECORDING composer bottom area after
+     * the hands-free Lock was removed ENTIRELY (the pill, the inline toggle, the
+     * swipe-up-to-lock gesture, the "recording locked" indicator, and the hint) and
+     * Discard was moved onto the SAME balanced action row as Insert and Send. This
+     * mirrors the fix:
+     *  - recording surface: [00:14 timer · waveform] — no lock affordance;
+     *  - bottom row: a single right-aligned balanced action row —
+     *    [Discard (outlined) · Insert (outlined) · Send (accent)]. The editing tools
+     *    (📎 {} /) are not shown mid-dictation, so Discard sits right next to Insert
+     *    and Send and the three pills fit without clipping `Send` (the #1152 guard).
      *
      * Caveat (#555): the real recording row lives in the `app` module's
      * `SheetContent`, which the ui-kit harness can't import, so this mirrors its
      * layout with the same tokens. It is the fast first design check for the
-     * fit/regroup; the acceptance is the full-device emulator screenshot in the
-     * recording-not-locked state.
+     * regroup; the acceptance is the full-device emulator screenshot in the
+     * recording state.
      */
     @Test
     fun composerRecordingControlsRow() = render("composer-recording-controls-row") {
@@ -2116,7 +2115,7 @@ class DesignRenders {
                 .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // Recording surface: timer + waveform (Discard no longer lives here).
+            // Recording surface: timer + waveform (no lock, no Discard here).
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2132,19 +2131,6 @@ class DesignRenders {
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
-                // Issue #1245: the hands-free lock is now an INLINE toggle on the
-                // recording/waveform row (attached to the recording it controls),
-                // an accent-bordered circle with the lock glyph — no longer a
-                // mystery-meat pill in the bottom Send/Discard cluster.
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(17.dp))
-                        .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(17.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(text = "🔒", fontSize = 15.sp)
-                }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2158,102 +2144,66 @@ class DesignRenders {
                     )
                 }
             }
-            // Bottom row: mounted tools group (left) + weighted gap + the four
-            // pills stacked as two right-aligned rows.
+            // Bottom row: a single right-aligned balanced action row —
+            // [Discard · Insert · Send]. No editing tools compete for this row while
+            // recording, so Discard sits next to Insert and Send (#1245).
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Row(
+                Spacer(Modifier.weight(1f))
+                // Discard — outlined secondary pill (48dp).
+                Box(
                     modifier = Modifier
+                        .height(48.dp)
                         .clip(RoundedCornerShape(22.dp))
                         .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                        .padding(horizontal = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
-                    }
-                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "{ }",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                    Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "/",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
+                    Text(
+                        text = "Discard",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
-                Spacer(Modifier.weight(1f))
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                // Insert — outlined secondary pill (48dp).
+                Box(
+                    modifier = Modifier
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                        .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 16.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Discard — outlined secondary pill (48dp). Issue #1245: the
-                        // Lock pill was removed from this cluster (it moved up to the
-                        // waveform row as an inline toggle); Discard stays put.
-                        Box(
-                            modifier = Modifier
-                                .height(48.dp)
-                                .clip(RoundedCornerShape(22.dp))
-                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
-                                .padding(horizontal = 14.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "Discard",
-                                color = PocketShellColors.TextSecondary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(
-                            modifier = Modifier
-                                .height(48.dp)
-                                .clip(RoundedCornerShape(22.dp))
-                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(22.dp))
-                                .padding(horizontal = 16.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "Insert",
-                                color = PocketShellColors.Text,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        Row(
-                            modifier = Modifier
-                                .height(48.dp)
-                                .clip(RoundedCornerShape(22.dp))
-                                .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                                .padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = "Send",
-                                color = PocketShellColors.OnAccent,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
-                        }
-                    }
+                    Text(
+                        text = "Insert",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                // Send — accent primary pill (48dp).
+                Row(
+                    modifier = Modifier
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "Send",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
                 }
             }
         }

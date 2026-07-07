@@ -386,12 +386,14 @@ JOURNEY_CLASSES=(
   # fit. No Docker fixture, no self-skip. Lives under com.pocketshell.app.composer,
   # not the proof prefix, so it carries its fully-qualified name directly.
   "com.pocketshell.app.composer.PromptComposerRecordingRowFitProofTest"
-  # ADDED (#585): Telegram-style hold-and-pull-up on the composer mic must start
-  # recording and lock it hands-free in one gesture, with the real
-  # ModalBottomSheet still mounted so the mic detector competes with the sheet
-  # drag detector. This was repeatedly emulator-green but device-broken, so the
-  # focused journey is gate-wired per D31/G9; it uses no Docker fixture.
-  "com.pocketshell.app.composer.PromptComposerMicSwipeLockJourneyTest"
+  # ADDED (#1245): the hands-free "lock" was REMOVED from the composer entirely
+  # (the inline lock toggle, the swipe-up-to-lock gesture, the locked indicator,
+  # the hint). This journey drives the real PromptComposerSheet inside its
+  # ModalBottomSheet and asserts RED→GREEN that (a) no lock control/indicator/hint
+  # renders while recording and (b) Discard now rides the SAME balanced action row
+  # as Insert/Send (moved out of its old separate row above Send). Gate-wired per
+  # D31/G9; no Docker fixture.
+  "com.pocketshell.app.composer.PromptComposerRecordingNoLockJourneyTest"
   # ADDED (#585 REOPENED — the TRUE desired behavior): the ENTRY gesture on the
   # composer LAUNCHER button, not the mic inside the already-open sheet. Hold the
   # launcher (SESSION_COMPOSER_LAUNCHER_TAG) + swipe UP → the Prompt Composer opens

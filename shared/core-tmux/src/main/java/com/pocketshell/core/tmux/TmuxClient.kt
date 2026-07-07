@@ -256,6 +256,26 @@ public interface TmuxClient : AutoCloseable {
     public fun drainPaneOutputBacklog(paneId: String): Int
 
     /**
+     * Issue #1305: the AUTHORITATIVE post-capture variant of
+     * [drainPaneOutputBacklog], called by the overflow-reseed swap ONLY after a
+     * successful `capture-pane` snapshot (step 4 of
+     * [TmuxSessionViewModel.launchPaneOverflowReseed]).
+     *
+     * Besides emptying the queued channel like [drainPaneOutputBacklog], it also
+     * marks the single frame the pane's drain loop may have RECEIVED into its
+     * local and PARKED at the pause boundary as stale, so that frame is DROPPED on
+     * [resumeOutputDelivery] instead of double-applying on top of the fresh
+     * snapshot. The pre-capture drain (step 2) intentionally does NOT arm this:
+     * on a capture FAILURE step 2 is the only drain that runs, and the parked
+     * frame must still REPLAY on resume (the #1297 held-frame guarantee).
+     *
+     * Defaults to plain [drainPaneOutputBacklog] for [TmuxClient] doubles that do
+     * not model the pause-boundary park.
+     */
+    public fun drainPaneOutputBacklogAfterCapture(paneId: String): Int =
+        drainPaneOutputBacklog(paneId)
+
+    /**
      * Issue #1297: freeze `%output` delivery for [paneId] so frames landing while
      * the sole collector is momentarily detached are HELD in the bounded backlog
      * channel instead of being emitted into a zero-subscriber `replay = 0`
@@ -1802,8 +1822,19 @@ internal class RealTmuxClient(
     // Issue #1205: empty the pane's queued delivery backlog so a post-overflow
     // `capture-pane` reseed is not clobbered by stale burst frames replaying on
     // top of it. Best-effort: only touches the live channel, never the reader.
+    // Issue #1305: this pre-capture drain does NOT arm discard of a frame parked
+    // at the pause boundary — on a capture FAILURE it is the only drain that runs
+    // and the parked frame must still REPLAY on resume (the #1297 guarantee).
     override fun drainPaneOutputBacklog(paneId: String): Int =
-        paneOutputPipes[paneId]?.drainBacklog() ?: 0
+        paneOutputPipes[paneId]?.drainBacklog(armStaleParkedFrameDiscard = false) ?: 0
+
+    // Issue #1305: the AUTHORITATIVE post-capture drain. Runs only after a
+    // successful `capture-pane` reseed, so besides emptying the channel it also
+    // arms discard of the frame parked in the drain loop's local at the pause
+    // boundary — that frame is PRE-capture (already reflected in the fresh
+    // snapshot), so emitting it on resume would double-apply on top of the grid.
+    override fun drainPaneOutputBacklogAfterCapture(paneId: String): Int =
+        paneOutputPipes[paneId]?.drainBacklog(armStaleParkedFrameDiscard = true) ?: 0
 
     override fun pauseOutputDelivery(paneId: String) {
         paneOutputPipes[paneId]?.pauseDelivery()
@@ -2825,6 +2856,16 @@ internal class RealTmuxClient(
         // into a zero-subscriber flow. Driven by [pauseDelivery]/[resumeDelivery]
         // across the overflow-reseed producer swap.
         private val paused: MutableStateFlow<Boolean>,
+        // Issue #1305: `true` while the drain loop holds a frame RECEIVED into its
+        // local but not yet emitted (it parked at the pause boundary). The frame
+        // is no longer in [channel], so [drainBacklog] cannot reach it — this flag
+        // lets a drain-during-pause mark it stale so it is dropped, not
+        // double-applied on top of the authoritative capture snapshot.
+        private val holdingFrameAtPause: AtomicBoolean = AtomicBoolean(false),
+        // Issue #1305: armed by [drainBacklog] when it runs while a frame is parked
+        // at the pause boundary; consumed by the drain loop on resume to DISCARD
+        // that pre-capture frame instead of emitting it.
+        private val discardParkedFrame: AtomicBoolean = AtomicBoolean(false),
         private val droppedEvents: AtomicInteger = AtomicInteger(0),
         private val overflowDiagnosticEmitted: AtomicBoolean = AtomicBoolean(false),
     ) {
@@ -2875,7 +2916,19 @@ internal class RealTmuxClient(
          * The pipe's drain job keeps running; only the queued-but-undelivered
          * burst frames are dropped so a post-overflow reseed is authoritative.
          */
-        fun drainBacklog(): Int {
+        fun drainBacklog(armStaleParkedFrameDiscard: Boolean): Int {
+            // Issue #1305: a frame the drain loop received into its local and
+            // PARKED at the pause boundary is NOT in [channel] — the channel drain
+            // below cannot reach it. Only the AUTHORITATIVE post-capture drain
+            // ([armStaleParkedFrameDiscard] = true) may mark it for discard so it is
+            // dropped on resume instead of double-applying on top of the fresh
+            // capture snapshot. The pre-capture drain (step 2 of the overflow-reseed
+            // swap) passes false: on a capture FAILURE it is the ONLY drain that
+            // runs, and the parked frame must still REPLAY on resume (the #1297
+            // held-frame guarantee), not be silently dropped.
+            if (armStaleParkedFrameDiscard && holdingFrameAtPause.get()) {
+                discardParkedFrame.set(true)
+            }
             var drained = 0
             while (channel.tryReceive().isSuccess) {
                 drained++
@@ -2898,6 +2951,10 @@ internal class RealTmuxClient(
                 )
                 val channel = Channel<ControlEvent.Output>(OUTPUT_BACKLOG_EVENTS)
                 val paused = MutableStateFlow(false)
+                // Issue #1305: coordinate the frame parked in the drain loop's
+                // local at the pause boundary with a concurrent [drainBacklog].
+                val holdingFrameAtPause = AtomicBoolean(false)
+                val discardParkedFrame = AtomicBoolean(false)
                 val job = scope.launch {
                     // Issue #1204: replay any output buffered before this pipe
                     // was registered, IN ORDER, ahead of the live channel. The
@@ -2963,7 +3020,26 @@ internal class RealTmuxClient(
                         // when the pause lands is held, not emitted into a paused
                         // (subscriber-detached) flow.
                         if (paused.value) {
+                            // Issue #1305: this frame was received into `event`
+                            // BEFORE the pause released — it is now parked in a
+                            // local, out of [channel] and beyond [drainBacklog]'s
+                            // reach. Expose it and arm discard detection for THIS
+                            // park so an overflow drain that runs while we're parked
+                            // can flag the frame stale. Re-arm to false at the start
+                            // of every park so a stale flag from a prior park (or a
+                            // drain that ran with nothing parked) never discards a
+                            // legitimate post-snapshot frame.
+                            discardParkedFrame.set(false)
+                            holdingFrameAtPause.set(true)
                             paused.first { !it }
+                            holdingFrameAtPause.set(false)
+                            if (discardParkedFrame.compareAndSet(true, false)) {
+                                // A drain ran while this frame was parked: the
+                                // authoritative capture snapshot already reflects
+                                // it, so emitting now would double-apply on top of
+                                // the fresh grid. Drop it and continue.
+                                continue
+                            }
                         }
                         flow.emit(event)
                     }
@@ -2975,6 +3051,8 @@ internal class RealTmuxClient(
                     onOverflow = onOverflow,
                     diagnosticFields = diagnosticFields,
                     paused = paused,
+                    holdingFrameAtPause = holdingFrameAtPause,
+                    discardParkedFrame = discardParkedFrame,
                 )
             }
         }

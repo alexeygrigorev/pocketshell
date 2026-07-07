@@ -1198,6 +1198,135 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `capture SUCCESS drains the frame parked at the pause boundary, not double-applied after the snapshot`() =
+        runBlocking {
+            // Issue #1305 (red→green, SUCCESS path): the overflow-reseed swap pauses
+            // %output, drains the pane backlog (step 2, PRE-capture), takes an
+            // authoritative capture snapshot, drains AGAIN (step 4, POST-capture),
+            // then resumes. Both drains empty the pipe CHANNEL — but NOT the single
+            // frame already received into the drain loop's local and PARKED at the
+            // pause boundary (`if (paused.value) { paused.first { !it } }`). On the
+            // #1297 base that parked frame survives BOTH drains and is emitted on
+            // resume, AFTER the snapshot that already reflects it — a double-apply on
+            // top of the fresh grid. With the fix the AUTHORITATIVE step-4 drain
+            // (`drainPaneOutputBacklogAfterCapture`) marks the parked frame stale so
+            // it is dropped on resume; only genuinely post-snapshot deltas reach the
+            // collector.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            val received = Collections.synchronizedList(mutableListOf<String>())
+            try {
+                client.connect()
+                // Live collector so the pane pipe's drain loop is hot (blocked in
+                // receiveCatching on the empty channel, ready to receive + park).
+                val collector = scope.launch {
+                    client.outputFor("%305").collect {
+                        received.add(String(it.data, StandardCharsets.US_ASCII))
+                    }
+                }
+                delay(200)
+
+                // 1. Pause BEFORE feeding: the next frame the loop receives lands
+                //    in its local and PARKS at the pause boundary (it is NOT left
+                //    queued in the channel).
+                client.pauseOutputDelivery("%305")
+                shell.feed("%output %305 parked-pre-capture\n")
+                // Let the reader parse the frame and the hot loop receive it into
+                // its local + suspend on `paused.first { !it }`.
+                delay(300)
+
+                // 2. Step-2 PRE-capture drain (plain — must NOT arm discard). The
+                //    parked frame is in the loop's LOCAL, not the channel.
+                val drainedPreCapture = client.drainPaneOutputBacklog("%305")
+
+                // 3. Step-4 POST-capture AUTHORITATIVE drain — a successful reseed
+                //    ran, so this arms discard of the parked pre-capture frame.
+                val drainedPostCapture = client.drainPaneOutputBacklogAfterCapture("%305")
+
+                // 4. Resume (snapshot is authoritative). The parked, pre-capture
+                //    frame must NOT reach the collector.
+                client.resumeOutputDelivery("%305")
+                delay(150)
+
+                // 5. A genuinely post-snapshot live delta — this MUST be delivered.
+                shell.feed("%output %305 post-snapshot-delta\n")
+                delay(300)
+
+                collector.cancelAndJoin()
+
+                assertEquals(
+                    "on a SUCCESSFUL reseed the frame parked at the pause boundary " +
+                        "must be dropped by the authoritative post-capture drain (not " +
+                        "double-applied on top of the snapshot); only the post-snapshot " +
+                        "delta survives. drainedPreCapture=" + drainedPreCapture +
+                        " drainedPostCapture=" + drainedPostCapture,
+                    listOf("post-snapshot-delta"),
+                    received.toList(),
+                )
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `capture FAILURE replays the frame parked at the pause boundary, not dropped (issue 1297 guarantee)`() =
+        runBlocking {
+            // Issue #1305 (red→green, FAILURE path — the reviewer's G2 gap): on a
+            // capture FAILURE the overflow-reseed swap runs ONLY the step-2
+            // PRE-capture drain (`drainPaneOutputBacklog`); the step-4 authoritative
+            // drain is guarded by `if (reseeded)` and is SKIPPED. The #1297
+            // held-frame guarantee is that on that failed path the held frames
+            // (including the one parked in the drain loop's local at the pause
+            // boundary) are REPLAYED to the fresh producer on resume, not lost.
+            //
+            // The reviewer flagged that arming discard on ANY drain (the prior fix)
+            // would DROP the parked frame on this failed path too, reintroducing the
+            // #1297 lost-frame break. This test guards that: with the pre-capture
+            // drain NOT arming discard, the parked frame must survive to resume.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            val received = Collections.synchronizedList(mutableListOf<String>())
+            try {
+                client.connect()
+                val collector = scope.launch {
+                    client.outputFor("%305").collect {
+                        received.add(String(it.data, StandardCharsets.US_ASCII))
+                    }
+                }
+                delay(200)
+
+                // 1. Pause, feed → the frame parks in the drain loop's local.
+                client.pauseOutputDelivery("%305")
+                shell.feed("%output %305 parked-pre-capture\n")
+                delay(300)
+
+                // 2. Step-2 PRE-capture drain — the ONLY drain on the FAILURE path
+                //    (no reseed → step 4 is skipped). It must NOT arm discard.
+                val drainedPreCapture = client.drainPaneOutputBacklog("%305")
+
+                // 3. Resume — capture failed, so the held/parked frame must REPLAY
+                //    to the fresh producer (the #1297 guarantee), not be dropped.
+                client.resumeOutputDelivery("%305")
+                delay(300)
+
+                collector.cancelAndJoin()
+
+                assertEquals(
+                    "on a FAILED reseed (only the pre-capture drain ran, step 4 " +
+                        "skipped) the frame parked at the pause boundary must be " +
+                        "REPLAYED on resume — not silently dropped — preserving the " +
+                        "#1297 held-frame guarantee. drainedPreCapture=" + drainedPreCapture,
+                    listOf("parked-pre-capture"),
+                    received.toList(),
+                )
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
     fun `sendChainedCommands writes one chained line and drains both blocks in order`() = runBlocking {
         // Issue #692: the folder-list discovery probe fetches list-sessions +
         // list-panes in ONE control-mode round-trip. tmux -CC answers a

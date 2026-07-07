@@ -631,4 +631,79 @@ class TmuxClientIntegrationTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun `listPanesViaExec succeeds while the -CC channel streams a burst`() = runBlocking {
+        // Issue #1316 (G10 real-path, no emulator): the attach RECONCILE wedge —
+        // a new session's `list-panes` reply head-of-line blocked behind a flood
+        // of %output on the -CC reader (the maintainer's v0.4.24 day-0 "Attaching…"
+        // freeze). With the reconcile on an INDEPENDENT exec channel it returns
+        // while the burst streams on the -CC channel. Reproduces the busy-agent
+        // burst at the Docker level; on BASE (a -CC `list-panes`) the reply stalls
+        // behind the burst.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val sessionName = "it-${System.nanoTime()}"
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = sessionName,
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val paneId = withTimeout(10_000) {
+                        it.sendCommand("display-message -p \"#{pane_id}\"")
+                    }.output.firstOrNull()?.trim().orEmpty()
+                    assertTrue("pane id must resolve; got '$paneId'", paneId.startsWith("%"))
+
+                    // Keep the -CC reader busy: subscribe and drive a large output
+                    // burst into the pane so %output frames flood the control
+                    // channel while we reconcile.
+                    val burstBytes = java.util.concurrent.atomic.AtomicLong(0)
+                    val collector = scope.launch {
+                        it.outputFor(paneId).collect { evt -> burstBytes.addAndGet(evt.data.size.toLong()) }
+                    }
+                    delay(200)
+                    withTimeout(10_000) {
+                        it.sendCommand("send-keys -t $paneId 'seq 1 200000' Enter")
+                    }
+                    val burstDeadline = System.currentTimeMillis() + 10_000
+                    while (System.currentTimeMillis() < burstDeadline && burstBytes.get() < 50_000L) {
+                        delay(20)
+                    }
+                    assertTrue(
+                        "the -CC channel must actually be streaming a burst; sawBytes=${burstBytes.get()}",
+                        burstBytes.get() >= 50_000L,
+                    )
+
+                    // Reconcile on the exec lane WHILE the burst streams. It must
+                    // return (not time out) within the short ceiling, with the pane.
+                    val listPanesCommand =
+                        "list-panes -s -t '$sessionName' -F '#{pane_id}'"
+                    val startedAt = System.currentTimeMillis()
+                    val response = withTimeout(10_000) {
+                        it.listPanesViaExec(listPanesCommand, timeoutMs = 6_000L)
+                    }
+                    val elapsed = System.currentTimeMillis() - startedAt
+                    collector.cancel()
+                    assertFalse(
+                        "exec-lane reconcile must succeed during a -CC burst; got ${response.output}",
+                        response.isError,
+                    )
+                    assertTrue(
+                        "exec-lane reconcile must list the pane during a -CC burst; got ${response.output}",
+                        response.output.any { row -> row.trim() == paneId },
+                    )
+                    assertTrue(
+                        "exec-lane reconcile must return within the short ceiling during a burst " +
+                            "(elapsed ${elapsed}ms)",
+                        elapsed < 5_000L,
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
 }

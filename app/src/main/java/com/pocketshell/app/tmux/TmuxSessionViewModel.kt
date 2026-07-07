@@ -4765,7 +4765,13 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         client: TmuxClient,
     ): PrewarmedPaneRuntime {
-        val response = client.sendCommand(buildListPanesCommand(target))
+        // Issue #1316: the prewarm enumeration rides the same dedicated exec lane
+        // as the attach reconcile, so a busy sibling session's `-CC` burst cannot
+        // head-of-line-block a prewarm behind the shared control channel.
+        val response = client.listPanesViaExec(
+            buildListPanesCommand(target),
+            timeoutMs = RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS,
+        )
         if (response.isError) {
             throw TmuxAttachPanesReadyException(
                 "tmux list-panes failed during prewarm: " +
@@ -9947,7 +9953,19 @@ public class TmuxSessionViewModel @Inject constructor(
         val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
             withContext(seedIoDispatcher) {
-                client.sendCommand(buildListPanesCommand(target))
+                // Issue #1316: run the reconcile `list-panes` on the DEDICATED exec
+                // lane (mirror of #1297's capture-pane move), NOT the shared per-host
+                // `-CC` control channel. A new-session attach's reconcile used to
+                // head-of-line-block behind a busy sibling session's `-CC` `%output`
+                // burst on the ONE shared transport reader — the v0.4.24 "Attaching…"
+                // wedge. The bounded [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS] ceiling is
+                // the escape: a genuinely wedged/half-open transport surfaces a
+                // `Failed` fast (→ retryable "Tap Reconnect"), never a tens-of-seconds
+                // input-gated freeze.
+                client.listPanesViaExec(
+                    buildListPanesCommand(target),
+                    timeoutMs = RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS,
+                )
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -19599,8 +19617,25 @@ internal const val AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS: Int = 24
  * mid-word) still matches the original prompt's tail.
  */
 private val WHITESPACE_RUN_REGEX = Regex("\\s+")
-internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
+// Issue #1316: the OUTER attach-reveal ceiling. Was 30 s — the maintainer's
+// "it took forever to attach / wouldn't let me touch" felt-freeze while the
+// `list-panes` reconcile head-of-line-blocked behind a busy sibling's `-CC`
+// burst. With the reconcile now on the dedicated exec lane it returns in ms, so
+// this bound only ever fires on a genuinely stuck attach; a much shorter
+// ceiling turns that into a fast user-visible "Tap Reconnect to retry" escape
+// (→ evict lease → fresh-transport runConnect) instead of a tens-of-seconds
+// input-gated overlay. The reconcile itself is separately bounded by
+// [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS].
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+
+// Issue #1316: per-reconcile exec ceiling for the attach/switch/refresh
+// `list-panes` on the dedicated exec lane. Healthy reconciles return in
+// milliseconds; this is the safety bound so a genuinely wedged/half-open
+// transport surfaces a `Failed` fast (→ retryable attach error) rather than
+// parking the reveal. Well under the outer [ATTACH_PANES_READY_TIMEOUT_MS] so
+// the reconcile-level escape fires first.
+internal const val RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS: Long = 6_000L
 
 /**
  * Issue #552 / #685 (Bug A): a passive tmux reader EOF during a brief foreground

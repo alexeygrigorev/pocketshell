@@ -195,6 +195,42 @@ public interface TmuxClient : AutoCloseable {
         commands.map { sendCommand(it) }
 
     /**
+     * Issue #1316: enumerate a session's panes on a DEDICATED `exec` channel, NOT
+     * the shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The attach RECONCILE — the `tmux list-panes` round-trip in
+     * `TmuxSessionViewModel.awaitPanesReadyForAttach` — is the FIRST thing a
+     * fast-switch attach blocks on, and it used to ride the shared `-CC` control
+     * channel. When a NEW session B attaches while a busy Claude session A still
+     * drains its `-CC` `%output` burst, A head-of-line-blocks B's `list-panes`
+     * reply on the ONE shared sshj transport reader, so B's reconcile times out
+     * and retries for up to `ATTACH_PANES_READY_TIMEOUT_MS` behind the
+     * input-gated "Attaching…" overlay — the maintainer's day-0 v0.4.24 wedge.
+     * This is the SAME transport SPOF #1297 closed for `capture-pane`; here it is
+     * closed for the attach's own `list-panes`.
+     *
+     * The real client runs the enumeration on the independent [SshSession.exec]
+     * lane (the `tmux has-session` preflight / #1297 capture lane), whose stdout
+     * is read OUTSIDE the transport dispatcher, so a new attach's reconcile
+     * returns while a sibling session saturates the `-CC` reader.
+     *
+     * [listPanesCommand] is the tmux command WITHOUT the leading `tmux` — the
+     * same `list-panes -s -t '<session>' -F '…'` string the `-CC` path used, so
+     * the `#{…}` format parity (and the caller's row parse) is preserved
+     * unchanged. [timeoutMs] bounds the exec round-trip so a wedged/half-open
+     * transport surfaces a [TmuxClientException] fast instead of parking the
+     * attach — the bounded escape that stops the reveal gating input
+     * indefinitely.
+     *
+     * The default implementation falls back to a `-CC` [sendCommand] for
+     * [TmuxClient] doubles that do not model an exec lane.
+     */
+    public suspend fun listPanesViaExec(
+        listPanesCommand: String,
+        timeoutMs: Long? = null,
+    ): CommandResponse = sendCommand(listPanesCommand)
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -1246,6 +1282,80 @@ internal class RealTmuxClient(
         if (capture.isEmpty()) return emptyList()
         val lines = capture.split("\n")
         return if (lines.isNotEmpty() && lines.last().isEmpty()) lines.dropLast(1) else lines
+    }
+
+    /**
+     * Issue #1316: run the attach RECONCILE `list-panes` on a DEDICATED
+     * [SshSession.exec] channel — the same independent lane the `tmux
+     * has-session` preflight (#666) and the #1297 heal capture already use — NOT
+     * the shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The attach `awaitPanesReadyForAttach` reconcile was the FIRST call a
+     * fast-switch attach blocked on, and it rode the `-CC` channel. When a new
+     * session attaches while a busy sibling session drains its `-CC` `%output`
+     * burst, the sibling head-of-line-blocks the new attach's `list-panes` reply
+     * on the ONE shared sshj transport reader, so the reconcile timed out /
+     * retried behind the input-gated "Attaching…" overlay for up to 30 s (the
+     * maintainer's v0.4.24 day-0 wedge). The exec lane reads its own channel's
+     * stdout OUTSIDE the transport dispatcher, so this returns fast while a burst
+     * saturates `-CC`. [listPanesCommand] is the `-CC`-form command (no leading
+     * `tmux`); [timeoutMs] bounds the round-trip so a genuinely wedged/half-open
+     * transport surfaces a [TmuxClientException] fast instead of parking the
+     * attach.
+     */
+    override suspend fun listPanesViaExec(
+        listPanesCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
+        val command = "tmux $listPanesCommand"
+        val execResult =
+            try {
+                // Independent of the busy `-CC` channel, so this returns fast under
+                // a burst. The ceiling is the safety bound for a genuinely
+                // wedged/half-open transport; cancelling the exec closes its OWN
+                // channel (RealSshSession.exec cancellation handler), never `-CC`.
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux list-panes exec (attach reconcile lane) failed: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux listPanesViaExec exec timed out >${effectiveTimeoutMs}ms " +
+                    "(attach reconcile lane); surfacing a best-effort failure.",
+            )
+            throw TmuxClientException(
+                "tmux list-panes (exec attach reconcile lane) timed out after ${effectiveTimeoutMs}ms",
+            )
+        }
+        return parseListPanesExecResult(execResult)
+    }
+
+    /**
+     * Issue #1316: turn a `list-panes` [ExecResult] into the per-row
+     * [CommandResponse] the `-CC` `sendCommand` path returned, so the caller's
+     * `parsePaneRow` parse is unchanged. A non-zero exit (session/server gone)
+     * surfaces as an error response carrying the stderr — matching the `-CC`
+     * error contract — so the attach reconcile still fails honestly.
+     */
+    private fun parseListPanesExecResult(result: ExecResult): CommandResponse {
+        val isError = result.exitCode != 0
+        val lines = splitCaptureLines(result.stdout)
+        val output =
+            if (isError && lines.isEmpty()) {
+                result.stderr.trim().let { if (it.isEmpty()) emptyList() else it.split("\n") }
+            } else {
+                lines
+            }
+        return CommandResponse(number = -1L, output = output, isError = isError)
     }
 
     /**

@@ -5,14 +5,10 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.prefs.DeferredPrefs
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -60,12 +56,26 @@ import javax.inject.Singleton
  *
  * The fix mirrors F5's [com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore]:
  * the constructor never reads the prefs file on the calling thread. It only
- * *kicks off* the build on [ioDispatcher] (an eager [async]) and returns
+ * *kicks off* the build on [ioDispatcher] (an eager `async`) and returns
  * immediately, so `<init>` never blocks the constructing (Main) thread. The
- * first read warms-or-awaits that background result; on a fresh cold launch
+ * first read warms-or-opens that background result; on a fresh cold launch
  * [read] is never called (only on the process-death resume path), so the
  * background build is virtually always warm before any read. Hard-cut (D22):
- * there is no synchronous on-Main fallback.
+ * there is no legacy on-Main open branch.
+ *
+ * ## Resilient open + no runBlocking on Main (issue #1292)
+ *
+ * The prefs open routes through [com.pocketshell.app.prefs.DeferredPrefs], which
+ * opens via [com.pocketshell.app.prefs.ResilientPrefs] — the ONE shared resilient
+ * helper (best-effort delete + re-open on a corrupt file). A corrupt
+ * `last_session.xml` previously made `getSharedPreferences(...)` THROW inside the
+ * warm-up coroutine; `MainActivity.onCreate`'s process-death-resume
+ * `lastSessionStore.read()` then rethrew it on **Main**, crash-looping launch
+ * exactly like the #1291 `app_settings` outage (fixed for that one file in
+ * #1229/#1248). Routing through [DeferredPrefs] closes this door of the same
+ * class, and its [DeferredPrefs.get] opens synchronously on the cold path rather
+ * than `runBlocking`-awaiting the off-main coroutine (#1249) — so [read] never
+ * `runBlocking`s on Main.
  */
 @Singleton
 class LastSessionStore @VisibleForTesting internal constructor(
@@ -76,32 +86,13 @@ class LastSessionStore @VisibleForTesting internal constructor(
     @Inject
     constructor(@ApplicationContext context: Context) : this(context, Dispatchers.IO)
 
-    private val appContext: Context = context.applicationContext
-
-    // Once the background build completes, the result is cached here so reads
-    // never re-enter runBlocking. @Volatile: written on [ioDispatcher], read
-    // from any consumer thread.
-    @Volatile
-    private var cachedPrefs: SharedPreferences? = null
-
-    // Test seam (#1087): records the name of the thread the prefs-file build
-    // actually ran on, so the regression test can hard-assert it is NOT the
-    // constructing/Main thread. Written on [ioDispatcher].
-    @Volatile
-    private var prefsBuildThreadName: String? = null
-
-    // Eager async: the build STARTS at construction but on a background thread.
-    // `async` (DEFAULT start) dispatches immediately and returns without
-    // blocking the caller.
-    private val warmUpScope = CoroutineScope(SupervisorJob() + ioDispatcher)
-    private val prefsDeferred: Deferred<SharedPreferences> = warmUpScope.async {
-        prefsBuildThreadName = currentPhysicalThreadName()
-        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .also { cachedPrefs = it }
-    }
+    // The ONE shared resilient prefs helper (#1292): eager off-main open through
+    // [com.pocketshell.app.prefs.ResilientPrefs] (corrupt-tolerant, self-healing),
+    // and a cold-path synchronous open that never `runBlocking`s on Main (#1249).
+    private val deferredPrefs = DeferredPrefs(context, PREFS_NAME, ioDispatcher)
 
     private val prefs: SharedPreferences
-        get() = cachedPrefs ?: runBlocking { prefsDeferred.await() }
+        get() = deferredPrefs.get()
 
     /**
      * Test-only: block until the off-main build completes and return the name
@@ -109,19 +100,8 @@ class LastSessionStore @VisibleForTesting internal constructor(
      * construction did NOT happen on the constructing/Main thread (#1087).
      */
     @VisibleForTesting
-    internal fun awaitPrefsBuildThreadNameForTest(): String {
-        runBlocking { prefsDeferred.await() }
-        return prefsBuildThreadName
-            ?: error("prefs build thread was not recorded")
-    }
-
-    // The build runs inside a coroutine, whose framework decorates the thread
-    // name with a " @coroutine#N" suffix. Strip it so the recorded value is the
-    // PHYSICAL thread name — otherwise an on-Main build (e.g. the un-fixed base)
-    // would still differ from the captured constructing name by the suffix alone,
-    // giving a false off-main pass (#1087 G6: keep the assertion load-bearing).
-    private fun currentPhysicalThreadName(): String =
-        Thread.currentThread().name.substringBefore(" @coroutine")
+    internal fun awaitPrefsBuildThreadNameForTest(): String =
+        deferredPrefs.awaitBuildThreadNameForTest()
 
     /**
      * Issue #834: identity of the most recently killed session, remembered in

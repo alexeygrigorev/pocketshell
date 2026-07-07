@@ -13,7 +13,7 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * Issue #1125 / #1087 (freeze cause F6, class sweep): open a
- * [SharedPreferences] file OFF the Main thread.
+ * [SharedPreferences] file OFF the Main thread, resiliently (issue #1292).
  *
  * `Context.getSharedPreferences(...)` does a synchronous first-touch disk read.
  * Opening it eagerly in a store's field initializer blocks whatever thread
@@ -24,12 +24,26 @@ import kotlinx.coroutines.runBlocking
  * lands, but the block is real on every screen open).
  *
  * This helper kicks the open + first-touch off onto [ioDispatcher] (an eager
- * [async]) at construction time and exposes the prefs via [get], which
- * warms-or-awaits. The build is started immediately, so by the time a consumer
- * actually reads (a draft load, a toggle read, a dedup check) the cache is
- * typically already warm; the worst case blocks the caller waiting for the IO
- * build, but the disk read itself never runs on the constructing/Main thread.
- * Hard-cut (D22): there is no synchronous on-Main open fallback.
+ * [async]) at construction time and exposes the prefs via [get]. The build is
+ * started immediately, so by the time a consumer actually reads (a draft load, a
+ * toggle read, a dedup check) the cache is typically already warm, and the disk
+ * read is virtually never on the constructing/Main thread. Hard-cut (D22): there
+ * is no legacy on-Main open branch.
+ *
+ * ## Resilient open + no runBlocking on Main (issue #1292)
+ *
+ * The file-backed constructor opens through [ResilientPrefs.open], which
+ * tolerates a corrupt/unreadable prefs file (best-effort delete + re-open fresh)
+ * instead of letting the open THROW — a corrupt file previously latched in the
+ * warm-up `Deferred` and rethrew on **Main** at the first [get], crash-looping
+ * the app/screen (the #1291 class; `app_settings` was fixed in #1229/#1248).
+ *
+ * [get] no longer `runBlocking`-awaits the off-main coroutine on a cache miss:
+ * that parked Main on the whole contended IO-dispatcher queue drain during cold
+ * start (the #1249 lesson), not merely on the small-file read. Instead the cold
+ * path opens SYNCHRONOUSLY via the same resilient [opener] — a single bounded
+ * small-file read that also caches — so no `runBlocking` runs on the Main /
+ * cold-start path.
  *
  * This is the reusable extraction of the inlined pattern that already lives in
  * [com.pocketshell.app.release.UpdateCheckStore],
@@ -40,17 +54,17 @@ internal class DeferredPrefs(
     ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     /**
-     * Open the named prefs file off-main. The opener captures [context]'s
-     * application context so it does not retain an Activity/screen Context.
+     * Open the named prefs file off-main, resiliently (#1292). The opener
+     * captures [context]'s application context so it does not retain an
+     * Activity/screen Context, and routes through [ResilientPrefs.open] so a
+     * corrupt prefs file self-heals instead of crashing.
      */
     constructor(
         context: Context,
         prefsName: String,
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     ) : this(
-        opener = {
-            context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        },
+        opener = { ResilientPrefs.open(context, prefsName) },
         ioDispatcher = ioDispatcher,
     )
 
@@ -71,8 +85,15 @@ internal class DeferredPrefs(
         opener().also { cachedPrefs = it }
     }
 
-    /** The opened prefs — warm if the off-main build finished, else await it. */
-    fun get(): SharedPreferences = cachedPrefs ?: runBlocking { deferred.await() }
+    /**
+     * The opened prefs. Warm case: the eager off-main build already published
+     * [cachedPrefs] — a plain volatile read, zero on-Main disk work. Cold /
+     * contended case: open SYNCHRONOUSLY via the resilient [opener] (which caches
+     * as a side effect) rather than `runBlocking`-awaiting the off-main coroutine
+     * — that await parked Main on the whole contended IO-queue drain during cold
+     * start (#1249), and this path must never `runBlocking` on Main (#1292).
+     */
+    fun get(): SharedPreferences = cachedPrefs ?: opener().also { cachedPrefs = it }
 
     /**
      * Test-only: block until the off-main open completes and return the name of

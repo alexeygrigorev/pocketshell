@@ -436,6 +436,41 @@ public fun TmuxSessionScreen(
     val revealHoldsTerminal =
         !(revealState is RevealState.Live && revealState.targetIdOrNull() == targetSessionId)
     val effectiveHidesTerminal = revealHoldsTerminal
+    // Issue #1322: a HARD reveal failure (target Gone, or an Error whose retry is
+    // exhausted) must render DISTINCTLY from the "Attaching…" hold. The surface
+    // paints the calm failed placeholder (not the spinner), and both top loading
+    // banners are suppressed, so the pill + surface + "Tap to reconnect" band all
+    // agree — killing the #1321 "Disconnected pill + Attaching spinner + raw
+    // exception" contradiction.
+    val revealHardFailure = revealIsHardFailure(revealState)
+    // Issue #1322 (coordinator scope-expansion, screenshots A/B): make EVERY
+    // non-live state render exactly ONE coherent primary indicator, computed once
+    // here and threaded to the surface, the top banner, and the pull box so they
+    // can never stack.
+    //
+    // The surface's own centered region is the primary indicator in two shapes:
+    //  - a CALM FAILURE placeholder ([RevealFailurePlaceholder]) — a hard reveal
+    //    failure OR a settled [ConnectionStatus.Failed] while the terminal is held.
+    //    It carries NO spinner (screenshot A: no "Attaching…" over Disconnected),
+    //    and the "Tap to reconnect" band owns the single reconnect affordance.
+    //  - a centered LOADER spinner — the "Attaching…" hold
+    //    ([SwitchingLoadingPlaceholder], while the terminal is held) OR the
+    //    "waiting for tmux panes…" ring ([EmptyPanesPlaceholder], when the reveal
+    //    is live but no panes have arrived yet). EITHER is the SOLE loader, so the
+    //    top connecting/reconnecting banner and the pull box spinner must both be
+    //    suppressed (screenshot B: the #750 Reconnecting 2-3-spinner stack).
+    val panesEmpty = unifiedPanes.isEmpty()
+    val surfaceCalmFailure =
+        surfaceShowsCalmFailure(effectiveHidesTerminal, revealHardFailure, status)
+    val surfaceCenteredLoader =
+        surfaceShowsCenteredLoader(effectiveHidesTerminal, revealHardFailure, status, panesEmpty)
+    // The single "the surface owns the primary indicator; the top banner + box
+    // spinner are the redundant duplicates" gate. Passed as the reducer's
+    // `effectiveHidesTerminal` input so a live-frame-kept Connecting/Reconnecting
+    // edge (surface shows NEITHER a loader nor a failure) still keeps its top
+    // banner as the sole indicator.
+    val surfaceOwnsPrimary =
+        surfaceOwnsPrimaryIndicator(effectiveHidesTerminal, revealHardFailure, status, panesEmpty)
     // Issue #487: active-forwarding state for the host this session belongs
     // to. `remember(hostId)` re-subscribes if the screen is reused for a
     // different host. Drives the in-session forwarding chip in the chrome.
@@ -1775,7 +1810,14 @@ public fun TmuxSessionScreen(
             // [TmuxTopConnectingBanner] for the per-banner rationale.
             TmuxTopConnectingBanner(
                 status = status,
-                effectiveHidesTerminal = effectiveHidesTerminal,
+                // Issue #1322: suppress the top banner whenever the surface owns the
+                // primary indicator — the "Attaching…" hold, the "waiting for tmux
+                // panes…" ring, OR the calm failure placeholder. The banner renders
+                // ONLY in the live-frame-kept Connecting/Reconnecting edge where the
+                // surface shows none of those, so a state is never left with zero
+                // indicators. This is the broadened #750 gate that kills the
+                // Reconnecting 2-3-spinner stack (screenshot B).
+                effectiveHidesTerminal = surfaceOwnsPrimary,
                 sessionName = sessionName,
                 onCancelConnect = { viewModel.cancelConnect() },
                 onRetryNow = { viewModel.reconnect() },
@@ -1947,18 +1989,19 @@ public fun TmuxSessionScreen(
             // guard. Breaking the wedge is connection-core logic owned by epic
             // #792 (Slice 2); this slice deliberately does not touch it.
             val pullToReconnectActive = !sessionLive && canReconnect
-            // Issue #750 (3rd occurrence): during the attach/reattach hold the
-            // surface content paints the centered "Attaching…"
-            // [SwitchingLoadingPlaceholder] (driven by `effectiveHidesTerminal`).
-            // That centered spinner is the SOLE indicator for this state, so the
-            // pull-to-reconnect wrapper below must NOT also run its own
-            // [PullToRefreshBox] spinner on top of it (the maintainer's reported
-            // cyan ring + gray spinner-in-a-chip stacked over "Attaching…"). The
-            // pull GESTURE stays mounted — only the duplicate box spinner is
-            // suppressed — so #823's pull-to-reconnect is preserved, and the box
-            // spinner returns as the SOLE affordance once the surface settles
-            // into a steady non-loader state (no centered "Attaching…").
-            val surfaceShowsCenteredLoader = effectiveHidesTerminal
+            // Issue #750 (3rd occurrence) / #1322 (screenshot B): the surface
+            // content paints the centered loader in TWO shapes — the "Attaching…"
+            // [SwitchingLoadingPlaceholder] while the terminal is held, and the
+            // "waiting for tmux panes…" [EmptyPanesPlaceholder] ring when the reveal
+            // is live but no panes have arrived yet. EITHER is the SOLE indicator for
+            // its state, so the pull-to-reconnect wrapper below must NOT also run its
+            // own [PullToRefreshBox] spinner on top of it (the maintainer's reported
+            // cyan ring + gray spinner-in-a-chip). The pull GESTURE stays mounted —
+            // only the duplicate box spinner is suppressed — so #823's
+            // pull-to-reconnect is preserved. [surfaceShowsCenteredLoader] is
+            // computed once at the top of the screen (broadened for #1322 to cover
+            // the waiting-for-panes ring, and false for the calm failure placeholder
+            // which carries no spinner).
             // The surface content (terminal pager / conversation / placeholders)
             // is captured once so it can render either inside the pull-to-reconnect
             // wrapper (not live) or bare (live) without duplicating the tree.
@@ -2033,7 +2076,18 @@ public fun TmuxSessionScreen(
                 // `!= null` guards below are for the compiler's smart-cast).
                 val visibleConversation =
                     surfaceConversationPaneId?.let { agentConversationsState.value[it] }
-                if (effectiveHidesTerminal) {
+                if (surfaceCalmFailure) {
+                    // Issue #1322: the terminal is held AND the connection has
+                    // SETTLED into a failure — a HARD reveal failure (target Gone, or
+                    // an Error whose retry is exhausted) OR a [ConnectionStatus.Failed]
+                    // status. Painting the centered "Attaching…" spinner over a dead
+                    // session is the #1321/#1320-screenshot-A desync (a spinner that
+                    // will never resolve, contradicting the "Disconnected" pill and
+                    // the "Tap to reconnect" band). Render the calm failed placeholder
+                    // instead — NO spinner — so the surface AGREES with the pill and
+                    // the single [FailedConnectionRow] band above.
+                    RevealFailurePlaceholder()
+                } else if (effectiveHidesTerminal) {
                     // Issue #661 / EPIC #687 P1: a cross-session switch is in flight —
                     // never paint the leaving session's terminal (or its agent
                     // conversation). Show a compact "Attaching" loading state until
@@ -2267,23 +2321,26 @@ public fun TmuxSessionScreen(
                     onReconnect = { viewModel.reconnect() },
                     // Issue #750: suppress the box's own spinner while the surface
                     // already shows the centered "Attaching…" hold — one indicator.
-                    surfaceShowsCenteredLoader = surfaceShowsCenteredLoader,
+                    surfaceShowsCenteredLoader = surfaceCenteredLoader,
                     // Issue #890: the visible "Reconnect" button shows ONLY once the
-                    // connect/attach has SETTLED into a failed/dropped/stuck state —
-                    // never WHILE a connect/reconnect/attach is in progress (the
+                    // connect/attach has SETTLED into a dropped/stuck state — never
+                    // WHILE a connect/reconnect/attach is in progress (the
                     // maintainer's "no reconnect button while I'm connecting"). The
                     // in-progress states (`Connecting` / `Switching`(=Attaching) /
                     // `Reconnecting`) already drive the progress bar + "Attaching…/
-                    // Reconnecting…" indicator, so the system is plainly already
-                    // trying; the button would be redundant chrome. We show it on
-                    // the remaining non-Connected states — `Failed` (honest error)
-                    // and `Idle` (dropped/never-attached, with a `canReconnect`
-                    // target) — exactly where a manual retry is meaningful. (This
-                    // stays compatible with #886's planned `RevealState.Error`
-                    // stuck-attach band, which projects to `Failed` here.)
-                    showReconnectButton = status !is ConnectionStatus.Connecting &&
-                        status !is ConnectionStatus.Switching &&
-                        status !is ConnectionStatus.Reconnecting,
+                    // Reconnecting…" indicator, so the button would be redundant.
+                    //
+                    // Issue #1322 (screenshot A): the button is ALSO suppressed on a
+                    // `Failed` status, because the calm [FailedConnectionRow] "Tap to
+                    // reconnect" band (rendered above when the status is `Failed`)
+                    // already offers the SINGLE reconnect affordance. Showing both the
+                    // band link AND this bottom button is the "TWO reconnect controls
+                    // at once" duplicate the maintainer reported (a regression of
+                    // #720's single tappable "Tap to reconnect"). This leaves the
+                    // bottom button as the SOLE affordance ONLY on the remaining
+                    // `Idle` (dropped/never-attached, with a `canReconnect` target)
+                    // state, which has no band.
+                    showReconnectButton = surfaceReconnectButtonVisible(status),
                     content = surfaceContent,
                 )
             }
@@ -4239,7 +4296,19 @@ internal enum class PrimaryLoadingSurface {
 internal fun primaryLoadingSurface(
     status: ConnectionStatus,
     effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean = false,
 ): PrimaryLoadingSurface = when {
+    // Issue #1322: a HARD reveal failure (target Gone, or an Error whose retry is
+    // exhausted) is NOT a loading state. It must render DISTINCTLY from the
+    // "Attaching…" hold — never a spinner over a dead session, and never a top
+    // connecting/reconnecting banner. The surface paints the calm failed
+    // placeholder and the pill + "Tap to reconnect" [FailedConnectionRow] band own
+    // this state, so all three agree (killing the #1321 "Disconnected pill +
+    // Attaching spinner + raw exception" contradiction). This wins over the
+    // terminal-held branch below because [effectiveHidesTerminal] is ALSO true for
+    // a hard failure (the reveal is not Live) — which is exactly what used to
+    // collapse the honest error into "Attaching…".
+    revealHardFailure -> PrimaryLoadingSurface.None
     // The terminal is held → the surface paints the centered "Attaching…" hold,
     // which is the canonical SOLE loader. Both top banners are suppressed so the
     // maintainer never sees the top connecting banner AND the centered spinner at
@@ -4249,6 +4318,108 @@ internal fun primaryLoadingSurface(
     status is ConnectionStatus.Reconnecting -> PrimaryLoadingSurface.ReconnectingBand
     else -> PrimaryLoadingSurface.None
 }
+
+/**
+ * Issue #1322: whether the id-keyed [RevealState] is a HARD reveal failure that
+ * must render DISTINCTLY from the "Attaching…"/Seeding hold.
+ *
+ * The #1321 screenshot showed the honest failure state ([RevealState.Error] after
+ * a past-grace transport drop) painted as the centered "Attaching…" spinner,
+ * because [effectiveHidesTerminal] special-cased ONLY [RevealState.Live] — every
+ * other reveal, including a dead-session error, collapsed to the same loading
+ * hold. That desynced the surface from the "Disconnected" pill and the "Tap to
+ * reconnect" band.
+ *
+ *  - [RevealState.Gone] — the target session was deleted elsewhere (#666). There
+ *    is nothing to attach to; a spinner would lie.
+ *  - [RevealState.Error] with `retrying == false` — the control channel dropped
+ *    and retry is EXHAUSTED (the honest error per the [RevealState.Error] doc).
+ *    This is the maintainer's exact reported state.
+ *
+ * [RevealState.Error] while `retrying == true` is the calm healing/"reconnecting"
+ * window — NOT a hard failure — so it keeps its reconnecting hold and is excluded
+ * here. Pure so it is a unit-testable predicate (G9).
+ */
+internal fun revealIsHardFailure(revealState: RevealState): Boolean = when (revealState) {
+    is RevealState.Gone -> true
+    is RevealState.Error -> !revealState.retrying
+    else -> false
+}
+
+/**
+ * Issue #1322 (screenshots A/B): whether the session surface paints the CALM
+ * FAILURE placeholder ([RevealFailurePlaceholder]) in place of the terminal.
+ *
+ * True when the terminal is held ([effectiveHidesTerminal]) AND the connection has
+ * SETTLED into a failure — a hard reveal failure ([revealHardFailure]) OR a
+ * [ConnectionStatus.Failed] status. The placeholder carries NO spinner, so the
+ * "Attaching…" hold is never painted over a dead session (killing the #1321
+ * "Disconnected pill + Attaching spinner" contradiction and screenshot A's
+ * spinner-over-Disconnected). Pure so it is unit-testable (G9).
+ */
+internal fun surfaceShowsCalmFailure(
+    effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean,
+    status: ConnectionStatus,
+): Boolean =
+    effectiveHidesTerminal && (revealHardFailure || status is ConnectionStatus.Failed)
+
+/**
+ * Issue #750 / #1322 (screenshot B): whether the session surface paints a centered
+ * LOADER spinner — the "Attaching…" [SwitchingLoadingPlaceholder] hold (terminal
+ * held) OR the "waiting for tmux panes…" [EmptyPanesPlaceholder] ring (reveal live
+ * but no panes yet, [panesEmpty]).
+ *
+ * A settled failure ([surfaceShowsCalmFailure]) is NOT a loader (no spinner). This
+ * is the SOLE loader for its state, so the top connecting/reconnecting banner and
+ * the pull box spinner must both be suppressed — the fix for the Reconnecting
+ * 2-3-spinner stack (top bar + waiting ring + gray chip). Pure (G9).
+ */
+internal fun surfaceShowsCenteredLoader(
+    effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean,
+    status: ConnectionStatus,
+    panesEmpty: Boolean,
+): Boolean =
+    !surfaceShowsCalmFailure(effectiveHidesTerminal, revealHardFailure, status) &&
+        (effectiveHidesTerminal || panesEmpty)
+
+/**
+ * Issue #1322: the single "the surface owns the primary indicator, so the top
+ * banner + pull box spinner are the redundant duplicates" gate. True whenever the
+ * surface paints either a centered loader OR the calm failure placeholder; false
+ * only in the live-frame-kept Connecting/Reconnecting edge (surface shows a live
+ * terminal), where the top banner is the SOLE indicator. Pure (G9).
+ */
+internal fun surfaceOwnsPrimaryIndicator(
+    effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean,
+    status: ConnectionStatus,
+    panesEmpty: Boolean,
+): Boolean =
+    surfaceShowsCalmFailure(effectiveHidesTerminal, revealHardFailure, status) ||
+        surfaceShowsCenteredLoader(effectiveHidesTerminal, revealHardFailure, status, panesEmpty)
+
+/**
+ * Issue #890 / #1322 (screenshot A): whether the VISIBLE bottom "Reconnect" button
+ * ([SessionSurfaceReconnectWrapper]) is shown for this status.
+ *
+ *  - #890: hidden WHILE a connect/attach/reconnect is in progress
+ *    (`Connecting`/`Switching`/`Reconnecting`) — the progress indicator already
+ *    shows the system is trying, so the button would be redundant chrome.
+ *  - #1322: ALSO hidden on `Failed` — the calm [FailedConnectionRow] "Tap to
+ *    reconnect" band already offers the SINGLE reconnect affordance for that
+ *    state, so showing this button too is the "TWO reconnect controls at once"
+ *    duplicate (a regression of #720's single tappable "Tap to reconnect").
+ *
+ * It therefore renders as the SOLE affordance only on the remaining `Idle`
+ * (dropped/never-attached) state, which has no band. Pure (G9).
+ */
+internal fun surfaceReconnectButtonVisible(status: ConnectionStatus): Boolean =
+    status !is ConnectionStatus.Connecting &&
+        status !is ConnectionStatus.Switching &&
+        status !is ConnectionStatus.Reconnecting &&
+        status !is ConnectionStatus.Failed
 
 /**
  * Issue #750: the single-indicator gate for the top under-header
@@ -4263,8 +4434,10 @@ internal fun primaryLoadingSurface(
 internal fun shouldShowConnectingProgressOverlay(
     status: ConnectionStatus,
     effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean = false,
 ): Boolean =
-    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ConnectingBanner
+    primaryLoadingSurface(status, effectiveHidesTerminal, revealHardFailure) ==
+        PrimaryLoadingSurface.ConnectingBanner
 
 /**
  * Issue #750: the single-indicator gate for the top under-header
@@ -4289,8 +4462,10 @@ internal fun shouldShowConnectingProgressOverlay(
 internal fun shouldShowReconnectingProgressRow(
     status: ConnectionStatus,
     effectiveHidesTerminal: Boolean,
+    revealHardFailure: Boolean = false,
 ): Boolean =
-    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ReconnectingBand
+    primaryLoadingSurface(status, effectiveHidesTerminal, revealHardFailure) ==
+        PrimaryLoadingSurface.ReconnectingBand
 
 /**
  * Issue #463: the short leaf label for the header project crumb, derived
@@ -4864,6 +5039,14 @@ internal const val TMUX_RECONNECTING_RETRY_NOW_TAG = "tmux:session:reconnecting:
 // content is never painted while the new session attaches.
 internal const val TMUX_SWITCHING_LOADING_TAG = "tmux:session:switching-loading"
 
+// Issue #1322: the full-surface CALM failed placeholder shown in place of the
+// terminal on a HARD reveal failure (target Gone / retry-exhausted Error). It
+// renders DISTINCTLY from the "Attaching…" hold — no spinner over a dead session
+// — so the surface agrees with the "Disconnected" pill and the "Tap to
+// reconnect" [FailedConnectionRow] band. The test tag lets the #1321 regression
+// test assert the surface resolved to this state, not the Attaching spinner.
+internal const val TMUX_REVEAL_FAILURE_TAG = "tmux:session:reveal-failure"
+
 /**
  * Issue #165: timings for the SSH-handshake progress overlay. A
  * 2-5s handshake is the common case the audit flagged as "feels
@@ -4950,6 +5133,10 @@ private fun StatusLine(text: String) {
 @Composable
 internal fun TmuxTopConnectingBanner(
     status: ConnectionStatus,
+    // Issue #1322: the caller passes the broadened "surface owns the primary
+    // indicator" gate here — true for the "Attaching…" hold, the "waiting for tmux
+    // panes…" ring, AND the calm failure placeholder — so the top banner is
+    // suppressed in ALL of them (never stacked over a surface loader/failure).
     effectiveHidesTerminal: Boolean,
     sessionName: String,
     onCancelConnect: () -> Unit,
@@ -5429,6 +5616,45 @@ internal fun SwitchingLoadingPlaceholder() {
         LoadingIndicator.Spinner(
             size = SpinnerSize.Medium,
             label = "Attaching…",
+        )
+    }
+}
+
+/**
+ * Issue #1322: the full-surface CALM failed placeholder shown in place of the
+ * terminal when the id-keyed reveal is a HARD failure ([revealIsHardFailure] —
+ * target [RevealState.Gone], or a retry-exhausted [RevealState.Error]).
+ *
+ * The #1321 screenshot showed the honest failure state painted as the centered
+ * "Attaching…" spinner because [effectiveHidesTerminal] special-cased ONLY
+ * [RevealState.Live] (every other reveal collapsed to the same loading hold). A
+ * spinner over a dead session is a lie — it will never resolve — and it desynced
+ * the surface from the "Disconnected" pill and the "Tap to reconnect" band.
+ *
+ * This placeholder renders DISTINCTLY from [SwitchingLoadingPlaceholder]: NO
+ * spinner, a calm muted line that points at the tappable [FailedConnectionRow]
+ * band above. The surface, the pill, and the error band now agree for the failure
+ * state. Deliberately does not itself carry a Reconnect button — the
+ * [FailedConnectionRow] band (rendered above when the status is `Failed`) owns the
+ * single, calm reconnect affordance.
+ */
+@Composable
+internal fun RevealFailurePlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(color = PocketShellColors.Background)
+            .testTag(TMUX_REVEAL_FAILURE_TAG),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            // #720/#1322: a calm, honest prompt — the muted secondary token, NOT the
+            // alarming error band and NOT a spinner. The recovery affordance is the
+            // "Tap to reconnect" band above.
+            text = "Disconnected — tap to reconnect above.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 14.sp,
+            modifier = Modifier.padding(horizontal = 24.dp),
         )
     }
 }

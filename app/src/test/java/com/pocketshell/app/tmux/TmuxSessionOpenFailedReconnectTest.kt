@@ -130,10 +130,14 @@ class TmuxSessionOpenFailedReconnectTest {
             "first connect should surface the open-failed error, got $failed",
             failed is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
-        assertTrue(
-            "the failure message should reflect the open-failed cause, was " +
+        // Issue #1322: the user-facing failure message is now the CURATED calm
+        // prompt, NEVER the raw `error: TmuxClientException: ... open failed` text.
+        // (The recovery behaviour below is what this test actually pins.)
+        assertEquals(
+            "the failure message must be the curated calm prompt, was " +
                 (failed as TmuxSessionViewModel.ConnectionStatus.Failed).message,
-            failed.message.contains("open failed"),
+            "Connection lost. Tap Reconnect to retry.",
+            failed.message,
         )
         assertEquals("only the poisoned transport should have been opened so far", 1, connector.connectCount)
         assertTrue("Reconnect must remain available after an open-failed error", vm.canReconnect.value)
@@ -201,6 +205,11 @@ class TmuxSessionOpenFailedReconnectTest {
             "first connect should surface the command timeout, got $failed",
             failed is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
+        // NOTE (#1322): a command timeout during pane-reconcile is wrapped in
+        // [TmuxAttachPanesReadyException] — the already-curated branch of
+        // `connectFailureMessage`, unchanged by #1322 (which curated only the GENERAL
+        // else-branch). Its message stays the descriptive "Failed waiting for tmux
+        // panes … Tap Reconnect to retry." (no raw `error: <Class>:` prefix).
         assertTrue(
             "the failure message should reflect the timeout cause, was " +
                 (failed as TmuxSessionViewModel.ConnectionStatus.Failed).message,
@@ -267,6 +276,10 @@ class TmuxSessionOpenFailedReconnectTest {
             "first connect should surface the list-panes EOF write, got $failed",
             failed is TmuxSessionViewModel.ConnectionStatus.Failed,
         )
+        // NOTE (#1322): a list-panes EOF write during pane-reconcile is wrapped in
+        // [TmuxAttachPanesReadyException] — the already-curated branch, unchanged by
+        // #1322. Its message stays the descriptive "Failed waiting for tmux panes …
+        // Tap Reconnect to retry." (no raw `error: <Class>:` prefix).
         assertTrue(
             "the failure message should mention EOF, was " +
                 (failed as TmuxSessionViewModel.ConnectionStatus.Failed).message,

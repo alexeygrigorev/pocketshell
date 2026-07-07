@@ -269,50 +269,6 @@ class ConnectionControllerTest {
         assertEquals(ConnectionState.Unreachable(host, a), controller.state.value)
     }
 
-    // --- The state -> indicator mapping -----------------------------------
-
-    @Test
-    fun `state maps one-to-one to the header indicator`() {
-        assertEquals(ConnectionIndicator.Idle, ConnectionState.Idle.toIndicator())
-        assertEquals(ConnectionIndicator.Connecting, ConnectionState.Connecting(host, a).toIndicator())
-        assertEquals(ConnectionIndicator.Attaching, ConnectionState.Attaching(host, a).toIndicator())
-        assertEquals(ConnectionIndicator.Connected, ConnectionState.Live(host, a).toIndicator())
-        assertEquals(
-            ConnectionIndicator.Backgrounded,
-            ConnectionState.Backgrounded(host, a, sinceMs = 0L).toIndicator(),
-        )
-        // Both silent-recovery states show the same CALM reconnecting indicator,
-        // never a scary "Tap Reconnect" band.
-        assertEquals(ConnectionIndicator.Reconnecting, ConnectionState.Reattaching(host, a).toIndicator())
-        assertEquals(
-            ConnectionIndicator.Reconnecting,
-            ConnectionState.Reconnecting(host, a, attempt = 3).toIndicator(),
-        )
-        assertEquals(ConnectionIndicator.Gone, ConnectionState.Gone(host, a).toIndicator())
-        assertEquals(ConnectionIndicator.Unreachable, ConnectionState.Unreachable(host, a).toIndicator())
-    }
-
-    @Test
-    fun `indicator tracks the controller state through a full lifecycle`() {
-        val clock = FakeClock()
-        val transport = FakeTransportPort()
-        val controller = controller(clock, transport)
-        transport.setWarm(host, false)
-
-        controller.submit(ConnectionEvent.Enter(host, a))
-        assertEquals(ConnectionIndicator.Connecting, controller.state.value.toIndicator())
-        controller.submit(ConnectionEvent.TransportLive)
-        assertEquals(ConnectionIndicator.Attaching, controller.state.value.toIndicator())
-        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
-        assertEquals(ConnectionIndicator.Connected, controller.state.value.toIndicator())
-
-        controller.submit(ConnectionEvent.Background)
-        assertEquals(ConnectionIndicator.Backgrounded, controller.state.value.toIndicator())
-        clock.advanceBy(60_001L)
-        controller.submit(ConnectionEvent.Foreground)
-        assertEquals(ConnectionIndicator.Reconnecting, controller.state.value.toIndicator())
-    }
-
     // --- Reveal gate ------------------------------------------------------
 
     @Test

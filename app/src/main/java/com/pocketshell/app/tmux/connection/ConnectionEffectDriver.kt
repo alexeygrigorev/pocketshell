@@ -75,9 +75,9 @@ import kotlinx.coroutines.launch
  * via `projectStatusFromController()`.
  *
  * ## What is STILL observe-only (this slice)
- * Every OTHER effect remains inline. The driver calls **ZERO port IO** — it never
- * invokes [TransportPort.ensureLease], [TransportPort.evictStale], [TmuxPort.attach],
- * [TmuxPort.selectWindow], [TmuxPort.seedActivePane], or [TmuxPort.detachCleanly]. The
+ * Every OTHER effect remains inline. The driver calls **ZERO port IO** — the ports
+ * expose only the observed signals ([TransportPort.transportEvents] / [TransportPort.isWarm]
+ * and [TmuxPort.disconnected]); there is no control-IO surface on them. The
  * OPEN path (`runConnect`/`connectJob`), the switch path, the generation counter, and
  * the cold/warm projection read stay inline (deferred to a later slice). The only
  * controller submissions are the two transport events above; the detach effect is

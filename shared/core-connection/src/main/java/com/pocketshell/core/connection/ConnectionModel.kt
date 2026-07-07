@@ -18,7 +18,7 @@ package com.pocketshell.core.connection
  * The host a connection lives on. Opaque identity — the VM will mint this from
  * the existing `ConnectionTarget` host coordinates (hostId/host/port/user). The
  * lease + control channel are warm per host, so the host key is what the
- * [TransportPort.isWarm] / [TransportPort.ensureLease] calls key on.
+ * [TransportPort.isWarm] predicate keys on.
  */
 data class HostKey(val value: String)
 

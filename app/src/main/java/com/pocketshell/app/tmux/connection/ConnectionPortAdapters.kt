@@ -3,8 +3,6 @@ package com.pocketshell.app.tmux.connection
 import android.os.SystemClock
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.LeaseHandle
-import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
@@ -86,14 +84,6 @@ class SshLeaseTransportPort(
     private val leaseKeyFor: (HostKey) -> SshLeaseTarget,
 ) : TransportPort {
 
-    override suspend fun ensureLease(host: HostKey): LeaseHandle {
-        // Coalesces onto the #620 in-flight connect — never a second handshake.
-        leaseManager.acquire(leaseKeyFor(host)).getOrThrow()
-        return object : LeaseHandle {
-            override val host: HostKey = host
-        }
-    }
-
     /**
      * The warm-lease predicate the single 60s grace check ANDs against. The
      * controller calls this synchronously from its reducer, so this is a
@@ -109,12 +99,6 @@ class SshLeaseTransportPort(
      *  the VM already maintains off [SshLeaseManager.stateEvents]). Defaults to
      *  "not warm" until the VM wires it in 1c-ii. */
     var warmSnapshot: (HostKey) -> Boolean = { false }
-
-    override suspend fun evictStale(host: HostKey) {
-        // #680 evict-and-retry-once: close the poisoned warm lease so the next
-        // ensureLease dials fresh.
-        leaseManager.evictIdle(leaseKeyFor(host).leaseKey)
-    }
 
     /**
      * Maps the pinned [SshLeaseManager.stateEvents] to the controller's
@@ -186,17 +170,15 @@ internal const val KEEPALIVE_DEAD_REASON: String = "keepalive_dead"
  * reflects whichever client is currently attached — the REAL transport-drop signal
  * the [ConnectionEffectDriver] observes, not a stub `emptyFlow`.
  *
- * The control IO methods ([attach]/[selectWindow]/[seedActivePane]/[detachCleanly])
- * delegate to the current client so this is a faithful real port — but in this
- * OBSERVE-ONLY slice the driver never invokes them (it only collects [disconnected]).
- * They exist so a later sub-slice can let the driver ACT against the same seam with
- * no re-wiring. When no client is attached, [disconnected] reports the idle "true"
- * (no live channel) and the IO methods throw — the driver never reaches them.
+ * This is an OBSERVE-ONLY port: it exposes the [disconnected] drop oracle (and the
+ * typed [disconnectedClients] stream) the driver collects; it performs NO control IO.
  *
- * @param activePaneIdFor resolves a [SessionId] to the active pane id to capture
- *   (the VM owns the session→pane mapping). Only consulted by [seedActivePane].
- * @param scrollbackLines capture depth for the seed (matches the VM's reseed).
+ * @param activePaneIdFor resolves a [SessionId] to the active pane id (the VM owns the
+ *   session→pane mapping). Retained on the VM-owned constructor call site; not read here.
+ * @param scrollbackLines capture depth. Retained on the VM-owned constructor call site;
+ *   not read here.
  */
+@Suppress("unused") // activePaneIdFor/scrollbackLines: VM-owned constructor call site.
 @OptIn(ExperimentalCoroutinesApi::class)
 class CurrentClientTmuxPort(
     private val activePaneIdFor: (SessionId) -> String,
@@ -209,30 +191,6 @@ class CurrentClientTmuxPort(
      *  `attachClient`, so [disconnected] follows the live channel. */
     fun setClient(client: TmuxClient?) {
         currentClient.update { client }
-    }
-
-    private fun requireClient(): TmuxClient =
-        currentClient.value
-            ?: error("CurrentClientTmuxPort IO with no attached client (observe-only slice)")
-
-    override suspend fun attach(targetId: SessionId) {
-        requireClient().connect()
-    }
-
-    override suspend fun selectWindow(targetId: SessionId) {
-        requireClient().sendCommand("select-window -t ${targetId.value}")
-    }
-
-    override suspend fun seedActivePane(targetId: SessionId): Seed {
-        val paneId = activePaneIdFor(targetId)
-        val capture =
-            requireClient().captureWithCursor(paneId = paneId, scrollbackLines = scrollbackLines)
-        val frame = capture.capture.output.joinToString("\n")
-        return Seed(targetId = targetId, paneId = paneId, frame = frame)
-    }
-
-    override suspend fun detachCleanly() {
-        requireClient().detachCleanly()
     }
 
     /**

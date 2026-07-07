@@ -148,8 +148,7 @@ internal object ConnectionStatusProjection {
                 // already a curated, user-facing string — never raw
                 // `TransportException`/SSH text); the CALM, tappable "Tap to reconnect"
                 // affordance + the dropped "Open the session again" instruction live in
-                // the screen band ([FailedConnectionRow]) and the calm
-                // [ConnectionIndicator.Unreachable] indicator. "Failed only after retries
+                // the screen band ([FailedConnectionRow]). "Failed only after retries
                 // truly exhaust" tracks the INLINE ladder (see [terminalOrInlineStatus]).
                 terminalOrInlineStatus(inlineStatus, hpu)
         }

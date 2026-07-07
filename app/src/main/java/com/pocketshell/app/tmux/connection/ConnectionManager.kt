@@ -3,16 +3,12 @@ package com.pocketshell.app.tmux.connection
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
-import com.pocketshell.core.connection.ConnectionIndicator
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.LeaseHandle
 import com.pocketshell.core.connection.SessionId
-import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
 import com.pocketshell.core.connection.targetIdOrNull
-import com.pocketshell.core.connection.toIndicator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -98,10 +94,6 @@ class ConnectionManager(
     /** The controller's current state as a flow — for the reveal machine / liveness gate. */
     val stateFlow: StateFlow<ConnectionState>
         get() = controller.state
-
-    /** The controller's header indicator (the V7 "indicator == current state" contract). */
-    val indicator: ConnectionIndicator
-        get() = controller.state.value.toIndicator()
 
     /**
      * The view-facing status NAME the equivalence tests compare against the inline
@@ -247,20 +239,13 @@ class ConnectionManager(
     /**
      * A minimal TEST-DOUBLE [TransportPort] for the equivalence suite. The controller only
      * consults [isWarm] synchronously; the facade feeds every transport EVENT explicitly, so
-     * [transportEvents] is empty and the suspend IO methods are inert. PRODUCTION never uses
-     * this — the VM injects the real [SshLeaseTransportPort].
+     * [transportEvents] is empty. PRODUCTION never uses this — the VM injects the real
+     * [SshLeaseTransportPort].
      */
     private class WarmSnapshotTransportPort(
         private val warmSnapshot: (HostKey) -> Boolean,
     ) : TransportPort {
-        override suspend fun ensureLease(host: HostKey): LeaseHandle =
-            object : LeaseHandle {
-                override val host: HostKey = host
-            }
-
         override fun isWarm(host: HostKey): Boolean = warmSnapshot(host)
-
-        override suspend fun evictStale(host: HostKey) = Unit
 
         override val transportEvents: Flow<TransportUpDown> = emptyFlow()
     }

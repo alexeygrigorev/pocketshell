@@ -6,8 +6,6 @@ import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.LeaseHandle
-import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
@@ -88,26 +86,18 @@ class ConnectionEffectDriverTest {
     private val sessionB = SessionId("7/build")
 
     /**
-     * A [TmuxPort] whose IO methods all FAIL the test if invoked (the inert
-     * contract). Only [disconnected] is a real flow the driver collects.
+     * A [TmuxPort] exposing only the [disconnected] oracle the driver collects
+     * (the port has no control-IO surface).
      */
     private class InertTmuxPort : TmuxPort {
         val disconnectedFlow = MutableSharedFlow<Boolean>(extraBufferCapacity = 16)
         override val disconnected: Flow<Boolean> = disconnectedFlow
-
-        override suspend fun attach(targetId: SessionId) = fail("attach")
-        override suspend fun selectWindow(targetId: SessionId) = fail("selectWindow")
-        override suspend fun seedActivePane(targetId: SessionId): Seed = fail("seedActivePane")
-        override suspend fun detachCleanly() = fail("detachCleanly")
-
-        private fun fail(method: String): Nothing =
-            throw AssertionError("inert driver must NOT call TmuxPort.$method")
     }
 
     /**
-     * A [TransportPort] whose IO methods all FAIL the test if invoked. [isWarm] is
-     * a pure synchronous snapshot the controller's reducer consults (NOT driver IO),
-     * so it is allowed. Only [transportEvents] is a real flow the driver collects.
+     * A [TransportPort] exposing only the observed inputs. [isWarm] is a pure
+     * synchronous snapshot the controller's reducer consults; [transportEvents] is
+     * the real flow the driver collects.
      */
     private class InertTransportPort(private val warm: Boolean) : TransportPort {
         val transportEventsFlow = MutableSharedFlow<TransportUpDown>(extraBufferCapacity = 16)
@@ -115,12 +105,6 @@ class ConnectionEffectDriverTest {
 
         // Consulted synchronously by the controller's reducer (NOT by the driver).
         override fun isWarm(host: HostKey): Boolean = warm
-
-        override suspend fun ensureLease(host: HostKey): LeaseHandle = fail("ensureLease")
-        override suspend fun evictStale(host: HostKey) = fail("evictStale")
-
-        private fun fail(method: String): Nothing =
-            throw AssertionError("inert driver must NOT call TransportPort.$method")
     }
 
     /** One harness: a controller + inert ports + a started inert driver. */
@@ -1057,10 +1041,9 @@ class ConnectionEffectDriverTest {
 
     @Test
     fun callsZeroPortIo_acrossFullLifecycle() = runTest {
-        // The InertTmuxPort / InertTransportPort throw AssertionError on ANY IO
-        // method; driving a full lifecycle through them with the driver collecting
-        // proves the inert contract: no ensureLease/attach/selectWindow/seed/detach/
-        // evictStale is ever called by the driver.
+        // The ports expose ONLY the observed signals (disconnected / transportEvents /
+        // isWarm) — there is no control-IO surface to call. Driving a full lifecycle
+        // through the driver with those inert ports proves it observes without error.
         val scope = driverScope()
         val h = Harness(scope, TestClock(), warm = true)
 

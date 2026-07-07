@@ -3,12 +3,10 @@ package com.pocketshell.app.tmux.connection
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.LeaseHandle
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
 import com.pocketshell.core.connection.TransportUpDown
-import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.ssh.SshLeaseKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -68,29 +66,18 @@ class ConnectionManagerEquivalenceTest {
     /**
      * A [TransportPort] test double with an injectable [isWarm] snapshot (the
      * controller's grace predicate consults it synchronously) AND an emittable
-     * [transportEvents] flow the driver collects. The suspend IO methods FAIL the
-     * test if invoked — the driver/controller never call them in this slice.
+     * [transportEvents] flow the driver collects.
      */
     private class FakeTransportPort(private val warm: (HostKey) -> Boolean) : TransportPort {
         val transportEventsFlow = MutableSharedFlow<TransportUpDown>(extraBufferCapacity = 32)
         override val transportEvents: Flow<TransportUpDown> = transportEventsFlow
         override fun isWarm(host: HostKey): Boolean = warm(host)
-        override suspend fun ensureLease(host: HostKey): LeaseHandle = fail("ensureLease")
-        override suspend fun evictStale(host: HostKey) = fail("evictStale")
-        private fun fail(method: String): Nothing =
-            throw AssertionError("equivalence harness must NOT call TransportPort.$method")
     }
 
     /** A [TmuxPort] test double whose [disconnected] oracle the driver collects. */
     private class FakeTmuxPort : TmuxPort {
         val disconnectedFlow = MutableSharedFlow<Boolean>(extraBufferCapacity = 32)
         override val disconnected: Flow<Boolean> = disconnectedFlow
-        override suspend fun attach(targetId: SessionId) = fail("attach")
-        override suspend fun selectWindow(targetId: SessionId) = fail("selectWindow")
-        override suspend fun seedActivePane(targetId: SessionId): Seed = fail("seedActivePane")
-        override suspend fun detachCleanly() = fail("detachCleanly")
-        private fun fail(method: String): Nothing =
-            throw AssertionError("equivalence harness must NOT call TmuxPort.$method")
     }
 
     /**

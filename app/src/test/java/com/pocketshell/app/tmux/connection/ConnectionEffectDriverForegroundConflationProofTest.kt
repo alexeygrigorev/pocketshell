@@ -4,8 +4,6 @@ import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.LeaseHandle
-import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TmuxPort
 import com.pocketshell.core.connection.TransportPort
@@ -82,22 +80,12 @@ class ConnectionEffectDriverForegroundConflationProofTest {
     private class InertTmuxPort : TmuxPort {
         val disconnectedFlow = MutableSharedFlow<Boolean>(extraBufferCapacity = 16)
         override val disconnected: Flow<Boolean> = disconnectedFlow
-        override suspend fun attach(targetId: SessionId) = fail("attach")
-        override suspend fun selectWindow(targetId: SessionId) = fail("selectWindow")
-        override suspend fun seedActivePane(targetId: SessionId): Seed = fail("seedActivePane")
-        override suspend fun detachCleanly() = fail("detachCleanly")
-        private fun fail(method: String): Nothing =
-            throw AssertionError("inert driver must NOT call TmuxPort.$method")
     }
 
     private class InertTransportPort(private val warm: Boolean) : TransportPort {
         val transportEventsFlow = MutableSharedFlow<TransportUpDown>(extraBufferCapacity = 16)
         override val transportEvents: Flow<TransportUpDown> = transportEventsFlow
         override fun isWarm(host: HostKey): Boolean = warm
-        override suspend fun ensureLease(host: HostKey): LeaseHandle = fail("ensureLease")
-        override suspend fun evictStale(host: HostKey) = fail("evictStale")
-        private fun fail(method: String): Nothing =
-            throw AssertionError("inert driver must NOT call TransportPort.$method")
     }
 
     /**

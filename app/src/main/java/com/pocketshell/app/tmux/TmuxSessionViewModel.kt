@@ -10732,8 +10732,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     // are all PRE-capture (already reflected server-side in the
                     // snapshot), so DROP them before the resume so they cannot
                     // double-apply on top of the fresh grid.
+                    // Issue #1305: use the AUTHORITATIVE post-capture drain so it
+                    // also discards the frame parked in the drain loop's local at
+                    // the pause boundary (not reachable by the channel drain). The
+                    // pre-capture drain in step 2 must NOT arm that discard, so on
+                    // a capture FAILURE (no reseed → this branch is skipped) the
+                    // parked frame still REPLAYS on resume (the #1297 guarantee).
                     drainedFrames +=
-                        runCatching { client.drainPaneOutputBacklog(paneId) }.getOrDefault(0)
+                        runCatching { client.drainPaneOutputBacklogAfterCapture(paneId) }.getOrDefault(0)
                 }
                 // 5. If no snapshot ever landed (all retries near-blank/errored),
                 //    still OPEN the gate so buffered live output is flushed rather

@@ -6757,86 +6757,92 @@ internal fun ConsolidatedTopChrome(
         )
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Issue #463: the tappable project/folder crumb. Opens a dropdown of
-        // this project's sibling sessions; selecting one warm-switches to it.
-        // Hidden entirely when we don't know the project; the chevron is
-        // hidden when there's nothing to switch to (single-session project).
-        if (projectLabel != null) {
-            ProjectSwitcherCrumb(
-                projectLabel = projectLabel,
-                switcher = projectSwitcher,
-                onOpen = onProjectSwitcherOpen,
-                onSwitchToSibling = onSwitchToSibling,
+        // Issue #1320: the LEADING yielding region — the ONLY part of the
+        // header that gives up width under pressure. It holds the project
+        // crumb, the title, and the connection-status pill, all wrapped in a
+        // single `weight(1f)` slot. Everything to its right (the
+        // Terminal/Conversation toggle and the kebab) is a NON-weighted sibling
+        // measured at its full intrinsic width FIRST, so the toggle can never be
+        // squeezed/clipped — it is a primary control and must always be fully
+        // visible + tappable.
+        //
+        // Why this shape (the 5×-recurrence root cause #962/#975/#1057/#1158):
+        // the toggle used to live INSIDE a `weight(1f, fill = false)` trailing
+        // slot that competed with the title's own `weight(1f)`. Two `weight(1f)`
+        // slots split the remaining width, so a long agent/session title (e.g.
+        // "pocketshell Claude Code") starved the toggle's slot and its
+        // "Conversation" segment ellipsised away — leaving only "Terminal" and
+        // no way to switch to the conversation view. Pulling the toggle OUT of
+        // the weighted slot and reserving it at intrinsic width fixes the clip
+        // at the layout level (not by adding another detection OR-term — the
+        // detection gate was never the cause of this report).
+        //
+        // Within this region the yield order is: the title (its own
+        // `weight(1f)` + ellipsis) shrinks FIRST; the crumb (capped ≤120dp,
+        // ellipsis) and the connection-status pill only clip under extreme
+        // pressure — both are acceptable to shrink, the toggle is not.
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Issue #463: the tappable project/folder crumb. Opens a dropdown
+            // of this project's sibling sessions; selecting one warm-switches
+            // to it. Hidden entirely when we don't know the project; the
+            // chevron is hidden when there's nothing to switch to.
+            if (projectLabel != null) {
+                ProjectSwitcherCrumb(
+                    projectLabel = projectLabel,
+                    switcher = projectSwitcher,
+                    onOpen = onProjectSwitcherOpen,
+                    onSwitchToSibling = onSwitchToSibling,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+
+            // Issue #481: the title — the agent/model name when a conversation
+            // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
+            // tmux session name. It takes the inner `weight(1f)` slot so it is
+            // the FIRST element to yield/ellipsise (issue #1320), keeping the
+            // crumb, pill, toggle, and kebab intact. The 8dp end padding keeps
+            // the name from butting straight against the pill/toggle.
+            val sessionLabelModifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp)
+                .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG)
+            Text(
+                text = agentName ?: sessionName,
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = sessionLabelModifier,
             )
-            Spacer(modifier = Modifier.width(6.dp))
+
+            // Issues #177 / #249: the compact "Reconnecting"/"Disconnected"
+            // pill. It sits at the right edge of the yielding region (adjacent
+            // to the toggle) so, under extreme width pressure, it clips AFTER
+            // the title but BEFORE the toggle (#1320 — the toggle never yields).
+            ConnectionStatusPill(connectionStatus)
         }
 
-        // Issue #481: the title — the agent/model name when a conversation
-        // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
-        // tmux session name.
-        //
-        // Issue #637: the title takes the full weighted slot (`weight(1f)`,
-        // fill = true) so it consumes ALL remaining width and pushes the
-        // trailing control cluster flush against the right edge. This is what
-        // gives the kebab a CONSISTENT right-anchored position in both
-        // states — the previous `fill = false` left the title hugging its
-        // own text, so the kebab floated in the middle of the row next to a
-        // short name instead of sitting at the edge ("⋮ position looks off").
-        // Because the title is the only element that yields width, a long
-        // host/session name ellipsises inside this slot WITHOUT squeezing the
-        // toggle or pushing the kebab off screen. The 8dp end padding
-        // guarantees the name never butts straight against the trailing
-        // controls.
-        val sessionLabelModifier = Modifier
-            .weight(1f)
-            .padding(end = 8.dp)
-            .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG)
-        Text(
-            text = agentName ?: sessionName,
-            color = PocketShellColors.Text,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = sessionLabelModifier,
-        )
-
-        // Issue #637 / #747: the trailing controls. The SHRINKABLE middle group
-        // (connection-status pill + Terminal/Conversation toggle) sits in its
-        // OWN weighted slot — `weight(1f, fill = false)` — so it yields width
-        // before anything else, while the kebab is a FIXED 48dp sibling of the
-        // outer row that is laid out AFTER the weighted slots and so can never
-        // be displaced.
-        //
-        // Why this matters (#747): previously the whole trailing cluster was a
-        // single non-shrinking [Row]. When that cluster was wide (forwarding
-        // active -> agent present -> the wide "Terminal Conversation" toggle, a
-        // non-live "Disconnected"/"Reconnecting" pill, and a project crumb all
-        // competing for width), the cluster overflowed the 56dp row and Compose
-        // shoved its LAST child — the kebab — past the right edge. The
-        // maintainer saw the kebab "can't be selected" because it was
-        // off-screen. Putting the kebab outside the weighted slot reserves its
-        // 48dp unconditionally; the toggle's segment labels ellipsise (they are
-        // `maxLines = 1`) instead of pushing the kebab off-screen.
-        Row(
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .padding(end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ConnectionStatusPill(connectionStatus)
-
-            if (tabLabels.size > 1) {
-                TabsRowWithPulse(pulseVisible = pulseConversationTab) {
-                    ConsolidatedTabPill(
-                        labels = tabLabels,
-                        selectedIndex = selectedTabIndex,
-                        onSelected = onTabSelected,
-                        modifier = Modifier.testTag(TMUX_TABS_TAG),
-                    )
-                }
+        // Issue #1320: the Terminal/Conversation toggle — a PRIMARY control that
+        // must have GUARANTEED width. It is a NON-weighted sibling of the outer
+        // row rendered at its full intrinsic width, so it is measured before the
+        // weighted leading region gets the remainder and can never be
+        // clipped/ellipsised no matter how long the title is. The kebab stays a
+        // fixed 48dp sibling laid out after it (#747), so both survive.
+        if (tabLabels.size > 1) {
+            Spacer(modifier = Modifier.width(8.dp))
+            TabsRowWithPulse(pulseVisible = pulseConversationTab) {
+                ConsolidatedTabPill(
+                    labels = tabLabels,
+                    selectedIndex = selectedTabIndex,
+                    onSelected = onTabSelected,
+                    modifier = Modifier.testTag(TMUX_TABS_TAG),
+                )
             }
+            Spacer(modifier = Modifier.width(4.dp))
         }
 
         // The kebab — fixed 48dp, OUTSIDE every weighted slot, so it is always

@@ -1057,6 +1057,25 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
+  # ADDED (#1320): the Terminal/Conversation TOGGLE-CLIP regression guard — the
+  # REAL (layout) cause behind the 5×-recurring "Conversation tab missing"
+  # (#962/#975/#1057/#1158). The toggle used to live in a `weight(1f, fill=false)`
+  # slot that split width 50/50 with the title's own `weight(1f)`, so a long
+  # agent title starved the toggle and its "Conversation" segment ellipsised away
+  # (detection had already fired — the header showed the agent name — so the prior
+  # detection-gate fixes never addressed this). This proof renders the PRODUCTION
+  # ConsolidatedTopChrome at a narrow phone width with a long title (+ status pill
+  # + long crumb + narrowest-width variants) and HARD-asserts the Conversation
+  # segment renders at its FULL intrinsic width (compared to a reference
+  # unconstrained SegmentedToggle — density-independent, no pixel threshold), not
+  # a bare assertIsDisplayed (a squeezed/ellipsised segment still reports
+  # displayed). RED on base (segment starved ~119px vs ~291px intrinsic); GREEN
+  # after the toggle is pulled OUT of the weighted slot and reserved at intrinsic
+  # width. Pure Compose-rule UI test — NO Docker fixture, NO SSH/tmux, NO
+  # toxiproxy, NO 2222/2226 port — so it needs no tests.yml service change, and it
+  # does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). It
+  # lives under com.pocketshell.app.tmux, so it carries its FQCN directly.
+  "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"
   # ADDED (#859 Slice B): the typed-card RENDERER REGISTRY proof. The session
   # feed is now a generic typed-card list dispatched through
   # SessionCardRenderers (no `when (type)` in the feed). This connected Compose

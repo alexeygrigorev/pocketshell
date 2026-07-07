@@ -19,6 +19,7 @@ import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -26,6 +27,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -88,6 +90,9 @@ class TerminalHotkeysPanelScreenshotHarness {
                 }
             }
         }
+        compose.waitForIdle()
+        // Issue #1332: reveal the extended sections so the full grid is captured.
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
         compose.waitForIdle()
         // Sanity: the redesigned panel really rendered its keys before capture.
         compose.onNodeWithText("^B").assertExists()

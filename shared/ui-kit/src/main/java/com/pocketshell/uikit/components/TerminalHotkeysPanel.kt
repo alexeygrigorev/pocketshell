@@ -1,5 +1,6 @@
 package com.pocketshell.uikit.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,9 +9,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -22,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -72,10 +76,26 @@ data class HotkeySection(
      * trailing slots empty (keys stay full-size, never stretched).
      */
     val columns: Int,
+    /**
+     * Issue #1332 — progressive disclosure. `false` (default) => this section is
+     * part of the COMMON set, always shown. `true` => this section lives behind
+     * the "Show more keys" expander and is only rendered when the panel is
+     * expanded. The catalog puts the everyday keys (arrows + Esc/Tab/Enter/^C/^D)
+     * in the common set and the full CTRL-combos / letters / doubled-chord grids
+     * behind the expander so the panel opens compact.
+     */
+    val extended: Boolean = false,
 )
 
 const val TERMINAL_HOTKEYS_PANEL_TAG: String = "terminal:hotkeys-panel"
 const val TERMINAL_HOTKEYS_PANEL_CLOSE_TAG: String = "terminal:hotkeys-panel-close"
+
+/**
+ * Issue #1332: test tag on the "Show more / Show fewer keys" expander row that
+ * toggles the extended sections. Only rendered when the panel actually has
+ * [HotkeySection.extended] sections to reveal.
+ */
+const val TERMINAL_HOTKEYS_PANEL_EXPAND_TAG: String = "terminal:hotkeys-panel-expand"
 
 /**
  * Test-only semantics flag (issue #755): `true` on a key slot whose label
@@ -100,6 +120,16 @@ val HotkeyModifierActiveKey: SemanticsPropertyKey<Boolean> =
     SemanticsPropertyKey("HotkeyModifierActive")
 var SemanticsPropertyReceiver.hotkeyModifierActive: Boolean by HotkeyModifierActiveKey
 
+/**
+ * Issue #1332: test-readable flag on the expander row — `true` when the panel is
+ * expanded (extended sections shown), `false` when collapsed (common set only).
+ * A JVM Compose test reads it to assert the progressive-disclosure state without
+ * relying on layout timing. Render-only; no behaviour.
+ */
+val HotkeyPanelExpandedKey: SemanticsPropertyKey<Boolean> =
+    SemanticsPropertyKey("HotkeyPanelExpanded")
+var SemanticsPropertyReceiver.hotkeyPanelExpanded: Boolean by HotkeyPanelExpandedKey
+
 @Composable
 fun TerminalHotkeysPanel(
     sections: List<HotkeySection>,
@@ -112,7 +142,22 @@ fun TerminalHotkeysPanel(
     // the [KeyBar] modifier visual. The single shared state is enough because
     // the panel has exactly one modifier (`Ctrl`).
     modifierState: KeyModifierState = KeyModifierState.Off,
+    // Issue #1332: seed the collapsed/expanded state. Defaults to `false` so the
+    // panel opens COLLAPSED every time it is shown (no persistence — the sheet
+    // re-enters composition on each open, resetting the remembered state). It is
+    // overridable ONLY so the JVM render harness can snapshot the expanded state
+    // (a captured render cannot tap the expander); production callers never pass
+    // it.
+    initiallyExpanded: Boolean = false,
 ) {
+    // Issue #1332: progressive disclosure. The COMMON sections (arrows first,
+    // then the everyday keys) are always shown; the EXTENDED sections (the full
+    // CTRL combos / letters / doubled chords) hide behind the expander so the
+    // panel opens compact.
+    val commonSections = sections.filterNot { it.extended }
+    val extendedSections = sections.filter { it.extended }
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -135,7 +180,7 @@ fun TerminalHotkeysPanel(
             modifier = Modifier.padding(top = 6.dp),
         )
 
-        sections.forEach { section ->
+        commonSections.forEach { section ->
             HotkeySectionGrid(
                 section = section,
                 onKey = onKey,
@@ -143,6 +188,75 @@ fun TerminalHotkeysPanel(
                 modifierState = modifierState,
             )
         }
+
+        if (extendedSections.isNotEmpty()) {
+            HotkeyExpandToggle(
+                expanded = expanded,
+                enabled = enabled,
+                onToggle = { expanded = !expanded },
+            )
+            // Smooth reveal/collapse: the extended block fades + expands in and
+            // shrinks + fades out. When collapsed the extended sections are NOT
+            // composed at all, so their keys genuinely aren't in the tree.
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    extendedSections.forEach { section ->
+                        HotkeySectionGrid(
+                            section = section,
+                            onKey = onKey,
+                            enabled = enabled,
+                            modifierState = modifierState,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Issue #1332: the "Show more keys" / "Show fewer keys" expander that toggles the
+ * extended sections. A full-width, bordered, accent-labelled row with a chevron
+ * that flips with the state. Publishes [hotkeyPanelExpanded] for tests.
+ */
+@Composable
+private fun HotkeyExpandToggle(
+    expanded: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+) {
+    val label = if (expanded) "Show fewer keys" else "Show more keys"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(
+                border = BorderStroke(1.dp, PocketShellColors.Border),
+                shape = RoundedCornerShape(8.dp),
+            )
+            .let { if (enabled) it.clickable(role = Role.Button, onClick = onToggle) else it }
+            .testTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG)
+            .semantics(mergeDescendants = true) {
+                hotkeyPanelExpanded = expanded
+                contentDescription = label
+            }
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = if (expanded) "▴" else "▾",
+            color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 

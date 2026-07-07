@@ -7801,10 +7801,14 @@ internal fun tmuxTerminalKeyboardChromeMode(
  * Issue #784: the dedicated terminal-hotkeys panel key set.
  *
  * This replaces the cramped, `…`-overflowing in-composer key bar (#458/#755,
- * hard-cut per D22). The panel shows EVERY key at once in a tidy multi-row grid
- * — no `…` expander, no horizontal scroll, no lone `Ctrl` modifier, no
- * duplicate `/`. Each label is audited so the visible glyph equals the byte
- * sent ([TmuxSessionViewModel.onKeyBarKey]):
+ * hard-cut per D22). Issue #1332 adds progressive disclosure: the panel opens
+ * COMPACT showing only the COMMON set (ARROWS first — the most-used keys — then
+ * `Esc`/`Tab`/`Enter`/`^C`/`^D`), with a "Show more keys" expander revealing the
+ * EXTENDED set (the full `CTRL COMBOS` grid, `⇧Tab`, doubled interrupt/EOF, the
+ * `Ctrl` sticky modifier, and the a–z `LETTERS` grid). No horizontal scroll, no
+ * lone `Ctrl` modifier, no duplicate `/`. Each label is audited so the visible
+ * glyph equals the byte sent ([TmuxSessionViewModel.onKeyBarKey]) — #1332 only
+ * reordered and split the catalog; no routing/byte changed:
  *
  *  - Keys section: `Esc` (0x1B), `Tab`, `Enter` (#527).
  *  - Ctrl combos section: the useful chords as DIRECT buttons (no modifier to
@@ -7842,25 +7846,43 @@ internal const val TmuxHotkeyInterruptX2Label: String = "^C×2"
 internal const val TmuxHotkeyEofX2Label: String = "^D×2"
 
 internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.HotkeySection> = listOf(
+    // Issue #1332: ARROWS is now the FIRST/top section (was last). Arrows are the
+    // most-used navigation keys, so they sit at the very top, immediately
+    // reachable. Part of the COMMON set (always shown, `extended = false`).
     com.pocketshell.uikit.components.HotkeySection(
-        title = "KEYS",
+        title = "ARROWS",
+        keys = listOf(
+            KeyBinding(label = "←", kind = KeyKind.Arrow),
+            KeyBinding(label = "↑", kind = KeyKind.Arrow),
+            KeyBinding(label = "↓", kind = KeyKind.Arrow),
+            KeyBinding(label = "→", kind = KeyKind.Arrow),
+        ),
+        columns = 4,
+    ),
+    // Issue #1332: the everyday essentials, shown by default alongside the
+    // arrows — `Esc`, `Tab`, `Enter`, and the single `^C` / `^D` (interrupt /
+    // EOF). One compact row of five. `^C` / `^D` also remain in the full CTRL
+    // COMBOS grid behind the expander; surfacing them here is intentional (the
+    // most-reached-for control keys). Every label still routes through
+    // [TmuxSessionViewModel.onKeyBarKey] exactly as before — order/disclosure
+    // only, no byte change.
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "COMMON",
         keys = listOf(
             KeyBinding(label = "Esc", kind = KeyKind.Regular),
             KeyBinding(label = "Tab", kind = KeyKind.Regular),
-            // Issue #893: ⇧Tab (back-tab / Shift+Tab) sends tmux's `BTab` named
-            // key (ESC [ Z) so the maintainer can cycle Claude Code's
-            // permission/plan mode from the phone. 4 columns keep every label
-            // fully readable (Esc / Tab / ⇧Tab / Enter).
-            KeyBinding(label = "⇧Tab", kind = KeyKind.Regular),
             KeyBinding(label = TmuxHotkeyEnterLabel, kind = KeyKind.Regular),
+            KeyBinding(label = "^C", kind = KeyKind.Regular),
+            KeyBinding(label = "^D", kind = KeyKind.Regular),
         ),
-        columns = 4,
+        columns = 5,
     ),
     // Issue #1091: the curated one-tap control combos — the existing 8 plus the
     // control keys nano (and many TUIs) need that were missing: `^G` Help, `^J`
     // Justify, `^K` Cut, `^O` Write Out, `^T` Execute, `^U` cut-to-start, `^W`
     // Where-Is, `^X` Exit, `^\` Replace. Ordered by control byte so the grid
     // reads predictably. Each routes to its byte via [onKeyBarKey].
+    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
     com.pocketshell.uikit.components.HotkeySection(
         title = "CTRL COMBOS",
         keys = listOf(
@@ -7883,10 +7905,24 @@ internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.Hotk
             KeyBinding(label = "^\\", kind = KeyKind.Regular),
         ),
         columns = 4,
+        extended = true,
+    ),
+    // Issue #893: ⇧Tab (back-tab / Shift+Tab) sends tmux's `BTab` named key
+    // (ESC [ Z) so the maintainer can cycle Claude Code's permission/plan mode
+    // from the phone. Issue #1332: EXTENDED — it moved out of the common KEYS
+    // row into the expander (the common set is arrows + Esc/Tab/Enter/^C/^D).
+    com.pocketshell.uikit.components.HotkeySection(
+        title = "MORE KEYS",
+        keys = listOf(
+            KeyBinding(label = "⇧Tab", kind = KeyKind.Regular),
+        ),
+        columns = 4,
+        extended = true,
     ),
     // Issue #787: interrupt / EOF doubled chords (re-homed from the deleted
     // palette). Distinct from the single `^C`/`^D` above — these send the byte
     // TWICE so they actually stop the running agent / exit the REPL.
+    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
     com.pocketshell.uikit.components.HotkeySection(
         title = "INTERRUPT / EOF",
         keys = listOf(
@@ -7894,33 +7930,27 @@ internal val TmuxHotkeyPanelSections: List<com.pocketshell.uikit.components.Hotk
             KeyBinding(label = TmuxHotkeyEofX2Label, kind = KeyKind.Regular),
         ),
         columns = 2,
+        extended = true,
     ),
     // Issue #1091: the general `Ctrl + <any letter>` escape hatch. Tap `Ctrl`
     // (a sticky modifier — single tap = one-shot, double tap = locked, accent
     // when active) then a letter to send that letter's control byte. With
     // `Ctrl` off a letter types literally. Covers every `Ctrl+<a–z>` combo, not
     // just the curated subset above — so no TUI key is ever unreachable.
+    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
     com.pocketshell.uikit.components.HotkeySection(
         title = "CTRL + LETTER",
         keys = listOf(
             KeyBinding(label = TmuxHotkeyCtrlModifierLabel, kind = KeyKind.Modifier),
         ),
         columns = 4,
+        extended = true,
     ),
     com.pocketshell.uikit.components.HotkeySection(
         title = "LETTERS",
         keys = ('a'..'z').map { KeyBinding(label = it.toString(), kind = KeyKind.Regular) },
         columns = 7,
-    ),
-    com.pocketshell.uikit.components.HotkeySection(
-        title = "ARROWS",
-        keys = listOf(
-            KeyBinding(label = "←", kind = KeyKind.Arrow),
-            KeyBinding(label = "↑", kind = KeyKind.Arrow),
-            KeyBinding(label = "↓", kind = KeyKind.Arrow),
-            KeyBinding(label = "→", kind = KeyKind.Arrow),
-        ),
-        columns = 4,
+        extended = true,
     ),
 )
 

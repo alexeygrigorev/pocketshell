@@ -2,6 +2,7 @@ package com.pocketshell.app.session
 
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
+import com.pocketshell.app.voice.InMemoryUndeliveredTranscriptStore
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
@@ -256,6 +257,8 @@ class InlineDictationViewModelTest {
             FakeSpeechRecognitionProvider(available = false),
         pendingQueue: PromptComposerViewModel.PendingTranscriptionQueue =
             com.pocketshell.app.composer.DisabledPendingTranscriptionQueue,
+        undeliveredStore: com.pocketshell.app.voice.UndeliveredTranscriptStore =
+            com.pocketshell.app.voice.InMemoryUndeliveredTranscriptStore(),
     ): InlineDictationViewModel {
         val factory = WhisperClientFactory { whisper }
         val vm = InlineDictationViewModel(
@@ -265,6 +268,7 @@ class InlineDictationViewModelTest {
             voiceSettings = voiceSettings,
             speechRecognitionProvider = speechRecognitionProvider,
             pendingTranscriptionStore = pendingQueue,
+            undeliveredTranscriptStore = undeliveredStore,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
@@ -1613,5 +1617,211 @@ class InlineDictationViewModelTest {
 
         assertEquals(listOf("%7" to "make deploy"), delivered)
         collectorJob?.cancel()
+    }
+
+    // -- Issue #1272: permanent-dead-pane persistence + bounded channel --------
+
+    @Test
+    fun permanentDeadPaneTranscriptIsPersistedAndSurfacedOnClear() = runTest {
+        // The residual #1226 tail: a transcript resolves while there is NO pane,
+        // and the session never returns (the user navigated away). No collector
+        // ever subscribes, so the buffered transcript would be delivered to no
+        // one and silently lost. On ViewModel teardown (permanent pane death)
+        // the delivery channel is cancelled, which persists the still-buffered
+        // transcript to the durable store and surfaces it as a retryable item.
+        //
+        // RED on base: `onCleared` did not cancel the channel and there was no
+        // store, so the buffered transcript vanished with the ViewModel ->
+        // `store.snapshot()` empty, `undeliveredTranscripts.value` empty.
+        // GREEN with the fix: the transcript is persisted + surfaced.
+        val store = InMemoryUndeliveredTranscriptStore()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("git push origin main") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            undeliveredStore = store,
+        )
+
+        // Dictate to completion with NO collector ever subscribing (pane gone).
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        // Nothing persisted yet — the transcript is buffered, still deliverable
+        // if the pane were to return within this ViewModel's lifetime.
+        assertTrue(
+            "transcript must stay buffered (not persisted) while the ViewModel is alive",
+            store.snapshot().isEmpty(),
+        )
+
+        // The session is permanently gone: the ViewModel is cleared.
+        vm.clearForTest()
+        advanceUntilIdle()
+
+        val persisted = store.snapshot()
+        assertEquals(
+            "the undeliverable transcript must be persisted on permanent pane death",
+            1,
+            persisted.size,
+        )
+        assertEquals("git push origin main", persisted.first().text)
+        assertEquals(
+            "the persisted transcript is surfaced via undeliveredTranscripts",
+            listOf("git push origin main"),
+            vm.undeliveredTranscripts.value.map { it.text },
+        )
+    }
+
+    @Test
+    fun deliveredTranscriptIsNotPersistedOnClear() = runTest {
+        // Guard against a false positive: a transcript that WAS delivered to a
+        // live collector must not be re-persisted on teardown (receiveAsFlow
+        // removed it from the buffer, so channel-cancel has nothing to drain).
+        val store = InMemoryUndeliveredTranscriptStore()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("ls -la") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            undeliveredStore = store,
+        )
+
+        val delivered = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { delivered += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(listOf("ls -la"), delivered)
+
+        collector.cancel()
+        vm.clearForTest()
+        advanceUntilIdle()
+
+        assertTrue(
+            "a delivered transcript must NOT be persisted as undelivered, got ${store.snapshot()}",
+            store.snapshot().isEmpty(),
+        )
+    }
+
+    @Test
+    fun deliveryChannelIsBoundedAndOverflowPersistsInsteadOfGrowingUnbounded() = runTest {
+        // Second #1272 gap: the old `Channel.UNLIMITED` grew without bound under
+        // rapid repeated dictation into a permanently-dead pane. The channel is
+        // now bounded to DELIVERY_CHANNEL_CAPACITY with DROP_OLDEST, and a
+        // dropped-oldest element is routed to the store rather than lost.
+        //
+        // RED on base: an UNLIMITED channel buffers every send, so before any
+        // teardown the store is EMPTY no matter how many transcripts pile up.
+        // GREEN with the fix: sending capacity + N transcripts with no collector
+        // overflows the oldest N straight into the store.
+        val store = InMemoryUndeliveredTranscriptStore()
+        val overflow = 3
+        val total = InlineDictationViewModel.DELIVERY_CHANNEL_CAPACITY + overflow
+        var index = 0
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("cmd-${index++}") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            undeliveredStore = store,
+        )
+
+        // Fire `total` full dictation cycles with NO collector — the channel
+        // fills to capacity and then drops-oldest to the store.
+        repeat(total) {
+            vm.onMicTap()
+            runCurrent()
+            vm.onMicTap()
+            advanceUntilIdle()
+        }
+
+        val persisted = store.snapshot()
+        assertEquals(
+            "exactly the overflow (oldest) transcripts should be persisted; the " +
+                "channel must be bounded, not unbounded",
+            overflow,
+            persisted.size,
+        )
+        // DROP_OLDEST persists the FIRST-sent transcripts (cmd-0..cmd-2).
+        assertEquals(
+            setOf("cmd-0", "cmd-1", "cmd-2"),
+            persisted.map { it.text }.toSet(),
+        )
+    }
+
+    @Test
+    fun retryUndeliveredReDeliversToLivePaneAndClearsQueue() = runTest {
+        // Recovery loop across ViewModel instances (the real journey): session A
+        // dies with an undelivered transcript persisted; a new session screen B
+        // reads the durable store, the user taps Retry, and the transcript is
+        // re-delivered into B's live pane and removed from the queue.
+        val store = InMemoryUndeliveredTranscriptStore()
+
+        // Session A: dictate with no pane, then permanent death -> persisted.
+        val vmA = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("deploy now") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            undeliveredStore = store,
+        )
+        vmA.onMicTap()
+        runCurrent()
+        vmA.onMicTap()
+        advanceUntilIdle()
+        vmA.clearForTest()
+        advanceUntilIdle()
+        assertEquals(1, store.snapshot().size)
+        val id = store.snapshot().first().id
+
+        // Session B: shares the same durable store, has a live collector.
+        val vmB = newVm(
+            mic = FakeMicCapture(),
+            undeliveredStore = store,
+        )
+        val delivered = mutableListOf<String>()
+        val collector = launch { vmB.transcriptions.collect { delivered += it } }
+        runCurrent()
+
+        assertEquals(
+            "B surfaces the persisted item before retry",
+            listOf("deploy now"),
+            vmB.undeliveredTranscripts.value.map { it.text },
+        )
+
+        vmB.retryUndelivered(id)
+        advanceUntilIdle()
+
+        assertEquals(
+            "retry re-delivers the transcript into B's live pane",
+            listOf("deploy now"),
+            delivered,
+        )
+        assertTrue(
+            "the retried item is removed from the queue",
+            store.snapshot().isEmpty(),
+        )
+        collector.cancel()
+    }
+
+    @Test
+    fun dismissUndeliveredDiscardsWithoutRedelivery() = runTest {
+        val store = InMemoryUndeliveredTranscriptStore()
+        store.persist("obsolete command")
+        val vm = newVm(mic = FakeMicCapture(), undeliveredStore = store)
+
+        val delivered = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { delivered += it } }
+        runCurrent()
+
+        val id = store.snapshot().first().id
+        vm.dismissUndelivered(id)
+        advanceUntilIdle()
+
+        assertTrue("dismiss removes the item", store.snapshot().isEmpty())
+        assertTrue("dismiss must not re-deliver", delivered.isEmpty())
+        collector.cancel()
     }
 }

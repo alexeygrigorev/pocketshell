@@ -931,6 +931,186 @@ class TmuxClientTest {
         }
     }
 
+    /**
+     * Issue #1316: an [SshSession.exec] handler that simulates the remote shell
+     * running the attach reconcile `tmux list-panes …`, returning the given pane
+     * rows on stdout (one per line, the shape the `-CC` `%begin/%end` drain
+     * produced). Optional [delayMs] models a slow exec; a non-zero [exitCode] +
+     * [stderr] models a gone session.
+     */
+    private fun listPanesExecHandler(
+        rows: List<String>,
+        exitCode: Int = 0,
+        stderr: String = "",
+        delayMs: Long = 0L,
+    ): suspend (String) -> ExecResult = { _ ->
+        if (delayMs > 0L) delay(delayMs)
+        val stdout = if (rows.isEmpty()) "" else rows.joinToString(separator = "\n") + "\n"
+        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+    }
+
+    @Test
+    fun `listPanesViaExec runs on the exec lane and returns the pane rows`() = runBlocking {
+        // Issue #1316: the attach reconcile `list-panes` moves off the shared
+        // `-CC` control channel onto a DEDICATED exec channel (the #1297/#666
+        // lane). The exec runs `tmux list-panes …` and the rows come back as the
+        // per-row CommandResponse the caller's parse expects.
+        val rows = listOf("%0|PS|@0|PS|0|PS|\$1", "%1|PS|@0|PS|0|PS|\$1")
+        val shell = FakeShell()
+        val session = FakeSession(shell, execHandler = listPanesExecHandler(rows))
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val command = "list-panes -s -t 'sess' -F '#{pane_id}|PS|#{window_id}'"
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.listPanesViaExec(command)
+            }
+            assertFalse(response.isError)
+            assertEquals(rows, response.output)
+
+            // Proof it ran on an exec channel — NOT the -CC control shell. Nothing
+            // was written to -CC stdin for the reconcile, and the exec carries the
+            // tmux-prefixed list-panes command verbatim.
+            val execCmd = session.execCommands.single { it.contains("list-panes") }
+            assertEquals("tmux $command", execCmd)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `listPanesViaExec surfaces an error response when the session is gone`() = runBlocking {
+        // Issue #1316 (error parity with the -CC path): a non-zero exec exit
+        // (session/server gone) must surface as an ERROR CommandResponse carrying
+        // the stderr, so the attach reconcile still fails honestly (→ retryable
+        // attach error) rather than silently reporting zero panes.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = listPanesExecHandler(
+                rows = emptyList(),
+                exitCode = 1,
+                stderr = "can't find session: sess",
+            ),
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.listPanesViaExec("list-panes -s -t 'sess' -F '#{pane_id}'")
+            }
+            assertTrue("a gone session must surface as an error response", response.isError)
+            assertEquals(listOf("can't find session: sess"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `listPanesViaExec bounds itself and throws within the short ceiling on a wedged exec`() =
+        runBlocking {
+            // Issue #1316 (bounded escape): a genuinely wedged/half-open transport
+            // (the exec never returns) must surface a TmuxClientException within the
+            // caller's SHORT ceiling, NOT hang to the full command ceiling — so the
+            // attach reconcile can never gate input indefinitely. It fails fast → a
+            // `Failed` reconcile → a retryable "Tap Reconnect" attach error.
+            val shell = FakeShell()
+            val neverReturns = CompletableDeferred<ExecResult>()
+            val session = FakeSession(shell, execHandler = { neverReturns.await() })
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching {
+                    withTimeout(5_000) {
+                        client.listPanesViaExec(
+                            "list-panes -s -t 'sess' -F '#{pane_id}'",
+                            timeoutMs = 250L,
+                        )
+                    }
+                }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+                assertTrue(
+                    "a wedged exec must surface a TmuxClientException from the short " +
+                        "ceiling, not hang to the 30 s command ceiling (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                assertTrue(
+                    "the reconcile must time out within ~the short ceiling (elapsed ${elapsedMs}ms)",
+                    elapsedMs < 5_000L,
+                )
+                neverReturns.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `list-panes reconcile completes on the exec lane while the -CC channel is wedged by a burst`() =
+        runBlocking {
+            // Issue #1316 (acceptance criterion 1+4, red→green): the maintainer's
+            // v0.4.24 day-0 wedge. A busy Claude/agent session saturates the ONE
+            // shared `-CC` control channel; a NEW session's attach reconcile
+            // `list-panes` used to head-of-line-block behind that burst on the
+            // single transport reader and retry behind the "Attaching…" overlay for
+            // up to 30 s.
+            //
+            // We reproduce the head-of-line block SYNTHETICALLY (#780 model): a
+            // `sendCommand` that is written but NEVER answered holds the -CC
+            // `sendMutex` for its whole 30 s ceiling — the "reconcile behind a busy
+            // agent" symptom. On BASE (the default `listPanesViaExec` = `-CC`
+            // `sendCommand`) the reconcile can't get onto the wedged control channel
+            // within budget and blocks/times out → RED. With the fix it runs on a
+            // DEDICATED exec channel and returns fast, independent of the wedged
+            // -CC mutex → GREEN.
+            //
+            // This SAME code path (`reconcilePanes` → `listPanesViaExec`) serves
+            // BOTH reported scenarios — new-session-from-kebab attach AND
+            // enter-existing-Claude attach — so the class is covered here.
+            val rows = listOf("%7|PS|@0|PS|0|PS|\$1")
+            val shell = FakeShell()
+            val session = FakeSession(shell, execHandler = listPanesExecHandler(rows))
+            // A large command ceiling so the wedging command holds the mutex for the
+            // whole test.
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // WEDGE the -CC sendMutex: a sendCommand written but never answered
+                // holds the mutex for its whole 30 s ceiling (the busy-agent burst
+                // saturating the shared control channel).
+                val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+                withTimeout(2_000) {
+                    while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+                }
+
+                val startedAtMs = System.currentTimeMillis()
+                val response = withTimeout(5_000) {
+                    client.listPanesViaExec(
+                        "list-panes -s -t 'sess' -F '#{pane_id}|PS|#{window_id}'",
+                        timeoutMs = 6_000L,
+                    )
+                }
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+                assertFalse("the reconcile must succeed during a -CC burst", response.isError)
+                assertEquals(rows, response.output)
+                assertTrue(
+                    "the reconcile must complete well under the -CC mutex ceiling " +
+                        "(elapsed ${elapsedMs}ms) — proving it did NOT wait on the wedged " +
+                        "-CC sendMutex",
+                    elapsedMs < 2_000L,
+                )
+                wedger.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
     @Test
     fun `pauseOutputDelivery holds output across a collector gap so a fresh collector recovers them`() =
         runBlocking {

@@ -177,15 +177,12 @@ class TmuxConnectingProgressOverlayTest {
         compose.setContent {
             PocketShellTheme {
                 ReconnectingProgressRow(
-                    status = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
-                        host = "10.0.2.2",
-                        port = 22,
-                        user = "alex",
-                        attempt = 2,
-                        maxAttempts = 4,
-                        retryDelayMs = 60_000,
-                        reason = "Network changed; reconnecting.",
-                    ),
+                    user = "alex",
+                    host = "10.0.2.2",
+                    port = 22,
+                    attempt = 2,
+                    maxAttempts = 4,
+                    retryDelayMs = 60_000,
                     sessionLabel = "tmux work",
                     onRetryNow = { retryCalls += 1 },
                     onCancel = { cancelCalls += 1 },
@@ -233,7 +230,12 @@ class TmuxConnectingProgressOverlayTest {
                 when (val current = status.value) {
                     is TmuxSessionViewModel.ConnectionStatus.Reconnecting -> {
                         ReconnectingProgressRow(
-                            status = current,
+                            user = current.user,
+                            host = current.host,
+                            port = current.port,
+                            attempt = current.attempt,
+                            maxAttempts = current.maxAttempts,
+                            retryDelayMs = current.retryDelayMs,
                             sessionLabel = "tmux work",
                             onRetryNow = {},
                             onCancel = {

@@ -67,7 +67,7 @@ import java.io.InputStream
  *      ([TmuxSessionViewModel.currentRuntimeGuardForTest],
  *      [TmuxSessionViewModel.reseedBlankVisiblePanesForTest],
  *      [TmuxSessionViewModel.armConnectedBlankWatchdogForTest],
- *      [TmuxSessionViewModel.setSwitchHidesTerminalForTest]). These build a
+ *      [TmuxSessionViewModel.setRevealHoldForTest]). These build a
  *      [TmuxSessionViewModel.RuntimeRefreshGuard] pinned to the live runtime
  *      exactly the way the production reveal call sites do, so the cluster runs
  *      against a known runtime without driving the whole connect coroutine
@@ -82,6 +82,13 @@ import java.io.InputStream
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class ReseedBlankWatchdogCharacterizationTest {
+
+    // Issue #1326 (S3): the loading "Attaching…" hold is now owned by the id-keyed
+    // reveal machine ([RevealState.Seeding]) — the deleted `_switchHidesTerminal`
+    // flag is gone. "the loading overlay is raised" ⟺ the reveal is a held Seeding
+    // surface. (Live = terminal shown; Error = the calm honest-failure surface.)
+    private fun TmuxSessionViewModel.loadingHoldRaisedForTest(): Boolean =
+        revealState.value is com.pocketshell.core.connection.RevealState.Seeding
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -392,7 +399,7 @@ class ReseedBlankWatchdogCharacterizationTest {
     fun connectedBlankWatchdogReseedsBlankActivePaneAndClearsLoadingOverlay() = runVmTest {
         // The watchdog's reason for existing: a Connected pane that is BLACK gets
         // re-seeded on a timer until a real frame lands, at which point the
-        // loading overlay (switchHidesTerminal) is dropped.
+        // loading hold (RevealState.Seeding) is dropped.
         val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
         val vm = connectVm(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
@@ -402,7 +409,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         )
         assertTrue(
             "an empty-seed reveal keeps the loading overlay raised (never black-reveal)",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertTrue(pane.terminalState.visibleScreenIsBlank())
 
@@ -438,7 +445,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         )
         assertFalse(
             "once a real frame lands the watchdog drops the loading overlay",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertTrue(
             renderedTranscriptFor(pane).contains("ISSUE722-WATCHDOG-RECOVER"),
@@ -458,7 +465,7 @@ class ReseedBlankWatchdogCharacterizationTest {
             pane.terminalState.visibleScreenIsBlank(),
         )
         // Recreate the handed-off state: overlay raised over a (now) painted pane.
-        vm.setSwitchHidesTerminalForTest(true)
+        vm.setRevealHoldForTest()
 
         val capturesBefore = client.captureCount()
         val guard = requireNotNull(vm.currentRuntimeGuardForTest())
@@ -468,7 +475,7 @@ class ReseedBlankWatchdogCharacterizationTest {
 
         assertFalse(
             "a non-blank active pane makes the watchdog drop the overlay",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertEquals(
             "the watchdog must NOT reseed when the pane already shows content",
@@ -486,7 +493,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         val vm = connectVm(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
         assertTrue(pane.terminalState.visibleScreenIsBlank())
-        assertTrue(vm.switchHidesTerminal.value)
+        assertTrue(vm.loadingHoldRaisedForTest())
 
         // Isolate the WATCHDOG's disconnect guard from the VM's reconnect ladder:
         //   - grace=0 makes the silent-reattach grace a no-op (it would otherwise
@@ -524,9 +531,14 @@ class ReseedBlankWatchdogCharacterizationTest {
             capturesBefore,
             client.captureCount(),
         )
+        // Issue #1326: the watchdog bails WITHOUT revealing the terminal — the
+        // dead client never produced content, so the reveal stays a non-Live surface
+        // (a loading hold or, once grace=0 exhausts, the honest-failure surface). The
+        // load-bearing point is that the watchdog did NOT paint content on a dead
+        // client (no reseed above, terminal still not Live).
         assertTrue(
-            "the watchdog leaves the overlay raised when it bails on a dead client",
-            vm.switchHidesTerminal.value,
+            "the watchdog must not reveal the terminal when it bails on a dead client",
+            vm.revealState.value !is com.pocketshell.core.connection.RevealState.Live,
         )
     }
 
@@ -539,7 +551,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         val vm = connectVm(client)
         val pane = vm.panes.value.single { it.paneId == "%1" }
         assertTrue(pane.terminalState.visibleScreenIsBlank())
-        assertTrue(vm.switchHidesTerminal.value)
+        assertTrue(vm.loadingHoldRaisedForTest())
         // No further capture responses queued -> every capture is the default
         // empty reply, so the pane stays blank for the whole watchdog run.
 
@@ -585,7 +597,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         // (every capture-pane comes back empty — the wedged-seed stand-in for the
         // capture stuck behind a streaming agent channel). Before #886 the
         // connect()-auto-armed watchdog fell off the end SILENTLY, leaving
-        // switchHidesTerminal raised forever (the infinite "Attaching…" spinner).
+        // the loading hold raised forever (the infinite "Attaching…" spinner).
         // Now it must surface a retryable error + the #823 Reconnect affordance.
         val client = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
         val vm = connectVmExhaustingWatchdog(client)
@@ -602,7 +614,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         assertFalse(
             "the loading overlay must be dropped on watchdog exhaustion — never an " +
                 "infinite Attaching spinner (#886)",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         // The reveal projects to the honest-error surface (RevealState.Error,
         // not retrying) so the screen shows a clear message, not a spinner.
@@ -650,7 +662,7 @@ class ReseedBlankWatchdogCharacterizationTest {
 
         assertFalse(
             "the healed pane drops the overlay (revealed Live)",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertTrue(
             "a healed reveal must NOT surface a Failed error",
@@ -777,9 +789,9 @@ class ReseedBlankWatchdogCharacterizationTest {
         )
         // The reveal gate kept the loading overlay rather than revealing black.
         assertTrue(
-            "the reveal must KEEP the loading overlay (switchHidesTerminal=true) " +
+            "the reveal must KEEP the loading hold (RevealState.Seeding) " +
                 "for a blank active pane, never reveal a black Connected pane",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertTrue(
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
@@ -801,7 +813,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         )
         assertFalse(
             "after recovery the watchdog drops the loading overlay",
-            vm.switchHidesTerminal.value,
+            vm.loadingHoldRaisedForTest(),
         )
         assertTrue(
             renderedTranscriptFor(pane).contains("ISSUE722-721-HEALED"),

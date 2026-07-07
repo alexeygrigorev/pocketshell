@@ -12,8 +12,16 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.connection.ConnectionPhase
+import com.pocketshell.core.connection.FailureReason
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.SessionId
+import com.pocketshell.core.connection.SessionSurfaceState
+import com.pocketshell.core.connection.sessionSurfaceState
+import com.pocketshell.core.connection.showsCalmFailure
+import com.pocketshell.core.connection.showsCenteredLoader
+import com.pocketshell.core.connection.surfaceOwnsPrimary
+import com.pocketshell.core.connection.terminalHeld
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.uikit.model.SessionAgentKind
@@ -1340,31 +1348,59 @@ class TmuxSessionScreenTest {
 
     // ─── Issues #177 / #249: breadcrumb status mapping ──────────────────
 
+    // Issue #1326 (S3): the pill now derives from the SINGLE fused
+    // [SessionSurfaceState], so it can NEVER disagree with the surface/band.
     @Test
-    fun toUiStatusMapsConnectedToConnected() {
+    fun toUiStatusMapsLiveToConnected() {
         assertEquals(
             com.pocketshell.uikit.model.ConnectionStatus.Connected,
-            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u").toUiStatus(),
+            SessionSurfaceState.Live(SessionId("t"), "s", emptyList()).toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsAttachingToConnected() {
+        // A warm switch / live-unseeded hold keeps the dot GREEN — the session is up.
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Connected,
+            SessionSurfaceState.Attaching(SessionId("t"), "s", "h", 22, "u").toUiStatus(),
         )
     }
 
     @Test
     fun toUiStatusMapsConnectingToConnecting() {
-        // Connecting drives the amber pulse + "Reconnecting" pill while a
-        // background-detach reattach handshake (#177) is in flight.
         assertEquals(
             com.pocketshell.uikit.model.ConnectionStatus.Connecting,
-            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u").toUiStatus(),
+            SessionSurfaceState.Connecting(SessionId("t"), "s", "h", 22, "u").toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsReconnectingToConnecting() {
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Connecting,
+            SessionSurfaceState.Reconnecting(SessionId("t"), "s", "h", 22, "u", 2, 3, 0L).toUiStatus(),
         )
     }
 
     @Test
     fun toUiStatusMapsFailedToError() {
-        // Failed is the dropped-socket state #249 rides on; it must read
-        // as a red "Disconnected" indicator, not a steady-state dot.
+        // Failed must read as a red "Disconnected" indicator, not a steady-state dot.
         assertEquals(
             com.pocketshell.uikit.model.ConnectionStatus.Error,
-            TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected from ...").toUiStatus(),
+            SessionSurfaceState.Failed(
+                SessionId("t"),
+                "s",
+                FailureReason.Unreachable(retryable = true),
+            ).toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsGoneToError() {
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Error,
+            SessionSurfaceState.Gone(SessionId("t"), "s").toUiStatus(),
         )
     }
 
@@ -1372,7 +1408,7 @@ class TmuxSessionScreenTest {
     fun toUiStatusMapsIdleToIdle() {
         assertEquals(
             com.pocketshell.uikit.model.ConnectionStatus.Idle,
-            TmuxSessionViewModel.ConnectionStatus.Idle.toUiStatus(),
+            SessionSurfaceState.Idle.toUiStatus(),
         )
     }
 
@@ -1902,7 +1938,11 @@ class TmuxSessionScreenTest {
         assertEquals(30, imeKeyboardPanOffsetPx(imeBottomPx = 30, navBarBottomPx = 48))
     }
 
-    // --- Issue #750: single-indicator gate on the top ReconnectingProgressRow. ---
+    // ─── Issue #1326 (S3): ONE fused view state drives pill + surface + band. ───
+    // These pin the [sessionSurfaceState] fusion + the derived surface/pill/band
+    // helpers so a contradictory (pill, surface, band) triple is UNREPRESENTABLE.
+
+    private val sid = SessionId("host/work")
 
     private val reconnectingStatus = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
         host = "alpha.example",
@@ -1913,343 +1953,216 @@ class TmuxSessionScreenTest {
         retryDelayMs = 0L,
         reason = "Reconnecting…",
     )
-
-    @Test
-    fun topReconnectBarSuppressedWhileTerminalHeldDuringReattach() {
-        // Regression for the post-#766 two-loaders symptom: a recoverable drop
-        // projects Reconnecting (the top bar) WHILE the reveal machine holds the
-        // terminal in Seeding (effectiveHidesTerminal == true) and paints the
-        // centered "Attaching…" spinner. The top bar MUST be suppressed so only the
-        // centered indicator shows.
-        assertEquals(
-            false,
-            shouldShowReconnectingProgressRow(
-                status = reconnectingStatus,
-                effectiveHidesTerminal = true,
-            ),
-        )
-    }
-
-    @Test
-    fun topReconnectBarShownWhenReconnectingWithTerminalNotHeld() {
-        // The top bar is the fallback indicator for a (currently unreached)
-        // reconnect that keeps a live frame painted (terminal NOT held): it then
-        // renders so a reconnect is never left with zero indicators.
-        assertTrue(
-            shouldShowReconnectingProgressRow(
-                status = reconnectingStatus,
-                effectiveHidesTerminal = false,
-            ),
-        )
-    }
-
-    @Test
-    fun topReconnectBarNeverShownForNonReconnectingStatus() {
-        // The top bar renders ONLY for Reconnecting — so it is never the sole
-        // indicator for any other state. Connecting has its own top overlay (gated
-        // the same way); Connected/Switching/Failed/Idle drive their own affordances.
-        val nonReconnecting = listOf(
-            TmuxSessionViewModel.ConnectionStatus.Idle,
-            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
-            TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
-            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
-            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
-        )
-        nonReconnecting.forEach { status ->
-            assertEquals(
-                "no top progress bar for $status",
-                false,
-                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = false),
-            )
-            assertEquals(
-                "no top progress bar for $status (terminal held)",
-                false,
-                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
-            )
-        }
-    }
-
-    // --- Issue #750 (4th occurrence): the beyond-grace RECONNECT two-loaders bug.
-    // The maintainer sees the top "Connecting to host…" [ConnectingProgressOverlay]
-    // banner AND the centered "Attaching…" hold at the SAME time on a beyond-grace
-    // reconnect. Root cause: a reconnect re-dials through the controller's
-    // `Connecting` state → status projects to [ConnectionStatus.Connecting] (the top
-    // banner) WHILE the reveal machine holds the terminal (effectiveHidesTerminal ==
-    // true) and paints the centered spinner. The previous #750 fix gated only the
-    // Reconnecting band, never the Connecting overlay. These tests pin the reducer +
-    // BOTH gate predicates so exactly ONE primary loading surface resolves per state.
-
     private val connectingStatus =
         TmuxSessionViewModel.ConnectionStatus.Connecting("beta.example", 22, "alex")
 
+    /** Build the fused view state the screen renders, exactly as the screen wires it. */
+    private fun fuse(
+        reveal: RevealState,
+        status: TmuxSessionViewModel.ConnectionStatus,
+        target: SessionId? = sid,
+    ): SessionSurfaceState = sessionSurfaceState(reveal, connectionPhaseOf(status), target)
+
     @Test
-    fun connectingOverlaySuppressedWhileTerminalHeld_beyondGraceReconnectRepro() {
-        // REPRODUCTION of the maintainer's exact reopen state: a beyond-grace
-        // reconnect projects Connecting (the top overlay) WHILE the terminal is held
-        // (the centered "Attaching…" hold is up). Pre-fix the overlay was ungated on
-        // `status is Connecting`, so it stacked on top of the centered hold — TWO
-        // loaders. The reducer must resolve to the SINGLE centered hold and suppress
-        // the top banner.
-        assertEquals(
-            PrimaryLoadingSurface.CenteredAttaching,
-            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = true),
+    fun fusion_failedState_pillDisconnected_surfaceCalmFailure_noSpinner_1321Repro() {
+        // #1321 EXACT reproduction: a settled honest failure must render as ONE
+        // coherent screen — calm failure surface + "Disconnected" pill + NO spinner
+        // + NO top banner. Red on base (pre-S3): the pill read `status`, the surface
+        // read `revealState`, and the band read a raw string, so "Disconnected" pill
+        // + "Attaching…" spinner + raw exception could all show at once.
+        val state = fuse(
+            RevealState.Error(sid, "work", retrying = false, reason = FailureReason.Unreachable(true)),
+            TmuxSessionViewModel.ConnectionStatus.Failed("Connection lost."),
         )
+        assertTrue("settled failure → Failed view state", state is SessionSurfaceState.Failed)
+        // Surface: calm placeholder, NO centered loader.
+        assertTrue("surface paints calm failure", state.showsCalmFailure)
+        assertFalse("no centered loader over a dead session", state.showsCenteredLoader(panesEmpty = true))
+        assertEquals("no top loading banner", PrimaryLoadingSurface.None, primaryLoadingSurface(state, panesEmpty = true))
+        // Pill: Disconnected (red Error), never a green/amber that contradicts the surface.
         assertEquals(
-            "top Connecting overlay must be suppressed while the terminal is held",
-            false,
-            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = true),
+            com.pocketshell.uikit.model.ConnectionStatus.Error,
+            state.toUiStatus(),
         )
+        // Band owns the single reconnect affordance → the bottom button is suppressed.
+        assertFalse("no bottom reconnect button on Failed (band owns it)", surfaceReconnectButtonVisible(state))
     }
 
     @Test
-    fun connectingOverlayShownOnlyWhenTerminalNotHeld() {
-        // The top overlay is the fallback loader for a (currently unreached)
-        // Connecting that keeps a live frame painted (terminal NOT held), so it is
-        // never the sole indicator stripped from a state that needs it.
-        assertEquals(
-            PrimaryLoadingSurface.ConnectingBanner,
-            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = false),
-        )
-        assertTrue(
-            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = false),
-        )
+    fun fusion_reconnecting_holdSurface_matchingReconnectingPill_singleCenteredLoader() {
+        // AC-2: Reconnecting renders the hold (centered "Attaching…") + a MATCHING
+        // "Reconnecting" pill — never two loaders, never a pill that disagrees.
+        val state = fuse(RevealState.Seeding(sid, "work"), reconnectingStatus)
+        assertTrue("held → Reconnecting view state", state is SessionSurfaceState.Reconnecting)
+        assertTrue("terminal held", state.terminalHeld)
+        assertTrue("single centered loader", state.showsCenteredLoader(panesEmpty = false))
+        assertEquals("the SOLE loader is the centered hold", PrimaryLoadingSurface.CenteredAttaching, primaryLoadingSurface(state))
+        // Pill matches the surface: amber "Reconnecting".
+        assertEquals(com.pocketshell.uikit.model.ConnectionStatus.Connecting, state.toUiStatus())
+        // Both top banners suppressed while the surface owns the primary indicator.
+        val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty = false)
+        assertFalse(shouldShowReconnectingProgressRow(state, ownsPrimary))
+        assertFalse(shouldShowConnectingProgressOverlay(state, ownsPrimary))
     }
 
     @Test
-    fun exactlyOnePrimaryLoadingSurfacePerInProgressState_classCoverage() {
-        // Class coverage (D31/G2): every in-progress connection state resolves to
-        // EXACTLY ONE primary loading surface — never a top banner AND the centered
-        // "Attaching…" at once. Each in-progress state ALWAYS holds the terminal
-        // (RevealState.Seeding), so each resolves to the SINGLE centered hold; the
-        // top banners are suppressed. This is the invariant the maintainer's symptom
-        // keeps regressing on, pinned for all four states plus the never-held edges.
-
-        // Beyond-grace reconnect re-dials through the controller's Connecting →
-        // status Connecting; within-grace/steady recovery → status Reconnecting;
-        // a same-host switch → status Switching; a cold connect → status Connecting.
-        val inProgressHeldStates = listOf(
-            "cold Connecting" to connectingStatus,
-            "beyond-grace reconnect (re-dial → Connecting)" to connectingStatus,
-            "Switching / Attaching" to
-                TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
-            "Reattaching / Reconnecting" to reconnectingStatus,
+    fun fusion_everyInProgressHold_resolvesToSingleCenteredLoader_classCoverage() {
+        // Class coverage (D31/G2): every in-progress hold resolves to EXACTLY ONE
+        // primary loading surface — the centered "Attaching…" — and BOTH top banners
+        // are suppressed. This is the two-loaders invariant the maintainer's symptom
+        // keeps regressing on, pinned across cold connect / warm switch / reconnect.
+        val holds = listOf(
+            "cold Connecting" to fuse(RevealState.Seeding(sid, "work"), connectingStatus),
+            "warm Switching" to
+                fuse(RevealState.Seeding(sid, "work"), TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u")),
+            "beyond-grace Reconnecting" to fuse(RevealState.Seeding(sid, "work"), reconnectingStatus),
+            "Navigating (pre-connect)" to fuse(RevealState.Navigating(sid, "work"), TmuxSessionViewModel.ConnectionStatus.Idle),
         )
-        inProgressHeldStates.forEach { (label, status) ->
-            // Terminal held (the real in-progress reality): the SOLE loader is the
-            // centered "Attaching…"; BOTH top banners are suppressed.
+        holds.forEach { (label, state) ->
+            assertTrue("$label: terminal held", state.terminalHeld)
             assertEquals(
-                "$label must resolve to the single centered hold while the terminal is held",
+                "$label: the SOLE loader is the centered hold",
                 PrimaryLoadingSurface.CenteredAttaching,
-                primaryLoadingSurface(status, effectiveHidesTerminal = true),
+                primaryLoadingSurface(state),
             )
-            assertEquals(
-                "$label: top Connecting overlay suppressed while held",
-                false,
-                shouldShowConnectingProgressOverlay(status, effectiveHidesTerminal = true),
-            )
-            assertEquals(
-                "$label: top Reconnecting band suppressed while held",
-                false,
-                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
-            )
-            // Never both banners at once regardless of hold state.
-            listOf(true, false).forEach { held ->
-                assertFalse(
-                    "$label (held=$held): the two top banners must be mutually exclusive",
-                    shouldShowConnectingProgressOverlay(status, held) &&
-                        shouldShowReconnectingProgressRow(status, held),
-                )
+            val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty = false)
+            assertFalse("$label: top Connecting overlay suppressed", shouldShowConnectingProgressOverlay(state, ownsPrimary))
+            assertFalse("$label: top Reconnecting band suppressed", shouldShowReconnectingProgressRow(state, ownsPrimary))
+            // No settled failure surface for an in-progress hold.
+            assertFalse("$label: not a calm failure", state.showsCalmFailure)
+        }
+    }
+
+    @Test
+    fun fusion_liveReveal_dominates_regardlessOfPhase_withinGraceSuppression() {
+        // AC-4 (#685/#1098): a LIVE reveal is the surface authority — even if the
+        // connection phase is still Reconnecting (a within-grace silent heal), the
+        // fused state stays Live: terminal shown, GREEN pill, NO overlay/band. The
+        // load-bearing green is the SUPPRESSION (G6). Red if a phase read leaked
+        // through and flipped the surface/pill during the heal.
+        listOf(
+            reconnectingStatus,
+            connectingStatus,
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+        ).forEach { phaseStatus ->
+            val state = fuse(RevealState.Live(sid, "work", panes = emptyList()), phaseStatus)
+            assertTrue("live reveal dominates phase=$phaseStatus", state is SessionSurfaceState.Live)
+            assertFalse("terminal shown (no hold)", state.terminalHeld)
+            assertEquals("green Connected pill", com.pocketshell.uikit.model.ConnectionStatus.Connected, state.toUiStatus())
+            assertEquals("no loading surface over a live frame", PrimaryLoadingSurface.None, primaryLoadingSurface(state, panesEmpty = false))
+        }
+    }
+
+    @Test
+    fun fusion_goneTarget_calmFailure_disconnectedPill() {
+        // A target deleted elsewhere (#666) → calm failure surface + "Disconnected"
+        // pill + no spinner, all in agreement.
+        val state = fuse(RevealState.Gone(sid, "work"), TmuxSessionViewModel.ConnectionStatus.Failed("gone"))
+        assertTrue(state is SessionSurfaceState.Gone)
+        assertTrue(state.showsCalmFailure)
+        assertEquals(PrimaryLoadingSurface.None, primaryLoadingSurface(state))
+        assertEquals(com.pocketshell.uikit.model.ConnectionStatus.Error, state.toUiStatus())
+    }
+
+    @Test
+    fun fusion_contradictoryCombination_isUnrepresentable() {
+        // The keystone invariant: NO fused state can present a spinner AND a settled
+        // failure at once, and NO state can show a top banner while the surface owns
+        // the primary indicator. Enumerate every reveal×phase pair and assert the
+        // (loader, calm-failure) pair is never both-true and the banners never stack.
+        val reveals = listOf(
+            RevealState.Idle,
+            RevealState.Navigating(sid, "work"),
+            RevealState.Seeding(sid, "work"),
+            RevealState.Live(sid, "work", panes = emptyList()),
+            RevealState.Gone(sid, "work"),
+            RevealState.Error(sid, "work", retrying = false, reason = FailureReason.AuthFailed),
+        )
+        val phases = listOf(
+            ConnectionPhase.Idle,
+            ConnectionPhase.Connecting("h", 22, "u"),
+            ConnectionPhase.Warm("h", 22, "u"),
+            ConnectionPhase.Live("h", 22, "u"),
+            ConnectionPhase.Reconnecting("h", 22, "u", 1, 3, 0L),
+            ConnectionPhase.Failed,
+        )
+        reveals.forEach { reveal ->
+            phases.forEach { phase ->
+                val state = sessionSurfaceState(reveal, phase, sid)
+                listOf(true, false).forEach { panesEmpty ->
+                    // A calm failure and a centered loader can NEVER both paint.
+                    assertFalse(
+                        "reveal=$reveal phase=$phase panesEmpty=$panesEmpty: loader+failure both true",
+                        state.showsCalmFailure && state.showsCenteredLoader(panesEmpty),
+                    )
+                    val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty)
+                    // The two top banners are mutually exclusive AND suppressed while
+                    // the surface owns the primary indicator.
+                    assertFalse(
+                        "reveal=$reveal phase=$phase: both top banners at once",
+                        shouldShowConnectingProgressOverlay(state, ownsPrimary) &&
+                            shouldShowReconnectingProgressRow(state, ownsPrimary),
+                    )
+                    // Pill agrees with the surface: a calm-failure surface ALWAYS reads
+                    // Error; a live surface NEVER reads Error.
+                    if (state.showsCalmFailure) {
+                        assertEquals(
+                            "failure surface must read Disconnected pill",
+                            com.pocketshell.uikit.model.ConnectionStatus.Error,
+                            state.toUiStatus(),
+                        )
+                    }
+                }
             }
         }
     }
 
     @Test
-    fun steadyStatesHaveNoPrimaryLoadingSurface() {
-        // Connected / Idle / Failed with a live (not-held) frame have no primary
-        // loading surface — no spinner falsely implying in-flight work.
-        listOf(
-            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
-            TmuxSessionViewModel.ConnectionStatus.Idle,
-            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
-        ).forEach { status ->
-            assertEquals(
-                "no loading surface for steady $status",
-                PrimaryLoadingSurface.None,
-                primaryLoadingSurface(status, effectiveHidesTerminal = false),
-            )
+    fun fusion_failedState_carriesTypedReason_notRawString_curatedSentence() {
+        // AC-3: the failed state carries a TYPED FailureReason (no raw string field),
+        // and the screen maps it to ONE calm curated sentence — never raw exception
+        // text. Class coverage over every reason.
+        val cases = mapOf(
+            FailureReason.AuthFailed to "Authentication failed — check your key. Tap Reconnect to retry.",
+            FailureReason.HostUnresolved to "Host could not be resolved. Tap Reconnect to retry.",
+            FailureReason.ServerRestarted to "The tmux server restarted — all sessions ended. Tap Reconnect.",
+            FailureReason.SessionEnded to "This session ended. Tap Reconnect.",
+            FailureReason.KeyMissing to "Private key file not found. Tap Reconnect to retry.",
+            FailureReason.Unreachable(retryable = true) to "Connection lost. Tap Reconnect to retry.",
+        )
+        cases.forEach { (reason, expected) ->
+            val state = SessionSurfaceState.Failed(sid, "work", reason)
+            assertEquals("curated sentence for $reason", expected, failureReasonSentence(state.reason))
+            val sentence = failureReasonSentence(state.reason)
+            assertFalse("no raw error: prefix", sentence.startsWith("error:"))
+            assertFalse("no exception class name", sentence.contains("Exception"))
+            assertTrue("stays a calm reconnect prompt", sentence.contains("Reconnect"))
         }
     }
 
-    // --- Issue #1322: Slice 1 — render RevealState.Error/Gone DISTINCTLY (not as
-    // "Attaching…"), curate ALL connect-failure messages, and make EVERY connection
-    // state render exactly ONE coherent set of controls/indicators. These pin the
-    // pure decision reducers the screen uses. Each is red→green by reverting the
-    // corresponding reducer body.
-
-    private val sid = SessionId("host/work")
-
     @Test
-    fun revealHardFailure_goneAndRetryExhaustedError_areHardFailures() {
-        // Class coverage (G2): the two hard reveal failures — a target Gone, and an
-        // Error whose retry is EXHAUSTED (the #1321 past-grace transport drop) — must
-        // classify as hard failures so the surface paints the calm placeholder, NOT
-        // the "Attaching…" spinner.
-        assertTrue(revealIsHardFailure(RevealState.Gone(sid, "work")))
-        assertTrue(revealIsHardFailure(RevealState.Error(sid, "work", retrying = false)))
-    }
-
-    @Test
-    fun revealHardFailure_retryingErrorAndLoadingStates_areNotHardFailures() {
-        // The calm healing window (Error while still retrying) and the ordinary
-        // loading states keep their reconnecting/attaching hold — they are NOT hard
-        // failures.
-        assertFalse(revealIsHardFailure(RevealState.Error(sid, "work", retrying = true)))
-        assertFalse(revealIsHardFailure(RevealState.Seeding(sid, "work")))
-        assertFalse(revealIsHardFailure(RevealState.Navigating(sid, "work")))
-        assertFalse(revealIsHardFailure(RevealState.Live(sid, "work", panes = emptyList())))
-        assertFalse(revealIsHardFailure(RevealState.Idle))
-    }
-
-    @Test
-    fun surface_hardRevealFailure_paintsCalmFailureNotAttachingSpinner_1321Repro() {
-        // #1321 EXACT reproduction (defect A): a past-grace transport drop yields
-        // RevealState.Error(retrying=false) → the terminal is held
-        // (effectiveHidesTerminal == true) but the surface must paint the CALM
-        // failure placeholder (no spinner), NEVER the "Attaching…" hold. Red on base:
-        // revealIsHardFailure returned false for every state, so this collapsed to
-        // the centered "Attaching…" loader.
-        val failedStatus = TmuxSessionViewModel.ConnectionStatus.Failed(
-            "Connection lost. Tap Reconnect to retry.",
-        )
-        assertTrue(
-            "the honest hard failure must paint the calm placeholder",
-            surfaceShowsCalmFailure(
-                effectiveHidesTerminal = true,
-                revealHardFailure = true,
-                status = failedStatus,
-            ),
-        )
-        assertFalse(
-            "the hard failure must NOT paint a centered loader spinner",
-            surfaceShowsCenteredLoader(
-                effectiveHidesTerminal = true,
-                revealHardFailure = true,
-                status = failedStatus,
-                panesEmpty = true,
-            ),
-        )
-        // Pill + surface + band AGREE: the top connecting/reconnecting banner is
-        // suppressed for this state (surface owns the primary indicator), so there is
-        // no "Connecting…/Reconnecting…" line contradicting the "Disconnected" pill.
-        assertTrue(
-            surfaceOwnsPrimaryIndicator(
-                effectiveHidesTerminal = true,
-                revealHardFailure = true,
-                status = failedStatus,
-                panesEmpty = true,
-            ),
-        )
-        assertEquals(
-            PrimaryLoadingSurface.None,
-            primaryLoadingSurface(failedStatus, effectiveHidesTerminal = true, revealHardFailure = true),
-        )
+    fun surfaceReconnectButton_visibleOnlyOnIdleDrop_notWhileFailedOrInProgress() {
+        // The bottom Reconnect button is the sole affordance ONLY on a band-less Idle
+        // drop — hidden on Failed/Gone (the band owns it) and while connecting.
+        assertTrue(surfaceReconnectButtonVisible(SessionSurfaceState.Idle))
+        assertTrue(surfaceReconnectButtonVisible(SessionSurfaceState.Live(sid, "work", emptyList())))
+        assertFalse(surfaceReconnectButtonVisible(SessionSurfaceState.Failed(sid, "work", FailureReason.Unreachable(true))))
+        assertFalse(surfaceReconnectButtonVisible(SessionSurfaceState.Gone(sid, "work")))
+        assertFalse(surfaceReconnectButtonVisible(SessionSurfaceState.Connecting(sid, "work", "h", 22, "u")))
+        assertFalse(surfaceReconnectButtonVisible(SessionSurfaceState.Attaching(sid, "work", "h", 22, "u")))
+        assertFalse(surfaceReconnectButtonVisible(SessionSurfaceState.Reconnecting(sid, "work", "h", 22, "u", 1, 3, 0L)))
     }
 
     @Test
     fun connectFailureMessage_generalCase_isCuratedNeverRawExceptionText() {
-        // Defect B (#1321): the reported RAW `TmuxClientException: failed to preflight
-        // tmux has-session ... transport is closed` leaked to the UI. The general
-        // connect-failure case must fold into ONE calm curated prompt — never the
-        // `error: <Class>: <message>` format. This asserts the curated string the
-        // VM now stores as Failed.message (pinned end-to-end in
-        // TmuxSessionOpenFailedReconnectTest). Red on base: the message was
-        // `error: TmuxClientException: ...`.
-        val curated = "Connection lost. Tap Reconnect to retry."
-        assertFalse(
-            "curated message must not carry the raw `error: <Class>:` prefix",
-            curated.startsWith("error:"),
-        )
-        assertFalse("curated message must not name the exception class", curated.contains("Exception"))
-        assertFalse("curated message must not leak transport jargon", curated.contains("transport is closed"))
-        assertTrue("curated message must stay a calm reconnect prompt", curated.contains("Reconnect"))
-    }
-
-    @Test
-    fun failedState_exactlyOneReconnectControl_noBottomButtonDuplicate_screenshotA() {
-        // Screenshot A (coordinator scope-expansion): the Failed/Disconnected state
-        // showed TWO reconnect controls — the "Tap to reconnect" band link AND the
-        // bottom "Reconnect" button. The band owns the SINGLE affordance for Failed,
-        // so the bottom surface button MUST be suppressed. Red on base: the #890 gate
-        // did not exclude Failed, so the bottom button showed on top of the band.
-        val failed = TmuxSessionViewModel.ConnectionStatus.Failed("Connection lost. Tap Reconnect to retry.")
-        assertFalse(
-            "no bottom Reconnect button on Failed — the band's 'Tap to reconnect' is the sole affordance",
-            surfaceReconnectButtonVisible(failed),
-        )
-        // The bottom button IS the sole affordance on the band-less Idle drop.
-        assertTrue(
-            "the bottom Reconnect button is the sole affordance on Idle (no band)",
-            surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Idle),
-        )
-        // And it stays hidden while a connect/reconnect is in progress (#890).
-        assertFalse(surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u")))
-        assertFalse(surfaceReconnectButtonVisible(reconnectingStatus))
-        assertFalse(surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u")))
-    }
-
-    @Test
-    fun reconnecting_waitingForPanesRing_isSoleIndicator_topBannerAndBoxSpinnerSuppressed_screenshotB() {
-        // Screenshot B (#750 regression): a Reconnecting state where the reveal is
-        // live (effectiveHidesTerminal == false) but no panes have arrived yet
-        // (panesEmpty) stacked THREE indicators — the top ReconnectingProgressRow,
-        // the centered "waiting for tmux panes…" ring, and the pull box spinner.
-        // The waiting ring is the SOLE loader, so it must own the primary indicator:
-        // the top banner AND the box spinner are suppressed. Red on base:
-        // surfaceShowsCenteredLoader only counted effectiveHidesTerminal, missing the
-        // waiting ring — so all three fired.
-        assertTrue(
-            "the waiting-for-panes ring is a centered loader",
-            surfaceShowsCenteredLoader(
-                effectiveHidesTerminal = false,
-                revealHardFailure = false,
-                status = reconnectingStatus,
-                panesEmpty = true,
-            ),
-        )
-        assertTrue(
-            "the surface owns the primary indicator, so the top banner is suppressed",
-            surfaceOwnsPrimaryIndicator(
-                effectiveHidesTerminal = false,
-                revealHardFailure = false,
-                status = reconnectingStatus,
-                panesEmpty = true,
-            ),
-        )
-        // The banner-suppression reducer sees the broadened "surface owns it" gate
-        // and returns the centered-hold verdict (banners suppressed), never the
-        // ReconnectingBand — so the top bar cannot stack on the waiting ring.
-        assertFalse(
-            shouldShowReconnectingProgressRow(reconnectingStatus, effectiveHidesTerminal = true),
-        )
-    }
-
-    @Test
-    fun reconnecting_liveFrameKept_keepsTopBanner_asSoleIndicator() {
-        // The complementary edge: a Reconnecting state that keeps a LIVE frame
-        // (terminal not held AND panes present) shows NEITHER a surface loader nor a
-        // failure, so the top ReconnectingProgressRow is the SOLE indicator — never
-        // stripped to zero.
-        assertFalse(
-            surfaceOwnsPrimaryIndicator(
-                effectiveHidesTerminal = false,
-                revealHardFailure = false,
-                status = reconnectingStatus,
-                panesEmpty = false,
-            ),
-        )
-        assertTrue(
-            shouldShowReconnectingProgressRow(reconnectingStatus, effectiveHidesTerminal = false),
-        )
+        // Defect B (#1321): the reported RAW `TmuxClientException: ... transport is
+        // closed` leaked to the UI. The general (closed-transport) case classifies to
+        // a retryable Unreachable → the calm curated prompt, never `error: <Class>:`.
+        val curated = failureReasonSentence(FailureReason.Unreachable(retryable = true))
+        assertFalse("no raw `error:` prefix", curated.startsWith("error:"))
+        assertFalse("no exception class name", curated.contains("Exception"))
+        assertFalse("no transport jargon", curated.contains("transport is closed"))
+        assertTrue("stays a calm reconnect prompt", curated.contains("Reconnect"))
     }
 
     @Test
@@ -2325,14 +2238,14 @@ class TmuxSessionScreenTest {
             "Failed-with-target must enable Reconnect (the dropped-session escape hatch)",
             reconnectKebabEnabled(
                 canReconnect = true,
-                status = TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected"),
+                surfaceState = SessionSurfaceState.Failed(sid, "work", FailureReason.Unreachable(true)),
             ),
         )
         assertTrue(
-            "a (possibly stale) Connected with a target still enables a manual reconnect",
+            "a (possibly stale) Live session with a target still enables a manual reconnect",
             reconnectKebabEnabled(
                 canReconnect = true,
-                status = TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+                surfaceState = SessionSurfaceState.Live(sid, "work", emptyList()),
             ),
         )
     }
@@ -2342,14 +2255,14 @@ class TmuxSessionScreenTest {
         // No target to reconnect to (VM never opened / initial-connect race) — the item
         // must be disabled so a tap is never a silent no-op (AC4).
         listOf(
-            TmuxSessionViewModel.ConnectionStatus.Idle,
-            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
-            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
-        ).forEach { status ->
+            SessionSurfaceState.Idle,
+            SessionSurfaceState.Failed(sid, "work", FailureReason.Unreachable(true)),
+            SessionSurfaceState.Live(sid, "work", emptyList()),
+        ).forEach { state ->
             assertEquals(
-                "no target → Reconnect disabled for $status",
+                "no target → Reconnect disabled for $state",
                 false,
-                reconnectKebabEnabled(canReconnect = false, status = status),
+                reconnectKebabEnabled(canReconnect = false, surfaceState = state),
             )
         }
     }
@@ -2374,7 +2287,7 @@ class TmuxSessionScreenTest {
             "the kebab Reconnect must be enabled while dropped-with-target (the escape hatch)",
             reconnectKebabEnabled(
                 canReconnect = true,
-                status = TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected"),
+                surfaceState = SessionSurfaceState.Failed(sid, "work", FailureReason.Unreachable(true)),
             ),
         )
         // While dropped, the queue does NOT flush (the message stays queued).
@@ -2408,14 +2321,14 @@ class TmuxSessionScreenTest {
         // redundant re-dial that yanks an already-recovering session, so the item is
         // disabled even with a target present (AC: "sensible state mid-reconnect").
         listOf(
-            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
-            TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
-            reconnectingStatus,
-        ).forEach { status ->
+            SessionSurfaceState.Connecting(sid, "work", "h", 22, "u"),
+            SessionSurfaceState.Attaching(sid, "work", "h", 22, "u"),
+            SessionSurfaceState.Reconnecting(sid, "work", "h", 22, "u", 1, 3, 0L),
+        ).forEach { state ->
             assertEquals(
-                "in-flight → Reconnect disabled for $status",
+                "in-flight → Reconnect disabled for $state",
                 false,
-                reconnectKebabEnabled(canReconnect = true, status = status),
+                reconnectKebabEnabled(canReconnect = true, surfaceState = state),
             )
         }
     }

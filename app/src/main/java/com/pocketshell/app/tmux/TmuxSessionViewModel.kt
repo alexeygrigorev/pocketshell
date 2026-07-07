@@ -80,7 +80,10 @@ import com.pocketshell.app.tmux.connection.hostKeyFor
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
+import com.pocketshell.core.connection.FailureReason
 import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.classifyFailure
+import com.pocketshell.core.connection.retryable
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RevealStateMachine
@@ -1584,7 +1587,7 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * EPIC #687 P1: promote the reveal to [RevealState.Live] for the CURRENT target
      * at the inline "active pane revealed" moments — the points where the inline
-     * path clears `_switchHidesTerminal` because the target's own pane is shown.
+     * path clears the reveal-machine hold because the target's own pane is shown.
      * This covers the WARM-CACHE switch (and the fast-switch/cold reveal) where no
      * fresh `capture-pane` re-fires for an already-cached pane, so [offerRevealSeed]
      * alone would never land a seed and the NEW-path reveal gate would stay held
@@ -1791,29 +1794,13 @@ public class TmuxSessionViewModel @Inject constructor(
         projectStatusFromController()
     }
 
-    /**
-     * Issue #661: while a CROSS-session switch to a NOT-yet-cached target is in
-     * flight, the screen must NEVER paint the leaving session's terminal frame —
-     * not even for one Compose frame. #634 kept the previous frame painted to
-     * avoid a "Connecting" blank, but the maintainer's refined preference is the
-     * opposite for a cross-session switch: hide the terminal surface entirely
-     * (show a compact "Attaching" loading indicator) and reveal ONLY once the
-     * NEW session's panes are seeded from `capture-pane`.
-     *
-     * This flag is set SYNCHRONOUSLY (before any coroutine runs) at the start of
-     * a cross-session fast-switch and cleared the instant the new session's
-     * panes are revealed (status flips to [ConnectionStatus.Connected]). It is
-     * NOT set on the runtime-cache-hit path: that path activates the TARGET
-     * session's own cached frame instantly, which is correct content (the target,
-     * never the leaving session), so there is nothing to hide.
-     *
-     * Keep-frame remains in force for a within-session reattach / warm reopen of
-     * the SAME session — only the cross-session case blanks.
-     */
-    private val _switchHidesTerminal: MutableStateFlow<Boolean> =
-        MutableStateFlow(false)
-    public val switchHidesTerminal: StateFlow<Boolean> =
-        _switchHidesTerminal.asStateFlow()
+    // Issue #1326 (S3): the legacy switch-hides-terminal "hide the terminal
+    // during a cross-session switch" flag is DELETED (D22 hard-cut). It was a
+    // SECOND, unsynchronised source for the surface-hold decision alongside the
+    // id-keyed [RevealStateMachine] — no production render read it (the screen
+    // holds the terminal off [revealState] alone), so it was a dead write that
+    // could only DIVERGE from the reveal machine. The single hold authority is now
+    // the reveal machine -> [SessionSurfaceState].
 
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
@@ -2955,7 +2942,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // SYNCHRONOUSLY (the screen shows a compact "Attaching" loading state
         // instead) and reveal only once the new session's panes are seeded. This
         // reverses #634's keep-frame for the cross-session case (see
-        // [_switchHidesTerminal]). The runtime-cache-hit path returned earlier
+        // the reveal-machine hold). The runtime-cache-hit path returned earlier
         // above and is unaffected — it activates the target's own cached frame,
         // which is correct content, not the leaving session.
         //
@@ -2966,9 +2953,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // we are removing. The cached runtime still captures the leaving panes
         // via [deactivateCurrentRuntimeToCache]'s `paneRows` fallback (the
         // per-pane row map is untouched here), so blanking [_panes] now loses no
-        // warm-cache content.
+        // warm-cache content. (The terminal is held by the reveal machine, not a
+        // separate flag — #1326.)
         if (willFastSwitch) {
-            _switchHidesTerminal.value = true
             _panes.value = emptyList()
             rebuildUnifiedPanes()
         }
@@ -3050,7 +3037,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // second" flash the maintainer reported. We now blank the
                     // rendered panes (the producer teardown inside
                     // [deactivateCurrentRuntimeToCache] already clears them)
-                    // and rely on [_switchHidesTerminal] (set synchronously
+                    // and rely on the reveal-machine hold (set synchronously
                     // above) to show a compact "Attaching" loading state until
                     // [runFastSessionSwitch]'s reconcile seeds and reveals the
                     // NEW session's panes. Input stays gated for the whole
@@ -3781,7 +3768,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // lease is intact: we re-capture the active pane and let the existing
         // SeedLanded feedback promote the controller back to Live. We DO NOT run the
         // old inline `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)`
-        // path, which raised `_switchHidesTerminal` (the "Attaching…" overlay) on any
+        // path, which raised the reveal-machine hold (the "Attaching…" overlay) on any
         // confirmed-dead probe verdict even inside grace — the D21 violation #754 fixes.
         // The within-grace gate (`resumedWithinGrace && warm lease`) is exactly the
         // controller's `onForeground` predicate (`now < deadline && transport.isWarm`),
@@ -3795,7 +3782,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // grace-elapsed teardown, NOT here, so the #738 driver detach never fires).
             // Run the RESEED-ONLY effect directly: it re-promotes Live (a no-op
             // TransportLive on an already-Live controller) and heals blank panes over
-            // the warm client. NO connect(), NO `_switchHidesTerminal` "Attaching…"
+            // the warm client. NO connect(), NO the reveal-machine hold "Attaching…"
             // overlay — the D21 within-grace contract. The driver's
             // `foregroundReattachEffect` seam invokes this SAME body on the controller's
             // Backgrounded→Reattaching edge (the classification model, unit-tested in
@@ -3890,7 +3877,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * drops a late seed for a switched-away/superseded runtime.
      *
      * D21/D28 contract: NO reconnect, NO new lease, NO `connectGeneration` bump, NO
-     * `_switchHidesTerminal` "Attaching…" overlay, and NO new polling/timer (#1164) — a single
+     * the reveal-machine hold "Attaching…" overlay, and NO new polling/timer (#1164) — a single
      * reseed on this one no-op branch, at most one `capture-pane` per pinned foreground return.
      * A no-op when nothing is attached / the client is gone (the beyond-grace non-pinned resume
      * that DID tear down never reaches here — it always has an arm to dispatch above).
@@ -4022,7 +4009,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * to Live (the channel is live) and run the existing blank-pane safety-net reseed
      * over the SAME live client so a pane that came back blank under a brief link blip
      * still heals — without a handshake. Crucially this NEVER calls `connect()` and
-     * NEVER raises `_switchHidesTerminal`, so the user sees no "Attaching…" overlay and
+     * NEVER raises the reveal-machine hold, so the user sees no "Attaching…" overlay and
      * no reconnect — the D21 within-grace contract.
      *
      * This is also the body the [ConnectionEffectDriver]'s `foregroundReattachEffect`
@@ -4099,7 +4086,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *    or touches the reconnect/grace state machine. It runs entirely over the
      *    already-live `clientRef` (`-CC` control channel) against the current runtime
      *    guard, exactly like the within-grace foreground reseed does.
-     *  - It does NOT raise `_switchHidesTerminal` (no "Attaching…" overlay) and does NOT
+     *  - It does NOT raise the reveal-machine hold (no "Attaching…" overlay) and does NOT
      *    change [_connectionStatus] — the status stays the calm `Connected`.
      *
      * It differs from [reseedVisiblePaneIfBlank] (the #662 switch heal) in that it is
@@ -6102,11 +6089,6 @@ public class TmuxSessionViewModel @Inject constructor(
         installLifecycleHooks(target.hostId)
         bindProjectRootsForHost(target.hostId)
         refreshReconnectAvailability()
-        // Issue #661: the cache-hit path activates the TARGET session's own
-        // cached frame (already published above), so there is never a leaving
-        // frame to hide here; clear the gate defensively in case a prior
-        // in-flight fast switch had set it.
-        _switchHidesTerminal.value = false
         // EPIC #687 P1: the warm cache-hit reveals the target's own pane WITHOUT a
         // fresh capture, so promote the reveal machine to Live for the target here
         // (otherwise the NEW-path reveal gate would stay held and the surface would
@@ -6485,17 +6467,10 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             // Issue #693/#661: NEVER reveal a black active pane on this cold/slow
             // path either (it is also the dead-lease fast-switch escalation
-            // target). Gate the reveal on a non-empty active-pane seed; only
-            // clear [_switchHidesTerminal] (the loading overlay) once the active
-            // pane is non-blank, otherwise keep the calm "Attaching…" overlay and
-            // hand off to [armConnectedBlankWatchdog].
+            // target). Gate the reveal on a non-empty active-pane seed, otherwise
+            // keep the calm "Attaching…" hold and hand off to
+            // [armConnectedBlankWatchdog].
             val activePaneSeeded = awaitActivePaneSeededOrLoading(blankReseedGuard)
-            // Issue #661: clear any cross-session "hide terminal" gate at the
-            // reveal so a fast switch that fell through to this slow/cold path
-            // (e.g. a dead-lease escalation) still reveals the new session's
-            // seeded panes rather than staying on the loading placeholder — but
-            // only when the active pane actually has content (#693).
-            _switchHidesTerminal.value = !activePaneSeeded
             // EPIC #687 P1: when the active pane is seeded non-blank, the inline path
             // reveals the target's surface — promote the reveal machine to Live for
             // the target so the NEW-path reveal gate releases in lockstep.
@@ -7019,23 +6994,13 @@ public class TmuxSessionViewModel @Inject constructor(
             // reveal gates on the active pane's single capture — a degraded
             // switch could otherwise reveal a BLACK active pane with a green dot
             // and no reconnecting band. Gate the reveal on a non-empty active-
-            // pane seed (bounded retries); only clear [_switchHidesTerminal]
-            // (the loading overlay) once the active pane is non-blank.
+            // pane seed (bounded retries).
             val fastSwitchRevealGuard = RuntimeRefreshGuard(
                 generation = connectGeneration,
                 target = target,
                 client = client,
             )
             val activePaneSeeded = awaitActivePaneSeededOrLoading(fastSwitchRevealGuard)
-            // Issue #661: the NEW session's panes are seeded (reconciled in
-            // [awaitPanesReadyForAttach]); reveal the terminal surface in the
-            // SAME state mutation that flips to Connected so the first painted
-            // frame is the new session's content — never a transient blank or
-            // (worse) the leaving session's frame. When the active pane could
-            // NOT be seeded non-blank within the gate's bound, keep the loading
-            // overlay raised and hand off to [armConnectedBlankWatchdog] so the
-            // user sees a calm "Attaching…" rather than a black Connected pane.
-            _switchHidesTerminal.value = !activePaneSeeded
             // EPIC #687 P1: the fast-switch reveal shows the target's seeded pane —
             // promote the reveal machine to Live for the target so the NEW-path reveal
             // gate releases in the same mutation (never holds on a warm switch).
@@ -7493,9 +7458,6 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget =
             if (preserveReconnectTarget || staleChannelSymptom || coalescedCancel) target else null
         refreshReconnectAvailability()
-        // Issue #661: a failed switch must drop the cross-session "hide terminal"
-        // gate so the Failed band is shown (not the loading placeholder).
-        _switchHidesTerminal.value = false
         setConnectionState(ConnectionState.Unreachable(message))
         // Issue #1185 (two-holder safety net): drive the reveal machine DIRECTLY
         // to a terminal error for THIS exact target instead of relying solely on
@@ -7506,7 +7468,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // honest error in lockstep, closing the #1185 contradictory Disconnected +
         // live-spinner surface. Drop-by-id inside the machine makes this a no-op if
         // the user has since navigated to another session.
-        driveRevealTerminalError(target)
+        driveRevealTerminalError(target, cause)
     }
 
     /**
@@ -7592,8 +7554,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * the machine makes this a no-op when the user has navigated to another
      * session.
      */
-    private fun driveRevealTerminalError(target: ConnectionTarget) {
-        revealStateMachine.onTerminalError(controllerSessionId(target))
+    private fun driveRevealTerminalError(target: ConnectionTarget, cause: Throwable?) {
+        // Issue #1326 (S3): carry the TYPED failure reason (the single
+        // [classifyFailure] classifier) to the reveal machine so the honest error
+        // surface renders a curated sentence, never a raw exception string.
+        revealStateMachine.onTerminalError(controllerSessionId(target), classifyFailure(cause))
         _revealState.value = revealStateMachine.state.value
     }
 
@@ -7639,6 +7604,22 @@ public class TmuxSessionViewModel @Inject constructor(
             current = current.cause
         }
         return false
+    }
+
+    /**
+     * Issue #1326 (characterization test seam): drive the id-keyed reveal machine to
+     * a HELD (Seeding) surface for the active target — the loading-hold state a
+     * connected-but-blank pane hands off into. Replaces the deleted
+     * `setSwitchHidesTerminalForTest` seam now that the reveal machine (not a
+     * separate flag) is the single surface-hold authority.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setRevealHoldForTest() {
+        val target = activeTarget ?: connectingTarget ?: return
+        revealStateMachine.onConnectionState(
+            CoreConnectionState.Attaching(controllerHostKey(target), controllerSessionId(target)),
+        )
+        _revealState.value = revealStateMachine.state.value
     }
 
     /**
@@ -7819,48 +7800,29 @@ public class TmuxSessionViewModel @Inject constructor(
      * (a host briefly unreachable while rebooting, Wi-Fi handover, etc.), so
      * they stay on the retry-with-backoff path.
      */
-    private fun isNonRetryableConnectFailure(cause: Throwable?): Boolean {
-        var current: Throwable? = cause
-        val seen = HashSet<Throwable>()
-        while (current != null && seen.add(current)) {
-            val simpleName = current.javaClass.simpleName
-            if (simpleName in NON_RETRYABLE_FAILURE_CLASS_NAMES) return true
-            // The key-not-found case is surfaced as a plain IOException with a
-            // descriptive message (see [SshConnection]); a literal type match
-            // would be too broad (IOException also covers transient socket
-            // tear-downs), so we narrow it on the message text.
-            val message = current.message
-            if (message != null && message.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true)) {
-                return true
-            }
-            current = current.cause
-        }
-        return false
-    }
+    // Issue #1326 (S3): the `Throwable → non-retryable?` and `Throwable → reason`
+    // string tables moved to the SINGLE `:shared:core-connection` classifier
+    // ([classifyFailure] + [FailureReason.retryable]). These are thin adapters over
+    // it so the auto-reconnect ladder + the [ConnectionStatus.Failed] band keep their
+    // exact behaviour while there is ONE source of truth for the reason.
+    private fun isNonRetryableConnectFailure(cause: Throwable?): Boolean =
+        !classifyFailure(cause).retryable
 
     /**
-     * Issue #440: a short, user-facing reason for a non-retryable connect
-     * failure, used in the [ConnectionStatus.Failed] message that replaces
-     * the backoff loop. Keeps the band actionable ("authentication failed —
-     * check your key") instead of leaking the raw exception type.
+     * Issue #440/#1326: a short, user-facing reason for a non-retryable connect
+     * failure, used in the [ConnectionStatus.Failed] message that replaces the
+     * backoff loop. Derived from the typed [classifyFailure] reason so the wording
+     * has one source.
      */
-    private fun nonRetryableReason(cause: Throwable?): String {
-        var current: Throwable? = cause
-        val seen = HashSet<Throwable>()
-        while (current != null && seen.add(current)) {
-            when (current.javaClass.simpleName) {
-                "UserAuthException" -> return "authentication failed"
-                "UnknownHostException" -> return "host could not be resolved"
-                // Issue #998: server-death — all sessions ended, recreate one.
-                "TmuxServerDeadException" -> return "the tmux server restarted — all sessions ended"
-            }
-            if (current.message?.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true) == true) {
-                return "private key file not found"
-            }
-            current = current.cause
+    private fun nonRetryableReason(cause: Throwable?): String =
+        when (val reason = classifyFailure(cause)) {
+            FailureReason.AuthFailed -> "authentication failed"
+            FailureReason.HostUnresolved -> "host could not be resolved"
+            FailureReason.ServerRestarted -> "the tmux server restarted — all sessions ended"
+            FailureReason.SessionEnded -> "this session ended"
+            FailureReason.KeyMissing -> "private key file not found"
+            is FailureReason.Unreachable -> "connection cannot be retried"
         }
-        return "connection cannot be retried"
-    }
 
     private fun connectFailureMessage(t: Throwable, target: ConnectionTarget): String =
         if (t is TmuxAttachPanesReadyException) {
@@ -9625,10 +9587,9 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         // Issue #437 (slice A) / #661: mirror production — a same-host fast
         // switch enters [Switching] (inline indicator), NOT the blanking
-        // full-screen [Connecting] overlay; and per #661 it HIDES the terminal
-        // surface ([_switchHidesTerminal]) so the leaving frame is never painted
-        // until the new session's panes are seeded.
-        _switchHidesTerminal.value = true
+        // full-screen [Connecting] overlay; per #661 the reveal machine holds the
+        // terminal surface so the leaving frame is never painted until the new
+        // session's panes are seeded.
         setConnectionState(ConnectionState.Attaching(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -9640,9 +9601,9 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         // Mirror production's ordering: deactivate the previous tmux/UI runtime
         // into the warm cache before binding the new one. Issue #661: do NOT
-        // re-publish the leaving frame — blank the rendered panes and rely on
-        // [_switchHidesTerminal] to show the loading state until the new
-        // session's panes reconcile and reveal.
+        // re-publish the leaving frame — blank the rendered panes and rely on the
+        // reveal machine's hold to show the loading state until the new session's
+        // panes reconcile and reveal.
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
         _panes.value = emptyList()
         rebuildUnifiedPanes()
@@ -9691,8 +9652,8 @@ public class TmuxSessionViewModel @Inject constructor(
         bindProjectRootsForHost(hostId)
         connectingTarget = null
         refreshReconnectAvailability()
-        // Issue #661: reveal the new session's surface at the Connected flip.
-        _switchHidesTerminal.value = false
+        // Issue #661: reveal the new session's surface at the Connected flip
+        // (the reveal machine promotes to Live via the seed/promote path).
         setConnectionState(ConnectionState.Live(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -11202,17 +11163,6 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Issue #722 (characterization test seam): set the loading-overlay flag
-     * [_switchHidesTerminal] so a test can recreate the exact post-reveal state
-     * the blank watchdog is handed off into (overlay raised over a blank pane).
-     * Touches only the overlay flag — NOT the connection-status machinery.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun setSwitchHidesTerminalForTest(hidden: Boolean) {
-        _switchHidesTerminal.value = hidden
-    }
-
     private suspend fun preloadVisibleContentForNewPanes(
         newPanes: List<TmuxPaneState>,
         refreshGuard: RuntimeRefreshGuard? = null,
@@ -11573,7 +11523,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     // pane (a real one-line prompt that landed after reveal reads
                     // partial-black), reseed-thrashing it on every arming — so the
                     // watchdog keeps its narrow fully-blank contract.
-                    if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #1326: the frame recovered — promote the reveal machine
+                    // to Live for the active target so the surface reveals (this
+                    // replaces the deleted switch-hides-terminal clear; the reveal
+                    // machine is now the single hold authority).
+                    promoteRevealLiveForActiveTarget()
                     // Issue #973: the pane that was blank AT reveal has now
                     // produced a frame, so hand off the #966 lifetime net here —
                     // the reveal sites skip arming the stale-render watchdog while
@@ -11590,7 +11544,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
                 reseedBlankVisiblePanes(refreshGuard)
                 if (!activePane.terminalState.visibleScreenIsBlank()) {
-                    if (_switchHidesTerminal.value) _switchHidesTerminal.value = false
+                    // Issue #1326: reveal via the single reveal-machine authority.
+                    promoteRevealLiveForActiveTarget()
                     // Issue #973: frame landed after a reseed — hand off the #966
                     // stale-render lifetime net (see the early-exit case above).
                     armActivePaneStaleRenderWatchdog(refreshGuard)
@@ -11994,11 +11949,12 @@ public class TmuxSessionViewModel @Inject constructor(
             "maxTicks" to connectedBlankWatchdogMaxTicks,
             "tickMs" to CONNECTED_BLANK_WATCHDOG_TICK_MS,
         )
-        // Preserve the target so Reconnect has something to re-dial, then drop
-        // the loading overlay and drive the honest-error reveal surface.
+        // Preserve the target so Reconnect has something to re-dial, then drive
+        // the honest-error surface via [ConnectionState.Unreachable] (the reveal
+        // machine + [SessionSurfaceState] resolve the held surface to the calm
+        // failure placeholder — no separate loading-overlay flag; #1326).
         connectingTarget = target
         refreshReconnectAvailability()
-        _switchHidesTerminal.value = false
         val where = target?.let { " ${it.user}@${it.host}:${it.port}" } ?: ""
         setConnectionState(
             ConnectionState.Unreachable(
@@ -19958,39 +19914,6 @@ private const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
  * surfaces instead of an unbounded re-dial loop.
  */
 private const val COALESCED_CANCEL_REDIAL_MAX: Int = 2
-
-/**
- * Issue #440: simple class names of connect-failure causes that retrying
- * cannot fix — authentication rejection and DNS resolution failure. Matched
- * against the cause chain of a failed connect attempt (see
- * [TmuxSessionViewModel.isNonRetryableConnectFailure]). When one of these is
- * the failure, auto-reconnect stops immediately and surfaces the manual
- * Reconnect affordance rather than exhausting the backoff schedule.
- *
- * `UserAuthException` is sshj's authentication failure; `UnknownHostException`
- * is `java.net`'s DNS / unresolved-host signal. Both are config-level
- * problems the user must fix, not transient blips.
- */
-private val NON_RETRYABLE_FAILURE_CLASS_NAMES: Set<String> = setOf(
-    "UserAuthException",
-    "UnknownHostException",
-    // Issue #998: a dead tmux server will not come back by retrying the same
-    // attach — every retry would re-detect `no server running` (or worse, on a
-    // host whose tmux DID come back up, silently `new-session -A` a fresh empty
-    // server). So the auto-reconnect ladder must STOP on server-death rather
-    // than burn its 4 rungs; the user lands on the list (failServerDied already
-    // emitted `sessionEnded`) and recreates a session explicitly.
-    "TmuxServerDeadException",
-)
-
-/**
- * Issue #440: substring that identifies the "private key file not found"
- * IOException raised by [com.pocketshell.core.ssh.SshConnection]. A missing
- * key is a non-retryable config error; matching on the message keeps the
- * generic IOException type (which also covers transient socket drops) on the
- * retryable path.
- */
-private const val MISSING_KEY_MESSAGE_FRAGMENT: String = "Private key file not found"
 
 /**
  * Issue #423: a terminal surface that fails this many times within

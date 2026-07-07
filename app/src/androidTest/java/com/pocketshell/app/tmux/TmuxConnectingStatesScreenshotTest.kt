@@ -23,6 +23,14 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.core.connection.FailureReason
+import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.SessionId
+import com.pocketshell.core.connection.SessionSurfaceState
+import com.pocketshell.core.connection.sessionSurfaceState
+import com.pocketshell.core.connection.showsCalmFailure
+import com.pocketshell.core.connection.showsCenteredLoader
+import com.pocketshell.core.connection.surfaceOwnsPrimary
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -71,6 +79,15 @@ class TmuxConnectingStatesScreenshotTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
+
+    // Issue #1326 (S3): build the fused view state the screen renders, exactly as
+    // the screen wires it, so these screenshot proofs drive the SAME single state.
+    private val sid = SessionId("host/work")
+
+    private fun surfaceOf(
+        reveal: RevealState,
+        status: TmuxSessionViewModel.ConnectionStatus,
+    ): SessionSurfaceState = sessionSurfaceState(reveal, connectionPhaseOf(status), sid)
 
     @Test
     fun captureWaitingForPanesConnectingState() {
@@ -233,8 +250,8 @@ class TmuxConnectingStatesScreenshotTest {
                     // true` (the reconnect re-dial reality) the gate suppresses BOTH
                     // banners → this renders NOTHING.
                     TmuxTopConnectingBanner(
-                        status = connecting,
-                        effectiveHidesTerminal = true,
+                        surfaceState = surfaceOf(RevealState.Seeding(sid, "git-pocketshell"), connecting),
+                        surfaceOwnsPrimary = true,
                         sessionName = "git-pocketshell",
                         onCancelConnect = {},
                         onRetryNow = {},
@@ -309,7 +326,12 @@ class TmuxConnectingStatesScreenshotTest {
                     // The REAL under-header reconnect band — text + Retry now /
                     // Cancel, no linear bar after the #750 class-wide fix.
                     ReconnectingProgressRow(
-                        status = reconnecting,
+                        user = reconnecting.user,
+                        host = reconnecting.host,
+                        port = reconnecting.port,
+                        attempt = reconnecting.attempt,
+                        maxAttempts = reconnecting.maxAttempts,
+                        retryDelayMs = reconnecting.retryDelayMs,
                         sessionLabel = "tmux claude-main",
                         onRetryNow = {},
                         onCancel = {},
@@ -405,7 +427,9 @@ class TmuxConnectingStatesScreenshotTest {
                             onReconnect = {},
                             // The REAL gate — false for Failed (the band owns the
                             // single affordance), so the bottom button is suppressed.
-                            showReconnectButton = surfaceReconnectButtonVisible(failed),
+                            showReconnectButton = surfaceReconnectButtonVisible(
+                                surfaceOf(RevealState.Error(sid, "claude-main", retrying = false, reason = FailureReason.Unreachable(true)), failed),
+                            ),
                         ) {
                             Box(
                                 modifier = Modifier
@@ -450,6 +474,12 @@ class TmuxConnectingStatesScreenshotTest {
         val failed = TmuxSessionViewModel.ConnectionStatus.Failed(
             "Connection lost. Tap Reconnect to retry.",
         )
+        // The #1321 exact state: a past-grace transport drop → RevealState.Error
+        // (retry exhausted) fused with the Failed phase → SessionSurfaceState.Failed.
+        val hardFailureState = surfaceOf(
+            RevealState.Error(sid, "claude-main", retrying = false, reason = FailureReason.Unreachable(true)),
+            failed,
+        )
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -465,7 +495,7 @@ class TmuxConnectingStatesScreenshotTest {
                         onMore = {},
                     )
                     FailedConnectionRow(
-                        message = failed.message,
+                        message = failureReasonSentence((hardFailureState as SessionSurfaceState.Failed).reason),
                         onReconnect = {},
                         canReconnect = true,
                     )
@@ -478,24 +508,14 @@ class TmuxConnectingStatesScreenshotTest {
                             pullToReconnectActive = true,
                             isReconnecting = false,
                             onReconnect = {},
-                            showReconnectButton = surfaceReconnectButtonVisible(failed),
+                            showReconnectButton = surfaceReconnectButtonVisible(hardFailureState),
                             // The surface centered loader flag driven by the REAL
                             // decision: a settled hard failure is NOT a loader.
-                            surfaceShowsCenteredLoader = surfaceShowsCenteredLoader(
-                                effectiveHidesTerminal = true,
-                                revealHardFailure = true,
-                                status = failed,
-                                panesEmpty = true,
-                            ),
+                            surfaceShowsCenteredLoader = hardFailureState.showsCenteredLoader(panesEmpty = true),
                         ) {
                             // The REAL surface branch decision: a hard reveal failure
                             // paints the calm placeholder, NEVER "Attaching…".
-                            if (surfaceShowsCalmFailure(
-                                    effectiveHidesTerminal = true,
-                                    revealHardFailure = true,
-                                    status = failed,
-                                )
-                            ) {
+                            if (hardFailureState.showsCalmFailure) {
                                 RevealFailurePlaceholder()
                             } else {
                                 SwitchingLoadingPlaceholder()
@@ -545,18 +565,11 @@ class TmuxConnectingStatesScreenshotTest {
             retryDelayMs = 4_000L,
             reason = "Reconnecting…",
         )
-        val ownsPrimary = surfaceOwnsPrimaryIndicator(
-            effectiveHidesTerminal = false,
-            revealHardFailure = false,
-            status = reconnecting,
-            panesEmpty = true,
-        )
-        val centeredLoader = surfaceShowsCenteredLoader(
-            effectiveHidesTerminal = false,
-            revealHardFailure = false,
-            status = reconnecting,
-            panesEmpty = true,
-        )
+        // Reveal LIVE (terminal not held) but no panes yet → the "waiting for tmux
+        // panes…" ring is the SOLE loader; the top banner + box spinner are suppressed.
+        val waitingState = surfaceOf(RevealState.Live(sid, "claude-main", panes = emptyList()), reconnecting)
+        val ownsPrimary = waitingState.surfaceOwnsPrimary(panesEmpty = true)
+        val centeredLoader = waitingState.showsCenteredLoader(panesEmpty = true)
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -574,8 +587,8 @@ class TmuxConnectingStatesScreenshotTest {
                     // The REAL top-banner render site, driven by the broadened gate —
                     // suppressed because the surface owns the waiting ring.
                     TmuxTopConnectingBanner(
-                        status = reconnecting,
-                        effectiveHidesTerminal = ownsPrimary,
+                        surfaceState = waitingState,
+                        surfaceOwnsPrimary = ownsPrimary,
                         sessionName = "claude-main",
                         onCancelConnect = {},
                         onRetryNow = {},
@@ -592,7 +605,7 @@ class TmuxConnectingStatesScreenshotTest {
                             // The box spinner is suppressed because the surface shows
                             // the waiting ring (the broadened #1322 flag).
                             surfaceShowsCenteredLoader = centeredLoader,
-                            showReconnectButton = surfaceReconnectButtonVisible(reconnecting),
+                            showReconnectButton = surfaceReconnectButtonVisible(waitingState),
                         ) {
                             // The "waiting for tmux panes…" ring (EmptyPanesPlaceholder
                             // body) — the SOLE loader for this state.

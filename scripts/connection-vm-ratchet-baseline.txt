@@ -1,0 +1,13 @@
+# connection-core god-object ratchet baseline (issue #1047; re-landed + re-baselined #1324)
+# Measured over app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt.
+# ONE-WAY DOWNWARD ratchet: scripts/check-connection-vm-ratchet.sh --update may
+# only LOWER these (after an extraction slice removes IO / a decision / lines).
+# Never hand-raise a value — that is exactly the growth the guard exists to stop.
+# vm_line_count established at current main reality (de9f221d, post-#1322/S1
+# render-coherence slice which added 11 lines). The consolidation roadmap (#1331
+# S3-S8) ratchets this DOWN toward ~14-15k as the VM's parallel state machine is
+# extracted; --update only ever lowers it from here.
+io_count 17
+runblocking_count 13
+connection_decision_variants 7
+vm_line_count 20113

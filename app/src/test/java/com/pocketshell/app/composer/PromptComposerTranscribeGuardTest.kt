@@ -20,7 +20,6 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -45,9 +44,8 @@ import org.robolectric.annotation.Config
  *
  * RED on base: the FSM stays `Transcribing` forever after the throw / past any
  * bound.
- * GREEN with the fix: the FSM returns to Idle, the mic is unlocked
- * (`recordingLocked = false`), and a retryable error banner surfaces; the
- * watchdog bounds the wedged case.
+ * GREEN with the fix: the FSM returns to Idle, and a retryable error banner
+ * surfaces; the watchdog bounds the wedged case.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -96,10 +94,6 @@ class PromptComposerTranscribeGuardTest {
                 "stayed Transcribing with the mic locked forever",
             RecordingState.Idle,
             state.recording,
-        )
-        assertFalse(
-            "the mic must be unlocked after the throw so the user can record again",
-            state.recordingLocked,
         )
         assertNotNull(
             "a retryable error banner must surface so the user sees it failed",
@@ -155,7 +149,6 @@ class PromptComposerTranscribeGuardTest {
             RecordingState.Idle,
             state.recording,
         )
-        assertFalse("the mic is unlocked after the watchdog fires", state.recordingLocked)
         assertEquals(
             PromptComposerViewModel.TRANSCRIBE_TIMEOUT_MESSAGE,
             state.error,

@@ -19,7 +19,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.composer.COMPOSER_CANCEL_RECORDING_TAG
 import com.pocketshell.app.composer.COMPOSER_MIC_TAG
-import com.pocketshell.app.composer.COMPOSER_RECORDING_LOCKED_TAG
 import com.pocketshell.app.composer.COMPOSER_STOP_SEND_TAG
 import com.pocketshell.app.composer.COMPOSER_TO_FIELD_TAG
 import com.pocketshell.app.composer.PromptComposerSheet
@@ -34,8 +33,6 @@ import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -45,9 +42,13 @@ import org.junit.runner.RunWith
  * Issue #585 (REOPENED — the TRUE desired behavior). The maintainer's vision is
  * an ENTRY gesture on the composer LAUNCHER button (NOT the mic inside the
  * already-open sheet, which prior attempts kept building): hold the launcher and
- * swipe UP → the Prompt Composer opens AND recording begins immediately, locked
- * hands-free, in ONE gesture. A plain tap on the launcher still opens the
- * composer with NO recording.
+ * swipe UP → the Prompt Composer opens AND recording begins immediately, in ONE
+ * gesture. A plain tap on the launcher still opens the composer with NO recording.
+ *
+ * Issue #1245 removed the hands-free "lock" concept entirely: the launcher entry
+ * gesture still opens the composer with recording auto-started, but there is no
+ * "locked" state — the recording simply runs (timer + waveform) until the user
+ * taps Discard / Insert / Send.
  *
  * This drives the REAL production wiring: the real [ConversationComposerLauncherRow]
  * launcher (tag [SESSION_COMPOSER_LAUNCHER_TAG]) with the same `onDictateTap` /
@@ -60,8 +61,8 @@ import org.junit.runner.RunWith
  * RED on base: without the launcher entry gesture + the sheet's
  * `autoStartRecording` auto-start, the hold+swipe-up on the launcher opens the
  * composer with NO recording (recording stays Idle), so
- * [holdLauncherThenSwipeUpOpensComposerWithLockedRecording] fails its
- * Recording+locked assertion. GREEN with the fix.
+ * [holdLauncherThenSwipeUpOpensComposerWithRecording] fails its Recording
+ * assertion. GREEN with the fix.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RunWith(AndroidJUnit4::class)
@@ -176,7 +177,7 @@ class ComposerLauncherHoldSwipeUpJourneyTest {
     }
 
     @Test
-    fun holdLauncherThenSwipeUpOpensComposerWithLockedRecording() {
+    fun holdLauncherThenSwipeUpOpensComposerWithRecording() {
         val mic = FakeMicCapture()
         val viewModel = newViewModel(mic)
         renderLauncherAndComposer(viewModel)
@@ -193,37 +194,33 @@ class ComposerLauncherHoldSwipeUpJourneyTest {
                 up()
             }
 
-        // The composer must OPEN from the swipe AND recording must go live +
-        // locked hands-free from the SAME gesture. (Once recording starts, the
-        // Idle mic disc COMPOSER_MIC_TAG is replaced by the recording controls, so
-        // recording state — driven only from INSIDE the composed sheet — is itself
-        // the proof the composer opened.)
+        // The composer must OPEN from the swipe AND recording must go live from the
+        // SAME gesture. (Once recording starts, the Idle mic disc COMPOSER_MIC_TAG
+        // is replaced by the recording controls, so recording state — driven only
+        // from INSIDE the composed sheet — is itself the proof the composer opened.)
+        // Issue #1245: there is no "locked" state anymore — recording just runs.
         compose.waitUntil(timeoutMillis = 5_000) {
-            viewModel.uiState.value.recording == RecordingState.Recording &&
-                viewModel.uiState.value.recordingLocked
+            viewModel.uiState.value.recording == RecordingState.Recording
         }
         compose.waitForIdle()
 
         assertEquals("Launcher swipe-up entry must start exactly one capture", 1, mic.startCount)
         assertEquals("Finger-up after the entry swipe must not stop capture", 0, mic.stopCount)
         assertEquals(RecordingState.Recording, viewModel.uiState.value.recording)
-        assertTrue("Recording must be locked hands-free", viewModel.uiState.value.recordingLocked)
-        // The live locked recording UI + its stop/cancel/send controls are present
+        // The live recording UI + its Discard/Insert/Send controls are present
         // (proves the composer is open in the recording state, not just that the
         // ViewModel flipped).
-        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
         WalkthroughScreenshotArtifacts.capture("issue-585-launcher-swipe-open-recording")
 
-        // Stop/cancel still works from the launcher-opened locked recording.
+        // Discard still works from the launcher-opened recording.
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            viewModel.uiState.value.recording == RecordingState.Idle &&
-                !viewModel.uiState.value.recordingLocked
+            viewModel.uiState.value.recording == RecordingState.Idle
         }
-        assertEquals("Discard should stop the locked capture once", 1, mic.stopCount)
+        assertEquals("Discard should stop the capture once", 1, mic.stopCount)
     }
 
     @Test
@@ -243,7 +240,5 @@ class ComposerLauncherHoldSwipeUpJourneyTest {
         compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed()
         assertEquals("Plain tap must NOT start recording", 0, mic.startCount)
         assertEquals(RecordingState.Idle, viewModel.uiState.value.recording)
-        assertFalse(viewModel.uiState.value.recordingLocked)
-        compose.onNodeWithTag(COMPOSER_RECORDING_LOCKED_TAG).assertDoesNotExist()
     }
 }

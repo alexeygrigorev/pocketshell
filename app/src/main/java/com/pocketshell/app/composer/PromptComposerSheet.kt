@@ -16,8 +16,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -48,7 +46,6 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.DataObject
-import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -78,19 +75,11 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
-import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -132,7 +121,6 @@ import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
-import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -237,12 +225,13 @@ public fun PromptComposerSheet(
     // Tests may override this seam; production defaults to the owning VM's
     // resendAllQueued, which re-arms every resendable row to Queued in FIFO order.
     onResendAllOutbound: (() -> Unit)? = null,
-    // Issue #585: open the composer WITH recording already started + locked
-    // hands-free. Set true only when the session launcher's hold+swipe-up ENTRY
-    // gesture opened this sheet; a plain-tap open leaves it false (no recording).
-    // The effect below fires ONCE per sheet open (a remembered latch guards it),
-    // starts recording through the same permission/API-key gate as the mic tap,
-    // and immediately locks it so releasing the finger keeps capturing.
+    // Issue #585: open the composer WITH recording already started. Set true only
+    // when the session launcher's hold+swipe-up ENTRY gesture opened this sheet; a
+    // plain-tap open leaves it false (no recording). The effect below fires ONCE
+    // per sheet open (a remembered latch guards it) and starts recording through
+    // the same permission/API-key gate as the mic tap. The recording then runs
+    // (timer + waveform) until Discard / Insert / Send — issue #1245 removed the
+    // separate hands-free "lock" concept.
     autoStartRecording: Boolean = false,
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -361,19 +350,19 @@ public fun PromptComposerSheet(
     }
 
     // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
-    // sheet WITH recording already started + locked hands-free — one gesture, not
-    // "open then tap the mic". [autoStartRecording] carries that intent from the
-    // launcher; a plain-tap open leaves it false. This effect fires ONCE per sheet
-    // open (a remembered latch guards it against recomposition) and only starts
-    // from a clean Idle composer so it never interrupts an in-flight capture.
+    // sheet WITH recording already started — one gesture, not "open then tap the
+    // mic". [autoStartRecording] carries that intent from the launcher; a
+    // plain-tap open leaves it false. This effect fires ONCE per sheet open (a
+    // remembered latch guards it against recomposition) and only starts from a
+    // clean Idle composer so it never interrupts an in-flight capture.
     //
     // Recording start runs through the SAME permission + API-key gate as the mic
-    // tap. On the common path (mic already granted, key present) it starts and
-    // locks synchronously; if the mic permission must be requested first, the
-    // grant callback ([permissionLauncher]) starts the capture and the lock-latch
-    // effect below locks it the moment capture goes live.
+    // tap. On the common path (mic already granted, key present) it starts
+    // synchronously; if the mic permission must be requested first, the grant
+    // callback ([permissionLauncher]) starts the capture. Recording then simply
+    // runs (timer + waveform) until the user taps Discard / Insert / Send — there
+    // is no separate "lock" concept (issue #1245: the hands-free lock was removed).
     var autoStartRecordingConsumed by remember { mutableStateOf(false) }
-    var autoLockPending by remember { mutableStateOf(false) }
     LaunchedEffect(autoStartRecording) {
         if (!autoStartRecording || autoStartRecordingConsumed) return@LaunchedEffect
         autoStartRecordingConsumed = true
@@ -387,8 +376,7 @@ public fun PromptComposerSheet(
             Manifest.permission.RECORD_AUDIO,
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) {
-            // The grant callback fires onMicTap(); the latch effect then locks it.
-            autoLockPending = true
+            // The grant callback fires onMicTap() once the permission lands.
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return@LaunchedEffect
         }
@@ -398,17 +386,6 @@ public fun PromptComposerSheet(
             return@LaunchedEffect
         }
         viewModel.onMicTap()
-        viewModel.lockRecording()
-    }
-    // Issue #585: when auto-start had to wait on the permission dialog, lock the
-    // recording as soon as the grant-driven capture actually goes live.
-    LaunchedEffect(state.recording, autoLockPending) {
-        if (autoLockPending &&
-            state.recording == PromptComposerViewModel.RecordingState.Recording
-        ) {
-            viewModel.lockRecording()
-            autoLockPending = false
-        }
     }
 
     // Issue #511 / #509: dismissing the composer (× button, scrim tap,
@@ -488,7 +465,6 @@ public fun PromptComposerSheet(
             // transcribe/final-result wait.
             onCancelRecording = viewModel::cancelRecording,
             onCancelTranscription = viewModel::cancelTranscription,
-            onLockRecording = viewModel::lockRecording,
             // Issue #746: clears the stale "Not sent" draft + attachments +
             // banner so the user no longer has to delete it by hand.
             onDiscard = viewModel::discardDraft,
@@ -612,7 +588,6 @@ internal fun SheetContent(
     // Separate from recording discard because the audio/recognizer session
     // has already moved out of active capture.
     onCancelTranscription: () -> Unit = {},
-    onLockRecording: () -> Unit = {},
     // Issue #746: throw away the current "Not sent" / unsent draft (text +
     // attachments + banner). Rendered as the Discard action inside the error
     // banner the maintainer reported had no way to clear a stale prompt.
@@ -761,15 +736,6 @@ internal fun SheetContent(
         keyboardController?.hide()
         onSend(true)
     }
-    val lockThresholdPx = with(LocalDensity.current) { MIC_LOCK_SWIPE_THRESHOLD_DP.dp.toPx() }
-    val micStartSlopPx = with(LocalDensity.current) { MIC_GESTURE_START_SLOP_DP.dp.toPx() }
-    val currentOnMicTap by rememberUpdatedState(onMicTap)
-    val currentOnLockRecording by rememberUpdatedState(onLockRecording)
-    val micGestureEnabled by rememberUpdatedState(
-        state.recording == PromptComposerViewModel.RecordingState.Idle,
-    )
-    var micBoundsInControlsRow by remember { mutableStateOf<Rect?>(null) }
-
     // Issue #682 / #567: bound the composer body to the room ABOVE the keyboard.
     //
     // KEY FACT (measured on-device, issue #567): the `ModalBottomSheet`'s dialog
@@ -987,10 +953,6 @@ internal fun SheetContent(
                         // the visible tail width-aware at render time so the
                         // newest words always stay visible.
                         liveTranscript = state.liveTranscript,
-                        locked = state.recordingLocked,
-                        // Issue #1245: the inline lock toggle on the waveform row
-                        // taps the SAME lock action the bottom-cluster button used to.
-                        onLockRecording = onLockRecording,
                     )
                 }
 
@@ -1253,43 +1215,36 @@ internal fun SheetContent(
         //  - Right, Transcribing: Cancel + "Send" (arms the queued send for
         //    the in-flight round-trip).
         val attachmentBusy = attachmentUploading != null
-        // Issue #1152: the maintainer's directive is FIT EVERYTHING — never hide a
-        // control to make room. The old single row packed the tools group + Lock +
-        // Insert + Send onto one line, overflowed the usable width, and clipped
-        // `Send` off the right edge (the cyan "S/e" sliver — audit D1).
+        // Issue #1152 / #1245: one bottom controls row. Idle / Transcribing anchor
+        // the editing-tools group (📎 attach · {} snippets · / command) on the left,
+        // then a weighted gap, then the state-driven right cluster.
         //
-        // The fix keeps this STABLE outer row (it carries the mic
-        // swipe-up-to-lock pointerInput, which MUST survive the Idle→Recording
-        // recompose — the finger is held continuously through the transition, so
-        // the gesture node cannot be replaced) with the editing-tools group +
-        // weighted gap, and makes only the RIGHT CLUSTER state-driven. The editing
-        // tools (📎 attach · {} snippets · / command) therefore stay MOUNTED in
-        // every state. During Recording the right cluster stacks the four pills as
-        // TWO rows ([Discard · Lock] over [Insert · Send]) so all controls fit —
-        // nothing is clipped or hidden — at font scale 1.0 and 1.3, locked and not.
+        // During Recording the row is a single BALANCED action row —
+        // [Discard · Insert · Send] — right-aligned. Issue #1245 removed the
+        // hands-free Lock entirely (both the pill AND the swipe-up-to-lock gesture),
+        // so this row no longer carries a pointerInput and no longer needs the
+        // four-pill two-row stack: the three stop actions fit comfortably on one
+        // line at font scale 1.0 and 1.3 without clipping `Send` (the #1152 guard).
+        // The editing tools are not shown mid-dictation (attach/snippets/slash are
+        // text-composition tools, not usable while the mic is live), which is what
+        // lets Discard sit right next to Insert and Send in one clean row.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .micSwipeUpLockGesture(
-                    lockThresholdPx = lockThresholdPx,
-                    startSlopPx = micStartSlopPx,
-                    enabled = { micGestureEnabled },
-                    startBounds = { micBoundsInControlsRow },
-                    onPressStart = { currentOnMicTap() },
-                    onLockRecording = { currentOnLockRecording() },
-                )
                 .padding(top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            ComposerEditingToolsGroup(
-                isTranscribing = isTranscribing,
-                attachmentBusy = attachmentBusy,
-                agentKind = agentKind,
-                onAttachFiles = onAttachFiles,
-                onSnippets = onSnippets,
-                onSlashTap = onSlashTap,
-            )
+            if (state.recording != PromptComposerViewModel.RecordingState.Recording) {
+                ComposerEditingToolsGroup(
+                    isTranscribing = isTranscribing,
+                    attachmentBusy = attachmentBusy,
+                    agentKind = agentKind,
+                    onAttachFiles = onAttachFiles,
+                    onSnippets = onSnippets,
+                    onSlashTap = onSlashTap,
+                )
+            }
             Spacer(modifier = Modifier.weight(1f))
 
             when (state.recording) {
@@ -1309,60 +1264,38 @@ internal fun SheetContent(
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    // Small cyan mic disc at the far right (the mockup's mic). Its
-                    // bounds (relative to THIS outer row — the gesture node) are the
-                    // swipe-up gesture's press-start target.
+                    // Small cyan mic disc at the far right (the mockup's mic). A tap
+                    // starts a dictation (Idle → Recording).
                     MicTriggerButton(
                         onClick = onMicTap,
                         enabled = true,
-                        modifier = Modifier
-                            .testTag(COMPOSER_MIC_TAG)
-                            .onGloballyPositioned { coordinates ->
-                                micBoundsInControlsRow = coordinates.boundsInParent()
-                            },
+                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
                     )
                 }
 
                 PromptComposerViewModel.RecordingState.Recording -> {
-                    // Issue #1152 / #1245: the recording stop actions stack as two
-                    // right-aligned rows so they all fit next to the mounted tools
-                    // group without clipping `Send` (the #1152 fit).
-                    //  - [Discard]: drop this audio — an outlined secondary pill,
-                    //    pulled OUT of the waveform surface (audit B/D2/D3).
-                    //  - [Insert · Send]: the two "how do you want to end this
-                    //    dictation" stop actions. Every pill shares one 48dp
-                    //    baseline (audit D4).
-                    // Issue #1245: the hands-free Lock is NO LONGER a pill here — it
-                    // moved UP to the recording/waveform row as an inline toggle
-                    // attached to the recording it controls (hard-cut D22: one
-                    // affordance, not two). Discard stays put (it's clear).
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            DiscardRecordingButton(
-                                onClick = onCancelRecording,
-                                modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
-                            )
-                        }
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            ToFieldButton(
-                                onClick = onMicTap,
-                                modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
-                            )
-                            StopSendButton(
-                                onClick = { onSend(true) },
-                                modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
-                            )
-                        }
-                    }
+                    // Issue #1245: a single balanced action row — Discard sits right
+                    // next to Insert and Send, so when the user records a voice
+                    // message and decides not to include it, Discard is right there
+                    // with the other stop actions. Every pill shares one 48dp
+                    // baseline (audit D4). With the hands-free Lock removed there are
+                    // only three pills, which fit on one right-aligned line without
+                    // clipping `Send` at font scale 1.0 and 1.3 (the #1152 guard).
+                    //  - [Discard]: drop this audio — an outlined secondary pill.
+                    //  - [Insert]: stop + transcribe into the field (nothing sent).
+                    //  - [Send]: stop + transcribe + send (the accent primary).
+                    DiscardRecordingButton(
+                        onClick = onCancelRecording,
+                        modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
+                    )
+                    ToFieldButton(
+                        onClick = onMicTap,
+                        modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
+                    )
+                    StopSendButton(
+                        onClick = { onSend(true) },
+                        modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
+                    )
                 }
 
                 PromptComposerViewModel.RecordingState.Transcribing -> {
@@ -1554,14 +1487,6 @@ private fun RecordingSurface(
     capturing: Boolean,
     elapsedLabel: String,
     liveTranscript: String?,
-    locked: Boolean,
-    // Issue #1245: the hands-free lock affordance now lives INLINE on this
-    // recording/waveform row — a compact toggle attached to the active recording
-    // it controls ("lock THIS recording"), not a mystery-meat labelled button
-    // floating in the bottom Send/Discard cluster. Tapping it is the tap-path
-    // equivalent of the swipe-up-to-lock gesture (kept working via #585). Defaults
-    // to a no-op so previews / legacy tests that don't wire it keep compiling.
-    onLockRecording: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1600,52 +1525,10 @@ private fun RecordingSurface(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
             )
-            // Issue #1245: the hands-free lock affordance lives inline here, between
-            // the timer and the waveform it controls. Until locked it is a compact
-            // TAPPABLE toggle (accent-bordered circle) whose tap locks the recording
-            // hands-free — the tap-path equivalent of the swipe-up gesture, moved up
-            // out of the mystery-meat bottom cluster (#1245). Once locked it becomes
-            // a static closed-lock indicator (no border, no tap) so the row reads
-            // clean. The two states keep the SAME tags the #585 journey drives.
-            if (locked) {
-                Icon(
-                    imageVector = Icons.Outlined.Lock,
-                    contentDescription = null,
-                    tint = PocketShellColors.Accent,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .testTag(COMPOSER_RECORDING_LOCKED_TAG)
-                        .semantics { contentDescription = "Recording locked" },
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(17.dp))
-                        .border(
-                            width = 1.dp,
-                            color = PocketShellColors.Accent,
-                            shape = RoundedCornerShape(17.dp),
-                        )
-                        .clickable(role = Role.Button, onClick = onLockRecording)
-                        .testTag(COMPOSER_LOCK_RECORDING_TAG)
-                        .semantics {
-                            contentDescription = "Lock recording to continue hands-free"
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Lock,
-                        contentDescription = null,
-                        tint = PocketShellColors.Accent,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
-            // Issue #1152: Discard moved OUT of this surface into the bottom action
-            // row (an outlined secondary pill), so the surface is now
-            // [timer · lock-toggle · waveform]. A small end inset keeps the amplitude
-            // bars from kissing the surface edge (audit C/D2).
+            // Issue #1152 / #1245: Discard moved OUT of this surface into the bottom
+            // action row, and the hands-free Lock was removed entirely (#1245), so
+            // the surface is now simply [timer · waveform]. A small end inset keeps
+            // the amplitude bars from kissing the surface edge (audit C/D2).
             Waveform(
                 amplitude = amplitude,
                 active = capturing,
@@ -1661,22 +1544,6 @@ private fun RecordingSurface(
                             "Prompt composer waiting for speech"
                         }
                     },
-            )
-        }
-        // Issue #585 / #1245: until the recording is locked, surface a one-line
-        // hint so the user knows the hands-free path exists and how to reach it —
-        // "tap the lock" (the inline toggle on this row, #1245) is the
-        // deterministic affordance, "swipe up" the gesture. The hint disappears
-        // the moment the lock indicator appears, so a locked recording reads
-        // clean. The missing feedback was itself a reason the gesture felt broken
-        // ("I don't think it's recording / locking").
-        if (!locked && liveTranscript.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Tap the lock or swipe up to keep recording hands-free",
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                modifier = Modifier.testTag(COMPOSER_LOCK_HINT_TAG),
             )
         }
         if (!liveTranscript.isNullOrBlank()) {
@@ -1877,7 +1744,7 @@ private fun DiscardRecordingButton(
 }
 
 // Genuine sub-ladder component geometry: the composer's 44–48dp action pills
-// (Send / Stop / To-field / Lock) read as fully-rounded "pills", which needs a
+// (Send / Stop / To-field / Discard) read as fully-rounded "pills", which needs a
 // half-height radius the named ladder rungs (8/14/20/28dp — design-system.md
 // "Radius, Elevation, And Borders") don't provide. 22dp is that pill radius for
 // this control height; named here (vs an inline literal) so it stays a single
@@ -1895,7 +1762,7 @@ private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadiu
 private val ComposerQueueButtonRadius = 6.dp
 private val ComposerQueueButtonShape = RoundedCornerShape(ComposerQueueButtonRadius)
 
-// Issue #1152: one baseline HEIGHT for EVERY recording-row pill (Discard / Lock /
+// Issue #1152: one baseline HEIGHT for EVERY recording-row pill (Discard /
 // Insert / Send) so the row reads as a single deliberate control ladder instead
 // of the old 40/44/48dp mix (audit D4). 48dp is the design-system tapTargetMin,
 // so a single 48dp pill is both the visual baseline and a full touch target —
@@ -2123,15 +1990,19 @@ private fun MicTriggerButton(
                 color = if (enabled) accent else PocketShellColors.SurfaceElev,
                 shape = androidx.compose.foundation.shape.CircleShape,
             )
+            // Issue #1245 follow-up: a REAL touch handler. The mic disc's finger
+            // tap used to be serviced by the outer Row's swipe-up-to-lock
+            // pointerInput (onPressStart → onMicTap); that gesture was deleted
+            // with the lock, so the mic needs its own `.clickable` — a bare
+            // `.semantics { onClick }` is accessibility-only and never fires on a
+            // real tap. `enabled = enabled` keeps the disabled state un-tappable.
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            )
             .semantics {
-                contentDescription = "Start dictation. Swipe up to lock recording"
-                role = Role.Button
-                if (enabled) {
-                    onClick {
-                        onClick()
-                        true
-                    }
-                }
+                contentDescription = "Start dictation"
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -2146,122 +2017,6 @@ private fun MicTriggerButton(
             modifier = Modifier.size(22.dp),
         )
     }
-}
-
-internal fun Modifier.micSwipeUpLockGesture(
-    lockThresholdPx: Float,
-    startSlopPx: Float,
-    enabled: () -> Boolean,
-    startBounds: () -> Rect?,
-    onPressStart: () -> Unit,
-    onLockRecording: () -> Unit,
-): Modifier {
-    return pointerInput(lockThresholdPx, startSlopPx) {
-        awaitEachGesture {
-            // Issue #585: listen in the Initial pass so this nested mic gesture
-            // beats the ModalBottomSheet's Main-pass drag-to-dismiss detector.
-            // The real-device failure was a fast upward pull being won by the
-            // sheet before the mic lock detector saw enough movement.
-            val down = awaitFirstDown(
-                requireUnconsumed = false,
-                pass = PointerEventPass.Initial,
-            )
-            val bounds = startBounds()
-            // Issue #585: the mic disc is a small 44dp target at the far
-            // bottom-right; a real hold-and-pull-up frequently lands the
-            // contact point a few px outside the tight rect. Inflating the
-            // start bounds by a touch-slop margin means an intentional press
-            // on/near the mic still arms the gesture instead of silently
-            // doing nothing (the maintainer's "it doesn't start recording"
-            // symptom).
-            if (!enabled() || !micGestureStartsAt(bounds, down.position, startSlopPx)) {
-                return@awaitEachGesture
-            }
-            val tracker = MicSwipeUpLockGestureTracker(lockThresholdPx)
-            if (tracker.onPressStart() == MicSwipeUpLockGestureEvent.StartRecording) {
-                onPressStart()
-            }
-            // Consume the down so the bottom sheet's nested-scroll / drag
-            // handle does not also treat this press as the start of a
-            // drag-to-dismiss.
-            down.consume()
-            while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                val drag = change.position - down.position
-                // Consume every move belonging to our pointer so the upward
-                // pull stays with the mic gesture (and the sheet cannot win
-                // the vertical drag). Without this, a quick swipe-up reads as
-                // a sheet drag on a real device and the lock never fires.
-                if (change.positionChanged()) {
-                    change.consume()
-                }
-                if (tracker.onDrag(drag.x, drag.y) == MicSwipeUpLockGestureEvent.LockRecording) {
-                    onLockRecording()
-                }
-                if (change.changedToUpIgnoreConsumed()) {
-                    tracker.onRelease()
-                    break
-                }
-            }
-        }
-    }
-}
-
-internal class MicSwipeUpLockGestureTracker(
-    private val lockThresholdPx: Float,
-) {
-    var started: Boolean = false
-        private set
-
-    var locked: Boolean = false
-        private set
-
-    fun onPressStart(): MicSwipeUpLockGestureEvent {
-        if (started) return MicSwipeUpLockGestureEvent.None
-        started = true
-        return MicSwipeUpLockGestureEvent.StartRecording
-    }
-
-    fun onDrag(dragX: Float, dragY: Float): MicSwipeUpLockGestureEvent {
-        if (!started || locked) return MicSwipeUpLockGestureEvent.None
-        if (!micSwipeCrossedLockThreshold(dragX, dragY, lockThresholdPx)) {
-            return MicSwipeUpLockGestureEvent.None
-        }
-        locked = true
-        return MicSwipeUpLockGestureEvent.LockRecording
-    }
-
-    fun onRelease(): MicSwipeUpLockGestureEvent = MicSwipeUpLockGestureEvent.None
-}
-
-internal enum class MicSwipeUpLockGestureEvent {
-    None,
-    StartRecording,
-    LockRecording,
-}
-
-internal fun micSwipeCrossedLockThreshold(
-    dragX: Float,
-    dragY: Float,
-    lockThresholdPx: Float,
-): Boolean = dragY <= -lockThresholdPx && abs(dragY) >= abs(dragX)
-
-/**
- * Issue #585: decide whether a pointer-down at [position] should arm the mic
- * swipe-up gesture. [bounds] is the tight mic-disc rect (relative to the
- * controls row); we accept a press within [startSlopPx] of that rect so a
- * slightly-off hold-and-pull-up on the small disc still starts recording
- * instead of silently doing nothing. Returns false when bounds are not yet
- * measured (mic not laid out / not in the Idle row).
- */
-internal fun micGestureStartsAt(
-    bounds: Rect?,
-    position: Offset,
-    startSlopPx: Float,
-): Boolean {
-    val rect = bounds ?: return false
-    return rect.inflate(startSlopPx).contains(position)
 }
 
 /**
@@ -3428,7 +3183,6 @@ internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
  */
 internal const val COMPOSER_LIVE_TRANSCRIPT_TAG = "prompt-composer-live-transcript"
 internal const val COMPOSER_LIVE_TRANSCRIPT_TEXT_TAG = "prompt-composer-live-transcript-text"
-internal const val COMPOSER_RECORDING_LOCKED_TAG = "prompt-composer-recording-locked"
 
 /**
  * Issue #870 (reopen): the dedicated live-transcript area holds exactly this
@@ -3558,36 +3312,12 @@ internal fun composerSendTooltipTestTag(label: String): String =
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
 
 /**
- * Issue #585: test tag for the deterministic hands-free Lock control. It only
- * appears while `Recording` and NOT yet locked; a single tap locks the
- * recording so the finger can be released without stopping capture (the
- * sheet-drag-proof alternative to the swipe-up-to-lock gesture).
- */
-internal const val COMPOSER_LOCK_RECORDING_TAG = "prompt-composer-lock-recording"
-
-/**
- * Issue #585: test tag for the recording hands-free hint shown while
- * `Recording` and not yet locked. Disappears once locked.
- */
-internal const val COMPOSER_LOCK_HINT_TAG = "prompt-composer-lock-hint"
-
-/**
  * Issue #174/#453: test tag for the transcribing cancel control. Kept
  * distinct from [COMPOSER_CANCEL_RECORDING_TAG] so tests can prove the active
  * recording discard affordance exists without conflating it with the
  * already-captured transcription cancel path.
  */
 internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
-// Issue #585: a deliberate upward pull should lock recording "from the
-// gesture" — kept just above the system touch-slop (~18dp) so a tap doesn't
-// accidentally lock, but small enough that any real swipe-up immediately
-// transitions to live+locked rather than requiring a long drag.
-private const val MIC_LOCK_SWIPE_THRESHOLD_DP = 24
-
-// Issue #585: how far outside the tight mic-disc rect a press still counts as
-// "on the mic" for arming the swipe-up gesture. The disc is 44dp; this slop
-// makes a slightly-off hold-and-pull-up still start recording.
-private const val MIC_GESTURE_START_SLOP_DP = 24
 
 // Issue #682: cap the scrollable upper region (draft + status banners) so the
 // content-height sheet never grows taller than this even with a long draft +

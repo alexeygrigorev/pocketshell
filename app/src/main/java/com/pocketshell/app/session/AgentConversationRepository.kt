@@ -182,12 +182,22 @@ internal fun reconcileAgentEvents(
             if (previous != null &&
                 previous.role == event.role &&
                 previous.text == event.text &&
-                previous.agent == event.agent
+                previous.agent == event.agent &&
+                // Issue #1234 (item 5): the collapse must fire ONLY for the
+                // #819 echo+record SHAPE — exactly one side lacks a stable id
+                // (the streaming echo's `line.hashCode()` fallback; a real
+                // `response_item`/UUID record always has one). Two ADJACENT
+                // authoritative records with distinct stable ids are a
+                // genuinely repeated turn — a real back-to-back "ok"/"Done." —
+                // and must both survive. Without this guard the old
+                // any-identical-adjacent-pair collapse silently merged those
+                // real repeats down to one.
+                (previous.lacksStableId() != event.lacksStableId())
             ) {
                 // Consecutive duplicate of the same turn (the Codex echo +
-                // record pair). Keep the one already inserted; skip this one.
-                // The previous entry stays "last" so a third identical write
-                // (rare) also collapses.
+                // record pair — one synthetic id, one real). Keep the one
+                // already inserted; skip this one. The previous entry stays
+                // "last" so a third identical write (rare) also collapses.
                 continue
             }
         }
@@ -283,6 +293,23 @@ private fun List<ConversationEvent>.takeLastPreservingMessages(
 
 private fun ConversationEvent.Message.isOptimistic(): Boolean =
     id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX)
+
+/**
+ * Issue #1234 (item 5): a message id that is a bare signed-decimal integer is
+ * the parser's `line.hashCode().toString()` fallback (`CodexParser`/
+ * `ClaudeCodeParser` mint it ONLY when a transcript line carried no stable
+ * `id`/`call_id`). That is the fingerprint of the streaming-echo half of a #819
+ * echo+record pair — the transient `event_msg`/`agent_message` line has no id,
+ * while its authoritative `response_item`/`message` (or Claude UUID) record
+ * always does. A real transcript id is never a bare integer, so this cleanly
+ * separates "streaming echo, no stable id" from a genuine authoritative record;
+ * the adjacency collapse fires only for the mixed (one-synthetic, one-stable)
+ * echo shape, never for two real records that happen to repeat the same text.
+ */
+private val SYNTHETIC_HASHCODE_ID_PATTERN: Regex = Regex("^-?\\d+$")
+
+private fun ConversationEvent.Message.lacksStableId(): Boolean =
+    SYNTHETIC_HASHCODE_ID_PATTERN.matches(id)
 
 /**
  * Issue #494: return a copy of this feed where the optimistic user turn

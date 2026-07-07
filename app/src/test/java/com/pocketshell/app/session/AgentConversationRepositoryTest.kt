@@ -348,6 +348,84 @@ class AgentConversationRepositoryTest {
         )
     }
 
+    @Test
+    fun reconcileKeepsGenuinelyRepeatedAdjacentAssistantTurnsWithDistinctStableIds() {
+        // Issue #1234 (item 5): the #819 echo-collapse over-reached. Its
+        // adjacency check collapsed ANY two adjacent Messages with the same
+        // role+text+agent, so a genuinely repeated SHORT turn the agent really
+        // emitted twice back-to-back (a real "Done." / "ok") silently showed
+        // once. The collapse must fire ONLY for the echo SHAPE — one side is
+        // the streaming echo with a synthetic `line.hashCode()` id, the other
+        // is the authoritative record with a stable id. Two ADJACENT records
+        // that BOTH carry a distinct STABLE id are a real repeat and must both
+        // survive.
+        //
+        // Before the fix this reconciles to a SINGLE "Done." (RED); after the
+        // fix both survive (GREEN).
+        val first = ConversationEvent.Message(
+            id = "codex-real-done-1",
+            agent = AgentKind.Codex,
+            role = ConversationRole.Assistant,
+            text = "Done.",
+        )
+        val second = ConversationEvent.Message(
+            id = "codex-real-done-2",
+            agent = AgentKind.Codex,
+            role = ConversationRole.Assistant,
+            text = "Done.",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(first, second))
+
+        val dones = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.Assistant && it.text == "Done." }
+        assertEquals(
+            "two ADJACENT authoritative assistant records with the same text " +
+                "but DISTINCT stable ids are a genuine repeat, not an echo — " +
+                "both must survive (#1234 item 5)",
+            2,
+            dones.size,
+        )
+        assertTrue(dones.any { it.id == "codex-real-done-1" })
+        assertTrue(dones.any { it.id == "codex-real-done-2" })
+    }
+
+    @Test
+    fun reconcileKeepsGenuinelyRepeatedAdjacentUserTurnsWithDistinctStableIds() {
+        // Issue #1234 (item 5), class coverage for the USER role: a user who
+        // really sends "ok" twice in a row produces two authoritative user
+        // records with DISTINCT stable ids and no intervening turn. Neither is
+        // an `optimistic:` echo, so the #819 adjacency collapse (pre-fix) would
+        // merge them into one — the same over-reach as the assistant case. With
+        // the echo-shape guard both stable-id records survive.
+        val first = ConversationEvent.Message(
+            id = "codex-real-ok-1",
+            agent = AgentKind.Codex,
+            role = ConversationRole.User,
+            text = "ok",
+        )
+        val second = ConversationEvent.Message(
+            id = "codex-real-ok-2",
+            agent = AgentKind.Codex,
+            role = ConversationRole.User,
+            text = "ok",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(first, second))
+
+        val oks = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.User && it.text == "ok" }
+        assertEquals(
+            "two ADJACENT authoritative user records with the same text but " +
+                "DISTINCT stable ids are a genuine repeat and must both survive " +
+                "(#1234 item 5)",
+            2,
+            oks.size,
+        )
+        assertTrue(oks.any { it.id == "codex-real-ok-1" })
+        assertTrue(oks.any { it.id == "codex-real-ok-2" })
+    }
+
     // ----------------------------------------------------------------
     // Issue #576: the conversation-tail performance hole.
     //

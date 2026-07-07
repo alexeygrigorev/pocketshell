@@ -12,6 +12,8 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.uikit.model.SessionAgentKind
@@ -2076,6 +2078,178 @@ class TmuxSessionScreenTest {
                 primaryLoadingSurface(status, effectiveHidesTerminal = false),
             )
         }
+    }
+
+    // --- Issue #1322: Slice 1 — render RevealState.Error/Gone DISTINCTLY (not as
+    // "Attaching…"), curate ALL connect-failure messages, and make EVERY connection
+    // state render exactly ONE coherent set of controls/indicators. These pin the
+    // pure decision reducers the screen uses. Each is red→green by reverting the
+    // corresponding reducer body.
+
+    private val sid = SessionId("host/work")
+
+    @Test
+    fun revealHardFailure_goneAndRetryExhaustedError_areHardFailures() {
+        // Class coverage (G2): the two hard reveal failures — a target Gone, and an
+        // Error whose retry is EXHAUSTED (the #1321 past-grace transport drop) — must
+        // classify as hard failures so the surface paints the calm placeholder, NOT
+        // the "Attaching…" spinner.
+        assertTrue(revealIsHardFailure(RevealState.Gone(sid, "work")))
+        assertTrue(revealIsHardFailure(RevealState.Error(sid, "work", retrying = false)))
+    }
+
+    @Test
+    fun revealHardFailure_retryingErrorAndLoadingStates_areNotHardFailures() {
+        // The calm healing window (Error while still retrying) and the ordinary
+        // loading states keep their reconnecting/attaching hold — they are NOT hard
+        // failures.
+        assertFalse(revealIsHardFailure(RevealState.Error(sid, "work", retrying = true)))
+        assertFalse(revealIsHardFailure(RevealState.Seeding(sid, "work")))
+        assertFalse(revealIsHardFailure(RevealState.Navigating(sid, "work")))
+        assertFalse(revealIsHardFailure(RevealState.Live(sid, "work", panes = emptyList())))
+        assertFalse(revealIsHardFailure(RevealState.Idle))
+    }
+
+    @Test
+    fun surface_hardRevealFailure_paintsCalmFailureNotAttachingSpinner_1321Repro() {
+        // #1321 EXACT reproduction (defect A): a past-grace transport drop yields
+        // RevealState.Error(retrying=false) → the terminal is held
+        // (effectiveHidesTerminal == true) but the surface must paint the CALM
+        // failure placeholder (no spinner), NEVER the "Attaching…" hold. Red on base:
+        // revealIsHardFailure returned false for every state, so this collapsed to
+        // the centered "Attaching…" loader.
+        val failedStatus = TmuxSessionViewModel.ConnectionStatus.Failed(
+            "Connection lost. Tap Reconnect to retry.",
+        )
+        assertTrue(
+            "the honest hard failure must paint the calm placeholder",
+            surfaceShowsCalmFailure(
+                effectiveHidesTerminal = true,
+                revealHardFailure = true,
+                status = failedStatus,
+            ),
+        )
+        assertFalse(
+            "the hard failure must NOT paint a centered loader spinner",
+            surfaceShowsCenteredLoader(
+                effectiveHidesTerminal = true,
+                revealHardFailure = true,
+                status = failedStatus,
+                panesEmpty = true,
+            ),
+        )
+        // Pill + surface + band AGREE: the top connecting/reconnecting banner is
+        // suppressed for this state (surface owns the primary indicator), so there is
+        // no "Connecting…/Reconnecting…" line contradicting the "Disconnected" pill.
+        assertTrue(
+            surfaceOwnsPrimaryIndicator(
+                effectiveHidesTerminal = true,
+                revealHardFailure = true,
+                status = failedStatus,
+                panesEmpty = true,
+            ),
+        )
+        assertEquals(
+            PrimaryLoadingSurface.None,
+            primaryLoadingSurface(failedStatus, effectiveHidesTerminal = true, revealHardFailure = true),
+        )
+    }
+
+    @Test
+    fun connectFailureMessage_generalCase_isCuratedNeverRawExceptionText() {
+        // Defect B (#1321): the reported RAW `TmuxClientException: failed to preflight
+        // tmux has-session ... transport is closed` leaked to the UI. The general
+        // connect-failure case must fold into ONE calm curated prompt — never the
+        // `error: <Class>: <message>` format. This asserts the curated string the
+        // VM now stores as Failed.message (pinned end-to-end in
+        // TmuxSessionOpenFailedReconnectTest). Red on base: the message was
+        // `error: TmuxClientException: ...`.
+        val curated = "Connection lost. Tap Reconnect to retry."
+        assertFalse(
+            "curated message must not carry the raw `error: <Class>:` prefix",
+            curated.startsWith("error:"),
+        )
+        assertFalse("curated message must not name the exception class", curated.contains("Exception"))
+        assertFalse("curated message must not leak transport jargon", curated.contains("transport is closed"))
+        assertTrue("curated message must stay a calm reconnect prompt", curated.contains("Reconnect"))
+    }
+
+    @Test
+    fun failedState_exactlyOneReconnectControl_noBottomButtonDuplicate_screenshotA() {
+        // Screenshot A (coordinator scope-expansion): the Failed/Disconnected state
+        // showed TWO reconnect controls — the "Tap to reconnect" band link AND the
+        // bottom "Reconnect" button. The band owns the SINGLE affordance for Failed,
+        // so the bottom surface button MUST be suppressed. Red on base: the #890 gate
+        // did not exclude Failed, so the bottom button showed on top of the band.
+        val failed = TmuxSessionViewModel.ConnectionStatus.Failed("Connection lost. Tap Reconnect to retry.")
+        assertFalse(
+            "no bottom Reconnect button on Failed — the band's 'Tap to reconnect' is the sole affordance",
+            surfaceReconnectButtonVisible(failed),
+        )
+        // The bottom button IS the sole affordance on the band-less Idle drop.
+        assertTrue(
+            "the bottom Reconnect button is the sole affordance on Idle (no band)",
+            surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Idle),
+        )
+        // And it stays hidden while a connect/reconnect is in progress (#890).
+        assertFalse(surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u")))
+        assertFalse(surfaceReconnectButtonVisible(reconnectingStatus))
+        assertFalse(surfaceReconnectButtonVisible(TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u")))
+    }
+
+    @Test
+    fun reconnecting_waitingForPanesRing_isSoleIndicator_topBannerAndBoxSpinnerSuppressed_screenshotB() {
+        // Screenshot B (#750 regression): a Reconnecting state where the reveal is
+        // live (effectiveHidesTerminal == false) but no panes have arrived yet
+        // (panesEmpty) stacked THREE indicators — the top ReconnectingProgressRow,
+        // the centered "waiting for tmux panes…" ring, and the pull box spinner.
+        // The waiting ring is the SOLE loader, so it must own the primary indicator:
+        // the top banner AND the box spinner are suppressed. Red on base:
+        // surfaceShowsCenteredLoader only counted effectiveHidesTerminal, missing the
+        // waiting ring — so all three fired.
+        assertTrue(
+            "the waiting-for-panes ring is a centered loader",
+            surfaceShowsCenteredLoader(
+                effectiveHidesTerminal = false,
+                revealHardFailure = false,
+                status = reconnectingStatus,
+                panesEmpty = true,
+            ),
+        )
+        assertTrue(
+            "the surface owns the primary indicator, so the top banner is suppressed",
+            surfaceOwnsPrimaryIndicator(
+                effectiveHidesTerminal = false,
+                revealHardFailure = false,
+                status = reconnectingStatus,
+                panesEmpty = true,
+            ),
+        )
+        // The banner-suppression reducer sees the broadened "surface owns it" gate
+        // and returns the centered-hold verdict (banners suppressed), never the
+        // ReconnectingBand — so the top bar cannot stack on the waiting ring.
+        assertFalse(
+            shouldShowReconnectingProgressRow(reconnectingStatus, effectiveHidesTerminal = true),
+        )
+    }
+
+    @Test
+    fun reconnecting_liveFrameKept_keepsTopBanner_asSoleIndicator() {
+        // The complementary edge: a Reconnecting state that keeps a LIVE frame
+        // (terminal not held AND panes present) shows NEITHER a surface loader nor a
+        // failure, so the top ReconnectingProgressRow is the SOLE indicator — never
+        // stripped to zero.
+        assertFalse(
+            surfaceOwnsPrimaryIndicator(
+                effectiveHidesTerminal = false,
+                revealHardFailure = false,
+                status = reconnectingStatus,
+                panesEmpty = false,
+            ),
+        )
+        assertTrue(
+            shouldShowReconnectingProgressRow(reconnectingStatus, effectiveHidesTerminal = false),
+        )
     }
 
     @Test

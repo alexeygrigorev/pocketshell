@@ -7867,7 +7867,18 @@ public class TmuxSessionViewModel @Inject constructor(
             val message = t.message ?: "Timed out waiting for tmux panes from ${target.sessionName}."
             if ("Tap Reconnect" in message) message else "$message Tap Reconnect to retry."
         } else {
-            "error: ${t.javaClass.simpleName}: ${t.message}"
+            // Issue #1322: curate the GENERAL connect-failure case. Every non-attach
+            // throwable used to be stored verbatim as `error: <Class>: <message>` and
+            // rendered RAW by [FailedConnectionRow] — the #1321 screenshot leaked the
+            // literal `TmuxClientException: failed to preflight tmux has-session ...
+            // transport is closed` (a closed-transport / has-session preflight failure
+            // originating in `TmuxClient`). A closed-transport drop is exactly the
+            // calm, recoverable [ConnectionStatus.Failed] state the "Tap Reconnect"
+            // band exists for, so fold it into a clean, calm user-facing prompt —
+            // NEVER raw exception text. The raw cause is still available in the
+            // diagnostic logs; the UI stays calm and consistent with the
+            // Reconnecting/Failed surface.
+            "Connection lost. Tap Reconnect to retry."
         }
 
     private fun shortAppSwitchReconnectFields(

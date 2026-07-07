@@ -18,6 +18,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -359,13 +360,21 @@ class TmuxConnectingStatesScreenshotTest {
     }
 
     @Test
-    fun captureDisconnectedSurfaceNoSpinner() {
-        // DISCONNECTED / idle state: there is NO active reconnect, so the surface
-        // shows the calm [FailedConnectionRow] "Tap to reconnect" affordance and
-        // NO animated spinner (a spinner would falsely imply work in flight). The
-        // pull wrapper runs with `isReconnecting = false`, so its box spinner is
-        // also off. Assert ZERO indeterminate-progress nodes so a regression that
-        // re-introduces a spinner in the idle disconnected state is caught.
+    fun captureFailedStateSingleReconnectControlNoSpinner_screenshotA() {
+        // Issue #1322 (coordinator screenshot A): the Failed/Disconnected state must
+        // render EXACTLY ONE reconnect affordance — the calm [FailedConnectionRow]
+        // "Tap to reconnect" band — and NO animated spinner. The maintainer's
+        // screenshot showed TWO reconnect controls at once (the band link AND the
+        // bottom surface "Reconnect" button) plus an "Attaching…" spinner.
+        //
+        // This mounts the REAL production composition with `showReconnectButton`
+        // driven by the REAL [surfaceReconnectButtonVisible] gate for a `Failed`
+        // status. RED on base: the #890 gate did not exclude `Failed`, so the bottom
+        // [TMUX_SURFACE_RECONNECT_BUTTON_TAG] button rendered on top of the band →
+        // TWO reconnect controls (the assertCountEquals(0) below fails).
+        val failed = TmuxSessionViewModel.ConnectionStatus.Failed(
+            "Connection lost. Tap Reconnect to retry.",
+        )
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -381,7 +390,7 @@ class TmuxConnectingStatesScreenshotTest {
                         onMore = {},
                     )
                     FailedConnectionRow(
-                        message = "Connection lost — tap to reconnect",
+                        message = failed.message,
                         onReconnect = {},
                         canReconnect = true,
                     )
@@ -394,6 +403,9 @@ class TmuxConnectingStatesScreenshotTest {
                             pullToReconnectActive = true,
                             isReconnecting = false,
                             onReconnect = {},
+                            // The REAL gate — false for Failed (the band owns the
+                            // single affordance), so the bottom button is suppressed.
+                            showReconnectButton = surfaceReconnectButtonVisible(failed),
                         ) {
                             Box(
                                 modifier = Modifier
@@ -408,15 +420,210 @@ class TmuxConnectingStatesScreenshotTest {
                 }
             }
         }
+        // The band's "Tap to reconnect" is the SOLE reconnect affordance.
         compose.onNodeWithText("Tap to reconnect").assertExists()
+        compose
+            .onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        // The DUPLICATE bottom surface "Reconnect" button MUST be gone (screenshot A).
+        compose
+            .onAllNodesWithTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
         compose
             .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
             .assertCountEquals(1)
         compose.waitForIdle()
-        // ZERO animated indicators — the idle disconnected state must not spin.
+        // ZERO animated indicators — the settled Failed state must not spin.
         assertIndeterminateIndicatorCount(0)
         SystemClock.sleep(300)
-        captureFullDevice(File(artifactDir(), "tmux-disconnected-no-spinner.png"))
+        captureFullDevice(File(artifactDir(), "tmux-failed-single-reconnect-control.png"))
+    }
+
+    @Test
+    fun captureHardRevealFailureCalmPlaceholderNoAttaching_1321Repro() {
+        // Issue #1322 (defect A / the #1321 screenshot): a past-grace transport drop
+        // yields RevealState.Error(retrying=false) → the terminal is held, but the
+        // surface must paint the CALM [RevealFailurePlaceholder] (no spinner), NEVER
+        // the centered "Attaching…" hold. RED on base: every non-Live reveal
+        // collapsed to the "Attaching…" [SwitchingLoadingPlaceholder] — the spinner
+        // that contradicted the "Disconnected" pill + "Tap to reconnect" band.
+        val failed = TmuxSessionViewModel.ConnectionStatus.Failed(
+            "Connection lost. Tap Reconnect to retry.",
+        )
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    FailedConnectionRow(
+                        message = failed.message,
+                        onReconnect = {},
+                        canReconnect = true,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        SessionSurfaceReconnectWrapper(
+                            pullToReconnectActive = true,
+                            isReconnecting = false,
+                            onReconnect = {},
+                            showReconnectButton = surfaceReconnectButtonVisible(failed),
+                            // The surface centered loader flag driven by the REAL
+                            // decision: a settled hard failure is NOT a loader.
+                            surfaceShowsCenteredLoader = surfaceShowsCenteredLoader(
+                                effectiveHidesTerminal = true,
+                                revealHardFailure = true,
+                                status = failed,
+                                panesEmpty = true,
+                            ),
+                        ) {
+                            // The REAL surface branch decision: a hard reveal failure
+                            // paints the calm placeholder, NEVER "Attaching…".
+                            if (surfaceShowsCalmFailure(
+                                    effectiveHidesTerminal = true,
+                                    revealHardFailure = true,
+                                    status = failed,
+                                )
+                            ) {
+                                RevealFailurePlaceholder()
+                            } else {
+                                SwitchingLoadingPlaceholder()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The calm failure placeholder is shown; the "Attaching…" hold is NOT.
+        compose
+            .onAllNodesWithTag(TMUX_REVEAL_FAILURE_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose
+            .onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        // Exactly ONE reconnect control (the band) and ZERO spinners.
+        compose
+            .onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose
+            .onAllNodesWithTag(TMUX_SURFACE_RECONNECT_BUTTON_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.waitForIdle()
+        assertIndeterminateIndicatorCount(0)
+        SystemClock.sleep(300)
+        captureFullDevice(File(artifactDir(), "tmux-hard-reveal-failure-calm-placeholder.png"))
+    }
+
+    @Test
+    fun captureReconnectingWaitingForPanesSingleIndicator_screenshotB() {
+        // Issue #1322 (coordinator screenshot B, #750 regression): a Reconnecting
+        // state where the reveal is live (`effectiveHidesTerminal == false`) but no
+        // panes have arrived yet stacked THREE indicators — the top
+        // [ReconnectingProgressRow] bar, the centered "waiting for tmux panes…" ring,
+        // and the pull box spinner. The waiting ring is the SOLE loader, so the top
+        // banner AND the box spinner are suppressed via the REAL broadened
+        // [surfaceOwnsPrimaryIndicator] / [surfaceShowsCenteredLoader] gates. RED on
+        // base: surfaceShowsCenteredLoader only counted `effectiveHidesTerminal`, so
+        // all three fired → 3 indeterminate nodes.
+        val reconnecting = TmuxSessionViewModel.ConnectionStatus.Reconnecting(
+            host = "hetzner.example",
+            port = 22,
+            user = "alex",
+            attempt = 2,
+            maxAttempts = 3,
+            retryDelayMs = 4_000L,
+            reason = "Reconnecting…",
+        )
+        val ownsPrimary = surfaceOwnsPrimaryIndicator(
+            effectiveHidesTerminal = false,
+            revealHardFailure = false,
+            status = reconnecting,
+            panesEmpty = true,
+        )
+        val centeredLoader = surfaceShowsCenteredLoader(
+            effectiveHidesTerminal = false,
+            revealHardFailure = false,
+            status = reconnecting,
+            panesEmpty = true,
+        )
+        compose.setContent {
+            PocketShellTheme {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    // The REAL top-banner render site, driven by the broadened gate —
+                    // suppressed because the surface owns the waiting ring.
+                    TmuxTopConnectingBanner(
+                        status = reconnecting,
+                        effectiveHidesTerminal = ownsPrimary,
+                        sessionName = "claude-main",
+                        onCancelConnect = {},
+                        onRetryNow = {},
+                    )
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    ) {
+                        SessionSurfaceReconnectWrapper(
+                            pullToReconnectActive = true,
+                            isReconnecting = true,
+                            onReconnect = {},
+                            // The box spinner is suppressed because the surface shows
+                            // the waiting ring (the broadened #1322 flag).
+                            surfaceShowsCenteredLoader = centeredLoader,
+                            showReconnectButton = surfaceReconnectButtonVisible(reconnecting),
+                        ) {
+                            // The "waiting for tmux panes…" ring (EmptyPanesPlaceholder
+                            // body) — the SOLE loader for this state.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(color = PocketShellColors.Surface),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LoadingIndicator.Spinner(
+                                    size = SpinnerSize.Medium,
+                                    label = "waiting for tmux panes…",
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("waiting for tmux panes…").assertExists()
+        // The top Reconnecting band must be suppressed (no "Retry now" line stacked).
+        compose.onAllNodesWithText("Retry now").assertCountEquals(0)
+        compose
+            .onAllNodesWithTag(TMUX_PULL_TO_RECONNECT_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
+        compose.waitForIdle()
+        // EXACTLY ONE animated indicator: the centered "waiting for tmux panes…"
+        // ring. Pre-fix the top bar + box spinner stacked two more → count 3.
+        assertIndeterminateIndicatorCount(1)
+        SystemClock.sleep(300)
+        captureFullDevice(File(artifactDir(), "tmux-reconnecting-waiting-single-indicator.png"))
     }
 
     /**

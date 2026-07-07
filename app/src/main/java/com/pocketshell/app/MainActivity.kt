@@ -1047,6 +1047,13 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #1239: one-tap "Resume last session" on the host card jumps
+            // straight into the most recently-attached session (the folder /
+            // session tree walk is skipped). The destination is already built
+            // by the ViewModel from the persisted LastSessionStore snapshot; we
+            // just route to it. A gone/stale session is handled by the session
+            // screen's existing recreate path (no dead end).
+            onResumeSession = { destination -> navigate(destination) },
             onOpenPortForwardPanel = { host, keyPath, passphrase ->
                 navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },

@@ -768,6 +768,38 @@ class DesignRenders {
      * Fresh (Warn 72%) on top, stale (Ok 63% · "cached from 13:40") below to
      * check the honest muted treatment. The emulator screenshot is the acceptance.
      */
+    /**
+     * Issue #1239: the host-card one-tap "Resume last session" affordance. The
+     * real row lives in the app module
+     * ([com.pocketshell.app.hosts.HostListScreen]'s `ResumeLastSessionRow`);
+     * this fixture mirrors it with the SAME chrome (accent play glyph, bright
+     * "Resume" label, muted-mono session name, AccentSoft fill + 40%-accent
+     * hairline on the `medium` card shape) so the fast JVM check shows it reads
+     * as a subtle action row under the matching host card — NOT a heavy second
+     * card — while making the exact session it resumes obvious. The top host has
+     * a resume row (the last-attached session); the second host has none (its
+     * snapshot isn't the current one), matching the snapshot-scoped production
+     * behaviour. The emulator screenshot is the acceptance.
+     */
+    @Test
+    fun hostCardResumeAffordance() = render("host-card-resume-affordance") {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            HostCard(
+                name = "hetzner",
+                subtitle = "alex@65.108.42.11",
+                status = HostStatus.Attached,
+                onClick = {},
+            )
+            ResumeLastSessionRowFacsimile(sessionName = "claude-main")
+        }
+        HostCard(
+            name = "gpu-box",
+            subtitle = "alex@10.0.0.42",
+            status = HostStatus.NoActiveSessions,
+            onClick = {},
+        )
+    }
+
     @Test
     fun usageGlancePill() = render("usage-glance-pill") {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -4187,6 +4219,48 @@ class DesignRenders {
             contentAlignment = Alignment.Center,
         ) {
             Text("⚙", color = PocketShellColors.TextSecondary)
+        }
+    }
+
+    /**
+     * Issue #1239: JVM facsimile of the app-module `ResumeLastSessionRow` — the
+     * one-tap "Resume last session" affordance under the matching host card. Same
+     * chrome as the production row (accent play glyph, bright "Resume" label,
+     * muted-mono session name, AccentSoft fill + 40%-accent hairline on the
+     * `medium` card shape) so the fast render is a faithful design read; the
+     * emulator screenshot is the acceptance.
+     */
+    @Composable
+    private fun ResumeLastSessionRowFacsimile(sessionName: String) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .background(color = PocketShellColors.AccentSoft, shape = PocketShellShapes.medium)
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.Accent.copy(alpha = 0.4f),
+                    shape = PocketShellShapes.medium,
+                )
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("▶", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Resume",
+                color = PocketShellColors.Accent,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = sessionName,
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyMono,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 

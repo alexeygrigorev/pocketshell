@@ -1124,6 +1124,18 @@ JOURNEY_CLASSES=(
   # cannot silently regress. It lives under com.pocketshell.app.tmux, so it carries
   # its fully-qualified name directly.
   "com.pocketshell.app.tmux.SessionSurfaceReconnectWrapperTest"
+  # ADDED (#1239): the host-card one-tap "Resume last session" affordance proof.
+  # Seeds a persisted `last_session` snapshot + two saved hosts, launches the
+  # real MainActivity, and HARD-asserts the Resume row is displayed under the
+  # matching host, absent for the other host, and that tapping it LEAVES the host
+  # list (deep-links into the session screen). It needs NO Docker fixture (the
+  # session screen renders optimistically, so "left the host list" is observable
+  # without SSH), NO toxiproxy, NO port — so no tests.yml service change — and it
+  # does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). Per
+  # G9 (a test per acceptance criterion, wired into a running gate) it must run
+  # per-push so the affordance cannot silently regress. It lives under
+  # com.pocketshell.app.hosts, so it carries its fully-qualified name directly.
+  "com.pocketshell.app.hosts.HostResumeLastSessionE2eTest"
   # ADDED (#868): the previous-session-toggle REMOVED regression guard (AC4).
   # The maintainer's #628 previous-session toggle button was hard-cut from the
   # Conversation bottom composer; this proof composes the production

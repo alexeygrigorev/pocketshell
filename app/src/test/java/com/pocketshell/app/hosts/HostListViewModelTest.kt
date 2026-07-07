@@ -17,6 +17,7 @@ import com.pocketshell.app.notifications.UpdateNotifier
 import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.usage.UsageRemoteSource
@@ -345,6 +346,90 @@ class HostListViewModelTest {
             settingsRepository = newSettingsRepository(),
         )
         assertNull(viewModel.keyFor(9_999L))
+    }
+
+    // Issue #1239: the host-card one-tap "Resume last session" affordance is
+    // driven by [HostListViewModel.resumableSession], read from the persisted
+    // [LastSessionStore] snapshot. `newViewModel` uses the default store over the
+    // Robolectric `context`, so seeding that store before construction (or before
+    // an explicit refresh) exercises the exact production path.
+
+    private fun clearLastSession() {
+        context.getSharedPreferences("last_session", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+    }
+
+    private fun seedLastSession(
+        hostId: Long = 42L,
+        sessionName: String = "claude-main",
+        savedAtMillis: Long = System.currentTimeMillis(),
+    ) {
+        LastSessionStore(context).save(
+            LastSessionStore.LastSession(
+                hostId = hostId,
+                hostName = "hetzner",
+                hostname = "10.0.0.9",
+                port = 2222,
+                username = "alex",
+                keyPath = "/data/keys/id_ed25519",
+                sessionName = sessionName,
+                startDirectory = "/home/alex/project",
+                composerDraft = "",
+                savedAtMillis = savedAtMillis,
+            ),
+        )
+    }
+
+    @Test
+    fun resumableSession_isPresent_whenAFreshSnapshotExists() = runTest {
+        clearLastSession()
+        seedLastSession(hostId = 42L, sessionName = "claude-main")
+
+        val viewModel = newViewModel()
+        viewModel.refreshResumableSession().join()
+
+        val resume = viewModel.resumableSession.value
+        assertNotNull(resume)
+        requireNotNull(resume)
+        assertEquals(42L, resume.hostId)
+        assertEquals("claude-main", resume.sessionName)
+        // The one-tap route jumps straight into that live session.
+        assertEquals(42L, resume.destination.hostId)
+        assertEquals("claude-main", resume.destination.sessionName)
+        assertEquals("10.0.0.9", resume.destination.hostname)
+        assertEquals(2222, resume.destination.port)
+        assertEquals("alex", resume.destination.username)
+        assertEquals("/data/keys/id_ed25519", resume.destination.keyPath)
+        // Passphrase is never persisted — reattach resolves the key by path.
+        assertNull(resume.destination.passphrase)
+    }
+
+    @Test
+    fun resumableSession_isNull_whenNoSnapshotExists() = runTest {
+        clearLastSession()
+
+        val viewModel = newViewModel()
+        viewModel.refreshResumableSession().join()
+
+        // No snapshot → no affordance → host tap falls back to normal
+        // folder-list navigation (AC1: no dead end).
+        assertNull(viewModel.resumableSession.value)
+    }
+
+    @Test
+    fun resumableSession_isNull_whenSnapshotIsStale() = runTest {
+        clearLastSession()
+        // Saved ~25h ago — past the 24h recency cap peek() enforces.
+        seedLastSession(
+            hostId = 42L,
+            savedAtMillis = System.currentTimeMillis() -
+                (LastSessionStore.DEFAULT_MAX_AGE_MILLIS + 60_000L),
+        )
+
+        val viewModel = newViewModel()
+        viewModel.refreshResumableSession().join()
+
+        assertNull(viewModel.resumableSession.value)
     }
 
     @Test

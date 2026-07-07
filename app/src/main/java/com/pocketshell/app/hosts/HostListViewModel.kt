@@ -15,8 +15,10 @@ import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
 import com.pocketshell.app.bootstrap.cliUpdateNoChangeMessage
 import com.pocketshell.app.bootstrap.compareSemver
+import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.notifications.DefaultUpdateNotifier
 import com.pocketshell.app.notifications.UpdateNotifier
+import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
@@ -142,6 +144,13 @@ class HostListViewModel internal constructor(
         },
     ),
     private val sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
+    // Issue #1239: the persisted "last active session" snapshot backs the
+    // host-card one-tap "Resume last session" affordance. Defaulted to a
+    // store over the application context so the Robolectric tests can
+    // construct the ViewModel without Hilt; production injects the shared
+    // @Singleton store (same one MainActivity's onStop writes) via the
+    // @Inject constructor below.
+    private val lastSessionStore: LastSessionStore = LastSessionStore(applicationContext),
     // Issue #502: posts a local "new version available" notification when
     // the foreground [releaseChecker] detects a strictly-newer release.
     // De-dupes per version so the user isn't re-notified on every cold
@@ -161,6 +170,7 @@ class HostListViewModel internal constructor(
         activeClients: ActiveTmuxClients,
         settingsRepository: SettingsRepository,
         sshLeaseManager: SshLeaseManager,
+        lastSessionStore: LastSessionStore,
     ) : this(
         applicationContext = applicationContext,
         hostDao = hostDao,
@@ -172,6 +182,7 @@ class HostListViewModel internal constructor(
         settingsRepository = settingsRepository,
         sshLeaseManager = sshLeaseManager,
         sessionOpener = LeaseBackedHostSessionOpener(sshLeaseManager),
+        lastSessionStore = lastSessionStore,
     )
 
     /** Live list of saved hosts, sorted by name (DAO query). */
@@ -266,6 +277,41 @@ class HostListViewModel internal constructor(
         )
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
+
+    /**
+     * Issue #1239: the single most-recently-attached session, surfaced as a
+     * one-tap "Resume last session" affordance on its host's card. Null when
+     * there is no fresh snapshot (cold install, the session was killed / the
+     * user walked away, or the snapshot aged past the 24h recency cap in
+     * [LastSessionStore]) — the affordance is then absent and the user falls
+     * back to the normal host-tap → folder-list navigation (AC1: no dead end).
+     *
+     * Because [LastSessionStore] is written on `MainActivity.onStop`, this is
+     * refreshed by [refreshResumableSession] every time the host list appears
+     * (the screen calls it from a `LaunchedEffect`), so returning from a session
+     * immediately re-arms the affordance for whatever the user last had open.
+     */
+    private val _resumableSession = MutableStateFlow<ResumableSession?>(null)
+    val resumableSession: StateFlow<ResumableSession?> = _resumableSession.asStateFlow()
+
+    /**
+     * Issue #1239: re-read the persisted last-session snapshot off-main and
+     * publish it (or null) to [resumableSession]. Called from the host-list
+     * screen's `LaunchedEffect` on every appearance so the Resume affordance
+     * tracks the latest backgrounded session. Uses [LastSessionStore.peek]
+     * (non-logging) since this is a UI-arming peek, not a process-death restore.
+     */
+    fun refreshResumableSession(): Job =
+        viewModelScope.launch {
+            val session = withContext(Dispatchers.IO) { lastSessionStore.peek() }
+            _resumableSession.value = session?.let {
+                ResumableSession(
+                    hostId = it.hostId,
+                    sessionName = it.sessionName,
+                    destination = with(lastSessionStore) { it.toDestination() },
+                )
+            }
+        }
 
     // Issue #483 introduced a per-host usage summary chip (`usageSummaries`)
     // rendered under each host card; issue #506 dropped that chip because it
@@ -678,6 +724,9 @@ class HostListViewModel internal constructor(
     init {
         checkForUpdates()
         observeCachedAppUpdateWarnings()
+        // Issue #1239: arm the host-card Resume affordance for the first
+        // composition; the screen re-arms it on every appearance thereafter.
+        refreshResumableSession()
     }
 
     /**

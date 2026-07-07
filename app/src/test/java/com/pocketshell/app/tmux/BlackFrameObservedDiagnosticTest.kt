@@ -115,7 +115,11 @@ class BlackFrameObservedDiagnosticTest {
             val healed = vm.healActivePaneIfStaleRenderForTest()
             advanceUntilIdle()
 
-            assertFalse("an empty capture cannot heal", healed)
+            assertEquals(
+                "an empty capture cannot heal — it is UNVERIFIED (issue #1294)",
+                HealOutcome.Unverified,
+                healed,
+            )
             val event = sink.singleBlackFrameEvent()
             assertEquals("capture_empty", event.fields["class"])
             assertEquals("%1", event.fields["paneId"])
@@ -154,7 +158,7 @@ class BlackFrameObservedDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertFalse(healed)
+        assertEquals(HealOutcome.Unverified, healed)
         val event = sink.singleBlackFrameEvent()
         assertEquals("never_seeded", event.fields["class"])
         assertEquals(0, event.fields["captureBytes"])
@@ -188,7 +192,7 @@ class BlackFrameObservedDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertTrue("the render lost the frame → the heal fires", healed)
+        assertEquals("the render lost the frame → the heal fires", HealOutcome.Healed, healed)
         val event = sink.singleBlackFrameEvent()
         assertEquals("lost_after_paint", event.fields["class"])
         assertEquals(0, event.fields["renderedChars"])
@@ -226,7 +230,7 @@ class BlackFrameObservedDiagnosticTest {
         val healed = vm.healActivePaneIfStaleRenderForTest()
         advanceUntilIdle()
 
-        assertTrue(healed)
+        assertEquals(HealOutcome.Healed, healed)
         val event = sink.singleBlackFrameEvent()
         assertEquals("partial_blank", event.fields["class"])
         assertTrue("partial-black keeps SOME rendered content", (event.fields["renderedChars"] as Int) > 0)

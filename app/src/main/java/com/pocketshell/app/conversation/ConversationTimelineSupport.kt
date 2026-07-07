@@ -4,6 +4,41 @@ import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationTextFormatting
 
+/**
+ * Issue #1225/#1267: the [ConversationEvent.SystemNote.tag] used for the
+ * over-cap transcript-line truncation marker. Unlike ordinary system notes,
+ * this marker is an ALWAYS-VISIBLE truncation affordance: it MUST survive the
+ * `showSystemNotes = false` filter, because a truncated giant line is a
+ * *dropped user message* the user needs to know about regardless of the
+ * system-notes preference (the exact silently-dropped-again failure #1225 set
+ * out to avoid). Kept in lockstep with the tag emitted by
+ * `AgentConversationRepository.parseTranscriptTailLines` /
+ * `parseOpenCodeRowsWithTruncation`.
+ */
+internal const val TRUNCATED_LINE_SYSTEM_NOTE_TAG: String = "truncated"
+
+/**
+ * Issue #176/#1267: the events the conversation timeline actually renders,
+ * given the `showSystemNotes` preference. Internal-protocol-noise rows are
+ * always dropped; when [showSystemNotes] is false, ordinary
+ * [ConversationEvent.SystemNote] rows are hidden too — EXCEPT the truncation
+ * marker ([TRUNCATED_LINE_SYSTEM_NOTE_TAG]), which stays visible so a
+ * byte-clamped giant line never becomes a silently dropped message.
+ *
+ * Pure + side-effect free so it is unit-tested directly (the composable just
+ * `remember`s the result).
+ */
+internal fun conversationTimelineVisibleEvents(
+    events: List<ConversationEvent>,
+    showSystemNotes: Boolean,
+): List<ConversationEvent> {
+    val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
+    if (showSystemNotes) return timelineEvents
+    return timelineEvents.filterNot {
+        it is ConversationEvent.SystemNote && it.tag != TRUNCATED_LINE_SYSTEM_NOTE_TAG
+    }
+}
+
 internal fun ConversationEvent.isHiddenConversationTimelineRow(): Boolean = when (this) {
     is ConversationEvent.SystemNote ->
         // turn_duration was always hidden; #704 req #1 also hides rows whose

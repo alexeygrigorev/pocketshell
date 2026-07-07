@@ -197,6 +197,10 @@ fun HostListScreen(
     val usageWarningProviders by viewModel.usageWarningProviders.collectAsState()
     val dismissedBanners by viewModel.dismissedBanners.collectAsState()
     val forwardingIndicator by forwardingIndicatorViewModel.state.collectAsState()
+    // Issue #1241: the glanceable most-constraining usage percent, read from
+    // the SAME cached scheduler snapshots the warning banners use (no new
+    // fetch). Null while there's no usable reading — the pill is then hidden.
+    val usageGlancePill by viewModel.usageGlancePill.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
 
@@ -364,6 +368,11 @@ fun HostListScreen(
                 onSettingsClick = onOpenSettings,
                 forwardingIndicator = forwardingIndicator,
                 onForwardingIndicatorClick = onOpenPortForwarding,
+                // Issue #1241: the glance pill only lights up when there's a
+                // cached reading AND a Usage route is wired (mirrors the
+                // banner / kebab gate).
+                usageGlancePill = usageGlancePill,
+                onOpenUsage = onOpenUsage,
             )
 
             // The landing body is one scrolling hosts-first list. Live
@@ -755,7 +764,13 @@ fun HostListScreen(
                         Intent.createChooser(
                             Intent(Intent.ACTION_SEND)
                                 .setType("text/plain")
-                                .putExtra(Intent.EXTRA_TEXT, share.payload),
+                                // Issue #1230: a payload may split into several
+                                // QR envelope parts; share every one (newline
+                                // separated) so a text import can reassemble.
+                                .putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    share.payloads.joinToString("\n"),
+                                ),
                             "Share host",
                         ),
                     )
@@ -977,19 +992,32 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
  * from the caller's live state.
  */
 @Composable
-private fun HostsAppBar(
+internal fun HostsAppBar(
     hostCount: Int,
     activeSessionCount: Int,
     onSettingsClick: () -> Unit = {},
     forwardingIndicator: com.pocketshell.app.portfwd.ForwardingIndicatorState =
         com.pocketshell.app.portfwd.ForwardingIndicatorState(),
     onForwardingIndicatorClick: () -> Unit = {},
+    // Issue #1241: the glanceable usage pill. Null (or a null route) hides it.
+    usageGlancePill: com.pocketshell.app.usage.UsageGlancePillState? = null,
+    onOpenUsage: (() -> Unit)? = null,
 ) {
     ScreenHeader(
         title = "Hosts",
         subtitle = hostsHeaderSubtitle(hostCount, activeSessionCount),
         modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
         trailing = {
+            // Issue #1241: the most-constraining usage percent, tapping into
+            // UsageScreen. Leftmost of the trailing affordances so the number
+            // is the first thing scanned; the shared trailing Row's inter-item
+            // spacing keeps it clear of the forwarding pill + Settings gear.
+            if (usageGlancePill != null && onOpenUsage != null) {
+                com.pocketshell.app.usage.UsageGlancePill(
+                    state = usageGlancePill,
+                    onClick = onOpenUsage,
+                )
+            }
             // Issue #446: the global "ports forwarding" indicator only appears
             // while ≥1 host is actively auto-forwarding. Tapping it opens the
             // port-forward panel entry (same chooser as the QS tile +
@@ -1465,7 +1493,14 @@ private fun HostShareDialog(
     onDismiss: () -> Unit,
     onShare: () -> Unit,
 ) {
-    val qr = remember(share.payload) { HostQrCode.encode(share.payload, sizePx = 640) }
+    // Issue #1230: a large payload (long name/hostname/username, long key
+    // name) splits into several QR envelope parts. Page through them so the
+    // in-app scanner can reassemble; a single-part payload shows just its QR.
+    val total = share.payloads.size
+    var index by remember(share) { mutableStateOf(0) }
+    val safeIndex = index.coerceIn(0, (total - 1).coerceAtLeast(0))
+    val current = share.payloads[safeIndex]
+    val qr = remember(current) { HostQrCode.encode(current, sizePx = 640) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Share ${share.hostName}", color = PocketShellColors.Text) },
@@ -1476,6 +1511,37 @@ private fun HostShareDialog(
                     contentDescription = "Host share QR code",
                     modifier = Modifier.size(220.dp),
                 )
+                if (total > 1) {
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        PocketShellButton(
+                            text = "Prev",
+                            onClick = { if (safeIndex > 0) index = safeIndex - 1 },
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                        )
+                        Text(
+                            text = "QR ${safeIndex + 1} of $total",
+                            color = PocketShellColors.Text,
+                            style = PocketShellTypography.labelSmall,
+                        )
+                        PocketShellButton(
+                            text = "Next",
+                            onClick = { if (safeIndex < total - 1) index = safeIndex + 1 },
+                            variant = ButtonVariant.Text,
+                            compact = true,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+                    Text(
+                        text = "This host is large, so it splits across $total codes. Scan all of them with the in-app QR scanner to combine.",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellTypography.labelSmall,
+                    )
+                }
                 Spacer(modifier = Modifier.height(PocketShellSpacing.md))
                 Text(
                     text = "Private keys and passphrases are never included. Import requires a local key with the same name.",

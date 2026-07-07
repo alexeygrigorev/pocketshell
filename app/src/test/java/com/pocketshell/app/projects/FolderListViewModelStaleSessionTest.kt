@@ -22,8 +22,6 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -32,17 +30,19 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Issue #1155 (Part B): the folder tree's "This session no longer exists —
- * create a new session in this folder?" recovery prompt.
+ * Issue #1155: when a persisted session is confirmed GENUINELY GONE on attach
+ * ([SessionLifecycleSignals.staleSessions], emitted only from the
+ * `TmuxSessionNotFoundException` path — NOT a transient reconnect), the bound
+ * folder tree drops the dead row from its list so the list stays accurate.
  *
- * When a persisted session the user tried to open is confirmed GENUINELY GONE on
- * attach ([SessionLifecycleSignals.staleSessions], emitted only from the
- * `TmuxSessionNotFoundException` path — NOT a transient reconnect), the tree
- * raises a [StaleSessionRecreatePrompt] instead of leaving the user on a blank
- * list. Confirming reuses the SAME folder's create-session path; dismissing
- * clears it. The genuinely-gone-vs-transient distinction itself is proven on the
- * emitter side in `TmuxSessionWarmOpenTest`
+ * The USER-FACING "This session no longer exists — create in this folder, or go
+ * home?" recovery PROMPT is owned app-level by
+ * [com.pocketshell.app.tmux.StaleSessionPromptController] (so it also surfaces on
+ * the cold-restore path where this view model never exists), covered by
+ * `StaleSessionPromptControllerTest`; the genuinely-gone-vs-transient distinction
+ * is proven on the emitter side in `TmuxSessionWarmOpenTest`
  * (`goneSessionBroadcastsStaleSignal…` / `liveSessionDoesNotBroadcastStale…`).
+ * This test covers only the tree's row-accuracy behaviour.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -61,10 +61,10 @@ class FolderListViewModelStaleSessionTest {
 
     private val goneFolder = "/home/alexey/git/pocketshell"
 
-    // ---- a genuinely-gone session raises the recreate prompt (bound host) -----
+    // ---- a genuinely-gone session drops its row from the bound tree -----------
 
     @Test
-    fun staleSessionRaisesRecreatePromptForBoundHost() = runTest {
+    fun staleSessionDropsDeadRowForBoundHost() = runTest {
         val signals = SessionLifecycleSignals()
         val gateway = StubGateway(listOf(sessionRow("git-pocketshell"), sessionRow("beta")))
         val vm = newViewModel(gateway = gateway, signals = signals)
@@ -74,31 +74,34 @@ class FolderListViewModelStaleSessionTest {
             // The user navigated onward to the (now gone) session -> tree paused.
             vm.stopPolling()
             runCurrent()
-            assertNull("no prompt before the gone-session signal", vm.staleSessionPrompt.value)
+            assertTrue(
+                "the row is present before the gone-session signal",
+                "git-pocketshell" in readySessionNames(vm),
+            )
 
-            // The session was confirmed genuinely gone on attach.
+            // The session was confirmed genuinely gone on attach. The USER-FACING
+            // recovery prompt is owned app-level (StaleSessionPromptController);
+            // the tree just keeps its list accurate by dropping the dead row.
             signals.emitStaleSession(HOST.id, "git-pocketshell", goneFolder)
             runCurrent()
 
-            val prompt = vm.staleSessionPrompt.value
-            assertTrue("a genuinely-gone session must raise the recreate prompt", prompt != null)
-            assertEquals("git-pocketshell", prompt!!.sessionName)
-            assertEquals(goneFolder, prompt.folderPath)
-            // The confirmed-gone row is also dropped from the tree so the list the
-            // prompt sits over is accurate.
             assertTrue(
                 "the confirmed-gone session drops from the tree",
                 "git-pocketshell" !in readySessionNames(vm),
+            )
+            assertTrue(
+                "an unrelated live row is untouched",
+                "beta" in readySessionNames(vm),
             )
         } finally {
             vm.stopPolling()
         }
     }
 
-    // ---- host filter: a gone session on ANOTHER host must not prompt ----------
+    // ---- host filter: a gone session on ANOTHER host must not drop OUR row -----
 
     @Test
-    fun staleSessionForOtherHostDoesNotPrompt() = runTest {
+    fun staleSessionForOtherHostDoesNotDropRow() = runTest {
         val signals = SessionLifecycleSignals()
         val gateway = StubGateway(listOf(sessionRow("git-pocketshell")))
         val vm = newViewModel(gateway = gateway, signals = signals)
@@ -109,104 +112,19 @@ class FolderListViewModelStaleSessionTest {
             signals.emitStaleSession(HOST.id + 1, "git-pocketshell", goneFolder)
             runCurrent()
 
-            assertNull(
-                "a gone session on another host must not raise this host's prompt",
-                vm.staleSessionPrompt.value,
+            assertTrue(
+                "a gone session on another host must not drop this host's row",
+                "git-pocketshell" in readySessionNames(vm),
             )
         } finally {
             vm.stopPolling()
         }
     }
 
-    // ---- confirm recreates in the SAME folder and routes to the new session ---
+    // ---- class coverage: app-created removal (via the app) also drops the row --
 
     @Test
-    fun confirmRecreatesSessionInSameFolderAndRoutes() = runTest {
-        val signals = SessionLifecycleSignals()
-        val gateway = StubGateway(listOf(sessionRow("beta")))
-        val vm = newViewModel(gateway = gateway, signals = signals)
-        try {
-            bind(vm)
-            runCurrent()
-            signals.emitStaleSession(HOST.id, "git-pocketshell", goneFolder)
-            runCurrent()
-            assertTrue(vm.staleSessionPrompt.value != null)
-
-            val routed = mutableListOf<String>()
-            vm.confirmRecreateStaleSession(onResolved = { routed.add(it) })
-            runCurrent()
-
-            assertEquals(
-                "confirm must recreate the session in the SAME folder",
-                listOf("git-pocketshell" to goneFolder),
-                gateway.createdSessions,
-            )
-            assertEquals("confirm routes to the recreated session", listOf("git-pocketshell"), routed)
-            assertNull("confirm clears the prompt", vm.staleSessionPrompt.value)
-        } finally {
-            vm.stopPolling()
-        }
-    }
-
-    // ---- dismiss clears the prompt (no create) --------------------------------
-
-    @Test
-    fun dismissClearsPromptWithoutCreating() = runTest {
-        val signals = SessionLifecycleSignals()
-        val gateway = StubGateway(listOf(sessionRow("beta")))
-        val vm = newViewModel(gateway = gateway, signals = signals)
-        try {
-            bind(vm)
-            runCurrent()
-            signals.emitStaleSession(HOST.id, "git-pocketshell", goneFolder)
-            runCurrent()
-            assertTrue(vm.staleSessionPrompt.value != null)
-
-            vm.dismissStaleSessionPrompt()
-            runCurrent()
-
-            assertNull("dismiss clears the prompt", vm.staleSessionPrompt.value)
-            assertTrue("dismiss must NOT create a session", gateway.createdSessions.isEmpty())
-        } finally {
-            vm.stopPolling()
-        }
-    }
-
-    // ---- missing-data: a gone session with no known folder falls back to ~ -----
-
-    @Test
-    fun staleSessionWithNullFolderFallsBackToHomeOnRecreate() = runTest {
-        val signals = SessionLifecycleSignals()
-        val gateway = StubGateway(listOf(sessionRow("beta")))
-        val vm = newViewModel(gateway = gateway, signals = signals)
-        try {
-            bind(vm)
-            runCurrent()
-            // The gone session carried no start directory (missing-data case).
-            signals.emitStaleSession(HOST.id, "orphan", folderPath = null)
-            runCurrent()
-
-            val prompt = vm.staleSessionPrompt.value
-            assertTrue("a null-folder gone session must STILL prompt (never blank/error)", prompt != null)
-            assertNull(prompt!!.folderPath)
-
-            vm.confirmRecreateStaleSession(onResolved = {})
-            runCurrent()
-            assertEquals(
-                "a null-folder recreate falls back to the host home directory",
-                listOf("orphan" to "~"),
-                gateway.createdSessions,
-            )
-        } finally {
-            vm.stopPolling()
-        }
-    }
-
-    // ---- class coverage: app-created removal (via the app) drops the row and --
-    // ---- does NOT prompt (the tree stays accurate) — only a gone-on-open does -
-
-    @Test
-    fun appCreatedRemovalDropsRowWithoutRecreatePrompt() = runTest {
+    fun appCreatedRemovalDropsRow() = runTest {
         val signals = SessionLifecycleSignals()
         val gateway = StubGateway(listOf(sessionRow("git-pocketshell"), sessionRow("beta")))
         val vm = newViewModel(gateway = gateway, signals = signals)
@@ -217,14 +135,13 @@ class FolderListViewModelStaleSessionTest {
             runCurrent()
 
             // The COMMON case: the user removed the session THROUGH the app — the
-            // tree drops the row immediately and there is nothing to recover, so
-            // NO recreate prompt (that is only for opening a persisted-but-gone
-            // session — the external-removal / missed-sync case).
+            // tree drops the row immediately (external removal is the gone-on-open
+            // case the app-level recovery prompt covers).
             signals.emitKilled(HOST.id, "git-pocketshell")
             runCurrent()
 
             assertTrue("app-created removal drops the row", "git-pocketshell" !in readySessionNames(vm))
-            assertNull("app-created removal must NOT raise the recreate prompt", vm.staleSessionPrompt.value)
+            assertTrue("the sibling row survives", "beta" in readySessionNames(vm))
         } finally {
             vm.stopPolling()
         }

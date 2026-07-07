@@ -17,25 +17,19 @@ import java.io.OutputStream
 
 /**
  * Issue #1176 (GAP A) — the heal-oracle DEAD-ZONE the maintainer kept hitting on the latest
- * release (spike #874). [TerminalSurfaceState.visibleRenderLostFrameVsCapture] used to UNION two
- * ceilings on DIFFERENT metrics that do not compose: a 25%-**char** ceiling (#966
- * [TerminalSurfaceState.visibleScreenDivergesFromCapture]) OR a 50%-**line** ceiling (#1153). A
- * render carrying >25% of tmux's chars spread across >50% of the rows — a black BAND covering
- * ~a third-to-a-half of the screen — cleared BOTH ceilings, was judged HEALTHY, and was NEVER
- * healed on any path.
+ * release (spike #874): a >3-line half-black BAND covering ~a third-to-a-half of the screen was
+ * judged HEALTHY by the pre-#1176 ceilings and NEVER healed on any path.
  *
- * These tests pin the fix: the oracle is now a SINGLE char-coverage judgment (heal when the
- * render reproduces at most [LOST_FRAME_MAX_RENDERED_FRACTION] = 0.75 of tmux's visible content),
- * so a half-to-two-thirds black band is judged LOST — while a dense / only-slightly-behind pane
- * is not.
+ * These tests pin that the oracle heals such a band. Since #1300 the oracle is a per-line-hash
+ * content diff ([TerminalSurfaceState.visibleRenderLostFrameVsCapture]) — heal when the render is
+ * missing at least a QUARTER of tmux's content lines — so a half-to-two-thirds black band is
+ * judged LOST while a dense / only-slightly-behind pane is not.
  *
  * ## RED → GREEN (D33/G1/G10)
  *
  * [deadZoneBandClearsBothOldCeilingsYetIsHealedByUnifiedOracle] composes a >3-line half-black
- * band whose char-coverage is > 0.25 (clears the old CHAR ceiling — `visibleScreenDivergesFromCapture`
- * is FALSE) AND whose live share of the rows is > 0.50 (clears the old LINE ceiling —
- * `visibleScreenLooksSparseForSendHeal` is FALSE). On base `visibleRenderLostFrameVsCapture`
- * returns FALSE (the dead-zone — RED). With the unified oracle it returns TRUE (GREEN). The
+ * band whose live share of the rows is > 0.50 (clears the old LINE ceiling —
+ * `visibleScreenLooksSparseForSendHeal` is FALSE). The oracle judges it LOST (GREEN). The
  * geometry is visible-render-vs-capture-pane, not a proxy.
  *
  * ## Class coverage (D32-G2)
@@ -115,12 +109,6 @@ class TerminalSurfaceStateDeadZoneHealTest {
             "precondition: it has MORE than 3 live lines, so it is NOT the ≤3-line partial-black",
             state.visibleScreenIsPartiallyBlank(),
         )
-        // The old CHAR ceiling (25%) judged it healthy: char-coverage > 0.25.
-        assertFalse(
-            "RED premise: the render carries > 25% of tmux's chars → the old 25%-char divergence " +
-                "oracle judged the band HEALTHY (cleared the CHAR ceiling)",
-            state.visibleScreenDivergesFromCapture(capture),
-        )
         // The old LINE ceiling (50%) judged it healthy: live share of the rows > 0.50, so the
         // 0.5-live-fraction send-heal pre-check reads NON-sparse.
         assertFalse(
@@ -171,12 +159,9 @@ class TerminalSurfaceStateDeadZoneHealTest {
                     state.visibleRenderLostFrameVsCapture(capture),
                 )
                 if (liveFraction > 0.5) {
-                    // The DEAD-ZONE members: confirm they cleared BOTH old ceilings (so they were
-                    // genuinely un-healed on base), closing the dead-zone as a class not a point.
-                    assertFalse(
-                        "band $blackPercent%: cleared the old 25%-char ceiling",
-                        state.visibleScreenDivergesFromCapture(capture),
-                    )
+                    // The DEAD-ZONE members: confirm they cleared the old 50%-line send-heal
+                    // ceiling (so they were genuinely un-healed on the pre-#1176 line ceiling),
+                    // closing the dead-zone as a class not a point.
                     assertFalse(
                         "band $blackPercent%: cleared the old 50%-line ceiling",
                         state.visibleScreenLooksSparseForSendHeal(),

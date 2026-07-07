@@ -511,4 +511,78 @@ class PocketshellUsageJsonParserTest {
             )
         }
     }
+
+    // -- issue #1223: per-record resilience on the exit-0 success path --------
+    //
+    // An old/mismatched host CLI (or a custom usageCommandOverride wrapper) can
+    // emit one healthy provider record plus one drifted/malformed record, or
+    // prepend a non-JSON MOTD/deprecation line. Before #1223 the FIRST bad
+    // record threw and discarded ALL providers. Parse must now skip the bad
+    // record and return the ones that parsed; only zero parsed records is a
+    // whole-panel failure (mirrors the exit != 0 graceful path #847 class).
+
+    @Test
+    fun parse_skipsDriftedRecordAndKeepsHealthyProvider() {
+        // Healthy record is FIRST so we prove an already-parsed provider is not
+        // discarded when a LATER record drifts (missing `provider`).
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}
+            {"status":"ok","short_term":"not-an-object","long_term":null,"block_reason":null,"error":null,"details":{}}
+            """.trimIndent(),
+        )
+
+        assertEquals(1, records.size)
+        assertEquals("codex", records.single().provider)
+        assertEquals(UsageStatus.Ok, records.single().status)
+    }
+
+    @Test
+    fun parse_skipsNonJsonPreambleLineAndRendersAllValidProviders() {
+        // A wrapper/MOTD prints a non-JSON preamble line before the NDJSON. All
+        // valid provider records after it must still render.
+        val records = parser.parse(
+            """
+            WARNING: pocketshell 0.3.1 is deprecated, upgrade with: uv tool upgrade pocketshell
+            {"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}
+            {"provider":"claude","status":"ok","short_term":{"percent_remaining":41.0},"long_term":null,"block_reason":null,"error":null,"details":{}}
+            """.trimIndent(),
+        )
+
+        assertEquals(2, records.size)
+        assertEquals("codex", records[0].provider)
+        assertEquals("claude", records[1].provider)
+    }
+
+    @Test
+    fun parse_throwsWhenZeroRecordsParse() {
+        // Non-empty input where NOTHING parses must still surface a visible
+        // failure (no silent empty-success). The message aggregates the
+        // per-record diagnostics.
+        val error = assertThrows(UsageParseException::class.java) {
+            parser.parse(
+                """
+                this is not json
+                also not json {broken
+                """.trimIndent(),
+            )
+        }
+        assertNotNull(error.message)
+        assertTrue(error.message!!.contains("invalid usage JSON"))
+    }
+
+    @Test
+    fun parse_skipsMalformedJsonRecordAmongValidOnes() {
+        // A record with broken JSON syntax sandwiched between two valid ones is
+        // skipped; the two valid providers still render.
+        val records = parser.parse(
+            """
+            {"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}
+            {"provider":"claude","status":"ok","short_term":{"percent_remaining":not-a-number}}
+            {"provider":"copilot","status":"ok","short_term":{"percent_remaining":90.0},"long_term":null,"block_reason":null,"error":null,"details":{}}
+            """.trimIndent(),
+        )
+
+        assertEquals(listOf("codex", "copilot"), records.map { it.provider })
+    }
 }

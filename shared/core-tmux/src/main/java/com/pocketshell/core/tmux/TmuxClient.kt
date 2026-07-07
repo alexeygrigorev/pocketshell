@@ -1,6 +1,7 @@
 package com.pocketshell.core.tmux
 
 import android.util.Log
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
@@ -79,10 +80,14 @@ public interface TmuxClient : AutoCloseable {
      *
      * Hot — backed by a shared flow inside the implementation so that
      * multiple subscribers see the same events without re-reading the SSH
-     * stream. Per-pane `%output` events flow here too (they are
-     * [ControlEvent.Output] instances) but most callers will subscribe
-     * via the dedicated [outputFor] demux instead so they don't have to
-     * filter the whole bus.
+     * stream.
+     *
+     * Issue #1224: this bus carries STRUCTURAL control events only
+     * (`%window-close`, `%session-changed`, `%layout-change`, `%window-add`,
+     * `%exit`, …). Per-pane `%output` is deliberately NOT multiplexed here —
+     * subscribe to the dedicated [outputFor] demux for pane bytes. Copying every
+     * high-rate `%output` onto this shared bus used to let an output burst fill
+     * the buffer and silently drop a burst-tail structural event.
      */
     public val events: Flow<ControlEvent>
 
@@ -124,27 +129,24 @@ public interface TmuxClient : AutoCloseable {
         sendCommand(cmd)
 
     /**
-     * Issue #640: capture a pane's content AND its cursor in a SINGLE wire
-     * round-trip.
+     * Issue #640 / #1297: capture a pane's content AND its cursor
+     * (`#{cursor_x},#{cursor_y}`, see #259) so the seed path can repaint a
+     * freshly-attached — or stale/black — pane correctly.
      *
-     * The seed path needs both the `capture-pane` snapshot and the pane's true
-     * cursor (`#{cursor_x},#{cursor_y}`, see #259) to repaint a freshly-attached
-     * pane correctly. In `tmux -CC` control mode a `cmd1 ; cmd2` request is
-     * answered with TWO separate `%begin`/`%end` blocks — chaining does NOT
-     * collapse them — so a naive single `sendCommand` would only see the first
-     * block and the cursor reply would arrive as an uncorrelated second block.
-     *
-     * Implementations therefore send the chained command and drain BOTH
-     * response blocks under one single-flight acquisition, returning the capture
-     * block plus the raw cursor reply line. This collapses the previous two
-     * serial seed round-trips into one wire exchange while keeping the cursor
-     * restore intact. Best-effort: a missing/failed cursor block degrades to a
-     * null [CaptureWithCursor.cursorReply] (seed without explicit cursor
-     * restore) rather than failing the capture.
+     * Issue #1297 (heal-capture SPOF): the real client runs this on a DEDICATED
+     * `exec` channel (the `SshSession.exec` lane the `tmux has-session` preflight
+     * already uses), NOT the shared per-host `-CC` control-mode `sendMutex`. A
+     * busy Claude agent saturating the `-CC` channel used to wedge every
+     * recovery-net capture (stale-render heal, reveal/switch reseed, overflow
+     * reseed) behind that one mutex, so the 2.5s seed ceiling fired exactly when
+     * a pane was black (#470/#835). The exec lane reads its own channel's stdout
+     * independently of the `-CC` reader, so a heal capture succeeds while a burst
+     * saturates the control channel. Both `capture-pane` and `display-message`
+     * run in one exec, split on a sentinel line; a missing/failed cursor degrades
+     * to a null [CaptureWithCursor.cursorReply] rather than failing the capture.
      *
      * The default implementation falls back to two separate best-effort
-     * commands for [TmuxClient] doubles that do not model control-mode block
-     * correlation.
+     * `-CC` commands for [TmuxClient] doubles that do not model an exec lane.
      */
     public suspend fun captureWithCursor(
         paneId: String,
@@ -193,6 +195,42 @@ public interface TmuxClient : AutoCloseable {
         commands.map { sendCommand(it) }
 
     /**
+     * Issue #1316: enumerate a session's panes on a DEDICATED `exec` channel, NOT
+     * the shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The attach RECONCILE — the `tmux list-panes` round-trip in
+     * `TmuxSessionViewModel.awaitPanesReadyForAttach` — is the FIRST thing a
+     * fast-switch attach blocks on, and it used to ride the shared `-CC` control
+     * channel. When a NEW session B attaches while a busy Claude session A still
+     * drains its `-CC` `%output` burst, A head-of-line-blocks B's `list-panes`
+     * reply on the ONE shared sshj transport reader, so B's reconcile times out
+     * and retries for up to `ATTACH_PANES_READY_TIMEOUT_MS` behind the
+     * input-gated "Attaching…" overlay — the maintainer's day-0 v0.4.24 wedge.
+     * This is the SAME transport SPOF #1297 closed for `capture-pane`; here it is
+     * closed for the attach's own `list-panes`.
+     *
+     * The real client runs the enumeration on the independent [SshSession.exec]
+     * lane (the `tmux has-session` preflight / #1297 capture lane), whose stdout
+     * is read OUTSIDE the transport dispatcher, so a new attach's reconcile
+     * returns while a sibling session saturates the `-CC` reader.
+     *
+     * [listPanesCommand] is the tmux command WITHOUT the leading `tmux` — the
+     * same `list-panes -s -t '<session>' -F '…'` string the `-CC` path used, so
+     * the `#{…}` format parity (and the caller's row parse) is preserved
+     * unchanged. [timeoutMs] bounds the exec round-trip so a wedged/half-open
+     * transport surfaces a [TmuxClientException] fast instead of parking the
+     * attach — the bounded escape that stops the reveal gating input
+     * indefinitely.
+     *
+     * The default implementation falls back to a `-CC` [sendCommand] for
+     * [TmuxClient] doubles that do not model an exec lane.
+     */
+    public suspend fun listPanesViaExec(
+        listPanesCommand: String,
+        timeoutMs: Long? = null,
+    ): CommandResponse = sendCommand(listPanesCommand)
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -201,6 +239,49 @@ public interface TmuxClient : AutoCloseable {
      * [ControlEvent.Output] for rationale.
      */
     public fun outputFor(paneId: String): Flow<ControlEvent.Output>
+
+    /**
+     * Issue #1205: discard every `%output` frame currently queued in [paneId]'s
+     * per-pane delivery backlog and return the number of frames dropped.
+     *
+     * After a backlog overflow (a sustained high-output burst outran the local
+     * renderer and [outputBacklogOverflows] fired), the buffered burst frames
+     * still queued in the pane's channel are STALE deltas: the recovery path
+     * repaints the pane from an authoritative `capture-pane` snapshot, and if
+     * those queued deltas were allowed to replay AFTER the snapshot they would
+     * double-apply on top of the already-current grid and corrupt it. Draining
+     * the backlog before the reseed is what makes "one reseed, not a dead pane"
+     * correct. No-op (returns 0) when the pane has no registered pipe.
+     */
+    public fun drainPaneOutputBacklog(paneId: String): Int
+
+    /**
+     * Issue #1297: freeze `%output` delivery for [paneId] so frames landing while
+     * the sole collector is momentarily detached are HELD in the bounded backlog
+     * channel instead of being emitted into a zero-subscriber `replay = 0`
+     * SharedFlow (where they vanish).
+     *
+     * The overflow-reseed producer swap
+     * ([TmuxSessionViewModel.launchPaneOverflowReseed]) tears the sole pane
+     * collector down and reattaches a FRESH one; every `%output` emitted in that
+     * teardown/reattach gap used to be lost, leaving recovery to depend SOLELY on
+     * the step-4 `capture-pane` (the same SPOF this issue closes). With the pause
+     * held across the swap, the held frames are replayed to the fresh collector
+     * on [resumeOutputDelivery] when the capture fails, and dropped
+     * ([drainPaneOutputBacklog]) when the authoritative capture succeeds.
+     *
+     * No-op when the pane has no registered pipe. The default implementation is a
+     * no-op for [TmuxClient] doubles that do not model per-pane delivery.
+     */
+    public fun pauseOutputDelivery(paneId: String) {}
+
+    /**
+     * Issue #1297: thaw `%output` delivery for [paneId] previously frozen by
+     * [pauseOutputDelivery]. Any frames held in the bounded backlog channel drain
+     * to the (re)attached collector in arrival order. No-op when the pane has no
+     * registered pipe or delivery was never paused.
+     */
+    public fun resumeOutputDelivery(paneId: String) {}
 
     /**
      * Issue #173: observable signal that the control channel has
@@ -758,6 +839,14 @@ internal class RealTmuxClient(
     // so the timeout fires exactly when the test releases it instead of racing
     // a tight wall-clock window against the runner's scheduler load.
     commandTimeoutGate: CommandTimeoutGate? = null,
+    // Issue #1212: grace window a registered pane pipe waits for its first
+    // collector before abandoning its (bounded) pre-registration replay list
+    // and proceeding to drain the live channel. Prevents a
+    // registered-but-never-collected pane from parking its replay job — and
+    // pinning up to [PRE_REGISTRATION_MAX_BYTES] of replay — for the life of
+    // the connection. Generous by default so the normal path (the ViewModel
+    // collects within milliseconds) is unaffected; tests inject a short value.
+    private val firstSubscriberReplayGraceMs: Long = DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS,
 ) : TmuxClient {
     // Issue #576 (P4): monotonic counter of the last reader-side event the
     // control-mode reader parsed (any `%begin`/`%end`/`%error`/`%output`).
@@ -789,11 +878,17 @@ internal class RealTmuxClient(
             Dispatchers.IO,
     )
 
-    // Shared flow of all events. extraBufferCapacity absorbs short bursts
-    // without blocking the reader. Pane `%output` is emitted to this bus on a
-    // best-effort basis from [emitOutput]; the per-pane terminal stream is the
-    // authoritative output path, and it must never let diagnostic/global event
-    // collectors starve the control reader.
+    // Shared flow of STRUCTURAL events. extraBufferCapacity absorbs short
+    // bursts without blocking the reader.
+    //
+    // Issue #1224: pane `%output` is NO LONGER emitted onto this bus. It used to
+    // be (best-effort, so the ViewModel could log first-frame-per-pane), which
+    // meant a dense output burst filled the 256-slot buffer and could silently
+    // drop a burst-tail structural event (`%window-close` / `%session-changed`)
+    // — leaving a stale window node or wrong active session in the UI. Output
+    // now rides ONLY the per-pane [outputFor] pipes (the ViewModel's
+    // first-visible-output log taps that stream); this bus carries structural
+    // events ONLY, so an output burst can never crowd them out.
     //
     // replay = 0 because subscribers only care about events that arrive
     // after they start collecting; tmux's structural state (sessions /
@@ -825,8 +920,27 @@ internal class RealTmuxClient(
     // taken ONLY on the cold paths (an `%output` for an as-yet-unregistered
     // pane, and pane registration) — the hot path (pipe already registered)
     // stays lock-free.
+    //
+    // Issue #1212 lifecycle hardening:
+    //  * The map is access-order (LRU): every `%output` for a pane moves it to
+    //    the most-recent end, so the eldest entry is the least-recently-active
+    //    pane — the right global-eviction victim.
+    //  * [totalPreRegistrationBytes] tracks the aggregate retained bytes across
+    //    ALL panes so a flood of never-registered background panes can't
+    //    accumulate 256 KB × pane-count for the connection's lifetime. Bounded
+    //    by BOTH [PRE_REGISTRATION_TOTAL_MAX_BYTES] and
+    //    [PRE_REGISTRATION_MAX_PANES] (evict eldest whole buffer on overflow).
+    //  * [windowPanes] maps a window id to the pane ids last seen in its
+    //    `%layout-change` layout, so when a `%window-close` arrives the dead
+    //    panes' pre-registration buffers are released instead of lingering.
     private val preRegistrationLock = Any()
-    private val preRegistrationBuffers = HashMap<String, PreRegistrationOutputBuffer>()
+    private val preRegistrationBuffers = LinkedHashMap<String, PreRegistrationOutputBuffer>(
+        16,
+        0.75f,
+        /* accessOrder = */ true,
+    )
+    private var totalPreRegistrationBytes = 0L
+    private val windowPanes = HashMap<String, MutableSet<String>>()
     private val preRegistrationDroppedEvents = AtomicInteger(0)
 
     // Issue #173: latched signal that the reader loop has exited (or
@@ -950,20 +1064,30 @@ internal class RealTmuxClient(
                     )
                     throw TmuxServerDeadException()
                 }
-                // Server alive but the target session is gone. On the explicit
-                // reattach path (`createIfMissing && probeServerLiveness`) a
-                // single missing session is the #666 not-the-#998 case: the
-                // server is up, so `new-session -A` recreating that one session
-                // is the correct reconnect behaviour — fall through and attach.
-                // Only the attach-only cold-restore path (`!createIfMissing`)
-                // must refuse to recreate a gone session.
-                if (!createIfMissing) {
-                    Log.i(
-                        ISSUE_105_DIAG_TAG,
-                        "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode}",
-                    )
-                    throw TmuxSessionNotFoundException(resolvedSessionName)
-                }
+                // Server alive but the TARGET session is gone. Issue #666 REOPEN
+                // (2026-07-06): a session that no longer exists at reattach time
+                // ENDED — a reattach must NEVER recreate it. Previously ONLY the
+                // attach-only cold-restore path (`!createIfMissing`) refused to
+                // recreate here; the reattach path (`createIfMissing &&
+                // probeServerLiveness`: LifecycleReattach / AutoReconnect /
+                // Reconnect / NetworkReconnect) FELL THROUGH to `new-session -A`
+                // (attach-OR-create) and silently resurrected the killed session —
+                // the exact dogfood bug ("I removed it on the computer, but the app
+                // created it again"). We hard-cut that branch (D22): whenever the
+                // preflight ran (`!createIfMissing || probeServerLiveness`) and the
+                // specific session is gone on a LIVE server, throw
+                // [TmuxSessionNotFoundException] so the caller drops to the list —
+                // identically for cold-restore AND every reattach. The only path
+                // that legitimately create-if-missing is the explicit user "new
+                // session" intent (`createIfMissing && !probeServerLiveness`), which
+                // never enters this preflight at all.
+                Log.i(
+                    ISSUE_105_DIAG_TAG,
+                    "tmux-has-session-gone session=$resolvedSessionName exit=${probe.exitCode} " +
+                        "createIfMissing=$createIfMissing probeServerLiveness=$probeServerLiveness " +
+                        "— refusing to recreate, dropping to list",
+                )
+                throw TmuxSessionNotFoundException(resolvedSessionName)
             }
         }
         // Open the SSH shell and launch the reader. We do not synchronously
@@ -1032,12 +1156,27 @@ internal class RealTmuxClient(
     }
 
     /**
-     * Issue #640: capture a pane + its cursor in a single single-flight wire
-     * exchange. tmux `-CC` answers `capture-pane ; display-message` with two
-     * separate `%begin`/`%end` blocks, so we register TWO pending commands
-     * (capture, then cursor) under one [sendMutex] acquisition, write the
-     * chained line once, and drain both blocks in FIFO order. This collapses
-     * the two serial seed round-trips into one while keeping the cursor restore.
+     * Issue #1297: capture a pane + its cursor on a DEDICATED `exec` channel, NOT
+     * the shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The heal-capture SPOF (audit finding 4, #1208): every recovery net —
+     * stale-render heal, reveal/switch reseed, overflow reseed — funnelled every
+     * `capture-pane` through the ONE `sendMutex`. A busy Claude agent saturating
+     * the `-CC` channel wedged that mutex, so a heal capture timed out at the
+     * 2.5s ceiling exactly when a pane was black (#470/#835). This runs
+     * `capture-pane` + `display-message` in a SINGLE [SshSession.exec] — the same
+     * independent-channel lane the `tmux has-session` preflight already uses
+     * (#666) — whose stdout is read OUTSIDE the transport dispatcher (see
+     * `RealSshSession.exec` phase 2), so a heal capture completes while a burst
+     * saturates the `-CC` reader. The two tmux sub-commands are joined with a
+     * sentinel line so the single stdout splits cleanly into cursor + capture; a
+     * missing/failed cursor degrades to a null [CaptureWithCursor.cursorReply].
+     *
+     * Failure signalling (§4 req 5): a wedged/half-open transport surfaces as a
+     * thrown [TmuxClientException] (timeout) — distinct from a capture that
+     * returned on a live transport but was empty (a non-error [CommandResponse]
+     * with an empty [CommandResponse.output]), so the caller can distinguish
+     * "timed out → stay hot" from "empty → never-seeded".
      */
     override suspend fun captureWithCursor(
         paneId: String,
@@ -1046,148 +1185,177 @@ internal class RealTmuxClient(
     ): CaptureWithCursor {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
-        // Issue #926: bound the attach/switch/reattach SEED capture by the
-        // caller's short ceiling (≈2-3 s) instead of the full per-command
-        // `commandTimeoutMs` (10 s). On a wedged-but-alive `-CC` channel the seed
-        // then surfaces a best-effort failure fast and the caller falls through
-        // to the blank watchdog on the still-live transport, rather than parking
-        // the (now off-Main, but still time-bounded) seed for the full 10 s. A
-        // null caller-supplied timeout (every non-seed caller) keeps the full
-        // ceiling. Clamp to `commandTimeoutMs` so a caller can only SHORTEN, never
-        // lengthen, the bound.
+        // Issue #926/#1297: bound the heal/seed capture by the caller's short
+        // ceiling (≈2.5s) instead of the full per-command `commandTimeoutMs`
+        // (10s). Clamp so a caller can only SHORTEN, never lengthen, the bound; a
+        // null (non-seed) caller keeps the full ceiling.
         val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
-        val chained =
-            "capture-pane -p -e -S -$scrollbackLines -t $paneId ; " +
-                "display-message -p -t $paneId '#{cursor_x},#{cursor_y}'"
-        // Issue #886: bound the single-flight ACQUIRE itself (mirrors
-        // #702/#692 in sendChainedCommands). `sendMutex.withLock { … }` had no
-        // deadline on the *acquire* — only the body inside it was gated. The
-        // attach seed reaches here on the shared per-host `-CC` client and
-        // serializes against the in-session terminal's own control traffic; if a
-        // current holder is wedged (e.g. another command stalled behind a busy
-        // agent channel during an attach) the seed parks on the acquire forever
-        // and "Attaching…" never resolves (#886). `Mutex.lock()` is a cancellable
-        // suspension point, so bound ONLY the acquire with `withTimeoutOrNull` and
-        // surface a best-effort failure (the caller falls back to opening the seed
-        // gate without a snapshot, exactly as for a capture timeout).
-        val acquired = withTimeoutOrNull(effectiveTimeoutMs) {
-            sendMutex.lock()
-            true
+        val quotedPane = "'${escapeSingleQuoted(paneId)}'"
+        // One exec, three shell commands: cursor FIRST, then a sentinel line,
+        // then the (multi-line) capture LAST. Splitting on the FIRST sentinel
+        // occurrence means capture content that happens to contain the sentinel
+        // token cannot corrupt the split (it lands after the split point).
+        val command = buildString {
+            append("tmux display-message -p -t ")
+            append(quotedPane)
+            append(" '#{cursor_x},#{cursor_y}'; printf '%s\\n' '")
+            append(HEAL_CAPTURE_SPLIT_MARKER)
+            append("'; tmux capture-pane -p -e -S -")
+            append(scrollbackLines)
+            append(" -t ")
+            append(quotedPane)
         }
-        if (acquired != true) {
+        val execResult =
+            try {
+                // The exec lane is independent of the busy `-CC` channel, so this
+                // returns fast under a burst. The ceiling is the safety bound for
+                // a genuinely wedged/half-open transport (both channels dead);
+                // cancelling the exec closes its own channel (RealSshSession.exec
+                // cancellation handler), never the `-CC` shell.
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux heal capture exec failed for pane $paneId: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
             Log.w(
                 ISSUE_244_DIAG_TAG,
-                "tmux captureWithCursor acquire wedged >${effectiveTimeoutMs}ms; " +
-                    "surfacing a best-effort failure so the seed gate opens. " +
-                    "paneId=$paneId",
+                "tmux captureWithCursor exec timed out >${effectiveTimeoutMs}ms " +
+                    "(heal lane); surfacing a best-effort failure. paneId=$paneId",
             )
             throw TmuxClientException(
-                "tmux capture-pane (combined) acquire wedged after ${effectiveTimeoutMs}ms",
+                "tmux capture-pane (exec heal lane) timed out after ${effectiveTimeoutMs}ms",
             )
         }
-        return try {
-            if (closed) throw TmuxClientException("client is closed")
-            if (!connected) throw TmuxClientException("client is not connected")
-            val sh = shell ?: throw TmuxClientException("client has no active shell")
-
-            // Register both expected response blocks BEFORE writing so neither
-            // can be lost if it arrives before the write returns. Order matters:
-            // tmux answers the chained commands in submission order, so the
-            // capture block correlates to [capturePending] and the cursor block
-            // to [cursorPending].
-            val capturePending = PendingCommand(deferred = CompletableDeferred())
-            val cursorPending = PendingCommand(deferred = CompletableDeferred())
-            synchronized(responseCorrelationLock) {
-                pendingQueue.offer(capturePending)
-                pendingQueue.offer(cursorPending)
-            }
-
-            val writeResult = CompletableDeferred<Unit>()
-            val writeCompleted = AtomicBoolean(false)
-            val writeJob = clientScope.launch {
-                try {
-                    writeLine(sh, chained)
-                    writeCompleted.set(true)
-                    writeResult.complete(Unit)
-                } catch (t: Throwable) {
-                    writeResult.completeExceptionally(t)
-                }
-            }
-
-            try {
-                val capture = commandTimeoutGate.run(effectiveTimeoutMs) { checkpoint ->
-                    writeResult.await()
-                    checkpoint.writeCompleted()
-                    capturePending.deferred.await()
-                } ?: run {
-                    // Capture itself timed out: tear down both pending entries
-                    // and surface a best-effort failure (the caller falls back
-                    // to opening the seed gate without a snapshot).
-                    cleanupCaptureWithCursorPending(
-                        capturePending = capturePending,
-                        cursorPending = cursorPending,
-                        commandWasWritten = writeCompleted.get(),
-                    )
-                    writeJob.cancel()
-                    throw TmuxClientException(
-                        "tmux capture-pane (combined) timed out after ${effectiveTimeoutMs}ms",
-                    )
-                }
-                // The cursor block is best-effort: a slow/absent reply degrades
-                // to no explicit cursor restore rather than failing the seed.
-                val cursorReply = commandTimeoutGate.run(effectiveTimeoutMs) { checkpoint ->
-                    checkpoint.writeCompleted()
-                    cursorPending.deferred.await()
-                }
-                    ?.takeUnless { it.isError }
-                    ?.output
-                    ?.firstOrNull()
-                if (cursorReply == null) {
-                    // Stop waiting on the cursor block: discard a not-yet-begun
-                    // late block or drain an already-open one so it cannot
-                    // mis-correlate with the NEXT command on the wire.
-                    synchronized(responseCorrelationLock) {
-                        abandonPendingResponse(cursorPending, commandWasWritten = true)
-                    }
-                }
-                CaptureWithCursor(capture = capture, cursorReply = cursorReply)
-            } catch (t: Throwable) {
-                cleanupCaptureWithCursorPending(
-                    capturePending = capturePending,
-                    cursorPending = cursorPending,
-                    commandWasWritten = writeCompleted.get(),
-                )
-                writeJob.cancel()
-                if (!writeCompleted.get()) {
-                    close()
-                    throw TmuxClientException(
-                        "failed to write tmux combined capture command: ${t.message}",
-                        t,
-                    )
-                }
-                throw t
-            }
-        } finally {
-            sendMutex.unlock()
-        }
+        return parseHealCaptureResult(execResult)
     }
 
     /**
-     * Issue #640: remove both pending entries for a combined capture exchange,
-     * accounting for blocks tmux has already begun, plus every not-yet-begun
-     * block still owed by a written chained line, so late replies cannot bind
-     * to a later command.
+     * Issue #1297: split a heal-capture [ExecResult] into the raw cursor reply
+     * and the `capture-pane` lines around the [HEAL_CAPTURE_SPLIT_MARKER]
+     * sentinel line. A non-zero exit (pane/session gone) surfaces as an error
+     * [CommandResponse] carrying the stderr; a live-but-blank pane surfaces as a
+     * non-error response so the caller distinguishes error from empty.
      */
-    private fun cleanupCaptureWithCursorPending(
-        capturePending: PendingCommand,
-        cursorPending: PendingCommand,
-        commandWasWritten: Boolean,
-    ) {
-        synchronized(responseCorrelationLock) {
-            for (pending in listOf(capturePending, cursorPending)) {
-                abandonPendingResponse(pending, commandWasWritten = commandWasWritten)
-            }
+    private fun parseHealCaptureResult(result: ExecResult): CaptureWithCursor {
+        val stdout = result.stdout
+        val markerIdx = stdout.indexOf(HEAL_CAPTURE_SPLIT_MARKER)
+        val cursorRaw: String
+        val captureRaw: String
+        if (markerIdx >= 0) {
+            cursorRaw = stdout.substring(0, markerIdx)
+            // Drop the newline that terminates the sentinel line so the capture
+            // starts on its own first line.
+            captureRaw = stdout.substring(markerIdx + HEAL_CAPTURE_SPLIT_MARKER.length)
+                .removePrefix("\n")
+        } else {
+            // Sentinel missing (unexpected shell state): no reliable split. Treat
+            // the whole stdout as capture and degrade to a null cursor.
+            cursorRaw = ""
+            captureRaw = stdout
         }
+        val cursorReply = cursorRaw.trim().ifEmpty { null }
+        val captureLines = splitCaptureLines(captureRaw)
+        val isError = result.exitCode != 0
+        val outputLines =
+            if (isError && captureLines.isEmpty()) {
+                result.stderr.trim().let { if (it.isEmpty()) emptyList() else it.split("\n") }
+            } else {
+                captureLines
+            }
+        return CaptureWithCursor(
+            capture = CommandResponse(number = -1L, output = outputLines, isError = isError),
+            cursorReply = cursorReply,
+        )
+    }
+
+    /**
+     * Split the `capture-pane` payload into lines, dropping the single trailing
+     * empty line the terminal newline produces so the output matches the
+     * per-line list the old `-CC` block drain returned.
+     */
+    private fun splitCaptureLines(capture: String): List<String> {
+        if (capture.isEmpty()) return emptyList()
+        val lines = capture.split("\n")
+        return if (lines.isNotEmpty() && lines.last().isEmpty()) lines.dropLast(1) else lines
+    }
+
+    /**
+     * Issue #1316: run the attach RECONCILE `list-panes` on a DEDICATED
+     * [SshSession.exec] channel — the same independent lane the `tmux
+     * has-session` preflight (#666) and the #1297 heal capture already use — NOT
+     * the shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The attach `awaitPanesReadyForAttach` reconcile was the FIRST call a
+     * fast-switch attach blocked on, and it rode the `-CC` channel. When a new
+     * session attaches while a busy sibling session drains its `-CC` `%output`
+     * burst, the sibling head-of-line-blocks the new attach's `list-panes` reply
+     * on the ONE shared sshj transport reader, so the reconcile timed out /
+     * retried behind the input-gated "Attaching…" overlay for up to 30 s (the
+     * maintainer's v0.4.24 day-0 wedge). The exec lane reads its own channel's
+     * stdout OUTSIDE the transport dispatcher, so this returns fast while a burst
+     * saturates `-CC`. [listPanesCommand] is the `-CC`-form command (no leading
+     * `tmux`); [timeoutMs] bounds the round-trip so a genuinely wedged/half-open
+     * transport surfaces a [TmuxClientException] fast instead of parking the
+     * attach.
+     */
+    override suspend fun listPanesViaExec(
+        listPanesCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
+        val command = "tmux $listPanesCommand"
+        val execResult =
+            try {
+                // Independent of the busy `-CC` channel, so this returns fast under
+                // a burst. The ceiling is the safety bound for a genuinely
+                // wedged/half-open transport; cancelling the exec closes its OWN
+                // channel (RealSshSession.exec cancellation handler), never `-CC`.
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux list-panes exec (attach reconcile lane) failed: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux listPanesViaExec exec timed out >${effectiveTimeoutMs}ms " +
+                    "(attach reconcile lane); surfacing a best-effort failure.",
+            )
+            throw TmuxClientException(
+                "tmux list-panes (exec attach reconcile lane) timed out after ${effectiveTimeoutMs}ms",
+            )
+        }
+        return parseListPanesExecResult(execResult)
+    }
+
+    /**
+     * Issue #1316: turn a `list-panes` [ExecResult] into the per-row
+     * [CommandResponse] the `-CC` `sendCommand` path returned, so the caller's
+     * `parsePaneRow` parse is unchanged. A non-zero exit (session/server gone)
+     * surfaces as an error response carrying the stderr — matching the `-CC`
+     * error contract — so the attach reconcile still fails honestly.
+     */
+    private fun parseListPanesExecResult(result: ExecResult): CommandResponse {
+        val isError = result.exitCode != 0
+        val lines = splitCaptureLines(result.stdout)
+        val output =
+            if (isError && lines.isEmpty()) {
+                result.stderr.trim().let { if (it.isEmpty()) emptyList() else it.split("\n") }
+            } else {
+                lines
+            }
+        return CommandResponse(number = -1L, output = output, isError = isError)
     }
 
     /**
@@ -1352,8 +1520,8 @@ internal class RealTmuxClient(
     /**
      * Issue #692: remove every still-pending entry for a chained exchange,
      * accounting for blocks tmux has already begun, plus every not-yet-begun
-     * block still owed by a written chained line. Mirrors
-     * [cleanupCaptureWithCursorPending] for N blocks.
+     * block still owed by a written chained line. The N-block generalisation of
+     * the old combined-capture pending cleanup.
      */
     private fun cleanupChainedPending(
         pendings: List<PendingCommand>,
@@ -1607,10 +1775,16 @@ internal class RealTmuxClient(
         // preserved end to end).
         val pipe = synchronized(preRegistrationLock) {
             paneOutputPipes[paneId] ?: run {
-                val buffered = preRegistrationBuffers.remove(paneId)?.drain().orEmpty()
+                val drainedBuffer = preRegistrationBuffers.remove(paneId)
+                if (drainedBuffer != null) {
+                    totalPreRegistrationBytes -= drainedBuffer.bufferedBytes
+                }
+                val buffered = drainedBuffer?.drain().orEmpty()
                 val created = PaneOutputPipe.create(
                     scope = clientScope,
+                    paneId = paneId,
                     preRegistrationReplay = buffered,
+                    firstSubscriberReplayGraceMs = firstSubscriberReplayGraceMs,
                     onOverflow = { overflow ->
                         _outputBacklogOverflows.tryEmit(overflow)
                     },
@@ -1623,6 +1797,20 @@ internal class RealTmuxClient(
             }
         }
         return pipe.flow.asSharedFlow()
+    }
+
+    // Issue #1205: empty the pane's queued delivery backlog so a post-overflow
+    // `capture-pane` reseed is not clobbered by stale burst frames replaying on
+    // top of it. Best-effort: only touches the live channel, never the reader.
+    override fun drainPaneOutputBacklog(paneId: String): Int =
+        paneOutputPipes[paneId]?.drainBacklog() ?: 0
+
+    override fun pauseOutputDelivery(paneId: String) {
+        paneOutputPipes[paneId]?.pauseDelivery()
+    }
+
+    override fun resumeOutputDelivery(paneId: String) {
+        paneOutputPipes[paneId]?.resumeDelivery()
     }
 
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
@@ -1713,8 +1901,13 @@ internal class RealTmuxClient(
         closed = true
         connected = false
         paneOutputPipes.values.forEach { it.close() }
-        // Issue #1204: drop any pre-registration buffers that never got a pipe.
-        synchronized(preRegistrationLock) { preRegistrationBuffers.clear() }
+        // Issue #1204/#1212: drop any pre-registration buffers that never got a
+        // pipe, and the window→pane bookkeeping that drives pane-death cleanup.
+        synchronized(preRegistrationLock) {
+            preRegistrationBuffers.clear()
+            totalPreRegistrationBytes = 0L
+            windowPanes.clear()
+        }
         // Issue #173: signal disconnection BEFORE we tear the rest down
         // so observers like [TmuxSessionViewModel] can flip their
         // connection-status state without racing the scope cancel.
@@ -1816,6 +2009,28 @@ internal class RealTmuxClient(
                         buffer.reset()
                     } else {
                         buffer.write(b.toInt())
+                        if (buffer.size() >= MAX_LINE_BUFFER_BYTES) {
+                            // Issue #1231 T2: an LF-starved stream (a binary MOTD
+                            // that lands before the `-CC` handshake, a degraded
+                            // non-control-mode byte stream, or a wedged server that
+                            // stops emitting LFs) would otherwise grow this buffer
+                            // one byte at a time with no ceiling until the process
+                            // OOMs — silently, with no diagnostic. Cap the
+                            // in-progress line: flush what we have as a (truncated)
+                            // line and reset, so framing stays bounded and the
+                            // overflow is observable. A truncated non-`%`-line just
+                            // parses to null downstream and is skipped.
+                            TmuxClientDiagnostics.record(
+                                "tmux_client_line_overflow",
+                                buildMap {
+                                    put("session", sessionName)
+                                    put("bytes", buffer.size())
+                                    put("maxBytes", MAX_LINE_BUFFER_BYTES)
+                                },
+                            )
+                            emit(takeLine(buffer))
+                            buffer.reset()
+                        }
                     }
                     i++
                 }
@@ -1922,6 +2137,24 @@ internal class RealTmuxClient(
                             )
                         }
                     }
+                    is ControlEvent.LayoutChange -> {
+                        // Issue #1212: learn which panes this window owns so a
+                        // later `%window-close` can release their
+                        // pre-registration buffers. Synchronous + lock-guarded;
+                        // never suspends the reader.
+                        synchronized(preRegistrationLock) {
+                            trackWindowPanesLocked(event.windowId, event.layout)
+                        }
+                    }
+                    is ControlEvent.WindowClose -> {
+                        // Issue #1212: the window (and every pane it owned) is
+                        // gone — release those panes' pre-registration buffers
+                        // so a never-viewed background pane can't retain up to
+                        // 256 KB for the connection's lifetime.
+                        synchronized(preRegistrationLock) {
+                            releasePreRegistrationBuffersForWindowLocked(event.windowId)
+                        }
+                    }
                     else -> Unit
                 }
                 // Forward public events without ever suspending the reader.
@@ -2019,27 +2252,17 @@ internal class RealTmuxClient(
     }
 
     private fun emitOutput(event: ControlEvent.Output) {
+        // The authoritative per-pane render path. Issue #1224: `%output` is NO
+        // LONGER copied onto the structural [eventBus]. That shared 256-slot bus
+        // silently dropped a burst-tail `%window-close` / `%session-changed`
+        // under output volume (a GC-stalled collector let 256 output copies fill
+        // the buffer, so the trailing structural event's `tryEmit` failed and was
+        // lost — leaving a stale window node / wrong active session). The ONLY
+        // consumer of output on the bus was the first-visible-output milestone
+        // log, which is fed instead by the ViewModel's existing per-pane
+        // [outputFor] tap. Output now rides ONLY the per-pane pipes here, so an
+        // output burst can never crowd out a structural event.
         deliverToPaneStream(event)
-        if (!eventBus.tryEmit(event)) {
-            val dropped = eventBusDroppedEvents.incrementAndGet()
-            if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
-                TmuxClientDiagnostics.record(
-                    "tmux_client_eventbus_overflow",
-                    commonDiagnosticFields() + mapOf(
-                        "session" to sessionName,
-                        "pane" to event.paneId,
-                        "bytes" to event.data.size,
-                        "droppedEvents" to dropped,
-                        "capacity" to EVENT_BUFFER,
-                    ),
-                )
-            }
-            Log.w(
-                ISSUE_105_DIAG_TAG,
-                "tmux-output-eventbus-drop pane=${event.paneId} bytes=${event.data.size} " +
-                    "droppedEvents=$dropped capacity=$EVENT_BUFFER",
-            )
-        }
     }
 
     /**
@@ -2065,16 +2288,156 @@ internal class RealTmuxClient(
             if (existing != null) {
                 existing
             } else {
-                preRegistrationBuffers.getOrPut(event.paneId) {
+                // `getOrPut` on the access-order map also moves this pane to the
+                // most-recent end, so global eviction never targets the pane we
+                // are actively buffering for.
+                val buffer = preRegistrationBuffers.getOrPut(event.paneId) {
                     PreRegistrationOutputBuffer(event.paneId)
-                }.add(event) { droppedForPane, evictedBytes ->
+                }
+                val bytesBefore = buffer.bufferedBytes
+                buffer.add(event) { droppedForPane, evictedBytes ->
                     recordPreRegistrationDrop(event.paneId, droppedForPane, evictedBytes)
                 }
+                totalPreRegistrationBytes += buffer.bufferedBytes - bytesBefore
+                // Issue #1212: bound the AGGREGATE across all panes so many
+                // orphaned/background pane-ids can't each pin a full per-pane
+                // buffer for the connection's lifetime.
+                enforceGlobalPreRegistrationBoundsLocked(protectPane = event.paneId)
                 null
             }
         }
         registered?.send(event)
     }
+
+    /**
+     * Issue #1212: keep the total retained pre-registration bytes and the
+     * number of distinct retained pane buffers bounded across ALL panes, not
+     * just per pane. Evicts the least-recently-active pane's whole buffer
+     * (access-order LRU) — never the pane we are currently buffering for
+     * ([protectPane]) — until both caps are satisfied.
+     *
+     * Caller must hold [preRegistrationLock].
+     */
+    private fun enforceGlobalPreRegistrationBoundsLocked(protectPane: String) {
+        while (preRegistrationBuffers.size > PRE_REGISTRATION_MAX_PANES) {
+            val victim = firstEvictablePaneLocked(protectPane) ?: break
+            evictPreRegistrationBufferLocked(victim, reason = "pane_count")
+        }
+        while (totalPreRegistrationBytes > PRE_REGISTRATION_TOTAL_MAX_BYTES &&
+            preRegistrationBuffers.size > 1
+        ) {
+            val victim = firstEvictablePaneLocked(protectPane) ?: break
+            evictPreRegistrationBufferLocked(victim, reason = "total_bytes")
+        }
+    }
+
+    /**
+     * The least-recently-active pane id that is NOT [protectPane], or null if
+     * only the protected pane remains. Iterating the access-order map's keys
+     * does not itself reorder, so the first non-protected key is the LRU
+     * victim. Caller must hold [preRegistrationLock].
+     */
+    private fun firstEvictablePaneLocked(protectPane: String): String? {
+        for (key in preRegistrationBuffers.keys) {
+            if (key != protectPane) return key
+        }
+        return null
+    }
+
+    /** Drop a whole pre-registration buffer and account its bytes. Caller must hold the lock. */
+    private fun evictPreRegistrationBufferLocked(paneId: String, reason: String) {
+        val removed = preRegistrationBuffers.remove(paneId) ?: return
+        totalPreRegistrationBytes -= removed.bufferedBytes
+        val total = preRegistrationDroppedEvents.addAndGet(removed.eventCount)
+        TmuxClientDiagnostics.record(
+            "tmux_client_preregistration_global_evict",
+            commonDiagnosticFields() + mapOf(
+                "session" to sessionName,
+                "pane" to paneId,
+                "bytes" to removed.bufferedBytes,
+                "reason" to reason,
+                "droppedEvents" to removed.eventCount,
+                "totalDroppedEvents" to total,
+                "retainedPanes" to preRegistrationBuffers.size,
+                "retainedBytes" to totalPreRegistrationBytes,
+                "maxPanes" to PRE_REGISTRATION_MAX_PANES,
+                "maxTotalBytes" to PRE_REGISTRATION_TOTAL_MAX_BYTES,
+            ),
+        )
+        Log.w(
+            ISSUE_105_DIAG_TAG,
+            "tmux-preregistration-global-evict pane=$paneId reason=$reason " +
+                "bytes=${removed.bufferedBytes} droppedEvents=${removed.eventCount} " +
+                "retainedPanes=${preRegistrationBuffers.size} retainedBytes=$totalPreRegistrationBytes",
+        )
+    }
+
+    /**
+     * Issue #1212: record which pane ids a window owns, parsed from its
+     * `%layout-change` layout string. A pane belongs to exactly one window, so
+     * a pane appearing in this window's layout is removed from any other
+     * window's set (handles a pane moved between windows). Caller must hold
+     * [preRegistrationLock].
+     */
+    private fun trackWindowPanesLocked(windowId: String, layout: String) {
+        val panes = extractLayoutPaneIds(layout)
+        if (panes.isEmpty()) return
+        for (entry in windowPanes) {
+            if (entry.key != windowId) entry.value.removeAll(panes)
+        }
+        windowPanes.getOrPut(windowId) { HashSet() }.addAll(panes)
+    }
+
+    /**
+     * Issue #1212: a window closed — release the pre-registration buffers of
+     * every pane it owned and forget the window. Caller must hold
+     * [preRegistrationLock].
+     */
+    private fun releasePreRegistrationBuffersForWindowLocked(windowId: String) {
+        val panes = windowPanes.remove(windowId) ?: return
+        for (paneId in panes) {
+            val removed = preRegistrationBuffers.remove(paneId) ?: continue
+            totalPreRegistrationBytes -= removed.bufferedBytes
+            TmuxClientDiagnostics.record(
+                "tmux_client_preregistration_window_close_evict",
+                commonDiagnosticFields() + mapOf(
+                    "session" to sessionName,
+                    "pane" to paneId,
+                    "window" to windowId,
+                    "bytes" to removed.bufferedBytes,
+                    "droppedEvents" to removed.eventCount,
+                    "retainedPanes" to preRegistrationBuffers.size,
+                    "retainedBytes" to totalPreRegistrationBytes,
+                ),
+            )
+            Log.i(
+                ISSUE_105_DIAG_TAG,
+                "tmux-preregistration-window-close-evict pane=$paneId window=$windowId " +
+                    "bytes=${removed.bufferedBytes} retainedPanes=${preRegistrationBuffers.size}",
+            )
+        }
+    }
+
+    /**
+     * Extract the pane ids from a tmux layout string. A leaf cell is
+     * `<w>x<h>,<x>,<y>,<paneId>`; container cells (`{...}` / `[...]`) have no
+     * trailing pane id, so the regex matches only leaves. tmux layouts use bare
+     * pane numbers; we `%`-prefix them to match [outputFor] / `%output` keys.
+     * Over-matching a phantom id is harmless (no such buffer exists);
+     * under-matching just misses a cleanup that the global cap still bounds.
+     */
+    private fun extractLayoutPaneIds(layout: String): Set<String> =
+        LAYOUT_PANE_REGEX.findAll(layout)
+            .map { "%" + it.groupValues[1] }
+            .toSet()
+
+    /** Issue #1212 test seam: aggregate retained pre-registration bytes across all panes. */
+    internal fun preRegistrationRetainedBytesForTest(): Long =
+        synchronized(preRegistrationLock) { totalPreRegistrationBytes }
+
+    /** Issue #1212 test seam: number of distinct panes with a retained pre-registration buffer. */
+    internal fun preRegistrationBufferCountForTest(): Int =
+        synchronized(preRegistrationLock) { preRegistrationBuffers.size }
 
     /**
      * Issue #1204: a pre-registration frame was evicted (buffer overflow). Count
@@ -2315,6 +2678,31 @@ internal class RealTmuxClient(
         private const val PRE_REGISTRATION_MAX_BYTES = 256L * 1024L
 
         /**
+         * Issue #1212: GLOBAL caps across all pre-registration buffers so many
+         * orphaned/never-registered background pane-ids can't each pin a full
+         * per-pane buffer for the connection's lifetime. When either is
+         * exceeded the least-recently-active pane's whole buffer is evicted.
+         */
+        private const val PRE_REGISTRATION_TOTAL_MAX_BYTES = 1024L * 1024L
+        private const val PRE_REGISTRATION_MAX_PANES = 64
+
+        /**
+         * Issue #1212: default grace a registered pane pipe waits for its first
+         * collector before abandoning its pre-registration replay. Generous so
+         * the ViewModel's prompt collect is never affected; a pane left
+         * uncollected this long is treated as unviewed and its replay released.
+         */
+        private const val DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS = 30_000L
+
+        /**
+         * Issue #1212: pane-id extractor for a tmux layout string. Matches a
+         * leaf cell's trailing `<w>x<h>,<x>,<y>,<paneId>`; container cells
+         * (`{...}`/`[...]`) have no trailing id so are skipped. Non-overlapping
+         * left-to-right, so adjacent leaves each yield exactly their own id.
+         */
+        private val LAYOUT_PANE_REGEX = Regex("""\d+x\d+,\d+,\d+,(\d+)""")
+
+        /**
          * Logcat tag for issue #105 live-update diagnostics. Kept short
          * enough to satisfy `Log.isLoggable`'s 23-char limit on older
          * Android versions while remaining greppable.
@@ -2341,6 +2729,15 @@ internal class RealTmuxClient(
         private const val ISSUE_105_DIAG_TAG = "issue105-diag"
         private const val ISSUE_244_DIAG_TAG = "issue244-diag"
 
+        /**
+         * Issue #1297: sentinel line printed between the cursor reply and the
+         * `capture-pane` payload in the single heal-capture `exec` so the one
+         * stdout splits cleanly into cursor + capture. Distinctive enough that a
+         * collision with real capture content is implausible, and the split takes
+         * the FIRST occurrence so even a colliding capture body cannot corrupt it.
+         */
+        private const val HEAL_CAPTURE_SPLIT_MARKER = "__PS_HEAL_CAPTURE_SPLIT_9c3f__"
+
         /** LF (`0x0A`) — the line delimiter in the control-mode stream. */
         private const val LF_BYTE: Byte = 0x0A
 
@@ -2349,6 +2746,16 @@ internal class RealTmuxClient(
 
         /** Initial per-line accumulation buffer. Grows as needed. */
         private const val DEFAULT_LINE_BUFFER_BYTES = 4096
+
+        /**
+         * Hard ceiling on a single in-progress LF-framed line (issue #1231
+         * T2). A legit `-CC` line — even a wide `%output` batch with escape
+         * sequences — is well under this; the cap only trips on an LF-starved
+         * stream, where without it the accumulation buffer grows unbounded to
+         * an OOM. On overflow the buffer is flushed-and-reset so framing stays
+         * bounded and the event is recorded via `tmux_client_line_overflow`.
+         */
+        private const val MAX_LINE_BUFFER_BYTES = 512 * 1024
 
         /** stdout read granularity for the control-mode reader. */
         private const val READ_CHUNK_BYTES = 8192
@@ -2413,9 +2820,24 @@ internal class RealTmuxClient(
         private val job: Job,
         private val onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
         private val diagnosticFields: () -> Map<String, Any?>,
+        // Issue #1297: when `true` the drain job stops emitting to [flow] and
+        // frames accumulate in the bounded [channel] instead of being dropped
+        // into a zero-subscriber flow. Driven by [pauseDelivery]/[resumeDelivery]
+        // across the overflow-reseed producer swap.
+        private val paused: MutableStateFlow<Boolean>,
         private val droppedEvents: AtomicInteger = AtomicInteger(0),
         private val overflowDiagnosticEmitted: AtomicBoolean = AtomicBoolean(false),
     ) {
+        /** Issue #1297: freeze delivery so a collector gap holds, not drops. */
+        fun pauseDelivery() {
+            paused.value = true
+        }
+
+        /** Issue #1297: thaw delivery; held frames drain to the collector. */
+        fun resumeDelivery() {
+            paused.value = false
+        }
+
         fun send(event: ControlEvent.Output) {
             val result = channel.trySend(event)
             if (result.isFailure) {
@@ -2447,10 +2869,26 @@ internal class RealTmuxClient(
             job.cancel()
         }
 
+        /**
+         * Issue #1205: discard every frame currently buffered in the live
+         * channel (best-effort, non-blocking) and return the count drained.
+         * The pipe's drain job keeps running; only the queued-but-undelivered
+         * burst frames are dropped so a post-overflow reseed is authoritative.
+         */
+        fun drainBacklog(): Int {
+            var drained = 0
+            while (channel.tryReceive().isSuccess) {
+                drained++
+            }
+            return drained
+        }
+
         companion object {
             fun create(
                 scope: CoroutineScope,
+                paneId: String,
                 preRegistrationReplay: List<ControlEvent.Output> = emptyList(),
+                firstSubscriberReplayGraceMs: Long = DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS,
                 onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
                 diagnosticFields: () -> Map<String, Any?>,
             ): PaneOutputPipe {
@@ -2459,6 +2897,7 @@ internal class RealTmuxClient(
                     extraBufferCapacity = EVENT_BUFFER,
                 )
                 val channel = Channel<ControlEvent.Output>(OUTPUT_BACKLOG_EVENTS)
+                val paused = MutableStateFlow(false)
                 val job = scope.launch {
                     // Issue #1204: replay any output buffered before this pipe
                     // was registered, IN ORDER, ahead of the live channel. The
@@ -2469,13 +2908,63 @@ internal class RealTmuxClient(
                     // meanwhile). This gate applies ONLY when there is buffered
                     // output to replay; the normal path (no pre-registration
                     // frames) drains the live channel immediately, unchanged.
-                    if (preRegistrationReplay.isNotEmpty()) {
-                        flow.subscriptionCount.first { it > 0 }
-                        for (event in preRegistrationReplay) {
-                            flow.emit(event)
+                    var replay: List<ControlEvent.Output>? = preRegistrationReplay
+                    if (!replay.isNullOrEmpty()) {
+                        // Issue #1212: bound the wait for the first collector.
+                        // If the returned flow is NEVER collected, this job used
+                        // to park here forever, pinning the replay list for the
+                        // life of the connection. Time-box the wait: on timeout
+                        // abandon (release) the replay and fall through to the
+                        // live drain so the pane is never wedged and its replay
+                        // bytes are freed.
+                        val gotSubscriber = withTimeoutOrNull(firstSubscriberReplayGraceMs) {
+                            flow.subscriptionCount.first { it > 0 }
+                            true
+                        } == true
+                        if (gotSubscriber) {
+                            for (event in replay) {
+                                flow.emit(event)
+                            }
+                        } else {
+                            var abandonedBytes = 0L
+                            for (event in replay) abandonedBytes += event.data.size
+                            TmuxClientDiagnostics.record(
+                                "tmux_client_preregistration_replay_abandoned",
+                                diagnosticFields() + mapOf(
+                                    "pane" to paneId,
+                                    "bytes" to abandonedBytes,
+                                    "droppedEvents" to replay.size,
+                                    "graceMs" to firstSubscriberReplayGraceMs,
+                                ),
+                            )
+                            Log.w(
+                                ISSUE_105_DIAG_TAG,
+                                "tmux-preregistration-replay-abandoned pane=$paneId " +
+                                    "bytes=$abandonedBytes droppedEvents=${replay.size} " +
+                                    "graceMs=$firstSubscriberReplayGraceMs",
+                            )
                         }
+                        replay = null // release the (bounded) replay list either way
                     }
-                    for (event in channel) {
+                    while (true) {
+                        val event = channel.receiveCatching().getOrNull() ?: break
+                        // Issue #1297: HOLD delivery while paused. The overflow-
+                        // reseed producer swap tears the sole collector down and
+                        // reattaches a fresh one; without this gate every %output
+                        // emitted in that window used to be emitted into the
+                        // zero-subscriber (replay = 0) flow and vanish, leaving
+                        // recovery to depend SOLELY on the step-4 capture (#1297's
+                        // SPOF). The just-received frame is HELD in `event` (never
+                        // dropped) and every later frame stays queued in the bounded
+                        // [channel] (its own OUTPUT_BACKLOG_EVENTS overflow bound
+                        // still applies); on resume the held frame emits first, then
+                        // the queued frames drain — arrival order preserved. Checked
+                        // AFTER the receive so a frame parked in [receiveCatching]
+                        // when the pause lands is held, not emitted into a paused
+                        // (subscriber-detached) flow.
+                        if (paused.value) {
+                            paused.first { !it }
+                        }
                         flow.emit(event)
                     }
                 }
@@ -2485,6 +2974,7 @@ internal class RealTmuxClient(
                     job = job,
                     onOverflow = onOverflow,
                     diagnosticFields = diagnosticFields,
+                    paused = paused,
                 )
             }
         }
@@ -2506,8 +2996,15 @@ internal class RealTmuxClient(
         private val paneId: String,
     ) {
         private val events = ArrayDeque<ControlEvent.Output>()
-        private var bufferedBytes = 0L
+
+        /** Running total of retained bytes — read by the client's global-bound accounting (#1212). */
+        var bufferedBytes: Long = 0L
+            private set
         private var droppedEvents = 0
+
+        /** Number of frames currently retained — reported on whole-buffer eviction (#1212). */
+        val eventCount: Int
+            get() = events.size
 
         /**
          * Append [event], evicting the oldest frame(s) while the buffer exceeds

@@ -322,6 +322,128 @@ class SshIntegrationTest {
         )
     }
 
+    // --- #1222: close-initiated is the authoritative "going away" signal the ---
+    // lease pool routes its liveness through (real SSH transport) --------------
+
+    @Test
+    fun closeInitiatedIsSynchronousAndAuthoritativeOnRealSession() = runBlocking(Dispatchers.IO) {
+        // The whole #1222 fix hinges on RealSshSession.isCloseInitiated being
+        // (a) false while the session is alive and (b) true the INSTANT close()
+        // is reached — synchronously, for the entire ~2 s async-drain window
+        // during which isConnected still lies true (#1144). If that real
+        // contract were wrong the lease-pool routing would be inert, so this is
+        // the load-bearing real-path proof, not a proxy.
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        assertTrue("a live session must be connected", session.isConnected)
+        assertFalse(
+            "a live session must NOT report close-initiated",
+            session.isCloseInitiated,
+        )
+
+        // close() launches the async teardown off-caller and returns immediately,
+        // but flips the close-initiated guard SYNCHRONOUSLY first.
+        session.close()
+        assertTrue(
+            "close() must flip isCloseInitiated synchronously, before the async " +
+                "SSH_MSG_DISCONNECT drains (the window where isConnected still lies true)",
+            session.isCloseInitiated,
+        )
+
+        // After the teardown drains, isConnected finally flips false too; the
+        // close-initiated signal is sticky.
+        session.awaitClosed()
+        assertFalse("the drained transport must report disconnected", session.isConnected)
+        assertTrue("close-initiated is sticky after the drain", session.isCloseInitiated)
+    }
+
+    @Test
+    fun leaseReleaseAfterCloseInitiatedReDialsFreshInsteadOfReusingTheCorpse() =
+        runBlocking(Dispatchers.IO) {
+            // End-to-end on the REAL transport + REAL lease pool: a session whose
+            // close() has been initiated (the keepalive-dead teardown calls close()
+            // out-of-band) must NOT be kept warm or reused. The pool's read-only
+            // probe must exclude it and a re-acquire must dial a FRESH handshake.
+            val connector = CountingLeaseConnector()
+            val manager = SshLeaseManager(
+                connector = connector,
+                idleTtlMillis = 60_000L,
+            )
+            val target = SshLeaseTarget(
+                leaseKey = SshLeaseKey(
+                    host = container!!.host,
+                    port = sshPort,
+                    user = "testuser",
+                    credentialId = privateKeyFile.absolutePath,
+                ),
+                key = SshKey.Path(privateKeyFile),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            )
+
+            try {
+                val lease = manager.acquire(target).getOrThrow()
+                val poisoned = lease.session
+                assertTrue("first acquire is a live connection", poisoned.isConnected)
+                assertEquals("exactly one handshake so far", 1, connector.connectCount)
+
+                // The keepalive-dead teardown calls close() on the session directly
+                // (out-of-band). close is now INITIATED.
+                poisoned.close()
+                assertTrue("close is initiated on the pooled session", poisoned.isCloseInitiated)
+
+                // The pool must no longer treat it as a live lease — even though the
+                // async disconnect may still be draining (isConnected transiently
+                // true). Routed through isCloseInitiated, this is deterministic.
+                assertFalse(
+                    "a close-initiated transport must NOT be reported as a live lease",
+                    manager.hasLiveLease(target.leaseKey),
+                )
+                assertFalse(
+                    "a close-initiated transport must NOT be reported as live-or-connecting",
+                    manager.hasLiveOrConnectingLease(target.leaseKey),
+                )
+
+                // The reconnect releases the poisoned lease inside the close window;
+                // a follow-up acquire (folder probe / reconnect ensureLease) must get
+                // a FRESH transport, not the corpse.
+                lease.release()
+                val refreshed = manager.acquire(target).getOrThrow()
+                assertTrue("the re-acquire dialled a brand-new connection", refreshed.isNewConnection)
+                assertTrue("the fresh transport is connected", refreshed.session.isConnected)
+                assertFalse("the fresh transport is NOT close-initiated", refreshed.session.isCloseInitiated)
+                assertEquals("a second, fresh handshake was performed", 2, connector.connectCount)
+
+                refreshed.release()
+            } finally {
+                manager.close()
+            }
+        }
+
+    /**
+     * Issue #1222: a real [SshLeaseConnector] that dials the container via
+     * [DefaultSshLeaseConnector] and counts how many handshakes the pool actually
+     * performed, so the end-to-end test can prove a close-initiated corpse is
+     * re-dialled fresh rather than reused.
+     */
+    private class CountingLeaseConnector : SshLeaseConnector {
+        private val delegate = DefaultSshLeaseConnector()
+        @Volatile
+        var connectCount: Int = 0
+            private set
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            connectCount += 1
+            return delegate.connect(target)
+        }
+    }
+
     @Test
     fun listDirectoryReturnsEntriesFoldersFirst() = runTest {
         // Issue #528: SFTP file explorer listing. Build a known tree under the
@@ -809,6 +931,63 @@ class SshIntegrationTest {
         assertTrue(
             "exec on a dead transport must produce the exact #680 heal-matcher text " +
                 "\"SSH session is not connected\"; got: ${ex?.message}",
+            ex?.message?.contains("SSH session is not connected", ignoreCase = true) == true,
+        )
+    }
+
+    /**
+     * Issue #1284 (regression, DETERMINISTIC) — the #1222 async-close race that
+     * broke the #680 heal-matcher gate on the batched-on-`main` Docker integration
+     * job, reproduced without any host-timing dependence.
+     *
+     * `execOnAClosedSessionThrowsExactStaleChannelMessage` above exercises the same
+     * contract but only fails when the `Dispatchers.IO` transport-drain coroutine is
+     * scheduled AFTER the follow-up `exec` — the loaded-CI ordering. On fast local
+     * hardware the drain wins that race and closes the dispatcher first, so exec
+     * hits `TransportClosedException` (also the canonical text) and the gate can
+     * never be made to fail locally. That masking is exactly how #1222 shipped
+     * green in isolation while red on CI.
+     *
+     * Here we inject the failing state synthetically (the #780 model): connect a
+     * REAL session, then enter the exact #1222 window — close INITIATED
+     * (`closeStarted` = true, so `isCloseInitiated` == true) but the transport NOT
+     * yet drained (`isConnected` still lies `true`: dispatcher open, client
+     * connected). In that window a pre-#1284 `exec` sails past `ensureConnected()`
+     * (which only consulted the lying `isConnected`), opens a channel on the
+     * still-live transport, and RETURNS A REAL RESULT — silently breaking the
+     * cross-module heal matcher (no exception at all, or a transient
+     * "Failed to open exec channel" if the drain lands mid-open), the CI failure.
+     * The #1284 fix makes `ensureConnected()` also consult `isCloseInitiated`, so
+     * exec in this window RELIABLY throws the exact
+     * "SSH session is not connected" text. Runs on any host.
+     */
+    @Test
+    fun execInCloseInitiatedRaceWindowThrowsExactStaleChannelMessage() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        // Enter the #1222 async-close window deterministically: close initiated but
+        // transport still live (isConnected == true, isCloseInitiated == true).
+        val real = session as RealSshSession
+        real.enterCloseInitiatedRaceWindowForTest()
+        assertTrue("precondition: transport must still be live in the race window", session.isConnected)
+        assertTrue("precondition: close must be initiated in the race window", session.isCloseInitiated)
+
+        val ex = runCatching { session.exec("whoami") }.exceptionOrNull()
+        assertTrue(
+            "exec in the #1222 close-initiated window must throw (not race ahead onto the " +
+                "still-live transport and return a result); got: $ex",
+            ex is SshException,
+        )
+        assertTrue(
+            "exec in the #1222 close-initiated window must produce the exact #680 heal-matcher " +
+                "text \"SSH session is not connected\"; got: ${ex?.message}",
             ex?.message?.contains("SSH session is not connected", ignoreCase = true) == true,
         )
     }

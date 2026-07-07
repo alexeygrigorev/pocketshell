@@ -61,6 +61,19 @@ internal class PcmCapturePump(
     // only cost of waiting is start latency; we never want to fail a
     // recording just because thread scheduling was slow.
     private val readyTimeoutMs: Long = READY_TIMEOUT_MS,
+    // Hard ceiling on how many PCM bytes a single capture may accumulate. Once
+    // the buffer reaches this, the reader loop self-stops and [captureCapReached]
+    // flips true so the caller can surface a "recording stopped (max length)"
+    // notice. Bounds memory (a forgotten/stuck capture otherwise grows ~19 MB per
+    // 10 min at 16 kHz mono 16-bit) and keeps the utterance inside the 60 s
+    // Whisper transcription timeout. Default derived for the AudioRecorder format
+    // (16 kHz mono 16-bit = 32000 B/s); a test can shrink it to exercise the cap.
+    private val maxCaptureBytes: Int = DEFAULT_MAX_CAPTURE_BYTES,
+    // Backoff applied when [PcmSource.read] returns 0 (no data available). A live
+    // AudioRecord can legitimately return 0 while the mic underruns; looping on
+    // it with no pause pins a CPU core (the busy-spin). A short sleep yields the
+    // core without meaningfully delaying real frames. Test-tunable.
+    private val idleReadBackoffMs: Long = IDLE_READ_BACKOFF_MS,
     // Test-only seam (issue #683): a hook the reader thread runs as its very
     // first action, BEFORE the `while (capturing)` guard. Production passes the
     // default no-op so behaviour is unchanged; the unit test injects a barrier
@@ -80,6 +93,12 @@ internal class PcmCapturePump(
 
     @Volatile
     private var captureError: AudioRecorderException? = null
+
+    // Set true when the capture self-stopped because it reached [maxCaptureBytes]
+    // (as opposed to the caller stopping it or a platform error). Lets the caller
+    // surface a "recording stopped at max length" notice to the user.
+    @Volatile
+    private var capReached: Boolean = false
 
     private var captureThread: Thread? = null
 
@@ -118,11 +137,33 @@ internal class PcmCapturePump(
                 }
                 val read = source.read(frame, 0, frame.size)
                 if (read > 0) {
-                    buffer.write(frame, 0, read)
-                    lastAmplitude = peakAmplitude(frame, read)
+                    // Never accumulate past the cap: clamp this frame's write to
+                    // the remaining budget, then self-stop. Bounds memory and
+                    // keeps the utterance within the Whisper timeout.
+                    val remaining = maxCaptureBytes - buffer.size()
+                    val writable = read.coerceAtMost(remaining)
+                    if (writable > 0) {
+                        buffer.write(frame, 0, writable)
+                        lastAmplitude = peakAmplitude(frame, writable)
+                    }
+                    if (buffer.size() >= maxCaptureBytes) {
+                        capReached = true
+                        capturing = false
+                    }
                 } else if (read < 0) {
                     captureError = mapAudioReadErrorCode(read)
                     capturing = false
+                } else {
+                    // read == 0: no data available right now. Yield the core
+                    // instead of hot-spinning until the next frame or a stop.
+                    if (idleReadBackoffMs > 0) {
+                        try {
+                            Thread.sleep(idleReadBackoffMs)
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            capturing = false
+                        }
+                    }
                 }
             }
         }
@@ -172,6 +213,13 @@ internal class PcmCapturePump(
     fun currentAmplitude(): Float = lastAmplitude
 
     /**
+     * True when the last capture self-stopped because it hit [maxCaptureBytes]
+     * rather than being stopped by the caller. The caller uses this to tell the
+     * user the recording was cut at the maximum length.
+     */
+    fun captureCapReached(): Boolean = capReached
+
+    /**
      * Pull whatever the source already has buffered, without blocking. The
      * real `AudioRecord` keeps a small ring buffer the HAL fills; the inline
      * loop abandoned it on stop. We read in [DRAIN_FRAME_BUDGET] bounded
@@ -181,10 +229,13 @@ internal class PcmCapturePump(
         val frame = ByteArray(frameBytes)
         var passes = 0
         while (passes < DRAIN_FRAME_BUDGET) {
+            val remaining = maxCaptureBytes - buffer.size()
+            if (remaining <= 0) break
             val read = source.readNonBlocking(frame, 0, frame.size)
             if (read <= 0) break
-            buffer.write(frame, 0, read)
-            lastAmplitude = peakAmplitude(frame, read)
+            val writable = read.coerceAtMost(remaining)
+            buffer.write(frame, 0, writable)
+            lastAmplitude = peakAmplitude(frame, writable)
             passes++
         }
     }
@@ -206,6 +257,17 @@ internal class PcmCapturePump(
 
     companion object {
         const val READY_TIMEOUT_MS: Long = 500L
+
+        // Default capture ceiling. AudioRecorder records 16 kHz mono 16-bit =
+        // 32000 B/s, so 60 s ≈ 1.92 MB. This bounds memory (vs ~19 MB for a
+        // forgotten 10-min capture) AND keeps a single utterance within the 60 s
+        // Whisper transcription timeout. When the cap trips the capture stops and
+        // [captureCapReached] flips so the user can be told why.
+        const val DEFAULT_MAX_CAPTURE_BYTES: Int = 32_000 * 60
+
+        // Sleep applied on a zero-length read so an underrunning/idle mic can't
+        // hot-spin the reader thread.
+        const val IDLE_READ_BACKOFF_MS: Long = 5L
 
         // Cap the post-stop drain. At 16 kHz mono 16-bit a typical frame is
         // tens of ms; a handful of passes covers the AudioRecord ring buffer

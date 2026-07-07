@@ -163,14 +163,32 @@ class CodexAppendBurstMainThreadProofTest {
             // (final-state correctness / no-loss).
             stdout.emit(finalMarkerLine(lastChunk).toByteArray(Charsets.US_ASCII))
 
-            // Let the tail of the burst drain across its budgeted frames and the
-            // settled final frame paint.
-            SystemClock.sleep(SETTLE_MS)
+            // Issue #1314: poll for the FINAL marker to a swiftshader-aware
+            // deadline instead of a single fixed settle sleep. The frame-budgeted
+            // drain paces a bounded-but-multi-MB FIFO backlog across frames, so on
+            // the slow software-GL CI AVD the tail of the burst can take well past
+            // a fixed 1.5s to reach the last byte — "late, not lost" (the drain
+            // reposts until availableBytes()==0; it never drops or reorders). A
+            // poll turns that "late" into a PASS while still hard-failing if the
+            // marker genuinely never arrives. Ping sampling stays active across the
+            // whole drain, so the #803 main-thread-stall measurement below still
+            // covers the settle (the drain must stay responsive the entire time).
+            val finalMarkerText = finalMarker(lastChunk)
+            var finalMarkerPresent = false
+            val markerDeadline = SystemClock.uptimeMillis() + FINAL_MARKER_TIMEOUT_MS
+            while (SystemClock.uptimeMillis() < markerDeadline) {
+                if (visibleTerminalText(view).contains(finalMarkerText)) {
+                    finalMarkerPresent = true
+                    break
+                }
+                SystemClock.sleep(MARKER_POLL_INTERVAL_MS)
+            }
             val burstDurationMs = SystemClock.uptimeMillis() - burstStartedAt
             pingActive.set(false)
 
             captureViewport(view, "issue803-append-burst")
             val transcript = visibleTerminalText(view)
+            finalMarkerPresent = finalMarkerPresent || transcript.contains(finalMarkerText)
 
             writeTimings(
                 instrumentation,
@@ -187,8 +205,9 @@ class CodexAppendBurstMainThreadProofTest {
                     "max_main_thread_stall_ms=${maxStallMs.get()}",
                     "max_main_thread_stall_budget_ms=$MAX_MAIN_THREAD_STALL_MS",
                     "anr_window_ms=5000",
-                    "final_marker=${finalMarker(lastChunk)}",
-                    "final_marker_present=${transcript.contains(finalMarker(lastChunk))}",
+                    "final_marker=$finalMarkerText",
+                    "final_marker_present=$finalMarkerPresent",
+                    "final_marker_timeout_ms=$FINAL_MARKER_TIMEOUT_MS",
                     "expectation=RED on pre-fix unbounded MSG_NEW_INPUT re-post (append pins main " +
                         "for seconds, max stall blows past budget); GREEN with the #803 " +
                         "frame-budgeted MainThreadDrainScheduler (stall bounded, final state correct)",
@@ -200,7 +219,7 @@ class CodexAppendBurstMainThreadProofTest {
                 "#803 dense-colored-diff append burst: chunks=$chunk sgrSpans=$sgrSpansEmitted " +
                     "maxStall=${maxStallMs.get()}ms pings=${pingCount.get()} " +
                     "burstDuration=${burstDurationMs}ms finalMarkerPresent=" +
-                    "${transcript.contains(finalMarker(lastChunk))}",
+                    "$finalMarkerPresent",
             )
 
             // Sanity: the burst must have emitted a real storm of SGR spans,
@@ -225,9 +244,10 @@ class CodexAppendBurstMainThreadProofTest {
             assertTrue(
                 "#803: the FINAL diff state must render — the frame-budgeted drain must " +
                     "parse every byte in order to the end (no lost/garbled/reordered output). " +
-                    "Final marker '${finalMarker(lastChunk)}' missing from transcript " +
-                    "(length=${transcript.length}).",
-                transcript.contains(finalMarker(lastChunk)),
+                    "Final marker '$finalMarkerText' missing from transcript " +
+                    "(length=${transcript.length}) after polling ${FINAL_MARKER_TIMEOUT_MS}ms " +
+                    "(issue #1314 swiftshader-aware deadline).",
+                finalMarkerPresent,
             )
 
             // ---- LOAD-BEARING assertion: the dense colored-diff append burst must
@@ -389,9 +409,15 @@ class CodexAppendBurstMainThreadProofTest {
         // at most one per-frame parse budget per turn and stays bounded.
         const val BURST_DURATION_MS = 3_500L
 
-        // Drain tail (across budgeted frames) + final-frame settle. Generous so
-        // the whole queue + the final marker drain even under the paced budget.
-        const val SETTLE_MS = 1_500L
+        // Issue #1314: the tail of a multi-MB burst drains across many budgeted
+        // frames, and on the slow software-GL CI AVD that can run well past the
+        // old fixed 1.5s settle. Poll the transcript for the FINAL marker to this
+        // generous swiftshader-aware deadline instead — succeed as soon as the
+        // marker lands, hard-fail only if it never arrives. This removes the
+        // throughput-dependent flake WITHOUT weakening the main-thread-stall
+        // load-bearing assertion (which still samples across the whole drain).
+        const val FINAL_MARKER_TIMEOUT_MS = 20_000L
+        const val MARKER_POLL_INTERVAL_MS = 100L
 
         const val PING_INTERVAL_MS = 16L
 

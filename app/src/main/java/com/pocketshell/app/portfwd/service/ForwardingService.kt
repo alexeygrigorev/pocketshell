@@ -245,7 +245,18 @@ class ForwardingService : Service() {
                 // a STARTED foreground service that doesn't call
                 // startForeground() fast enough crashes the process
                 // with ForegroundServiceDidNotStartInTimeException.
-                promoteToForegroundIfNeeded(initialNotification())
+                //
+                // Issue #1232: mirror SessionConnectionService — a start that
+                // lands on a background-restricted edge throws
+                // ForegroundServiceStartNotAllowedException (Android 12+; 14+
+                // adds specialUse throw conditions). promoteToForegroundIfNeeded
+                // now contains that throw and returns false rather than
+                // promote-or-die; on failure we stop the service cleanly instead
+                // of crashing the process.
+                if (!promoteToForegroundIfNeeded(initialNotification())) {
+                    stopForwarding()
+                    return START_NOT_STICKY
+                }
                 if (observeJob == null || observeJob?.isActive != true) {
                     startObserving()
                 }
@@ -340,27 +351,50 @@ class ForwardingService : Service() {
         stopSelf()
     }
 
-    private fun promoteToForegroundIfNeeded(notification: Notification) {
-        if (hasStartedForeground) return
-        // On Android 14+ (API 34) the service type must be supplied
-        // explicitly to `startForeground()`. We declare the type in
-        // the manifest as `specialUse` because PocketShell's
-        // foreground-service usage is not "data sync" or "media
-        // playback" — it's keeping a user-initiated SSH transport
-        // alive while the app is backgrounded. `specialUse` is the
-        // catch-all category for use cases not covered by the other
-        // pre-defined types and requires the `propertyName` attribute
-        // in the manifest, which we supply.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+    /**
+     * Promote the process to foreground state, containing a
+     * background-restricted-start failure instead of crashing.
+     *
+     * Issue #1232: previously this called `startForeground` unguarded, so a
+     * start that landed on a background-restricted edge (a network-restore-driven
+     * rebuild, or an enable landing exactly on the app→background transition)
+     * threw `ForegroundServiceStartNotAllowedException` (Android 12+; Android 14+
+     * adds specialUse throw conditions) and crashed the process. The sibling
+     * [com.pocketshell.app.sessions.service.SessionConnectionService.promoteToForegroundIfNeeded]
+     * already wrapped the identical call precisely because it can start on the
+     * background path; this mirrors that guard. On failure the caller stops the
+     * service cleanly (promote-or-stop, not promote-or-die).
+     *
+     * @return true if the service is now in the foreground (either it just
+     *   promoted or it was already foreground); false if promotion was rejected.
+     */
+    private fun promoteToForegroundIfNeeded(notification: Notification): Boolean {
+        if (hasStartedForeground) return true
+        return runCatching {
+            // On Android 14+ (API 34) the service type must be supplied
+            // explicitly to `startForeground()`. We declare the type in
+            // the manifest as `specialUse` because PocketShell's
+            // foreground-service usage is not "data sync" or "media
+            // playback" — it's keeping a user-initiated SSH transport
+            // alive while the app is backgrounded. `specialUse` is the
+            // catch-all category for use cases not covered by the other
+            // pre-defined types and requires the `propertyName` attribute
+            // in the manifest, which we supply.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            hasStartedForeground = true
+            true
+        }.getOrElse {
+            Log.w(TAG, "forwarding foreground service promotion failed", it)
+            false
         }
-        hasStartedForeground = true
     }
 
     private fun updateNotification(

@@ -147,6 +147,19 @@ internal class FakeTmuxClient(
     val capturePaneResponses: ArrayDeque<CommandResponse> = ArrayDeque()
 
     /**
+     * Issue #1294: sticky fallback for `capture-pane` when [capturePaneResponses] is empty.
+     * The default when this is `null` is an EMPTY success response — which the #1294 heal
+     * oracle now scores UNVERIFIED (an empty capture cannot CONFIRM the render). A test that
+     * needs a REPEATED confirmed-healthy tick (a matching frame on every backoff tick, not a
+     * one-shot from the FIFO) sets this to the frame that MATCHES the render, so the oracle
+     * reads HEALTHY and the watchdog backs off (the #1219 battery lever), without polluting
+     * the scrollback with a dense frame (which would defeat ≤3-line partial-black detection).
+     * Explicitly-queued [capturePaneResponses] still take precedence (checked first).
+     */
+    @Volatile
+    var defaultCaptureResponse: CommandResponse? = null
+
+    /**
      * Issue #259: replies to the `display-message -p ... '#{cursor_x},#{cursor_y}'`
      * cursor query the seed path issues after a `capture-pane`. Defaults to a
      * single `0,0` reply (cursor home) so tests that do not care about the seed
@@ -350,11 +363,13 @@ internal class FakeTmuxClient(
             }
         }
         if (cmd.startsWith("capture-pane")) {
-            return capturePaneResponses.removeFirstOrNull() ?: CommandResponse(
-                number = 0L,
-                output = emptyList(),
-                isError = false,
-            )
+            return capturePaneResponses.removeFirstOrNull()
+                ?: defaultCaptureResponse
+                ?: CommandResponse(
+                    number = 0L,
+                    output = emptyList(),
+                    isError = false,
+                )
         }
         // Issue #259: the seed path issues `display-message -p ... cursor_x,cursor_y`
         // right after `capture-pane`. Serve it from a dedicated queue so it
@@ -378,6 +393,37 @@ internal class FakeTmuxClient(
             output = emptyList(),
             isError = false,
         )
+    }
+
+    /**
+     * Issue #1205: records the panes whose backlog the recovery path asked to
+     * drain, so a test can assert the reseed-and-reattach recovery drained the
+     * stale burst before recapturing. The fake has no bounded channel, so the
+     * count is unused here; it returns 0 like a pane with no queued frames.
+     */
+    val drainedPaneBacklogs: MutableList<String> = mutableListOf()
+
+    override fun drainPaneOutputBacklog(paneId: String): Int {
+        drainedPaneBacklogs += paneId
+        return 0
+    }
+
+    /**
+     * Issue #1297: records the panes whose `%output` delivery the overflow-reseed
+     * swap froze/thawed, so a test can assert the swap paused delivery before the
+     * producer teardown and resumed it afterwards (so a collector gap holds frames
+     * instead of dropping them, and recovery doesn't depend solely on the
+     * capture).
+     */
+    val outputDeliveryPauseCalls: MutableList<String> = mutableListOf()
+    val outputDeliveryResumeCalls: MutableList<String> = mutableListOf()
+
+    override fun pauseOutputDelivery(paneId: String) {
+        outputDeliveryPauseCalls += paneId
+    }
+
+    override fun resumeOutputDelivery(paneId: String) {
+        outputDeliveryResumeCalls += paneId
     }
 
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> =

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.OutputStream
+import kotlin.math.ceil
 
 enum class TerminalRawInputPolicy {
     FlushSmartText,
@@ -143,13 +144,67 @@ class TerminalSurfaceState(
      * not Compose state: remote output can arrive in tight bursts, and each
      * burst should redraw the Android [TerminalView] without recomposing the
      * Compose wrapper.
+     *
+     * `replay = 1` (PocketShell #1206): mirrors the #879 fix on
+     * [_fullRepaintRequests]. On a fresh-pane seed / post-switch reveal the pane
+     * is seeded and its render request fires BEFORE the late-subscribing
+     * [TerminalSurface] binds its collector. With `replay = 0` that request was
+     * silently dropped (`extraBufferCapacity = 1` + `DROP_OLDEST` only buffers
+     * for an ALREADY-subscribed slow collector, never for a not-yet-subscribed
+     * one), and an idle Claude pane emits no follow-up byte to compensate — so
+     * the freshly seeded rows were left unpainted (fragments-over-black). With
+     * `replay = 1` a collector that subscribes after the emit still receives the
+     * most-recent render request and redraws. Harmless in steady state: one
+     * coalesced render on bind, then the #469 dirty path resumes.
      */
     private val _renderRequests = MutableSharedFlow<Unit>(
-        replay = 0,
+        replay = 1,
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     internal val renderRequests: SharedFlow<Unit> get() = _renderRequests.asSharedFlow()
+
+    /**
+     * Issue #1286 — true when the frame-budgeted VT-append drain still has
+     * unparsed `%output` bytes buffered in the bridge's process→terminal queue
+     * (`availableProcessOutputBytes() > 0`). During a Codex `%output` burst this
+     * stays true for the whole burst; [TerminalSurface] gates its per-frame
+     * repaint on `!renderDrainBacklogged()` so the append drain owns the main
+     * thread and finishes the burst tail instead of the on-main repaint starving
+     * it into the ANR — and the settled frame paints the moment the drain catches
+     * up (so the pane never stays stale/blank, the #1286 black-screen face).
+     *
+     * Returns `false` when no bridge is attached — a plain-SSH surface feeds the
+     * emulator synchronously (no frame-budgeted queue to back up) and every unit
+     * test without a real bridge — so those paths are UNCHANGED and the gate is
+     * inert without a drain to prioritise. Read on the main looper (the coalescer
+     * collector site), matching the [MainThreadDrainScheduler]'s own read.
+     */
+    fun renderDrainBacklogged(): Boolean {
+        renderDrainBackloggedOverrideForTest?.let { return it }
+        return (bridge?.pendingProcessOutputBytes() ?: 0) > 0
+    }
+
+    /**
+     * Test-only seam (#1286, the #780 synthetic-state model): force the value
+     * [renderDrainBacklogged] reports, WITHOUT needing a real bridge whose drain
+     * actually falls behind. The maintainer's on-device freeze only occurs when the
+     * drain genuinely backlogs under a heavy burst + the composer/IME amplifier; on
+     * the fast CI/dev x86 emulator the drain NEVER falls behind, so the real
+     * `availableProcessOutputBytes()` stays 0 and the drain-priority window would
+     * never engage — a connected proof would pass vacuously with or without the fix.
+     * Injecting the backlogged state here lets the on-device proof drive the terminal
+     * into the exact state where the drain-priority window is the load-bearing thing,
+     * so neutralising the production widening makes the proof go RED. A `null`
+     * override (the default) restores the real bridge-queue read — production is
+     * UNCHANGED (this seam is never touched outside tests).
+     */
+    @Volatile
+    private var renderDrainBackloggedOverrideForTest: Boolean? = null
+
+    fun setRenderDrainBackloggedOverrideForTest(backlogged: Boolean?) {
+        renderDrainBackloggedOverrideForTest = backlogged
+    }
 
     /**
      * Force-full-repaint requests (PocketShell #721). Unlike [renderRequests]
@@ -364,29 +419,55 @@ class TerminalSurfaceState(
      * `capture-pane` snapshot before future `%output` events arrive.
      */
     fun appendRemoteOutput(bytes: ByteArray) {
-        if (bytes.isEmpty()) return
-        val activeBridge = bridge ?: return
-        val clean = if (sanitizeQueryResponses) {
+        val activeBridge = bridge
+        val clean = if (bytes.isNotEmpty() && sanitizeQueryResponses) {
             TerminalQueryResponseSanitizer.sanitize(bytes)
         } else {
             bytes
         }
-        if (clean.isEmpty()) return
-        // Issue #468: apply this seed snapshot, then release any live `%output`
-        // bytes that were buffered behind the seed gate while the
-        // `capture-pane` round-trip was in flight — in their original arrival
-        // order, after the seed. When the gate was never closed (plain SSH
-        // surface, or a re-seed) this is just an ordinary feed plus an
-        // already-open-gate no-op.
-        activeBridge.seedThenOpenGate(clean)
-        _output.tryEmit(clean)
+        if (activeBridge != null && clean.isNotEmpty()) {
+            // Issue #468: apply this seed snapshot, then release any live
+            // `%output` bytes that were buffered behind the seed gate while the
+            // `capture-pane` round-trip was in flight — in their original arrival
+            // order, after the seed. When the gate was never closed (plain SSH
+            // surface, or a re-seed) this is just an ordinary feed plus an
+            // already-open-gate no-op.
+            activeBridge.seedThenOpenGate(clean)
+            _output.tryEmit(clean)
+            bufferTick.value = bufferTick.value + 1
+        }
         // Issue #721: a re-seed applies the captured snapshot to the emulator
         // buffer but does not change which rows the renderer's #469 dirty cache
         // considers stale — so a plain render request would repaint only freshly
         // changed cells and leave the rest of the existing screen black. Signal a
         // FULL repaint so every row is redrawn straight from the buffer.
+        //
+        // Issue #1206: fire the full repaint even when the capture came back
+        // EMPTY (or sanitized to empty). An idle alt-screen pane (Claude at rest)
+        // already holds its frame in the emulator buffer, but with the request
+        // gated behind the empty short-circuit it got neither fresh content NOR a
+        // repaint — so the #469 dirty cache clipped the next draw to changed rows
+        // over a black canvas and the pane stayed black until the agent happened
+        // to touch a cell. Firing here (above the empty short-circuits) repaints
+        // the existing buffer from a clean slate. Combined with the #879/#1206
+        // `replay = 1` flows, a late-subscribing surface still receives it.
         _fullRepaintRequests.tryEmit(Unit)
-        bufferTick.value = bufferTick.value + 1
+    }
+
+    /**
+     * Issue #1301 (reconciler reseed race): close the seed gate so subsequent live
+     * `%output` bytes are BUFFERED (in arrival order) behind it instead of reaching the
+     * emulator, until [appendRemoteOutput] (via `seedThenOpenGate`) or
+     * [openSeedGateWithoutSeed] flushes them. The continuous reconciler wraps its reseed
+     * capture+apply in `closeSeedGate()` … apply … `openSeedGateWithoutSeed()` so a NEWER
+     * in-flight `%output` delta that races the (older) `capture-pane` snapshot is buffered
+     * and re-applied ON TOP of the snapshot (newest-wins), instead of being clobbered by
+     * the snapshot's `CSI 2J` clear — the capture-clobbers-newer-delta race. Idempotent;
+     * no-op when no producer/bridge is attached or the gate is already closed. Mirrors the
+     * #468 seed-gate discipline the cold-open + overflow reseed already use.
+     */
+    fun closeSeedGate() {
+        bridge?.closeSeedGate()
     }
 
     /**
@@ -398,6 +479,13 @@ class TerminalSurfaceState(
      */
     fun openSeedGateWithoutSeed() {
         bridge?.openGateFlushingPending()
+        // Issue #1206: a fresh/empty-capture seed leaves the emulator holding
+        // whatever the idle alt-screen pane already had (or nothing). Fire a FULL
+        // repaint so an idle pane redraws its existing buffer from a clean slate
+        // instead of staying black behind the #469 dirty cache — the same
+        // idle-pane gap the empty-capture branch in [appendRemoteOutput] closes.
+        // Coalesced + `replay = 1`, so this is at worst one extra redraw on bind.
+        _fullRepaintRequests.tryEmit(Unit)
     }
 
     /**
@@ -429,6 +517,18 @@ class TerminalSurfaceState(
      */
     internal fun emitFullRepaintRequestForTesting(): Boolean =
         _fullRepaintRequests.tryEmit(Unit)
+
+    /**
+     * Test-only seam (PocketShell #1206): fire a plain render request exactly as
+     * a Termux screen-update callback does, WITHOUT a real session. Lets a unit
+     * test reproduce the fresh-pane / post-switch reveal ordering — the render
+     * request fires BEFORE the fresh [TerminalSurface]'s collector subscribes —
+     * and assert that with `replay = 1` a late subscriber still receives the
+     * most-recent request (with `replay = 0` it was silently dropped, leaving the
+     * freshly seeded rows unpainted over black).
+     */
+    internal fun emitRenderRequestForTesting(): Boolean =
+        _renderRequests.tryEmit(Unit)
 
     /**
      * Matcher used by [flowOfMatches] to extract tap-target candidates from
@@ -652,6 +752,49 @@ class TerminalSurfaceState(
         }
     }
 
+    /**
+     * Issue #1158 — true when the attached emulator is currently on the ALTERNATE
+     * screen buffer (the `smcup`/`?1049h` full-screen mode). A full-screen agent
+     * TUI (Claude Code / Codex / OpenCode and other curses apps) switches the
+     * terminal to the alternate buffer for its whole run; a plain scrolling shell
+     * sitting at a prompt stays on the MAIN buffer. The tmux ViewModel reads this
+     * as a detection-INDEPENDENT positive agent signal so the Conversation tab
+     * appears for an agent launched directly inside a shell-recorded session —
+     * where the `@ps_agent_kind` record says `shell`, the confirmed-shell verdict
+     * is never cleared (live detection can't bind for node-wrapped Claude / Codex
+     * `/proc` / Z.AI transcript-path fleets), and every other tab signal is false.
+     *
+     * A POSITIVE signal only: a genuine plain shell on the main buffer reads false,
+     * so the #894/#815 no-flap invariant holds (a fresh shell at a prompt never
+     * flashes the Conversation tab). Returns false when no emulator is attached yet,
+     * and treats a mid-resize throw as "unknown" (false) so a transient never
+     * spuriously latches the tab.
+     */
+    fun isAlternateBufferActive(): Boolean {
+        alternateBufferOverrideForTest?.let { return it }
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
+        return try {
+            emulator.isAlternateBufferActive
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Test-only seam (#1158): force the alternate-buffer verdict reported by
+     * [isAlternateBufferActive] WITHOUT standing up a real emulator on the JVM.
+     * A `null` override (the default) restores the real emulator read. Lets a JVM
+     * unit test drive a pane onto/off the alt-buffer synthetically (the #780
+     * synthetic-state model — CI has no real curses agent) so the sticky-latch
+     * behaviour is deterministically reproducible.
+     */
+    @Volatile
+    private var alternateBufferOverrideForTest: Boolean? = null
+
+    fun setAlternateBufferActiveForTest(active: Boolean?) {
+        alternateBufferOverrideForTest = active
+    }
+
     // -------------------------------------------------------------------------
     // Issue #1192 — SURFACE-paint confirmation seam (distinct from the MODEL grid).
     //
@@ -728,71 +871,6 @@ class TerminalSurfaceState(
         onSurfaceFramePainted(paintedEmulatorContent, atMs)
 
     /**
-     * Issue #966/#967 — the "mostly-black / stale render on a LIVE transport"
-     * oracle. The v0.4.17 black-screen heal ([visibleScreenIsBlank] /
-     * [visibleScreenIsPartiallyBlank]) only engages when the pane is FULLY blank
-     * or has ≤3 live lines, so the maintainer's #966 pane — a connected Claude
-     * window with a lone cursor + "3" + a scattered status line ("24m 3 / 8 / 4 /
-     * 3 / 31") — reads NEITHER fully blank NOR cleanly partial-blank (the
-     * fragments can exceed 3 live lines or scatter so the live FRACTION looks
-     * normal), so the heal SKIPS it and the user is stranded on a black-with-
-     * fragments pane while tmux's grid still holds the full content.
-     *
-     * This oracle closes that gap by diffing the RENDERED grid against what tmux
-     * says the pane SHOULD contain (the authoritative `capture-pane` text the
-     * caller passes in). It returns true — "the local render is stale/mostly-
-     * black relative to tmux, re-seed it" — when BOTH:
-     *
-     *  1. tmux's authoritative capture carries SUBSTANTIAL content
-     *     (≥ [STALE_RENDER_MIN_CAPTURE_CHARS] non-blank chars), i.e. there is a
-     *     real frame to restore — not a legitimately near-empty pane; AND
-     *  2. the rendered grid carries DRAMATICALLY LESS than the capture — its
-     *     non-blank char count is ≤ [STALE_RENDER_MAX_RENDERED_FRACTION] of the
-     *     capture's. A scattered-fragment / mostly-black render is exactly this:
-     *     a handful of glyphs against a full-screen authoritative frame.
-     *
-     * Why diff against `capture-pane` instead of a pure heuristic: re-seeding is
-     * idempotent (a full clear+repaint of tmux's authoritative grid), so a false
-     * positive only re-paints the SAME content the user already sees — no visible
-     * change. Anchoring on divergence-from-tmux (not "few glyphs") is what keeps
-     * a legitimately sparse-but-CORRECT pane (a real shell with little output)
-     * from over-firing: when the render already matches tmux, the rendered count
-     * is NOT a small fraction of the capture, so this returns false.
-     *
-     * Returns false when no emulator is attached (nothing rendered to compare),
-     * when the capture is itself near-empty (no real frame to restore — defer to
-     * the blank oracle), or when the render already carries a comparable amount
-     * of content (a healthy pane).
-     */
-    fun visibleScreenDivergesFromCapture(captureText: String): Boolean {
-        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
-        // Compare the rendered VISIBLE viewport against the VISIBLE-equivalent of
-        // tmux's capture. The heal's `capture-pane` includes scrollback (`-S -N`),
-        // so comparing rendered-visible against the FULL capture would falsely read
-        // a healthy pane (whose visible grid matches only the BOTTOM of tmux's
-        // grid) as stale. Take the capture's last [visibleRows] non-blank lines —
-        // the visible-tail — so the diff is apples-to-apples and scale-invariant.
-        val visibleRows = try {
-            emulator.screen.visibleScreenRows
-        } catch (_: Throwable) {
-            return false
-        }
-        if (visibleRows <= 0) return false
-        val captureVisibleNonBlank = captureText
-            .split('\n')
-            .filter { it.isNotBlank() }
-            .takeLast(visibleRows)
-            .sumOf { line -> line.count { !it.isWhitespace() } }
-        // tmux has (near) nothing visible for this pane → not a stale-render case;
-        // the fully/partially-blank oracle owns the genuinely-empty pane.
-        if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
-        val renderedNonBlank = renderedNonBlankCharCount()
-        // The render carries a healthy share of tmux's visible content → not stale.
-        val staleCeiling = (captureVisibleNonBlank * STALE_RENDER_MAX_RENDERED_FRACTION).toInt()
-        return renderedNonBlank <= staleCeiling
-    }
-
-    /**
      * Issue #989 — the NON-DESTRUCTIVE-swap guard for the manual Redraw / attach
      * reseed. The seed path repaints `capture-pane` into the live buffer with a
      * leading `CSI 2J` clear (`toTerminalViewportBytes`), so the swap is in-place
@@ -813,9 +891,9 @@ class TerminalSurfaceState(
      *     would restore — so painting it would CLEAR visible content to (near)
      *     black, a net LOSS.
      *
-     * It is the inverse discipline of [visibleScreenDivergesFromCapture]: that one
-     * paints only when the capture has substantially MORE than the render (heal a
-     * stale render); this one REFUSES to paint when the capture has substantially
+     * It is the inverse discipline of [visibleRenderLostFrameVsCapture]: that one
+     * heals only when the render is missing tmux's content lines (restore a lost
+     * frame); this one REFUSES to paint when the capture has substantially
      * LESS than the render (never clear-to-black). Together the reseed only ever
      * swaps TOWARD more content.
      *
@@ -852,42 +930,49 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Issue #1176 (unifies #966/#1138/#1153) — the SINGLE coherent "the live render LOST the
-     * frame" oracle. It answers ONE question against tmux's authoritative `capture-pane`: **how
-     * much of the visible content tmux holds for this pane is actually on screen?** The render
-     * has lost the frame when it reproduces at most [LOST_FRAME_MAX_RENDERED_FRACTION] of tmux's
-     * visible non-blank content while tmux holds materially more.
+     * Issue #1300 (unifies #966/#1138/#1153/#1214) — the SINGLE "the live render LOST the frame"
+     * oracle, a PER-LINE-HASH content diff against tmux's authoritative `capture-pane`. It answers
+     * ONE question: **how many of the content lines tmux holds for this pane does the render FAIL
+     * to reproduce?** The render has lost the frame when it is missing a substantial share of
+     * tmux's content lines.
      *
-     * ## Why one metric (the #1176 dead-zone this closes)
+     * ## Why a line-hash diff, not a scalar char-count (the #1300 blind spot this closes)
      *
-     * The pre-#1176 oracle UNIONED two ceilings on DIFFERENT metrics that do not compose:
-     *  - a 25%-**char** ceiling (the #966 [visibleScreenDivergesFromCapture]), and
-     *  - a 50%-**line** ceiling (the #1153 half-black band).
+     * The pre-#1300 oracle reduced BOTH sides to a single number — total visible non-blank chars —
+     * and healed only when the render's count sat far enough below the capture's. That is blind to
+     * *positional / content* divergence: a live, char-DENSE spinner/status block (a Claude/Codex
+     * progress bar, token counts, "esc to interrupt", context %) surviving over an otherwise-black
+     * grid can make the render's TOTAL char count MATCH a full tmux screen while the two grids share
+     * almost NO content lines. Count parity is not content parity, so the scalar scored the
+     * maintainer's photographed fragments-over-black pane HEALTHY and the watchdog never healed it.
      *
-     * A render carrying >25% of tmux's chars spread across >50% of the rows — a black BAND
-     * covering ~a third-to-a-half of the screen — cleared BOTH ceilings and was judged HEALTHY,
-     * so it was NEVER healed on any path. That was the residual black screen the maintainer kept
-     * hitting on the latest release (spike #874). A char-fraction and a line-fraction ceiling can
-     * each be "just above threshold" while the pane is plainly half-black. Collapsing them into
-     * a SINGLE content-coverage judgment removes the dead-zone: a black band loses chars (fewer
-     * non-blank cells) regardless of whether the loss reads as scattered sparsity (#966), a lone
-     * surviving status line (#1138), or a contiguous band (#1153) — so one char-coverage ceiling
-     * subsumes all three cases with no gap between them.
+     * Diffing the SET of content lines (hash each non-blank line, count how many of tmux's lines the
+     * render is missing) sees the lost frame regardless of char parity, and still subsumes the older
+     * classes: a scattered-fragment render (#966), a status-line-only alt-screen pane (#1138), a
+     * half-black band (#1153), and a mostly-empty model (#1214) all reproduce only a small fraction
+     * of tmux's content lines, so one line-diff catches them all.
      *
-     * ## The anti-thrash / distinguish-by-design gates (preserved from #1138)
+     * ## Position-free by design
+     *
+     * `getVisibleScreenText()` trims leading/trailing blank rows and joins wrapped rows, so a
+     * strict same-row diff is unavailable from the model. "How many of tmux's content lines are
+     * missing from the render" generalizes the positional "row blank in render but content in tmux"
+     * signal and is additionally robust to a scroll offset or a wrapped line.
+     *
+     * ## The anti-thrash / distinguish-by-design gates
      *
      *  1. tmux's visible tail must carry ≥ [STALE_RENDER_MIN_CAPTURE_CHARS] non-blank chars —
      *     there is a REAL frame to restore, not the #807 by-design near-empty alt-screen void; AND
-     *  2. tmux must carry at least [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] MORE non-blank chars than
-     *     the render — a genuine unrepainted frame, not a legitimately-short prompt whose capture
-     *     ≈ render (no reseed-thrash on every watchdog tick).
+     *  2. the render must be missing at least [LINE_HASH_MIN_LOST_LINES] of tmux's content lines
+     *     AND at least [LINE_HASH_MIN_LOST_FRACTION] of them — a genuine unrepainted frame, not a
+     *     legitimately-short prompt (capture ≈ render → nothing missing) nor a pane merely a few
+     *     rows behind a streaming agent (missing only those few new lines, under the fraction). A
+     *     single spinner/status line whose glyph churns against a 1-tick-stale capture is one line,
+     *     absorbed by the floor + fraction, so no special cursor-row exclusion is needed.
      *
-     * Only then does the coverage ceiling decide. A DENSE, correctly-painted pane reproduces
-     * ~all of tmux's visible content (its coverage sits ABOVE the ceiling) and never heals; a
-     * pane that is merely a few rows behind a streaming agent (capture holds slightly more) sits
-     * above the ceiling too and is left alone — no clear-to-repaint flicker on a lagging-but-fine
-     * pane. Re-seeding is idempotent (a full clear+repaint of tmux's authoritative grid), so the
-     * heal only ever swaps TOWARD more content.
+     * A DENSE, correctly-painted pane reproduces (nearly) all of tmux's content lines → missing
+     * ≈ 0 → never heals; re-seeding is idempotent (a full clear+repaint of tmux's authoritative
+     * grid), so the heal only ever swaps TOWARD more content.
      *
      * Returns false when no emulator is attached (nothing rendered to judge).
      */
@@ -899,25 +984,61 @@ class TerminalSurfaceState(
             return false
         }
         if (visibleRows <= 0) return false
-        val captureVisibleNonBlank = captureText
+        // tmux's authoritative visible content lines (the visible tail, scrollback excluded), each
+        // ANSI-stripped, trimmed, and non-blank. Reuse THIS same capture text — no extra round-trip.
+        // #1300: the capture is `capture-pane -e`, so each line carries raw SGR/colour escapes; strip
+        // them FIRST ([stripAnsiEscapes]) so a coloured capture line (`ESC[32m…ESC[0m`) collapses to
+        // the plain content the render holds — otherwise no coloured line ever hash-matches and every
+        // coloured pane scores divergent (reseed-thrash, #1164/#1219). Normalize with a full trim()
+        // (not just trimEnd) because `getVisibleScreenText()` trims the WHOLE rendered string,
+        // dropping a leading space on the render's first content line that the raw capture still
+        // carries — trimming both sides keeps those otherwise-identical lines matching. A bg-colour-
+        // only row (`ESC[44m   ESC[0m`) strips to spaces → trim → empty, matching its blank render.
+        val captureContentLines = captureText
             .split('\n')
-            .filter { it.isNotBlank() }
+            .map { stripAnsiEscapes(it).trim() }
+            .filter { it.isNotEmpty() }
             .takeLast(visibleRows)
-            .sumOf { line -> line.count { !it.isWhitespace() } }
+        if (captureContentLines.isEmpty()) return false
         // Gate 1 — the #807 by-design void: tmux has (near) nothing for this pane, so there is no
         // real frame to restore. Defer; do NOT heal a genuinely-empty pane to itself.
+        val captureVisibleNonBlank = captureContentLines.sumOf { line -> line.count { !it.isWhitespace() } }
         if (captureVisibleNonBlank < STALE_RENDER_MIN_CAPTURE_CHARS) return false
-        val renderedNonBlank = renderedNonBlankCharCount()
-        // Gate 2 — anti-thrash / distinguish-by-design: tmux must carry MATERIALLY MORE visible
-        // content than the render (a legitimately-short prompt or the agent's own clear has
-        // capture ≈ render and sits under this gap — left alone).
-        if (captureVisibleNonBlank - renderedNonBlank < PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS) return false
-        // THE unified judgment: the render reproduces at most [LOST_FRAME_MAX_RENDERED_FRACTION]
-        // of tmux's visible non-blank content → a black band / mostly-black / scattered render
-        // that lost the frame tmux still holds. A fully-painted or only-slightly-behind pane sits
-        // above the ceiling and is not healed.
-        return renderedNonBlank.toDouble() <=
-            captureVisibleNonBlank.toDouble() * LOST_FRAME_MAX_RENDERED_FRACTION
+        // The render's content lines as a COUNT-aware multiset (a per-line String.hashCode key). A
+        // multiset, not a set, so a black BAND over a uniform-content frame (many identical rows) is
+        // seen as lost: the render reproduces only `liveRows` copies while tmux holds all of them.
+        // The whole diff is two String.split + line hashes over ≤ visibleRows lines: well under 1 ms
+        // on-device, no allocation storm, and it runs only AFTER the capture already returned.
+        val renderedText = try {
+            emulator.screen.visibleScreenText
+        } catch (_: Throwable) {
+            return false
+        }
+        val renderedLineCounts = HashMap<String, Int>()
+        for (line in renderedText.split('\n')) {
+            // The render is already plain text (escapes consumed by the VT parser), so stripAnsiEscapes
+            // is a cheap no-op here (fast-path returns on no-ESC); applied for symmetry so both sides
+            // are normalized identically.
+            val norm = stripAnsiEscapes(line).trim()
+            if (norm.isNotEmpty()) renderedLineCounts.merge(norm, 1, Int::plus)
+        }
+        // PRIMARY signal: how many of tmux's content lines the render fails to reproduce (consuming
+        // one render copy per matched capture line) — the fragments-over-black loss the scalar
+        // char-count could not see.
+        var renderLostLines = 0
+        for (line in captureContentLines) {
+            val remaining = renderedLineCounts.getOrDefault(line, 0)
+            if (remaining > 0) renderedLineCounts[line] = remaining - 1 else renderLostLines++
+        }
+        // Gate 2 — anti-thrash: heal only when the render is missing a SUBSTANTIAL share of tmux's
+        // content lines (an absolute floor AND a fraction). A dense/correct pane misses ≈ 0; a
+        // slightly-lagging pane misses only the few new streaming lines; a churning spinner line is
+        // one line — all sit under this bar and are left alone.
+        val lostThreshold = maxOf(
+            LINE_HASH_MIN_LOST_LINES,
+            ceil(captureContentLines.size * LINE_HASH_MIN_LOST_FRACTION).toInt(),
+        )
+        return renderLostLines >= lostThreshold
     }
 
     /**
@@ -926,20 +1047,29 @@ class TerminalSurfaceState(
      * no-op-resize heal ([com.pocketshell.app.tmux.TmuxSessionViewModel.maybeHealActivePaneOnNoOpResize])
      * run to decide whether paying for an authoritative `capture-pane` diff (the unified
      * [visibleRenderLostFrameVsCapture] oracle) is worthwhile before revealing / after a keyboard
-     * toggle. It is TRUE when the rendered viewport is sparse/banded enough to POSSIBLY be a lost
-     * frame: fully blank, the ≤3-line partial-black, OR a black BAND whose live share of the
+     * toggle. It is TRUE when the rendered viewport is NOT confidently dense — POSSIBLY a lost
+     * frame: fully blank, the ≤3-line partial-black, OR any >3-line pane whose live share of the
      * visible rows is at most [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION].
      *
      * It fires for the SAME two states the pre-#1176 gates already captured for — fully blank OR
-     * the ≤3-line partial-black — PLUS the exact GAP the dead-zone left: a >3-line black BAND with
-     * MORE than half the visible rows live (so the pre-#1176 gates read it "painted") but still up
-     * to [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] of them — the band between the old 50%-line ceiling
-     * and a confidently-dense pane. A genuinely-sparse-but-correct SMALL pane (≤ half the rows live
-     * — a short prompt) is deliberately NOT flagged: the pre-#1176 no-op-resize contract pays
-     * nothing for it, and the steady-state watchdog remains its net. It does NOT confirm a lost
-     * frame — only the `capture-pane` diff can, since a sparse-but-correct pane looks identical
-     * locally — so a confidently-full pane (live rows ABOVE the ceiling) skips the capture entirely,
-     * and every flagged pane is confirmed against tmux by the unified oracle before any heal fires.
+     * the ≤3-line partial-black — PLUS every pane below the confidently-dense ceiling:
+     *  - the #1176 dead-zone BAND (a >3-line black band with MORE than half the visible rows live,
+     *    so the pre-#1176 gates read it "painted"), AND
+     *  - the #1214 mostly-empty MODEL (>3 scattered live lines but a live-fraction BELOW 0.5 — the
+     *    reveal-time leg of the photographed fragments-over-black).
+     *
+     * The #1214 change DROPPED the old 0.5 lower bound: a mostly-empty model with >3 live lines
+     * used to read "healthy" here and reveal UNHEALED (only the ≤16s-later steady watchdog could
+     * catch it). Paying ONE authoritative capture at reveal/resize is the deliberate cost — the
+     * unified oracle self-guards a genuinely-sparse-but-correct short prompt (Gate 2: capture must
+     * carry materially MORE than the render) and the #807 near-empty alt-screen void (Gate 1:
+     * capture must carry a real frame), so a FALSE pre-flag costs one wasted capture, NEVER a wrong
+     * heal or clear-to-black. It does NOT confirm a lost frame — only the `capture-pane` diff can,
+     * since a sparse-but-correct pane looks identical locally — so a confidently-full pane (live
+     * rows ABOVE the ceiling) skips the capture entirely, and every flagged pane is confirmed
+     * against tmux by the unified oracle before any heal fires. The steady-state watchdog's
+     * foreground/screen/back-off gates (#1166) are untouched — this widening is the reveal/resize
+     * LOCAL pre-check only.
      */
     fun visibleRenderMayHaveLostFrame(): Boolean {
         if (visibleScreenIsBlankOrPartiallyBlank()) return true
@@ -953,11 +1083,13 @@ class TerminalSurfaceState(
         val liveLines = renderedVisibleNonBlankLineCount()
         if (liveLines <= 0) return true
         val liveFraction = liveLines.toDouble() / visibleRows.toDouble()
-        // The #1176 dead-zone the pre-#1176 gates MISSED: MORE than half the rows live yet not
-        // confidently dense. Below the lower bound the pane is genuinely sparse (the pre-#1176
-        // no-op contract skips it — the "cheap no-op" for a short correct prompt); above the upper
-        // bound it is confidently full.
-        return liveFraction > MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION &&
+        // Flag every >3-line pane that is NOT confidently dense — its live share sits at or below
+        // the [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] ceiling. This covers BOTH the #1176 dead-zone
+        // band (0.5..0.75) AND the #1214 mostly-empty model (>3 live lines below 0.5). A ≤3-line
+        // pane is already handled by [visibleScreenIsBlankOrPartiallyBlank] above; a confidently-
+        // full pane (fraction above the ceiling) skips the capture. Every flagged pane is confirmed
+        // against tmux's authoritative capture by [visibleRenderLostFrameVsCapture] before any heal.
+        return liveLines > PARTIAL_BLANK_MAX_LIVE_LINES &&
             liveFraction <= MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION
     }
 
@@ -1230,6 +1362,44 @@ class TerminalSurfaceState(
         private const val MATCH_DEBOUNCE_MS = 250L
 
         /**
+         * Issue #1300: the heal capture is issued with `capture-pane -e` (`TmuxClient.kt`),
+         * which embeds each cell's ANSI SGR/color escape sequences so the seed path
+         * ([com.pocketshell.app.tmux.TmuxSessionViewModel.toTerminalViewportBytes]) can repaint
+         * colour. The render side ([com.termux.terminal.TerminalScreen.getVisibleScreenText]) is
+         * PLAIN text with escapes already consumed by the VT parser. So for the per-line content
+         * diff in [visibleRenderLostFrameVsCapture] to compare like-for-like, the raw `-e` escapes
+         * must be stripped from the capture side before hashing — otherwise a coloured capture line
+         * (`ESC[32m…ESC[0m`) never hash-matches its plain render line and EVERY coloured pane (i.e.
+         * essentially every real agent/shell pane) scores divergent, reseed-thrashing on every
+         * watchdog tick (the #1164/#1219 battery/heat regression). This matches the escape classes
+         * `capture-pane -e` can emit: CSI (SGR colour/attributes), OSC (hyperlinks, `OSC 8`), and
+         * bare two-byte C1/Fe escapes — stripped by [stripAnsiEscapes].
+         */
+        private val AnsiEscapeRegex: Regex = Regex(
+            // ESC (\u001B) introduces every sequence; one of three shapes follows:
+            "\u001B(?:" +
+                // OSC: ESC ] <text> terminated by BEL (0x07) or ST (ESC \\). Tried first so its
+                // `]` is not mistaken for a bare Fe escape.
+                "\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)" +
+                // CSI: ESC [ <params 0x30-0x3F> <intermediates 0x20-0x2F> <final 0x40-0x7E>
+                // (SGR colour/attributes, cursor moves, …).
+                "|\\[[0-?]*[ -/]*[@-~]" +
+                // Bare two-byte C1/Fe escapes: ESC + a single 0x40-0x5F byte, excluding `[`/`]`
+                // which begin CSI/OSC handled above.
+                "|[@-Z\\\\^_]" +
+                ")",
+        )
+
+        /**
+         * Issue #1300: strip the ANSI/SGR escape sequences a `capture-pane -e` line carries so it
+         * compares equal to the plain rendered line of the same content. Fast-path returns the input
+         * unchanged when it has no ESC (the render side is already plain — no regex cost on it), so
+         * the per-line diff stays well under 1 ms on-device.
+         */
+        private fun stripAnsiEscapes(line: String): String =
+            if (line.indexOf('\u001B') < 0) line else AnsiEscapeRegex.replace(line, "")
+
+        /**
          * Issue #553 (J2): upper bound on live (non-blank) lines for
          * [visibleScreenIsPartiallyBlank] to still classify the viewport as partially
          * blank. The "only a timer, rest blank" symptom is a single repainting status
@@ -1246,24 +1416,13 @@ class TerminalSurfaceState(
         private const val PARTIAL_BLANK_MAX_LIVE_FRACTION = 0.25
 
         /**
-         * Issue #966/#967: minimum non-blank chars the authoritative `capture-pane`
-         * text must carry for [visibleScreenDivergesFromCapture] to treat a sparse
-         * render as STALE (rather than a legitimately near-empty pane). A real
-         * full-screen agent/TUI frame is hundreds of chars; this floor keeps the
-         * oracle off a genuinely-tiny pane (a bare prompt) where there is no real
-         * frame to restore.
+         * Issue #966/#967 (Gate 1 of #1300): minimum non-blank chars the authoritative
+         * `capture-pane` text must carry for [visibleRenderLostFrameVsCapture] to treat a sparse
+         * render as STALE (rather than a legitimately near-empty pane). A real full-screen
+         * agent/TUI frame is hundreds of chars; this floor keeps the oracle off a genuinely-tiny
+         * pane (a bare prompt) where there is no real frame to restore.
          */
         private const val STALE_RENDER_MIN_CAPTURE_CHARS = 40
-
-        /**
-         * Issue #966/#967: the rendered grid is judged STALE/mostly-black when its
-         * non-blank char count is at most this FRACTION of the authoritative
-         * capture's. The #966 pane shows a handful of scattered glyphs against a
-         * full-screen frame — well under a quarter of tmux's content. A healthy
-         * pane renders a comparable amount to tmux, so it sits ABOVE this ceiling
-         * and never heals.
-         */
-        private const val STALE_RENDER_MAX_RENDERED_FRACTION = 0.25
 
         /**
          * Issue #989: a fresh `capture-pane` whose visible tail carries FEWER than
@@ -1295,25 +1454,26 @@ class TerminalSurfaceState(
         private const val NON_DESTRUCTIVE_SWAP_CLEAR_RATIO = 3
 
         /**
-         * Issue #1138: the minimum EXTRA non-blank chars tmux's authoritative
-         * `capture-pane` frame must carry OVER the local render before the
-         * steady-state watchdog heals a PARTIAL-BLACK pane ([visibleRenderLostFrameVsCapture]).
-         *
-         * The maintainer's live-streaming ALT-SCREEN agent pane (Codex/Claude) shows only
-         * the live status line while the upper alt-screen rows stayed black. An alt-screen
-         * agent frame is SPARSE (a header + a large blank conversation area + an input/status
-         * line), so its non-blank content is small and the surviving status line is a LARGE
-         * fraction of it — above the 25% [STALE_RENDER_MAX_RENDERED_FRACTION] divergence
-         * ceiling, so the #966 divergence oracle reads it "healthy" and never heals it.
-         *
-         * Requiring tmux to carry at least this many MORE non-blank chars than the render is
-         * the anti-thrash guard: a legitimately-short prompt (tmux ALSO has only those few
-         * lines → capture ≈ render) and the #807 by-design alt-screen void (the agent's OWN
-         * empty frame → capture ≈ render) both sit UNDER this gap and are left alone. Only a
-         * genuine unrepainted frame — tmux holds the full frame, the render shows the band —
-         * clears it. One line's worth of real content (≈40 chars).
+         * Issue #1300 (Gate 2): the render has lost the frame only when it is missing at least
+         * this many of tmux's authoritative content lines (an absolute floor, paired with
+         * [LINE_HASH_MIN_LOST_FRACTION]) in [visibleRenderLostFrameVsCapture]. A single spinner/
+         * status line whose glyph churns against a 1-tick-stale capture counts as one missing
+         * line, so this floor keeps that churn from thrashing the heal.
          */
-        private const val PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS = 40
+        private const val LINE_HASH_MIN_LOST_LINES = 3
+
+        /**
+         * Issue #1300 (Gate 2): the render has lost the frame only when it is missing at least
+         * this FRACTION of tmux's authoritative content lines (paired with the
+         * [LINE_HASH_MIN_LOST_LINES] floor) in [visibleRenderLostFrameVsCapture]. A DENSE, correct
+         * pane reproduces (nearly) all of tmux's lines → missing ≈ 0 → never heals; a pane merely
+         * a few rows behind a streaming agent is missing only those few new lines → under this
+         * fraction → left alone (no reseed-thrash on a lagging-but-fine pane, #1164/#1219). At 0.25
+         * the render must have lost a QUARTER or more of tmux's content lines — preserving the
+         * #1176 dead-zone coverage (the old char-coverage ceiling healed at ≥25% char loss) while
+         * catching the fragments-over-black / half-black-band / mostly-empty class the scalar missed.
+         */
+        private const val LINE_HASH_MIN_LOST_FRACTION = 0.25
 
         /**
          * Issue #1153: the upper bound on the rendered live-line FRACTION of the visible rows for
@@ -1325,59 +1485,33 @@ class TerminalSurfaceState(
          * visible rows black is "materially black"; a DENSE, normally-painted response paints
          * well over half its rows and sits ABOVE this ceiling, so it never heals. It is HIGHER
          * than [PARTIAL_BLANK_MAX_LIVE_FRACTION] (0.25) precisely to catch the >3-line band the
-         * narrow partial-black heuristic misses, and the capture-diff gate
-         * ([PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS]) still guards against healing a sparse-but-correct
-         * pane where tmux holds no more content than the render.
+         * narrow partial-black heuristic misses; the authoritative capture-diff gate
+         * ([visibleRenderLostFrameVsCapture]) still guards against healing a sparse-but-correct
+         * pane where the render already reproduces tmux's content lines.
          *
-         * NOTE (#1176): this is now ONLY the send-heal LOCAL cost-gate. The authoritative
-         * capture-vs-render decision moved to the unified [LOST_FRAME_MAX_RENDERED_FRACTION]
-         * char-coverage ceiling in [visibleRenderLostFrameVsCapture]; this 0.5 line-fraction no
-         * longer bounds that oracle.
+         * NOTE: this is now ONLY the send-heal LOCAL cost-gate. The authoritative capture-vs-render
+         * decision moved to the [visibleRenderLostFrameVsCapture] per-line-hash content diff (#1300);
+         * this 0.5 line-fraction no longer bounds that oracle.
          */
         private const val LOST_FRAME_MAX_LIVE_FRACTION = 0.5
 
         /**
-         * Issue #1176 — the SINGLE char-coverage ceiling of the unified
-         * [visibleRenderLostFrameVsCapture] oracle: the render has LOST the frame when its
-         * visible non-blank char count is at most this FRACTION of tmux's authoritative visible
-         * content (with the [STALE_RENDER_MIN_CAPTURE_CHARS] real-frame floor and the
-         * [PARTIAL_BLACK_HEAL_MIN_EXTRA_CHARS] materially-more gate both passed first).
-         *
-         * It REPLACES the pre-#1176 two-cliff union (a 25%-char ceiling OR a 50%-line ceiling)
-         * with one coherent judgment, closing the dead-zone where a black BAND carrying >25% of
-         * tmux's chars across >50% of the rows cleared BOTH old ceilings and was never healed.
-         * At 0.75 it heals a pane missing a quarter or more of tmux's visible content — the whole
-         * "half-to-two-thirds black band" the maintainer kept hitting (spike #874) — while a
-         * DENSE, correct pane (coverage ≈ 1.0) and a merely-a-few-rows-behind streaming pane
-         * (coverage ~0.84+, measured) both sit above the ceiling and are left alone (no
-         * clear-to-repaint flicker on a lagging-but-fine pane).
-         */
-        private const val LOST_FRAME_MAX_RENDERED_FRACTION = 0.75
-
-        /**
          * Issue #1176 (GAP C) — the live-line FRACTION ceiling of the LOCAL capture-gate
-         * [visibleRenderMayHaveLostFrame] used by the switch-reveal and no-op-resize heals. It is
-         * aligned with the unified oracle's [LOST_FRAME_MAX_RENDERED_FRACTION] (0.75) so a
-         * confidently-full pane (live rows above the ceiling) skips the authoritative
+         * [visibleRenderMayHaveLostFrame] used by the switch-reveal and no-op-resize heals. At 0.75
+         * a confidently-full pane (live rows above the ceiling) skips the authoritative
          * `capture-pane` diff while ANY pane that could be a dead-zone black band (live rows below
          * it) is confirmed against tmux by [visibleRenderLostFrameVsCapture] before any heal. It
          * is deliberately HIGHER than the send-heal cost-gate's [LOST_FRAME_MAX_LIVE_FRACTION]
          * (0.5) so the reveal/resize gates never MISS the #1176 dead-zone band the way the narrow
          * pre-check did.
+         *
+         * Issue #1214: the pre-#1176 0.5 LOWER bound (`MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION`) was
+         * DELETED here — a mostly-empty model (>3 live lines, live-fraction BELOW 0.5) used to read
+         * "healthy" and reveal UNHEALED, so the local gate now opens for EVERY >3-line pane at or
+         * below this ceiling. The unified oracle's Gate 1/Gate 2 self-guard a genuinely-sparse-but-
+         * correct pane, so a false pre-flag costs one wasted capture, never a wrong heal.
          */
         private const val MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION = 0.75
-
-        /**
-         * Issue #1176 (GAP C) — the LOWER bound of the [visibleRenderMayHaveLostFrame] band
-         * trigger. A >3-line pane with at most this live-fraction is genuinely SPARSE (a short
-         * correct prompt), NOT the dead-zone band the pre-#1176 no-op-resize gate missed — flagging
-         * it would break the "cheap no-op" contract (capturing a correct small pane on routine
-         * layout churn). The dead-zone is specifically the band with MORE than half the rows live
-         * (spike #874: >50% rows + >25% chars), so the local capture-gate only opens ABOVE this
-         * 0.5 boundary; the genuinely-sparse pane's net stays the steady-state watchdog + the
-         * send-heal path (whose own cost-gate is [LOST_FRAME_MAX_LIVE_FRACTION] = 0.5).
-         */
-        private const val MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION = 0.5
     }
 }
 

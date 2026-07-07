@@ -16,6 +16,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -744,6 +745,108 @@ class TmuxSessionScreenTest {
         assertTrue(!state.showsConversationTab)
     }
 
+    // ─── Issue #1158 (REOPENED chain #962→#975→#1057→#1158): the maintainer's ──
+    // REAL path — an agent launched DIRECTLY inside an existing shell session, so
+    // nothing recorded `@ps_agent_kind` (it stays `shell`), the confirmed-shell
+    // verdict is never cleared, and live detection never binds for the
+    // node-wrapped-Claude / Codex-`/proc` / Z.AI fleet. Every prior signal is
+    // false → the tab was gone for the session's whole life. The detection-
+    // INDEPENDENT alt-buffer signal ([altBufferAgent]) restores it: a full-screen
+    // agent TUI holds the alternate screen buffer for its run, which a plain shell
+    // at a prompt does not.
+    //
+    // RED→GREEN: on base — remove the `|| altBufferAgent` OR-term from
+    // `tmuxSessionTabState.showsConversationTab` — each alt-buffer case below FAILS
+    // (single "Terminal" pill, no toggle), exactly the maintainer's #1158 symptom.
+    // With the fix the term is present and they GREEN, while the plain-shell
+    // main-buffer no-flap control (#894/#815) stays GREEN either way. The alt-buffer
+    // signal is kind-AGNOSTIC (it reads the emulator, not `@ps_agent_kind`), so ONE
+    // case covers node-wrapped Claude, Codex, glm/Z.AI AND the missing-data
+    // kind=null fleet — they are indistinguishable at this gate; the parametrized
+    // sibling below locks that independence. ──────────────────────────────────────
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForAltBufferAgentOnShellRecordedSession() {
+        // The maintainer's EXACT reported path: `@ps_agent_kind=shell`
+        // (recordedAgentKind == false), confirmed-shell surface
+        // (presumedAgent == false), NO live detection, NO transcript content — yet
+        // the visible pane is on the ALTERNATE screen buffer (a full-screen agent
+        // TUI is running). The tab MUST be present. RED on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = false,
+            altBufferAgent = true,
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForAltBufferAgentOnForeignNullKindSession() {
+        // The missing-data (kind = null) fleet: a foreign session the app didn't
+        // launch, so there is no recorded kind AND no bindable transcript — but its
+        // visible pane is on the alt-buffer. The tab MUST be present. RED on base.
+        val state = tmuxSessionTabState(
+            currentAgentConversation = AgentConversationUiState(
+                detection = null,
+                selectedTab = SessionTab.Terminal,
+            ),
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(null),
+            altBufferAgent = true,
+        )
+
+        assertTrue(state.showsConversationTab)
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+    }
+
+    @Test
+    fun tmuxSessionTabStateAltBufferSignalIsIndependentOfRecordedKindAcrossFleet() {
+        // Class coverage (G2): the alt-buffer signal alone shows the tab regardless
+        // of what (if anything) the tree recorded — node-wrapped Claude, Codex,
+        // glm/Z.AI AND the null/unknown foreign case — all reach the tab through the
+        // SAME kind-agnostic emulator read, with NO detection, NO content, NOT
+        // presumed-agent.
+        for (recordedKind in listOf(
+            SessionAgentKind.Shell, // agent launched inside a shell-recorded session
+            SessionAgentKind.Unknown,
+            null, // foreign session
+        )) {
+            val state = tmuxSessionTabState(
+                currentAgentConversation = null,
+                presumedAgent = false,
+                recordedAgentKind = tmuxSessionRecordedAgentKind(recordedKind),
+                altBufferAgent = true,
+            )
+            assertTrue(
+                "alt-buffer must force the tab for recordedKind=$recordedKind",
+                state.showsConversationTab,
+            )
+        }
+    }
+
+    @Test
+    fun tmuxSessionTabStateHidesConversationForPlainShellMainBufferNoFlapControl() {
+        // #894/#815 no-flap invariant: a plain interactive shell at a prompt — main
+        // buffer (altBufferAgent == false), confirmed-shell (presumedAgent ==
+        // false), no detection, no content, recorded shell — must show NO
+        // Conversation tab and must not flap. GREEN on base AND with the fix (the
+        // alt-buffer signal is POSITIVE-only).
+        val state = tmuxSessionTabState(
+            currentAgentConversation = null,
+            presumedAgent = false,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(SessionAgentKind.Shell),
+            altBufferAgent = false,
+        )
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
+    }
+
     @Test
     fun tmuxSessionRecordedAgentKindClassifiesEveryKind() {
         // The recorded-agent signal is true ONLY for the agent kinds and never
@@ -1058,6 +1161,101 @@ class TmuxSessionScreenTest {
                 liveAgent = null,
                 presumedAgentKind = null,
                 withEnter = false,
+            ),
+        )
+    }
+
+    // --- Issue #1207: TUI-only slash-command handling on the Conversation
+    // composer (no misleading echo, Open-in-Terminal notice) + the stranded
+    // placeholder spinner-race fix. ---
+
+    @Test
+    fun tuiSlashCommandRecognisesAgentPickerCommands() {
+        // Criterion (a): `/model` and friends are TUI-only picker commands that
+        // write NOTHING to the transcript. They must be recognised so the
+        // composer suppresses the optimistic bubble and raises the notice.
+        assertTrue(tmuxComposerIsTuiSlashCommand("/model"))
+        assertTrue(tmuxComposerIsTuiSlashCommand("/config"))
+        assertTrue(tmuxComposerIsTuiSlashCommand("/login"))
+        // A slash-command WITH arguments (e.g. `/model sonnet`) is still a
+        // command — the first token drives the classification.
+        assertTrue(tmuxComposerIsTuiSlashCommand("/model sonnet"))
+        // Surrounding whitespace is trimmed before classifying.
+        assertTrue(tmuxComposerIsTuiSlashCommand("  /model  "))
+    }
+
+    @Test
+    fun tuiSlashCommandRejectsPromptsAndPaths() {
+        // A normal prompt is NOT a slash-command — it must keep the optimistic
+        // echo (`Echo`), never divert to the notice path.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("explain this diff"))
+        assertTrue(!tmuxComposerIsTuiSlashCommand(""))
+        // A bare slash is not a command.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/"))
+        // A filesystem path is not a command (it has a second `/`).
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/home/user/file.txt"))
+        // A leading-slash arithmetic/prompt is not a command (first token starts
+        // with a digit, not a letter).
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/2 + 2"))
+        // A multi-line message is a prompt the user typed, not a command, even
+        // when the first line looks command-like.
+        assertTrue(!tmuxComposerIsTuiSlashCommand("/model\nand also do this"))
+    }
+
+    @Test
+    fun agentConversationSendSuppressesEchoForTuiSlashCommand() {
+        // Criterion (a) — the load-bearing decision: a `/model` sent from the
+        // Conversation composer takes the NO-ECHO path (deliver keystrokes to the
+        // pane, raise the Open-in-Terminal notice), NOT the optimistic-bubble
+        // `sendToAgentPaneResult` echo path. On base (echo always) this would be
+        // `Echo`; the fix makes it `TuiCommandNoEcho`.
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/model"),
+        )
+        // A normal prompt keeps the optimistic echo — unchanged behaviour.
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("summarise the failing test"),
+        )
+    }
+
+    @Test
+    fun placeholderWithNoRowResolvesToTerminalEmptyNotEternalSpinner() {
+        // Criterion (b) — the stranded-spinner race: the 2-null detection
+        // teardown can remove the conversation row BEFORE the load watchdog
+        // fires, leaving the placeholder with NO row and NO watchdog behind it.
+        // The old `?: ConversationLoadState.Loading` fallback then spins FOREVER.
+        // A missing row (null) MUST resolve to a terminal legible state (Empty),
+        // never Loading. This is the exact fallback at
+        // TmuxSessionScreen.kt's showConversationPlaceholder branch.
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Empty,
+            tmuxConversationPlaceholderLoadState(null),
+        )
+    }
+
+    @Test
+    fun placeholderWithRowHonoursItsOwnLoadState() {
+        // When a row exists, honour its own load state — a `Loading` row always
+        // has the load watchdog armed behind it, so it is NOT a stranded spinner
+        // and must keep showing "Loading conversation…".
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Loading,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Loading,
+            ),
+        )
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Failed,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Failed,
+            ),
+        )
+        assertEquals(
+            com.pocketshell.app.session.ConversationLoadState.Ready,
+            tmuxConversationPlaceholderLoadState(
+                com.pocketshell.app.session.ConversationLoadState.Ready,
             ),
         )
     }
@@ -1746,8 +1944,8 @@ class TmuxSessionScreenTest {
     @Test
     fun topReconnectBarNeverShownForNonReconnectingStatus() {
         // The top bar renders ONLY for Reconnecting — so it is never the sole
-        // indicator for any other state. Connecting has its own full-screen
-        // overlay; Connected/Switching/Failed/Idle drive their own affordances.
+        // indicator for any other state. Connecting has its own top overlay (gated
+        // the same way); Connected/Switching/Failed/Idle drive their own affordances.
         val nonReconnecting = listOf(
             TmuxSessionViewModel.ConnectionStatus.Idle,
             TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u"),
@@ -1765,6 +1963,117 @@ class TmuxSessionScreenTest {
                 "no top progress bar for $status (terminal held)",
                 false,
                 shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
+            )
+        }
+    }
+
+    // --- Issue #750 (4th occurrence): the beyond-grace RECONNECT two-loaders bug.
+    // The maintainer sees the top "Connecting to host…" [ConnectingProgressOverlay]
+    // banner AND the centered "Attaching…" hold at the SAME time on a beyond-grace
+    // reconnect. Root cause: a reconnect re-dials through the controller's
+    // `Connecting` state → status projects to [ConnectionStatus.Connecting] (the top
+    // banner) WHILE the reveal machine holds the terminal (effectiveHidesTerminal ==
+    // true) and paints the centered spinner. The previous #750 fix gated only the
+    // Reconnecting band, never the Connecting overlay. These tests pin the reducer +
+    // BOTH gate predicates so exactly ONE primary loading surface resolves per state.
+
+    private val connectingStatus =
+        TmuxSessionViewModel.ConnectionStatus.Connecting("beta.example", 22, "alex")
+
+    @Test
+    fun connectingOverlaySuppressedWhileTerminalHeld_beyondGraceReconnectRepro() {
+        // REPRODUCTION of the maintainer's exact reopen state: a beyond-grace
+        // reconnect projects Connecting (the top overlay) WHILE the terminal is held
+        // (the centered "Attaching…" hold is up). Pre-fix the overlay was ungated on
+        // `status is Connecting`, so it stacked on top of the centered hold — TWO
+        // loaders. The reducer must resolve to the SINGLE centered hold and suppress
+        // the top banner.
+        assertEquals(
+            PrimaryLoadingSurface.CenteredAttaching,
+            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = true),
+        )
+        assertEquals(
+            "top Connecting overlay must be suppressed while the terminal is held",
+            false,
+            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = true),
+        )
+    }
+
+    @Test
+    fun connectingOverlayShownOnlyWhenTerminalNotHeld() {
+        // The top overlay is the fallback loader for a (currently unreached)
+        // Connecting that keeps a live frame painted (terminal NOT held), so it is
+        // never the sole indicator stripped from a state that needs it.
+        assertEquals(
+            PrimaryLoadingSurface.ConnectingBanner,
+            primaryLoadingSurface(connectingStatus, effectiveHidesTerminal = false),
+        )
+        assertTrue(
+            shouldShowConnectingProgressOverlay(connectingStatus, effectiveHidesTerminal = false),
+        )
+    }
+
+    @Test
+    fun exactlyOnePrimaryLoadingSurfacePerInProgressState_classCoverage() {
+        // Class coverage (D31/G2): every in-progress connection state resolves to
+        // EXACTLY ONE primary loading surface — never a top banner AND the centered
+        // "Attaching…" at once. Each in-progress state ALWAYS holds the terminal
+        // (RevealState.Seeding), so each resolves to the SINGLE centered hold; the
+        // top banners are suppressed. This is the invariant the maintainer's symptom
+        // keeps regressing on, pinned for all four states plus the never-held edges.
+
+        // Beyond-grace reconnect re-dials through the controller's Connecting →
+        // status Connecting; within-grace/steady recovery → status Reconnecting;
+        // a same-host switch → status Switching; a cold connect → status Connecting.
+        val inProgressHeldStates = listOf(
+            "cold Connecting" to connectingStatus,
+            "beyond-grace reconnect (re-dial → Connecting)" to connectingStatus,
+            "Switching / Attaching" to
+                TmuxSessionViewModel.ConnectionStatus.Switching("h", 22, "u"),
+            "Reattaching / Reconnecting" to reconnectingStatus,
+        )
+        inProgressHeldStates.forEach { (label, status) ->
+            // Terminal held (the real in-progress reality): the SOLE loader is the
+            // centered "Attaching…"; BOTH top banners are suppressed.
+            assertEquals(
+                "$label must resolve to the single centered hold while the terminal is held",
+                PrimaryLoadingSurface.CenteredAttaching,
+                primaryLoadingSurface(status, effectiveHidesTerminal = true),
+            )
+            assertEquals(
+                "$label: top Connecting overlay suppressed while held",
+                false,
+                shouldShowConnectingProgressOverlay(status, effectiveHidesTerminal = true),
+            )
+            assertEquals(
+                "$label: top Reconnecting band suppressed while held",
+                false,
+                shouldShowReconnectingProgressRow(status, effectiveHidesTerminal = true),
+            )
+            // Never both banners at once regardless of hold state.
+            listOf(true, false).forEach { held ->
+                assertFalse(
+                    "$label (held=$held): the two top banners must be mutually exclusive",
+                    shouldShowConnectingProgressOverlay(status, held) &&
+                        shouldShowReconnectingProgressRow(status, held),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun steadyStatesHaveNoPrimaryLoadingSurface() {
+        // Connected / Idle / Failed with a live (not-held) frame have no primary
+        // loading surface — no spinner falsely implying in-flight work.
+        listOf(
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+            TmuxSessionViewModel.ConnectionStatus.Idle,
+            TmuxSessionViewModel.ConnectionStatus.Failed("boom"),
+        ).forEach { status ->
+            assertEquals(
+                "no loading surface for steady $status",
+                PrimaryLoadingSurface.None,
+                primaryLoadingSurface(status, effectiveHidesTerminal = false),
             )
         }
     }

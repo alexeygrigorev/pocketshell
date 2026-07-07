@@ -252,6 +252,20 @@ public class SshTerminalBridge(
     }
 
     /**
+     * Issue #1286 — bytes still buffered in the process→terminal queue that the
+     * emulator has NOT yet parsed (the exact value the frame-budgeted
+     * [MainThreadDrainScheduler] budgets its drain turns against). Non-zero means
+     * a `%output` burst is still draining. [com.pocketshell.core.terminal.ui.TerminalSurfaceState.renderDrainBacklogged]
+     * reads this so [com.pocketshell.core.terminal.ui.TerminalSurface] can give the
+     * drain main-thread priority during a burst — suppressing the per-frame repaint
+     * (which would otherwise steal main-thread slices from the append drain and pin
+     * the looper into the #1286 ANR) until the tail finishes and the settled frame
+     * can paint. Read on the main looper (matches the scheduler's own read site).
+     */
+    public fun pendingProcessOutputBytes(): Int =
+        SessionReflection.availableProcessOutputBytes(session)
+
+    /**
      * Push [count] bytes from [data] starting at [offset] into the
      * emulator's input queue, then nudge the session's main-thread handler
      * so it actually drains the queue and renders the bytes.

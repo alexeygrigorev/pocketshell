@@ -994,6 +994,7 @@ class SessionsDashboardViewModelTest {
             return CommandResponse(0L, emptyList(), false)
         }
         override fun outputFor(paneId: String) = delegate.outputFor(paneId)
+        override fun drainPaneOutputBacklog(paneId: String) = delegate.drainPaneOutputBacklog(paneId)
         override fun close() = delegate.close()
         // Issue #215: detachCleanly added to the interface; the
         // throwing fake delegates to FakeTmuxClient so the killSession

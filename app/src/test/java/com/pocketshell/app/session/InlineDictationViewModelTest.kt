@@ -15,6 +15,7 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
@@ -1443,5 +1444,174 @@ class InlineDictationViewModelTest {
         } finally {
             // Nothing to release; the abandoned worker honours interrupt.
         }
+    }
+
+    // -- Issue #1226: durable delivery across a torn-down / re-keying collector
+
+    @Test
+    fun transcriptEmittedWhileNoCollectorSubscribedSurvivesTheReKey() = runTest {
+        // Reproduces the silent data-loss class (issue #1226). The user
+        // dictates a command and taps stop; during the 1-3s Whisper round-trip
+        // the session briefly drops/reconnects, so the screen's transcript
+        // collector is torn down (focusedPaneId flips to null / re-keys) and no
+        // collector is subscribed at emit time. On the old `replay = 0`
+        // MutableSharedFlow the emit lands in the collector gap and is silently
+        // dropped — the FSM is already back at Idle with error == null, so the
+        // user believes they sent a command that never arrived.
+        //
+        // RED on base: with the SharedFlow, a late subscriber never sees the
+        // dropped value -> `received` stays empty -> the assert fails.
+        // GREEN with the fix: the Channel buffers the transcript and hands it
+        // to the collector when it re-subscribes on re-key.
+        val audio = SpeechAudioGuard.speechWavForTesting()
+        val vm = newVm(
+            mic = FakeMicCapture(audio = audio),
+            whisper = fakeWhisperClient { Result.success("deploy prod") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        // No collector subscribed — the screen's collector is torn down during
+        // the reconnect gap while the Whisper round-trip resolves.
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        // Exactly the "user thinks it sent" state: Idle, no error surfaced.
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertNull(vm.uiState.value.error)
+
+        // The pane re-keys to a live id and the screen re-subscribes.
+        val received = mutableListOf<String>()
+        val collector = launch { received += vm.transcriptions.first() }
+        advanceUntilIdle()
+
+        assertEquals(
+            "transcript emitted during the collector gap must survive the re-key, not be dropped",
+            listOf("deploy prod"),
+            received,
+        )
+        collector.cancel()
+    }
+
+    @Test
+    fun transcriptDeliveredExactlyOnceWhileCollectorStaysAlive() = runTest {
+        // Subscriber-alive path — the pane survives, the transcript is
+        // delivered once and never duplicated (AC: no duplicate delivery when
+        // the pane survives).
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(listOf("git status"), received)
+
+        // Let the collector keep running: a durable channel must not
+        // re-deliver an already-consumed value.
+        advanceUntilIdle()
+        assertEquals(listOf("git status"), received)
+        collector.cancel()
+    }
+
+    @Test
+    fun reKeyAfterSuccessfulDeliveryDoesNotRedeliverTranscript() = runTest {
+        // Guards AC3 against the Channel change: a collector that re-subscribes
+        // AFTER a value was already delivered must NOT see it again (a
+        // `replay = 1` fix would have re-fired the command into the terminal).
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val firstReceived = mutableListOf<String>()
+        val first = launch { vm.transcriptions.collect { firstReceived += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(listOf("git status"), firstReceived)
+        first.cancel() // pane re-keys AFTER successful delivery
+
+        val secondReceived = mutableListOf<String>()
+        val second = launch { vm.transcriptions.collect { secondReceived += it } }
+        advanceUntilIdle()
+
+        assertTrue(
+            "re-key after delivery must not replay the transcript, got $secondReceived",
+            secondReceived.isEmpty(),
+        )
+        second.cancel()
+    }
+
+    @Test
+    fun screenCollectorPatternDeliversTranscriptAfterPaneReKeyDuringReconnect() = runTest {
+        // Faithful model of TmuxSessionScreen's inline-dictation collector and
+        // the #1226 fix: while focusedPaneId is null (session dropped mid
+        // Whisper round-trip) the LaunchedEffect must NOT drain the delivery
+        // channel; when the pane re-keys to a live id the effect re-runs and
+        // delivers the buffered transcript into the pane the user is now
+        // looking at.
+        //
+        // RED on base: the old code drained the SharedFlow even with a null
+        // pane and `return@collect`-discarded the value (and the SharedFlow
+        // dropped it anyway with no subscriber) -> `delivered` stays empty.
+        // GREEN with the fix: pane-null skips the collect entirely, the Channel
+        // buffers, and the re-keyed collector delivers.
+        val vm = newVm(
+            mic = FakeMicCapture(audio = SpeechAudioGuard.speechWavForTesting()),
+            whisper = fakeWhisperClient { Result.success("make deploy") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val delivered = mutableListOf<Pair<String, String>>() // paneId to text
+        var focusedPaneId: String? = null
+        var collectorJob: Job? = null
+
+        // Mirrors LaunchedEffect(inlineDictationViewModel, dictationMode,
+        // focusedPaneId): re-bind the collector on every focusedPaneId change,
+        // and skip collecting entirely when there is no pane (the #1226 guard).
+        fun rebindCollector() {
+            collectorJob?.cancel()
+            val paneId = focusedPaneId ?: return
+            collectorJob = launch {
+                vm.transcriptions.collect { text -> delivered += paneId to text }
+            }
+        }
+
+        rebindCollector() // pane null: effect returns early, nothing draining
+        runCurrent()
+
+        // Dictation completes while focusedPaneId is null (the reconnect gap).
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertTrue(
+            "no delivery may happen while there is no pane to receive it, got $delivered",
+            delivered.isEmpty(),
+        )
+
+        // Reconnect completes; the pane re-keys to a live id -> effect re-runs.
+        focusedPaneId = "%7"
+        rebindCollector()
+        advanceUntilIdle()
+
+        assertEquals(listOf("%7" to "make deploy"), delivered)
+        collectorJob?.cancel()
     }
 }

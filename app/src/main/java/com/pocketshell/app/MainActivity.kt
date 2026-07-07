@@ -30,8 +30,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
@@ -60,6 +62,9 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.RepoBrowserScreen
+import com.pocketshell.app.projects.STALE_SESSION_CONFIRM_TAG
+import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
+import com.pocketshell.app.projects.STALE_SESSION_GO_HOME_TAG
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.InlineDictationViewModel
@@ -85,6 +90,7 @@ import com.pocketshell.app.usage.UsageViewModel
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
@@ -190,6 +196,20 @@ class MainActivity : FragmentActivity() {
      */
     @Inject
     lateinit var sessionLifecycleSignals: SessionLifecycleSignals
+
+    /**
+     * Issue #1155 / #666: the APP-LEVEL owner of the "This session no longer
+     * exists — create in this folder, or go home?" recovery prompt. Injected here
+     * (so it is alive and subscribed to [SessionLifecycleSignals] from `onCreate`,
+     * long before any cold-restore connect emits) and observed inside
+     * [AppNavigator] to render a single app-level dialog. This surfaces the
+     * recovery prompt on the COLD-RESTORE path — the maintainer's dogfood scenario
+     * — where the folder tree was never opened, in addition to the in-tree
+     * OpenExisting tap.
+     */
+    @Inject
+    lateinit var staleSessionPromptController:
+        com.pocketshell.app.tmux.StaleSessionPromptController
 
     @Inject
     lateinit var startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource
@@ -488,6 +508,10 @@ class MainActivity : FragmentActivity() {
                         // when a restored session is found gone, so the next
                         // foreground does not retry-and-resurrect it.
                         onClearLastSession = { lastSessionStore.clear() },
+                        // Issue #1155 / #666: the app-level recovery-prompt owner,
+                        // observed to render the single "create in this folder, or
+                        // go home?" dialog — including on the cold-restore path.
+                        staleSessionPromptController = staleSessionPromptController,
                     )
                 }
             }
@@ -820,6 +844,12 @@ private fun AppNavigator(
     // session is found gone on the server, so the next foreground does not
     // retry-and-resurrect it. Wired by the activity to [LastSessionStore.clear].
     onClearLastSession: () -> Unit = {},
+    // Issue #1155 / #666: the app-level "This session no longer exists" recovery
+    // prompt owner. Observed here to render ONE app-level dialog (create in this
+    // folder OR go home) so the prompt also surfaces on the cold-restore path,
+    // where the folder tree was never opened. Null in previews/tests that do not
+    // exercise the recovery dialog.
+    staleSessionPromptController: com.pocketshell.app.tmux.StaleSessionPromptController? = null,
 ) {
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
@@ -851,6 +881,19 @@ private fun AppNavigator(
             "current" to current.timingName(),
             "requestedDestination" to requestedDestination.timingName(),
         )
+    }
+
+    // Issue #1155 / #666: remember the LAST tmux-session destination the app
+    // connected to — it carries every SSH connection field needed to recreate a
+    // fresh session in the gone session's folder from the app-level recovery
+    // dialog. Seeded with the cold-restore target so "Create session" works even
+    // when the app process-restored straight onto the (now gone) session and the
+    // folder tree was never opened. Updated as the user opens other sessions.
+    var lastTmuxDestination: AppDestination.TmuxSession? by remember {
+        mutableStateOf(restoredTmuxDestination)
+    }
+    LaunchedEffect(current) {
+        (current as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
     }
 
     // Issue #177: report the current top destination up to the activity
@@ -1684,6 +1727,107 @@ private fun AppNavigator(
         )
     }
     }
+
+    // Issue #1155 / #666: the SINGLE app-level "This session no longer exists"
+    // recovery dialog. The connection core refuses to resurrect a gone session
+    // (the #666 `tmux has-session` preflight in TmuxSessionViewModel) and
+    // broadcasts a StaleSession; this controller — subscribed process-wide from
+    // onCreate — holds the latest one, so the dialog appears REGARDLESS of which
+    // screen the app is on, including the cold-restore path where the folder tree
+    // was never opened (the maintainer's dogfood scenario). Two recoveries, per
+    // the reopen: recreate a fresh session in the SAME folder, or go to the host
+    // list ("go home"). A stale broadcast only ever fires for a genuinely-gone
+    // session (never a transient reconnect blip), so this never appears spuriously.
+    val recoveryScope = rememberCoroutineScope()
+    val stalePrompt = staleSessionPromptController?.prompt?.collectAsState()?.value
+    if (stalePrompt != null) {
+        val base = lastTmuxDestination?.takeIf { it.hostId == stalePrompt.hostId }
+        ConfirmDialog(
+            title = "This session no longer exists",
+            message = "The session “${stalePrompt.sessionName}” is gone on the host. " +
+                "Create a new session in “${staleSessionFolderLabel(stalePrompt.folderPath)}”, " +
+                "or go to the home screen?",
+            confirmLabel = "Create session",
+            dismissLabel = "Go to home",
+            destructive = false,
+            onConfirm = {
+                staleSessionPromptController.clear()
+                if (base != null) {
+                    // Issue #1155 REOPEN (2026-07-03): recreate a FRESH session in
+                    // the gone session's folder through the REAL create-in-folder
+                    // gateway path (`tmux create-detached` / `new-session -A -c`),
+                    // then attach to the now-existing session. We do NOT just
+                    // re-navigate to `base.copy(...)`: on the cold-restore path that
+                    // destination equals `restoredTmuxDestination`, so the screen
+                    // classifies it as [TmuxConnectTrigger.ColdRestore] whose
+                    // `has-session` preflight REFUSES to create the gone session (the
+                    // #666 no-resurrect guard) — making the recreate a silent no-op.
+                    // Creating server-side first makes the recovery deterministic on
+                    // BOTH the cold-restore and the in-tree OpenExisting path.
+                    recoveryScope.launch {
+                        val resolvedName = staleSessionPromptController
+                            .createSessionInFolder(
+                                hostId = stalePrompt.hostId,
+                                keyPath = base.keyPath,
+                                passphrase = base.passphrase,
+                                sessionName = stalePrompt.sessionName,
+                                folderPath = stalePrompt.folderPath,
+                            )
+                            .getOrElse {
+                                // Create exec failed (host briefly unreachable): fall
+                                // back to the session name we intended so the attach
+                                // path can still `new-session -A` it, and never leave
+                                // the user stuck on the dialog-less blank.
+                                stalePrompt.sessionName
+                            }
+                        // Attach to the freshly-created session. `openExisting = true`
+                        // makes this destination DISTINCT from the cold-restore
+                        // destination (which is `openExisting = false`), so it is
+                        // never re-classified as ColdRestore; its OpenExisting
+                        // preflight now finds the session ALIVE (we just created it)
+                        // and attaches instead of dropping back to the list.
+                        navigate(
+                            base.copy(
+                                sessionName = resolvedName,
+                                startDirectory = stalePrompt.folderPath,
+                                initialWindowIndex = null,
+                                tmuxSessionId = null,
+                                sessionCreated = null,
+                                openExisting = true,
+                            ),
+                        )
+                    }
+                } else {
+                    // No connection details to rebuild from — recover to the list.
+                    popToHostList()
+                }
+            },
+            onDismiss = {
+                // "Go to home" (and scrim/back): drop to the host list.
+                staleSessionPromptController.clear()
+                popToHostList()
+            },
+            modifier = Modifier.testTag(STALE_SESSION_DIALOG_TAG),
+            confirmTestTag = STALE_SESSION_CONFIRM_TAG,
+            dismissTestTag = STALE_SESSION_GO_HOME_TAG,
+        )
+    }
+}
+
+/**
+ * Issue #1155: the short folder label shown in the recovery dialog for a gone
+ * session's working directory. Mirrors `FolderListViewModel.defaultLabelForPath`
+ * for the app-level dialog: the trailing path segment, or "home" for a null /
+ * blank / `~` folder so the message always reads sensibly.
+ */
+internal fun staleSessionFolderLabel(folderPath: String?): String {
+    val clean = folderPath?.trim().orEmpty()
+    if (clean.isEmpty()) return "home"
+    val stripped = clean.trimEnd('/')
+    if (stripped.isEmpty()) return "/"
+    if (stripped == "~" || stripped == "\$HOME") return "home"
+    val tail = stripped.substringAfterLast('/')
+    return tail.ifBlank { stripped }
 }
 
 /**

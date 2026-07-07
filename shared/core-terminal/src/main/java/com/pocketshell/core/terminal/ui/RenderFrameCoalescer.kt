@@ -50,11 +50,44 @@ import kotlinx.coroutines.launch
  * inside a `runTest` and advance virtual time across windows to assert the
  * downstream emission count collapses while the final emission still fires.
  *
+ * ## Drain-priority gate (issue #1286)
+ *
+ * The downstream repaint the emitted signal drives (`TerminalView.onScreenUpdated()`
+ * → an on-main `onDraw` of the whole grid, plus the per-frame viewport affordance
+ * extraction) runs on the SAME main looper as the frame-budgeted VT-append drain
+ * ([com.pocketshell.core.terminal.bridge.MainThreadDrainScheduler]). During a Codex
+ * `%output` burst those per-frame repaints STEAL main-thread slices from the drain,
+ * so the append throughput falls and the burst tail never finishes within the frame
+ * budget — the main thread pins for seconds (the #1286 ANR) AND the pane can be left
+ * showing stale/partial content because the tail that would paint the settled frame
+ * never drains.
+ *
+ * [backlogWindowMs] closes that WITHOUT freezing the screen or breaking affordances:
+ * while the drain is backlogged it returns a WIDER coalescing window, so the repaint
+ * (and the affordance extraction the same signal drives) fires LESS often — handing
+ * the frame-budgeted drain more contiguous main-thread frames to finish the burst
+ * (drain priority). It does NOT suppress repaints entirely: the screen keeps updating
+ * during the burst (at the widened cadence, ~15fps instead of ~60fps) and tappable
+ * URL/path/command affordances keep refreshing, so this fixes the freeze/ANR AND the
+ * stale/blank face (the settled frame still paints) without introducing a
+ * repaints-frozen-for-the-whole-burst or affordances-dead regression. Once the drain
+ * catches up ([backlogWindowMs] returns the base [windowMs]) the ~60fps repaint
+ * resumes. Default returns [windowMs] unconditionally — the exact pre-#1286 behaviour,
+ * so plain-SSH surfaces and every existing test are UNCHANGED.
+ *
  * @param windowMs the coalescing window. ~16ms ≈ one 60Hz display frame: a
  *   burst of redraw signals inside a single frame collapses to one repaint.
  *   Mirrors [com.pocketshell.core.tmux.LayoutChangeCoalescer.DEFAULT_WINDOW_MS].
+ * @param backlogWindowMs issue #1286 drain-priority window. Evaluated after each
+ *   emission to size the NEXT coalescing window: return a value WIDER than [windowMs]
+ *   while the VT-append drain is backlogged (fewer repaints/sec → the drain gets more
+ *   main-thread frames), and [windowMs] once it has caught up. Clamped to be never
+ *   shorter than [windowMs]. Defaults to always [windowMs] (pre-#1286 behaviour).
  */
-internal fun Flow<Unit>.coalescePerFrame(windowMs: Long = RENDER_FRAME_WINDOW_MS): Flow<Unit> {
+internal fun Flow<Unit>.coalescePerFrame(
+    windowMs: Long = RENDER_FRAME_WINDOW_MS,
+    backlogWindowMs: () -> Long = { windowMs },
+): Flow<Unit> {
     val source = this
     return flow {
         // Conflated trigger channel: a storm of upstream emissions between two
@@ -103,8 +136,18 @@ internal fun Flow<Unit>.coalescePerFrame(windowMs: Long = RENDER_FRAME_WINDOW_MS
                     // emission next window — never O(N). The pending trigger that
                     // survives the burst is what guarantees the final settled
                     // frame paints.
-                    if (windowMs > 0L) {
-                        delay(windowMs)
+                    //
+                    // Issue #1286: size this window by [backlogWindowMs]. While the
+                    // VT-append drain is backlogged it returns a WIDER window, so the
+                    // repaint/affordance-extraction this signal drives fires less often
+                    // and the frame-budgeted drain gets more contiguous main-thread
+                    // frames (drain priority) — without ever suppressing the repaint, so
+                    // the screen stays live and affordances keep refreshing during the
+                    // burst. Clamp to at least [windowMs] so a bad predicate can never
+                    // TIGHTEN the window into an O(N) storm.
+                    val holdMs = backlogWindowMs().coerceAtLeast(windowMs)
+                    if (holdMs > 0L) {
+                        delay(holdMs)
                     }
                 }
             } catch (t: CancellationException) {
@@ -123,3 +166,17 @@ internal fun Flow<Unit>.coalescePerFrame(windowMs: Long = RENDER_FRAME_WINDOW_MS
  * [com.pocketshell.core.tmux.LayoutChangeCoalescer.DEFAULT_WINDOW_MS].
  */
 internal const val RENDER_FRAME_WINDOW_MS: Long = 16L
+
+/**
+ * Issue #1286 — the WIDENED render-coalescing window used while the frame-budgeted
+ * VT-append drain is backlogged (a Codex `%output` burst is still draining). At 64 ms
+ * (~15 fps) the repaint + affordance extraction the render signal drives fires ~4× less
+ * often than the base 16 ms window, so the frame-budgeted drain gets ~4× more contiguous
+ * main-thread frames to finish the burst (drain priority) — enough to erase the ~25%
+ * append-throughput drop that #1260's per-frame repaint introduced and that, with the
+ * composer/IME amplifier, tipped into the >5 s ANR. Still repaints ~15 fps, so the
+ * screen stays live and tappable affordances keep refreshing during the burst (no
+ * frozen/blank pane, no dead links). Reverts to [RENDER_FRAME_WINDOW_MS] the instant the
+ * drain catches up.
+ */
+internal const val DRAIN_PRIORITY_WINDOW_MS: Long = 64L

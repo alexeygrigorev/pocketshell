@@ -252,6 +252,86 @@ class DeadZoneBandRevealResizeHealTest {
         )
     }
 
+    // -------------------------------------------------------------------------------------------
+    // (6) #1214 — SWITCH-reveal heals a MOSTLY-EMPTY model (>3 scattered lines, live-fraction < 0.5).
+    // -------------------------------------------------------------------------------------------
+
+    @Test
+    fun switchRevealHealsMostlyEmptyModel() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%6")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%6" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        overpaintMostlyEmptyModel(pane)
+        assertMostlyEmptyPreconditions(pane)
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // THE REAL ENTRY POINT: the switch-reveal gate over the active pane.
+        val revealed = vm.awaitActivePaneSeededOrLoadingForTest(client)
+        advanceUntilIdle()
+
+        assertEquals(
+            "REGRESSION (#1214): the switch-reveal gate must confirm a mostly-empty model against " +
+                "tmux and heal it with EXACTLY ONE `capture-pane -p -e` (#973 one-capture bound). " +
+                "On base the pre-check read the >3-scattered-line, <0.5-fraction pane 'healthy' and " +
+                "revealed it UNHEALED (fragments-over-black), only maybe healed ~4s later at the " +
+                "steady watchdog.",
+            healCapturesBefore + 1,
+            client.healCaptureCount(),
+        )
+        assertTrue("the gate still reveals (does not spin)", revealed)
+        assertTrue(
+            "the heal restored the FULL frame from tmux's authoritative grid AT reveal",
+            renderedTranscriptFor(pane).contains(FULL_FRAME_MARKER),
+        )
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // (7) #1214 — NO-OP resize heals a MOSTLY-EMPTY model (keyboard/IME toggle).
+    // -------------------------------------------------------------------------------------------
+
+    @Test
+    fun noOpResizeHealsMostlyEmptyModel() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%7", title = "codex")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%7" }
+
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        overpaintMostlyEmptyModel(pane)
+        assertMostlyEmptyPreconditions(pane)
+
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 99L, output = FULL_FRAME, isError = false),
+        )
+        val healCapturesBefore = client.healCaptureCount()
+
+        // THE REAL ENTRY POINT: a same-dimension (no-op) resize, e.g. a keyboard dismissal.
+        assertTrue(vm.triggerSameDimensionResizeHealForTest())
+        advanceUntilIdle()
+
+        assertEquals(
+            "REGRESSION (#1214): a no-op resize (keyboard toggle) must confirm a mostly-empty model " +
+                "against tmux and heal it with EXACTLY ONE capture. On base the pre-check skipped the " +
+                ">3-scattered-line, <0.5-fraction pane and left it black-with-fragments until the ~4s " +
+                "watchdog.",
+            healCapturesBefore + 1,
+            client.healCaptureCount(),
+        )
+        assertTrue(
+            "the heal restored the FULL frame",
+            renderedTranscriptFor(pane).contains(FULL_FRAME_MARKER),
+        )
+    }
+
     // ------------------------------------------------------------------ Fixtures + assertions
 
     /** ESC (U+001B). */
@@ -296,6 +376,48 @@ class DeadZoneBandRevealResizeHealTest {
         pane.terminalState.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
     }
 
+    /**
+     * Issue #1214 — drive the active pane into a MOSTLY-EMPTY model: paint ~0.2 of the visible
+     * rows (but at least 4 lines, so it is ABOVE the ≤3-line partial-black cap) with non-wrapping
+     * content on the alt screen. Live-fraction well BELOW 0.5 yet MORE than 3 live lines — the
+     * exact gap the pre-#1214 pre-check read "healthy" and revealed unhealed (fragments-over-black),
+     * while tmux (the dense [FULL_FRAME] capture) still holds the full frame.
+     */
+    private fun overpaintMostlyEmptyModel(pane: TmuxPaneState) {
+        val visibleRows = visibleRowsOf(pane)
+        // >3 live lines (above the ≤3-line partial-black cap) AND strictly below the 0.5 floor
+        // (capped so a small grid can't cross 0.5).
+        val minLiveRows = 4
+        val liveRows = (visibleRows * 0.2).toInt()
+            .coerceAtLeast(minLiveRows)
+            .coerceAtMost((visibleRows * 0.45).toInt().coerceAtLeast(minLiveRows))
+        val frame = buildString {
+            append("$esc[?1049h$esc[2J$esc[H")
+            for (row in 0 until liveRows) {
+                append("$FULL_FRAME_MARKER scattered fragment line $row\r\n")
+            }
+        }
+        pane.terminalState.appendRemoteOutput(frame.toByteArray(Charsets.US_ASCII))
+    }
+
+    private fun assertMostlyEmptyPreconditions(pane: TmuxPaneState) {
+        val s = pane.terminalState
+        assertFalse("mostly-empty model is NOT fully blank", s.visibleScreenIsBlank())
+        assertFalse(
+            "mostly-empty model has >3 live lines, so it is NOT the ≤3-line partial-black (the ONLY " +
+                "sub-0.5 case the base pre-check flagged)",
+            s.visibleScreenIsPartiallyBlank(),
+        )
+        assertTrue(
+            "#1214: the widened local capture-gate flags the mostly-empty model (worth a capture-diff)",
+            s.visibleRenderMayHaveLostFrame(),
+        )
+        assertTrue(
+            "the unified oracle judges the mostly-empty model LOST vs tmux's full frame",
+            s.visibleRenderLostFrameVsCapture(FULL_FRAME.joinToString("\n")),
+        )
+    }
+
     private fun assertDeadZonePreconditions(pane: TmuxPaneState) {
         val s = pane.terminalState
         assertFalse("dead-zone band is NOT fully blank", s.visibleScreenIsBlank())
@@ -303,10 +425,6 @@ class DeadZoneBandRevealResizeHealTest {
         assertFalse(
             "dead-zone band cleared the old 0.5 LINE ceiling (> 50% rows live)",
             s.visibleScreenLooksSparseForSendHeal(),
-        )
-        assertFalse(
-            "dead-zone band cleared the old 0.25 CHAR ceiling (> 25% of tmux's chars)",
-            s.visibleScreenDivergesFromCapture(FULL_FRAME.joinToString("\n")),
         )
         assertTrue(
             "the #1176 local capture-gate catches the band (worth a capture-diff)",

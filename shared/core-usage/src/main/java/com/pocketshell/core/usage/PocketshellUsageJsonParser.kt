@@ -41,6 +41,18 @@ public class PocketshellUsageJsonParser(
         if (trimmed.isEmpty()) return emptyList()
 
         val records = mutableListOf<UsageProviderRecord>()
+        // Per-record resilience (issue #1223): an old/mismatched host CLI (or a
+        // custom `usageCommandOverride` wrapper) can emit one healthy provider
+        // record plus one drifted/malformed record, or prepend a non-JSON
+        // MOTD/deprecation line. We parse record-by-record, SKIP a record that
+        // fails (accumulating a per-record diagnostic), and return the ones that
+        // parsed. Only when ZERO records parse from non-empty input do we
+        // surface a whole-panel failure — this mirrors the graceful degradation
+        // the exit != 0 path (`parseProviderErrorStdout`) already has, and is the
+        // same version-skew class behind the v0.4.10 connect break (#847): one
+        // drifted line must not break the whole surface.
+        val diagnostics = mutableListOf<String>()
+        var candidateCount = 0
         // `pocketshell usage --json` is newline-delimited JSON (NDJSON): one
         // record per line. We also accept records that span multiple lines by
         // accumulating until braces balance — this keeps the parser
@@ -71,22 +83,44 @@ public class PocketshellUsageJsonParser(
                 val record = buffer.toString().trim()
                 buffer.setLength(0)
                 if (record.isEmpty()) continue
-                val obj = try {
-                    JSONObject(record)
-                } catch (e: JSONException) {
-                    throw UsageParseException("invalid usage JSON near line ${index + 1}: ${e.message}", e)
-                }
-                records += parseRecord(obj)
+                candidateCount += 1
+                parseCandidate(record, index + 1)
+                    .onSuccess { records += it }
+                    .onFailure { diagnostics += (it.message ?: "invalid usage record near line ${index + 1}") }
             } else if (buffer.isNotEmpty()) {
                 // Multi-line record: keep the newline so the next iteration
                 // separates tokens correctly.
                 buffer.append('\n')
             }
         }
-        if (depth != 0 || inString) {
-            throw UsageParseException("invalid usage JSON: unterminated record")
+        if (buffer.isNotEmpty() && (depth != 0 || inString)) {
+            // A trailing, never-closed record. Count it as one more failed
+            // candidate rather than hard-failing the whole panel — the same
+            // skip-or-total-failure rule below decides the outcome.
+            candidateCount += 1
+            diagnostics += "invalid usage JSON: unterminated record"
+        }
+
+        if (records.isEmpty() && candidateCount > 0) {
+            // Non-empty input, nothing parsed: surface a visible failure (never
+            // a silent empty-success). The message aggregates every per-record
+            // diagnostic so the cause is still reportable.
+            throw UsageParseException(
+                "invalid usage JSON: no usable records (" +
+                    diagnostics.joinToString("; ").ifBlank { "all records unparseable" } +
+                    ")",
+            )
         }
         return records
+    }
+
+    private fun parseCandidate(record: String, lineNumber: Int): Result<UsageProviderRecord> = runCatching {
+        val obj = try {
+            JSONObject(record)
+        } catch (e: JSONException) {
+            throw UsageParseException("invalid usage JSON near line $lineNumber: ${e.message}", e)
+        }
+        parseRecord(obj)
     }
 
     private fun parseRecord(obj: JSONObject): UsageProviderRecord {

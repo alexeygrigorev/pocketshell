@@ -722,6 +722,40 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1241: the landing app-bar with the new glanceable usage pill next
+     * to the forwarding indicator + Settings gear. The real pill lives in the
+     * app module ([com.pocketshell.app.usage.UsageGlancePill]); this fixture
+     * mirrors it with the SAME ui-kit chrome (32dp rounded SurfaceElev surface,
+     * 1dp BorderSoft hairline, kind-tinted dot + percent) the app pill composes,
+     * so the fast JVM check shows it reads as one small app-bar affordance — NOT
+     * a heavy card — and does NOT crowd the header (the #418 declutter guard).
+     * Fresh (Warn 72%) on top, stale (Ok 63% · "cached from 13:40") below to
+     * check the honest muted treatment. The emulator screenshot is the acceptance.
+     */
+    @Test
+    fun usageGlancePill() = render("usage-glance-pill") {
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ScreenHeader(
+                title = "Hosts",
+                subtitle = "5 hosts · 4 active",
+                trailing = {
+                    UsageGlancePillFacsimile(percent = "72%", dot = PillKind.Warn)
+                    AppBarPillFacsimile { Text("2", color = PocketShellColors.Text, style = PocketShellType.bodyDense, fontWeight = FontWeight.SemiBold) }
+                    AppBarGearFacsimile()
+                },
+            )
+            ScreenHeader(
+                title = "Hosts",
+                subtitle = "5 hosts · 4 active",
+                trailing = {
+                    UsageGlancePillFacsimile(percent = "63%", dot = PillKind.Ok, staleClock = "13:40")
+                    AppBarGearFacsimile()
+                },
+            )
+        }
+    }
+
+    /**
      * Issue #603: the host-detail workspace tree with the redesigned
      * inactive / empty watched-root callout.
      *
@@ -2058,11 +2092,14 @@ class DesignRenders {
      * Issue #1152: static mirror of the redesigned VOICE-RECORDING (not-locked)
      * composer bottom area. The old single row overflowed and clipped `Send` off
      * the right edge (audit D1); the maintainer directive is FIT EVERYTHING — keep
-     * the editing tools mounted, hide nothing. This mirrors the fix:
-     *  - recording surface: [00:14 timer · waveform] (Discard pulled out of it);
+     * the editing tools mounted, hide nothing. This mirrors the fix (with the #1245
+     * inline-lock move):
+     *  - recording surface: [00:14 timer · 🔒 inline lock toggle · waveform]
+     *    (Discard pulled out of it; #1245 moved the hands-free lock UP into it);
      *  - bottom row: the mounted [📎 {} /] tools group anchors the left, then a
-     *    weighted gap, then the four pills stacked as two right-aligned rows —
-     *    [Discard (outlined) · Lock (accent-outlined)] over [Insert · Send].
+     *    weighted gap, then the stop pills stacked as two right-aligned rows —
+     *    [Discard (outlined)] over [Insert · Send]. The old mystery-meat Lock pill
+     *    is gone from this cluster (#1245).
      *
      * Caveat (#555): the real recording row lives in the `app` module's
      * `SheetContent`, which the ui-kit harness can't import, so this mirrors its
@@ -2095,6 +2132,19 @@ class DesignRenders {
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
+                // Issue #1245: the hands-free lock is now an INLINE toggle on the
+                // recording/waveform row (attached to the recording it controls),
+                // an accent-bordered circle with the lock glyph — no longer a
+                // mystery-meat pill in the bottom Send/Discard cluster.
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(17.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "🔒", fontSize = 15.sp)
+                }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -2149,7 +2199,9 @@ class DesignRenders {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        // Discard — outlined secondary pill (48dp).
+                        // Discard — outlined secondary pill (48dp). Issue #1245: the
+                        // Lock pill was removed from this cluster (it moved up to the
+                        // waveform row as an inline toggle); Discard stays put.
                         Box(
                             modifier = Modifier
                                 .height(48.dp)
@@ -2162,25 +2214,6 @@ class DesignRenders {
                             Text(
                                 text = "Discard",
                                 color = PocketShellColors.TextSecondary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        // Lock — accent-outlined pill (48dp).
-                        Row(
-                            modifier = Modifier
-                                .height(48.dp)
-                                .clip(RoundedCornerShape(22.dp))
-                                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
-                                .border(1.dp, PocketShellColors.Accent, RoundedCornerShape(22.dp))
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text(text = "🔒", fontSize = 13.sp)
-                            Text(
-                                text = "Lock",
-                                color = PocketShellColors.Accent,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                             )
@@ -4103,6 +4136,71 @@ class DesignRenders {
                 color = PocketShellColors.Text,
                 style = PocketShellType.bodyDense,
             )
+        }
+    }
+
+    /**
+     * Issue #1241: ui-kit facsimile of the app-module app-bar usage glance pill
+     * ([com.pocketshell.app.usage.UsageGlancePill]) for the fast JVM render.
+     * Mirrors the app pill's chrome so the design read is faithful; the emulator
+     * screenshot is the acceptance.
+     */
+    @Composable
+    private fun UsageGlancePillFacsimile(percent: String, dot: PillKind, staleClock: String? = null) {
+        val alpha = if (staleClock != null) 0.6f else 1f
+        val dotColor = when (dot) {
+            PillKind.Ok -> PocketShellColors.Green
+            PillKind.Warn -> PocketShellColors.Amber
+            PillKind.Blocked -> PocketShellColors.Red
+            PillKind.Error -> PocketShellColors.TextMuted
+        }
+        Row(
+            modifier = Modifier
+                .height(32.dp)
+                .background(color = PocketShellColors.SurfaceElev, shape = PocketShellShapes.large)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = PocketShellShapes.large)
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(dotColor.copy(alpha = alpha)))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = percent,
+                color = PocketShellColors.Text.copy(alpha = alpha),
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (staleClock != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(text = staleClock, color = PocketShellColors.TextMuted, style = PocketShellType.bodyDense)
+            }
+        }
+    }
+
+    @Composable
+    private fun AppBarPillFacsimile(content: @Composable RowScope.() -> Unit) {
+        Row(
+            modifier = Modifier
+                .height(32.dp)
+                .background(color = PocketShellColors.SurfaceElev, shape = PocketShellShapes.large)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = PocketShellShapes.large)
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+    }
+
+    @Composable
+    private fun AppBarGearFacsimile() {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(color = PocketShellColors.SurfaceElev)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("⚙", color = PocketShellColors.TextSecondary)
         }
     }
 

@@ -23,6 +23,30 @@ public interface SshSession : AutoCloseable {
     public val isConnected: Boolean
 
     /**
+     * Issue #1222 — the authoritative "this session is going away" signal.
+     *
+     * True the instant [close] has been INITIATED, and stays true forever after.
+     * Distinct from ![isConnected]: the #1144 async [close] launches the bounded
+     * `SSH_MSG_DISCONNECT` teardown off the caller and returns immediately, so
+     * [isConnected] keeps reporting `true` for up to ~2 s (longer on a wedged
+     * socket) while the disconnect drains. During that window the transport is
+     * already doomed — no new channel should be opened on it, and it must NOT be
+     * kept as a warm/idle lease or handed to a concurrent acquirer.
+     *
+     * The [SshLeaseManager] treats a session as live for pooling ONLY while it is
+     * BOTH [isConnected] AND NOT close-initiated, so a keepalive-dead teardown (or
+     * any close reached mid-drain) evicts the lease and emits the real close cause
+     * instead of parking the corpse warm for 60 s (the #1222 bug). Backed by
+     * [RealSshSession]'s existing one-shot `closeStarted` guard.
+     *
+     * Has a default body returning `false` so the many bespoke per-test
+     * [SshSession] fakes need not override it; only [RealSshSession] answers off
+     * its real close-initiated flag.
+     */
+    public val isCloseInitiated: Boolean
+        get() = false
+
+    /**
      * Why this session's transport went down (issue #969 — reconnect
      * observability). [SshSessionCloseCause.KeepaliveDead] when the always-on
      * transport keepalive (#945) declared the peer dead and closed the

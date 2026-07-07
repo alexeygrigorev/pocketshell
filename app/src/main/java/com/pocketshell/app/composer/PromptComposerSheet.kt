@@ -233,6 +233,17 @@ public fun PromptComposerSheet(
     // Issue #900: UI/API plumbing for manual outbound retry. Tests may override
     // this seam, while production defaults to the owning VM.
     onRetryOutboundItem: ((String) -> Unit)? = null,
+    // Issue #1308: batch "Resend all" for the expanded unsent-prompts surface.
+    // Tests may override this seam; production defaults to the owning VM's
+    // resendAllQueued, which re-arms every resendable row to Queued in FIFO order.
+    onResendAllOutbound: (() -> Unit)? = null,
+    // Issue #585: open the composer WITH recording already started + locked
+    // hands-free. Set true only when the session launcher's hold+swipe-up ENTRY
+    // gesture opened this sheet; a plain-tap open leaves it false (no recording).
+    // The effect below fires ONCE per sheet open (a remembered latch guards it),
+    // starts recording through the same permission/API-key gate as the mic tap,
+    // and immediately locks it so releasing the finger keeps capturing.
+    autoStartRecording: Boolean = false,
 ) {
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
@@ -349,6 +360,57 @@ public fun PromptComposerSheet(
         viewModel.onComposerTargetChanged(composerTargetKey)
     }
 
+    // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
+    // sheet WITH recording already started + locked hands-free — one gesture, not
+    // "open then tap the mic". [autoStartRecording] carries that intent from the
+    // launcher; a plain-tap open leaves it false. This effect fires ONCE per sheet
+    // open (a remembered latch guards it against recomposition) and only starts
+    // from a clean Idle composer so it never interrupts an in-flight capture.
+    //
+    // Recording start runs through the SAME permission + API-key gate as the mic
+    // tap. On the common path (mic already granted, key present) it starts and
+    // locks synchronously; if the mic permission must be requested first, the
+    // grant callback ([permissionLauncher]) starts the capture and the lock-latch
+    // effect below locks it the moment capture goes live.
+    var autoStartRecordingConsumed by remember { mutableStateOf(false) }
+    var autoLockPending by remember { mutableStateOf(false) }
+    LaunchedEffect(autoStartRecording) {
+        if (!autoStartRecording || autoStartRecordingConsumed) return@LaunchedEffect
+        autoStartRecordingConsumed = true
+        if (viewModel.uiState.value.recording !=
+            PromptComposerViewModel.RecordingState.Idle
+        ) {
+            return@LaunchedEffect
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            // The grant callback fires onMicTap(); the latch effect then locks it.
+            autoLockPending = true
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return@LaunchedEffect
+        }
+        if (viewModel.needsOpenAiKeyForMicTap()) {
+            // Surface the key dialog; the user adds the key, then records manually.
+            showApiKeyDialog = true
+            return@LaunchedEffect
+        }
+        viewModel.onMicTap()
+        viewModel.lockRecording()
+    }
+    // Issue #585: when auto-start had to wait on the permission dialog, lock the
+    // recording as soon as the grant-driven capture actually goes live.
+    LaunchedEffect(state.recording, autoLockPending) {
+        if (autoLockPending &&
+            state.recording == PromptComposerViewModel.RecordingState.Recording
+        ) {
+            viewModel.lockRecording()
+            autoLockPending = false
+        }
+    }
+
     // Issue #511 / #509: dismissing the composer (× button, scrim tap,
     // system back, swipe-down) must RELEASE the microphone — not merely
     // hide the sheet. This [PromptComposerViewModel] is scoped to the
@@ -461,6 +523,7 @@ public fun PromptComposerSheet(
             onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
             onDeleteOutboundItem = viewModel::discardOutboundItem,
             onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
+            onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueued(); Unit },
             agentKind = agentKind,
         )
     }
@@ -572,6 +635,7 @@ internal fun SheetContent(
     onToggleOutboundQueue: () -> Unit = {},
     onDeleteOutboundItem: (String) -> Unit = {},
     onRetryOutboundItem: (String) -> Unit = {},
+    onResendAllOutbound: () -> Unit = {},
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -924,6 +988,9 @@ internal fun SheetContent(
                         // newest words always stay visible.
                         liveTranscript = state.liveTranscript,
                         locked = state.recordingLocked,
+                        // Issue #1245: the inline lock toggle on the waveform row
+                        // taps the SAME lock action the bottom-cluster button used to.
+                        onLockRecording = onLockRecording,
                     )
                 }
 
@@ -1114,6 +1181,7 @@ internal fun SheetContent(
                     onToggle = onToggleOutboundQueue,
                     onDelete = onDeleteOutboundItem,
                     onRetry = onRetryOutboundItem,
+                    onResendAll = onResendAllOutbound,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -1256,15 +1324,18 @@ internal fun SheetContent(
                 }
 
                 PromptComposerViewModel.RecordingState.Recording -> {
-                    // Issue #1152: the four recording pills stack as two right-
-                    // aligned rows so they all fit next to the mounted tools group.
-                    //  - [Discard · Lock]: Discard (drop this audio — pulled OUT of
-                    //    the waveform surface into a proper outlined secondary pill
-                    //    so it no longer collides with the bars / reads disabled,
-                    //    audit B/D2/D3) and, until locked, Lock (#585 hands-free).
+                    // Issue #1152 / #1245: the recording stop actions stack as two
+                    // right-aligned rows so they all fit next to the mounted tools
+                    // group without clipping `Send` (the #1152 fit).
+                    //  - [Discard]: drop this audio — an outlined secondary pill,
+                    //    pulled OUT of the waveform surface (audit B/D2/D3).
                     //  - [Insert · Send]: the two "how do you want to end this
                     //    dictation" stop actions. Every pill shares one 48dp
                     //    baseline (audit D4).
+                    // Issue #1245: the hands-free Lock is NO LONGER a pill here — it
+                    // moved UP to the recording/waveform row as an inline toggle
+                    // attached to the recording it controls (hard-cut D22: one
+                    // affordance, not two). Discard stays put (it's clear).
                     Column(
                         horizontalAlignment = Alignment.End,
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1277,12 +1348,6 @@ internal fun SheetContent(
                                 onClick = onCancelRecording,
                                 modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
                             )
-                            if (!state.recordingLocked) {
-                                LockRecordingButton(
-                                    onClick = onLockRecording,
-                                    modifier = Modifier.testTag(COMPOSER_LOCK_RECORDING_TAG),
-                                )
-                            }
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1490,6 +1555,13 @@ private fun RecordingSurface(
     elapsedLabel: String,
     liveTranscript: String?,
     locked: Boolean,
+    // Issue #1245: the hands-free lock affordance now lives INLINE on this
+    // recording/waveform row — a compact toggle attached to the active recording
+    // it controls ("lock THIS recording"), not a mystery-meat labelled button
+    // floating in the bottom Send/Discard cluster. Tapping it is the tap-path
+    // equivalent of the swipe-up-to-lock gesture (kept working via #585). Defaults
+    // to a no-op so previews / legacy tests that don't wire it keep compiling.
+    onLockRecording: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1528,6 +1600,13 @@ private fun RecordingSurface(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
             )
+            // Issue #1245: the hands-free lock affordance lives inline here, between
+            // the timer and the waveform it controls. Until locked it is a compact
+            // TAPPABLE toggle (accent-bordered circle) whose tap locks the recording
+            // hands-free — the tap-path equivalent of the swipe-up gesture, moved up
+            // out of the mystery-meat bottom cluster (#1245). Once locked it becomes
+            // a static closed-lock indicator (no border, no tap) so the row reads
+            // clean. The two states keep the SAME tags the #585 journey drives.
             if (locked) {
                 Icon(
                     imageVector = Icons.Outlined.Lock,
@@ -1538,10 +1617,34 @@ private fun RecordingSurface(
                         .testTag(COMPOSER_RECORDING_LOCKED_TAG)
                         .semantics { contentDescription = "Recording locked" },
                 )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .border(
+                            width = 1.dp,
+                            color = PocketShellColors.Accent,
+                            shape = RoundedCornerShape(17.dp),
+                        )
+                        .clickable(role = Role.Button, onClick = onLockRecording)
+                        .testTag(COMPOSER_LOCK_RECORDING_TAG)
+                        .semantics {
+                            contentDescription = "Lock recording to continue hands-free"
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Lock,
+                        contentDescription = null,
+                        tint = PocketShellColors.Accent,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
             // Issue #1152: Discard moved OUT of this surface into the bottom action
-            // row (an outlined secondary pill), so the surface is now just
-            // [timer · (lock?) · waveform]. A small end inset keeps the amplitude
+            // row (an outlined secondary pill), so the surface is now
+            // [timer · lock-toggle · waveform]. A small end inset keeps the amplitude
             // bars from kissing the surface edge (audit C/D2).
             Waveform(
                 amplitude = amplitude,
@@ -1560,16 +1663,17 @@ private fun RecordingSurface(
                     },
             )
         }
-        // Issue #585: until the recording is locked, surface a one-line hint so
-        // the user knows the hands-free path exists and how to reach it — "tap
-        // Lock" is the deterministic affordance, "swipe up" the gesture. The
-        // hint disappears the moment the lock indicator appears, so a locked
-        // recording reads clean. The missing feedback was itself a reason the
-        // gesture felt broken ("I don't think it's recording / locking").
+        // Issue #585 / #1245: until the recording is locked, surface a one-line
+        // hint so the user knows the hands-free path exists and how to reach it —
+        // "tap the lock" (the inline toggle on this row, #1245) is the
+        // deterministic affordance, "swipe up" the gesture. The hint disappears
+        // the moment the lock indicator appears, so a locked recording reads
+        // clean. The missing feedback was itself a reason the gesture felt broken
+        // ("I don't think it's recording / locking").
         if (!locked && liveTranscript.isNullOrBlank()) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Tap Lock or swipe up to keep recording hands-free",
+                text = "Tap the lock or swipe up to keep recording hands-free",
                 color = PocketShellColors.TextMuted,
                 fontSize = 11.sp,
                 modifier = Modifier.testTag(COMPOSER_LOCK_HINT_TAG),
@@ -1781,6 +1885,16 @@ private fun DiscardRecordingButton(
 private val ComposerActionPillRadius = 22.dp
 private val ComposerActionPillShape = RoundedCornerShape(ComposerActionPillRadius)
 
+// Genuine sub-ladder "micro role" geometry: the outbound-queue action buttons
+// (the per-row Resend affordance and the #1308 "Resend all" banner) use a
+// 6dp radius (design-system.md "Radius, Elevation, And Borders" — "Micro role
+// badges | 3-6dp"), smaller than the named ladder rungs (8/14/20/28dp). 6dp
+// matches the sibling per-row queue button; named here (vs an inline literal)
+// so it stays one intentional token rather than off-ladder drift. See
+// docs/design-system.md.
+private val ComposerQueueButtonRadius = 6.dp
+private val ComposerQueueButtonShape = RoundedCornerShape(ComposerQueueButtonRadius)
+
 // Issue #1152: one baseline HEIGHT for EVERY recording-row pill (Discard / Lock /
 // Insert / Send) so the row reads as a single deliberate control ladder instead
 // of the old 40/44/48dp mix (audit D4). 48dp is the design-system tapTargetMin,
@@ -1831,58 +1945,6 @@ private fun ComposerEditingToolsGroup(
             onClick = onSlashTap,
             enabled = !isTranscribing && !attachmentBusy && agentKind != null,
             modifier = Modifier.testTag(COMPOSER_SLASH_TAG),
-        )
-    }
-}
-
-/**
- * Issue #585: the deterministic hands-free LOCK affordance shown while
- * Recording but not yet locked. A single tap calls [onLockRecording] so the
- * user can release the finger and keep dictating — exactly the maintainer's
- * Telegram-style "swipe up to lock" intent, but via a tap that the
- * ModalBottomSheet drag-to-dismiss can NEVER steal (the velocity-driven
- * arbitration that broke the swipe gesture on real hardware across this
- * issue's reopens). Rendered as a compact accent-bordered pill with the lock
- * glyph so it reads as "lock this recording on". A 48dp min touch target keeps
- * it comfortably tappable next to the Insert/Send pills.
- */
-@Composable
-private fun LockRecordingButton(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier
-            // Issue #1152: shared 48dp recording pill baseline so Lock lines up
-            // with Discard / Insert / Send (audit D4).
-            .height(ComposerActionPillHeight)
-            .clip(ComposerActionPillShape)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = ComposerActionPillShape,
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Accent,
-                shape = ComposerActionPillShape,
-            )
-            .clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Lock recording to continue hands-free" }
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(
-            imageVector = Icons.Outlined.Lock,
-            contentDescription = null,
-            tint = PocketShellColors.Accent,
-            modifier = Modifier.size(16.dp),
-        )
-        Text(
-            text = "Lock",
-            color = PocketShellColors.Accent,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
         )
     }
 }
@@ -2693,6 +2755,7 @@ private fun OutboundQueueBanner(
     onToggle: () -> Unit,
     onDelete: (String) -> Unit,
     onRetry: (String) -> Unit,
+    onResendAll: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2745,6 +2808,45 @@ private fun OutboundQueueBanner(
                     .height(1.dp)
                     .background(PocketShellColors.BorderSoft),
             )
+            // Issue #1308: batch "Resend all" — re-arm EVERY resendable row
+            // (Queued/Failed) at once, in FIFO order, instead of tapping each
+            // row's Retry. Shown ONLY when at least TWO rows are actually
+            // resendable: a single resendable row already has its own tap-to-retry,
+            // so a batch affordance there would be the #971/#987 double-affordance
+            // confusion. Rows still delivering (InFlight/Uploading) are not counted.
+            val resendableCount = items.count {
+                it.state == OutboundState.Queued || it.state == OutboundState.Failed
+            }
+            if (resendableCount >= 2) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clip(ComposerQueueButtonShape)
+                        .background(PocketShellColors.Accent, ComposerQueueButtonShape)
+                        .clickable(
+                            role = androidx.compose.ui.semantics.Role.Button,
+                            onClick = onResendAll,
+                        )
+                        .padding(vertical = 10.dp)
+                        .testTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Resend all ($resendableCount)",
+                        color = PocketShellColors.OnAccent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .height(1.dp)
+                        .background(PocketShellColors.BorderSoft),
+                )
+            }
             items.forEach { item ->
                 OutboundQueueRow(
                     item = item,
@@ -3512,6 +3614,9 @@ internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle
 internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
 internal const val COMPOSER_OUTBOUND_QUEUE_BANNER_TAG = "prompt-composer-outbound-queue"
 internal const val COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG = "prompt-composer-outbound-queue-toggle"
+// Issue #1308: batch "Resend all" button, shown in the expanded queue banner
+// only when >= 2 rows are resendable.
+internal const val COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG = "prompt-composer-outbound-queue-resend-all"
 
 /**
  * Issue #688: status text shown on a pending row while its retry round-trip

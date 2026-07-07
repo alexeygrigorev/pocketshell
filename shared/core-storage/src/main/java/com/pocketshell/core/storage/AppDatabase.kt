@@ -49,9 +49,12 @@ val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
  * daemon running/enabled result so the host setup cache cannot route on CLI
  * readiness alone.
  *
- * `exportSchema = false` is historical. Issue #386 starts the preservation
- * path with checked-in migration code; a follow-up should enable exported
- * schemas so every future migration has a generated schema artifact too.
+ * `exportSchema = true` (Room writes the versioned schema JSON to the
+ * `room.schemaLocation` dir configured in this module's `build.gradle.kts`).
+ * The exported artifact is the durable record of each shipped schema, so a
+ * future migration gap (a `version` bump with no matching `MIGRATION_*`) is
+ * caught by a schema diff / migration test at build time instead of on the
+ * maintainer's device.
  */
 @Database(
     entities = [
@@ -68,7 +71,7 @@ val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
         CommandTemplateEntity::class,
     ],
     version = APP_DATABASE_SCHEMA_VERSION,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun hostDao(): HostDao

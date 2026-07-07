@@ -136,6 +136,103 @@ class UsageRemoteSourceTest {
         assertTrue(record.lastError?.contains("HTTP Error 401", ignoreCase = true) == false)
     }
 
+    // -- issue #1223: exit-0 per-record resilience (#847 version-skew class) --
+
+    @Test
+    fun fetchUsage_exit0PartialDrift_stillRendersHealthyProvider() = runTest {
+        // An old/mismatched host CLI emits provider A fine but provider B
+        // drifted (short_term is not an object). Before #1223 the whole usage
+        // panel showed Failed/blank; the healthy provider must now render.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = """{"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                        "\n" +
+                        """{"status":"ok","short_term":"drifted","long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(result is UsageFetchResult.Success)
+        val record = (result as UsageFetchResult.Success).records.single()
+        assertEquals("codex", record.provider)
+        assertEquals(UsageStatus.Ok, record.status)
+    }
+
+    @Test
+    fun fetchUsage_exit0NonJsonPreamble_stillRendersAllProviders() = runTest {
+        // A wrapper prepends a non-JSON MOTD/deprecation line before the valid
+        // NDJSON. All valid providers must still render.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = "WARNING: pocketshell 0.3.1 is deprecated\n" +
+                        """{"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                        "\n" +
+                        """{"provider":"claude","status":"ok","short_term":{"percent_remaining":41.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(result is UsageFetchResult.Success)
+        val records = (result as UsageFetchResult.Success).records
+        assertEquals(listOf("codex", "claude"), records.map { it.provider })
+    }
+
+    @Test
+    fun fetchUsage_exit0AllRecordsUnparseable_reportsFailure() = runTest {
+        // Zero parseable records must still surface a visible failure — never a
+        // silent empty-success.
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    stdout = "this is not json at all\nalso not json {broken",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue("zero-parse must not be a silent Success", result is UsageFetchResult.Failed)
+    }
+
+    // -- issue #1220: pocketshell present but `quse` backend missing ---------
+
+    @Test
+    fun fetchUsage_exit0QuseMissingText_surfacesPocketshellOwnError_notParserInternals() = runTest {
+        // Issue #1220 (reproduce-first): pocketshell IS installed and runs
+        // (exit 0), but `pocketshell usage --json` prints pocketshell's OWN
+        // dependency error — `quse` missing — as PLAIN TEXT on stdout instead
+        // of usage JSON. The panel must surface pocketshell's real message +
+        // install hint. It must NOT be classified as ToolMissing ("pocketshell
+        // not installed"), and it must NOT leak the JSON parser internals.
+        val quseMissing =
+            "pocketshell: `quse` is not installed on this host. " +
+                "Install it via `uv tool install quse` or `pipx install quse` and re-run."
+        val session = FakeSshSession(
+            mapOf(defaultFetchCommand to ExecResult(quseMissing, "", 0)),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue("quse-missing must NOT read as pocketshell missing", result !is UsageFetchResult.ToolMissing)
+        assertTrue("zero-parse pocketshell error must be a visible Failed, got $result", result is UsageFetchResult.Failed)
+        val reason = (result as UsageFetchResult.Failed).reason
+        assertTrue("must surface pocketshell's own quse dependency error, got: $reason", reason.contains("quse"))
+        assertTrue("must keep pocketshell's install hint, got: $reason", reason.contains("Install", ignoreCase = true))
+        assertTrue("must not leak the JSON parser internals, got: $reason", !reason.contains("invalid usage JSON", ignoreCase = true))
+    }
+
     @Test
     fun fetchUsage_nonzeroNonJsonStillReportsFailure() = runTest {
         val session = FakeSshSession(

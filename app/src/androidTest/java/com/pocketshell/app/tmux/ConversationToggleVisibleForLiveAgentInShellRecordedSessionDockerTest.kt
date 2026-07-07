@@ -355,6 +355,105 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         Unit
     } }
 
+    /**
+     * Issue #1158 (REOPENED — maintainer's EXACT dogfood path, 2026-07-01) — an
+     * agent launched DIRECTLY inside an existing shell tmux session (NOT via the
+     * `pocketshell agent` wrapper). Result on-device: the Conversation tab is NEVER
+     * shown — the user is stranded on the raw (often black) Terminal for the whole
+     * session. Root cause: the session recorded `@ps_agent_kind=shell` (so
+     * `recordedAgentKind == false`), the confirmed-shell verdict is never cleared,
+     * and live detection never binds for the node-wrapped-Claude / Codex-`/proc` /
+     * Z.AI fleet — so every prior tab signal is false and the toggle is gone for the
+     * session's life.
+     *
+     * The durable fix is the detection-INDEPENDENT alt-buffer positive signal: a
+     * full-screen agent TUI holds the ALTERNATE screen buffer, which the tmux
+     * ViewModel latches STICKY and OR's into `showsConversationTab`.
+     *
+     * ### #780 synthetic-state model (no self-skip — hard-fail)
+     *
+     * The tmux `-CC` control path does not reliably mirror a REMOTE pane's alternate
+     * screen buffer into the CLIENT emulator (the capture-pane seed replays the
+     * screen TEXT onto the main buffer, and an idle full-screen agent emits no fresh
+     * `%output` carrying the `?1049h` toggle), so a connected journey cannot enter
+     * the on-device alt-buffer state on its own. Per D33/#780 the failing state is
+     * injected SYNTHETICALLY on the REAL connected pane
+     * ([TmuxSessionViewModel.forceActivePaneAltBufferForTest]) — the ONLY synthetic
+     * part; the recorded-shell verdict, the detection-never-binds state, the real
+     * production tab gate and the real chrome rendering are all live. It HARD-fails
+     * (no `assumeTrue`) so CI carries real protection.
+     *
+     * RED on base: with no `|| altBufferAgent` term the toggle stays absent even
+     * with the alt-buffer injected (the maintainer's symptom). GREEN with the fix:
+     * the latch shows the toggle, and it STAYS after the buffer leaves alt-mode
+     * (sticky).
+     */
+    @Test
+    fun conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession() { runBlocking {
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
+        val sessionName = requireNotNull(seededSessionName) { "seed-before-launch session missing" }
+
+        attachToSeededSession(hostRowTag, sessionName)
+        waitForTerminalSessionAttached()
+        waitForVisibleTerminalText("issue962-plain-ready", VISIBLE_TIMEOUT_MS) {
+            "issue962-plain-ready" in it
+        }
+        stamp("altbuf_shell_attached session=$sessionName")
+
+        // Settle so the recorded `@ps_agent_kind=shell` verdict applies and live
+        // detection has a generous window to (not) fire — the exact base state where
+        // the toggle is absent for the maintainer.
+        val vm = currentViewModel()
+        val verdictObserved = waitForConfirmedShellVerdict(vm)
+        stamp("altbuf_confirmed_shell_verdict_observed=$verdictObserved")
+        SystemClock.sleep(SHELL_NO_TOGGLE_SETTLE_MS)
+        val detectionBound = vm.agentConversations.value.values.any { it.detection != null }
+        stamp("altbuf_detection_bound=$detectionBound")
+
+        // Precondition (the maintainer's symptom, base state): NO Conversation toggle
+        // — the recorded shell + no detection leaves only the "Terminal" pill.
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertDoesNotExist()
+        captureFullFrame("issue1158-altbuf-before-no-toggle")
+        stamp("altbuf_no_toggle_before_ok")
+
+        // The agent goes full-screen: the pane's emulator switches to the ALTERNATE
+        // screen buffer. Injected synthetically on the REAL connected pane (#780) —
+        // the on-device signal a full-screen Claude/Codex TUI produces.
+        compose.activityRule.scenario.onActivity { vm.forceActivePaneAltBufferForTest(true) }
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            vm.altBufferAgentPaneIds.value.isNotEmpty()
+        }
+        stamp("altbuf_latched=${vm.altBufferAgentPaneIds.value.isNotEmpty()}")
+
+        // DURABLE UI (load-bearing): the Terminal/Conversation toggle now appears,
+        // driven purely by the alt-buffer signal (detection is still null). RED on
+        // base (no `|| altBufferAgent`), GREEN with the fix.
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertExists()
+        compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
+            compose.onAllNodesWithText("Conversation", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Conversation", useUnmergedTree = true).assertExists()
+        captureFullFrame("issue1158-altbuf-toggle-appears")
+        stamp("altbuf_toggle_appears_ok")
+
+        // STICKY: the agent leaves the alt-buffer (exits its full-screen view /
+        // detection stays null). The toggle MUST remain for the session's life.
+        compose.activityRule.scenario.onActivity { vm.forceActivePaneAltBufferForTest(false) }
+        SystemClock.sleep(SHELL_NO_TOGGLE_SETTLE_MS)
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Conversation", useUnmergedTree = true).assertExists()
+        captureFullFrame("issue1158-altbuf-toggle-sticky")
+        stamp("altbuf_toggle_sticky_ok")
+        Unit
+    } }
+
     // -------------------------------------------------------------- seed-before-launch
 
     /**
@@ -375,6 +474,8 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
                 seedPlainShellSession(key)
             "conversationTogglePresentForRecordedCodexAgentWhenSourceBindingFails" ->
                 seedRecordedCodexNoTranscriptSession(key)
+            "conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession" ->
+                seedPlainShellSession(key)
             else -> error("unexpected test method $methodName")
         }
         seededSessionName = sessionName

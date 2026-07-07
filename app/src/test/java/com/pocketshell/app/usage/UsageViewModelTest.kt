@@ -754,6 +754,97 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun sshHostUsageFetcher_pocketshellPresentButQuseMissing_surfacesQuseError_notToolMissing() = runTest {
+        // Issue #1220 (reproduce-first, real path): pocketshell IS installed
+        // (the PATH-robust wrapped `pocketshell usage --json` resolves and runs,
+        // exit 0), but pocketshell prints its OWN dependency error — `quse`
+        // missing — as PLAIN TEXT on stdout at exit 0. The detail panel must
+        // surface that real dependency error, NOT conflate it with "pocketshell
+        // not installed" (ToolMissing is exit-127 only).
+        val keyFile = Files.createTempFile("pocketshell-quse", ".key").toFile()
+        keyFile.deleteOnExit()
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val host = HostEntity(
+            name = "hetzner",
+            hostname = "quse.example",
+            username = "u",
+            keyId = keyId,
+        )
+        val wrappedUsage = com.pocketshell.app.pocketshell.PocketshellCommand.wrap(
+            UsageRemoteSource.DEFAULT_USAGE_ARGS,
+        )
+        val quseMissing =
+            "pocketshell: `quse` is not installed on this host. " +
+                "Install it via `uv tool install quse` or `pipx install quse` and re-run."
+        val session = FakeSshSession(
+            canned = mapOf(wrappedUsage to ExecResult(stdout = quseMissing, stderr = "", exitCode = 0)),
+        )
+        val fetcher = SshHostUsageFetcher(
+            sshKeyDao = db.sshKeyDao(),
+            remoteSource = UsageRemoteSource(),
+            sshLeaseManager = leaseManagerFor(CountingLeaseConnector(session), this),
+        )
+
+        val result = fetcher.fetch(host)
+
+        assertTrue(
+            "quse-missing must NOT be classified as pocketshell missing, got $result",
+            result is HostUsageFetch.Failed,
+        )
+        val reason = (result as HostUsageFetch.Failed).reason
+        assertTrue("must surface pocketshell's own quse dependency error, got: $reason", reason.contains("quse"))
+        assertTrue("must keep pocketshell's install hint, got: $reason", reason.contains("Install", ignoreCase = true))
+        assertFalse("must not leak the JSON parser internals, got: $reason", reason.contains("invalid usage JSON", ignoreCase = true))
+    }
+
+    @Test
+    fun refresh_quseMissingHostRendersDependencyError_absentHostRendersNotInstalled() = runTest {
+        // Issue #1220: the two states must render DIFFERENTLY on the panel:
+        //  - pocketshell present but `pocketshell usage` errors (quse missing) →
+        //    a failed panel carrying pocketshell's own message, NOT the
+        //    "pocketshell not installed" empty state.
+        //  - pocketshell genuinely absent (exit 127 → ToolMissing) → the
+        //    "pocketshell not installed" empty state (correct only here).
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        val quseHostId = db.hostDao().insert(
+            HostEntity(name = "hetzner", hostname = "quse.example", username = "u", keyId = keyId),
+        )
+        val absentHostId = db.hostDao().insert(
+            HostEntity(name = "bare", hostname = "absent.example", username = "u", keyId = keyId),
+        )
+        val quseMessage =
+            "`quse` is not installed on this host. " +
+                "Install it via `uv tool install quse` or `pipx install quse` and re-run."
+        val fetcher = FakeFetcher(
+            scripts = mapOf(
+                "quse.example" to HostUsageFetch.Failed(quseMessage),
+                "absent.example" to HostUsageFetch.ToolMissing,
+            ),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        // quse host → the failed panel with the real dependency error.
+        assertEquals(listOf(quseHostId), state.failedHosts.map { it.hostId })
+        assertTrue(
+            "quse dependency error must be surfaced, got: ${state.failedHosts.single().reason}",
+            state.failedHosts.single().reason.contains("quse"),
+        )
+        assertFalse(
+            "quse-missing host must NOT be listed as pocketshell-not-installed",
+            state.missingToolHosts.any { it.hostId == quseHostId },
+        )
+        // absent host → the "pocketshell not installed" empty state, correct here.
+        assertEquals(listOf(absentHostId), state.missingToolHosts.map { it.hostId })
+    }
+
+    @Test
     fun sshHostUsageFetcher_nonJsonUsageFailureIsReturnedForUi() = runTest {
         val keyFile = Files.createTempFile("pocketshell-usage-failed", ".key").toFile()
         keyFile.deleteOnExit()

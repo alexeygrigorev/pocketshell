@@ -279,6 +279,7 @@ class SessionConnectionServiceE2eTest {
             CommandResponse(number = 0L, output = emptyList(), isError = false)
 
         override fun outputFor(paneId: String): Flow<ControlEvent.Output> = emptyFlow()
+        override fun drainPaneOutputBacklog(paneId: String): Int = 0
 
         override fun close() {
             markDisconnected()

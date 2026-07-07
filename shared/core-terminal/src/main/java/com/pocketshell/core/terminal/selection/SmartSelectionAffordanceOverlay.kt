@@ -25,202 +25,16 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 
 /**
- * Compose overlay that paints lightweight affordances for smart-selection
- * tokens currently visible on the embedded [com.termux.view.TerminalView].
- *
- * The overlay is purely visual. It does not install pointer handlers and it
- * does not change which tokens are tappable; URL taps still route through the
- * vendored View's gesture pipeline, and path/error taps still route through
- * [SelectionOverlay] when the host supplies a smart-selection callback.
- *
- * The treatment deliberately stays close to the terminal renderer: URLs keep
- * the existing 2 px cyan underline, while paths and errors get quieter
- * 1 px hairlines. There are no filled backgrounds, chips, or red error
- * chrome, so dense terminal output remains readable.
- *
- * ## Coordinate math
- *
- * The overlay reads the renderer's `mFontWidth` and `mFontLineSpacing` from
- * the supplied [TerminalView] and converts grid (col, row) ranges to pixel
- * rectangles using the same arithmetic the renderer does:
- *
- *   x_left  = col_start * mFontWidth
- *   x_right = col_end_exclusive * mFontWidth
- *   y_top   = (external_row - mTopRow) * mFontLineSpacing
- *   y_bot   = y_top + mFontLineSpacing
- *
- * `mTopRow` is the view's current scroll offset (0 when stationary,
- * negative when scrolled into history). The overlay only paints rows whose
- * `y_top` and `y_bot` fall inside the canvas height, so URLs that scrolled
- * partially off-screen are clipped naturally.
- *
- * ## Refresh cadence
- *
- * The overlay does not poll continuously. It re-scans the visible viewport
- * for matches every time the supplied [renderRequests] flow emits — the same
- * signal that drives [TerminalView.onScreenUpdated] — and whenever
- * [viewportChangeKey] changes due to scroll or terminal resize. That keeps
- * affordance regions in sync with both rendered text and viewport-only
- * movement without spinning a render-rate animation loop.
- *
- * Why no dependency on `androidx.compose.foundation`: this module stays on
- * `androidx.compose.ui` only (`compose.foundation` is not a declared
- * dependency in `build.gradle.kts`) so the overlay uses [Layout] +
- * [Modifier.drawBehind] instead of `foundation.Canvas`. The visual result is
- * identical — a `DrawScope` either way — but the dependency footprint stays
- * exactly the same as [SelectionOverlay].
- *
- * @param view the embedded [TerminalView]. May be null before the first
- *   layout pass; the overlay composes an inert sized box in that case.
- * @param renderRequests the surface's redraw signal — typically
- *   `state.renderRequests`. Each emission triggers a fresh match scan.
- * @param viewportChangeKey any value that changes when the visible grid
- *   changes without a render request, such as scrollback position or
- *   emulator size. Each key change triggers an immediate fresh URL scan.
- * @param matcher smart-selection matcher used only to derive visible
- *   affordance spans.
- * @param onMatchesChanged invoked with the latest visible match snapshot.
- *   Hosts may reuse the same snapshot for invisible smart-selection
- *   hit-testing; receiving it here does not make this overlay interactive.
- * @param modifier standard Compose modifier; the overlay sizes itself to the
- *   modifier's measured bounds.
- */
-@Composable
-fun SmartSelectionAffordanceOverlay(
-    view: TerminalView?,
-    renderRequests: Flow<Unit>,
-    viewportChangeKey: Any? = Unit,
-    matcher: TerminalMatcher = DefaultTerminalMatcher(),
-    onMatchesChanged: (List<TerminalMatchRegion>) -> Unit = {},
-    modifier: Modifier = Modifier,
-) {
-    var regions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
-    val latestOnMatchesChanged by rememberUpdatedState(onMatchesChanged)
-
-    LaunchedEffect(view, renderRequests, viewportChangeKey, matcher) {
-        if (view == null) {
-            latestOnMatchesChanged(emptyList())
-            return@LaunchedEffect
-        }
-        // Initial scan so the host gets the match list before the first
-        // post-render signal arrives.
-        val initial = findVisibleTerminalMatches(view, matcher)
-        regions = initial
-        latestOnMatchesChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleTerminalMatches(view, matcher)
-            // Only churn the host when the list shape changes; equal lists
-            // are no-ops both visually and for tap routing.
-            if (fresh != regions) {
-                regions = fresh
-                latestOnMatchesChanged(fresh)
-            }
-        }
-    }
-
-    Layout(
-        content = {},
-        modifier = modifier.drawBehind {
-            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
-                drawRect(
-                    color = segment.color,
-                    topLeft = Offset(segment.left, segment.top),
-                    size = Size(
-                        width = segment.right - segment.left,
-                        height = segment.thicknessPx,
-                    ),
-                )
-            }
-        },
-    ) { _, constraints ->
-        // Inert draw-only box sized to the terminal pane (drawBehind needs
-        // non-zero bounds to paint) — but robust to the pager/lookahead's
-        // intermittent UNBOUNDED-height measure pass (the v0.4.17
-        // `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
-        layoutOverlayBounded(constraints)
-    }
-}
-
-/**
- * Issue #500: paints a quiet path hairline under every tappable file path the
- * [findVisibleFilePaths] scanner reports on the visible viewport, and keeps the
- * host's [FilePathRegion] snapshot in sync for hit-testing. The actual tap
- * routing happens in the View's gesture pipeline via
- * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
- */
-@Composable
-public fun FilePathOverlay(
-    view: TerminalView?,
-    renderRequests: Flow<Unit>,
-    viewportChangeKey: Any? = Unit,
-    onFilePathsChanged: (List<FilePathRegion>) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var paths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
-    val latestOnPathsChanged by rememberUpdatedState(onFilePathsChanged)
-
-    LaunchedEffect(view, renderRequests, viewportChangeKey) {
-        if (view == null) {
-            latestOnPathsChanged(emptyList())
-            return@LaunchedEffect
-        }
-        val initial = findVisibleFilePaths(view)
-        paths = initial
-        latestOnPathsChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleFilePaths(view)
-            if (fresh != paths) {
-                paths = fresh
-                latestOnPathsChanged(fresh)
-            }
-        }
-    }
-
-    val regions = remember(paths) {
-        paths.map { region ->
-            TerminalMatchRegion(
-                match = TerminalMatch.Path(region.path),
-                row = region.row,
-                startCol = region.startCol,
-                endColExclusive = region.endColExclusive,
-            )
-        }
-    }
-
-    Layout(
-        content = {},
-        modifier = modifier.drawBehind {
-            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
-                drawRect(
-                    color = segment.color,
-                    topLeft = Offset(segment.left, segment.top),
-                    size = Size(
-                        width = segment.right - segment.left,
-                        height = segment.thicknessPx,
-                    ),
-                )
-            }
-        },
-    ) { _, constraints ->
-        // Issue: a draw-only overlay sized to the pane — but robust to the
-        // pager/lookahead's intermittent UNBOUNDED-height measure pass (the
-        // v0.4.17 `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
-        layoutOverlayBounded(constraints)
-    }
-}
-
-/**
  * Issue #871: tappable file paths AND URLs on an interactive-agent pane
  * (Codex/Claude), WITHOUT the per-frame main-thread regex cost that caused the
  * #803/#866/#796 ANR.
  *
- * ## Why a dedicated overlay instead of re-enabling [FilePathOverlay] + the URL scan
+ * ## Why a dedicated overlay instead of the per-frame on-main scan
  *
- * The #796-REOPENED gate turned ALL four per-frame, full-viewport, **on-main**
- * affordance scanners OFF for an agent pane to kill the ANR. Just flipping that
- * gate back on would reintroduce the exact per-frame main-thread scan storm.
- * This overlay restores the two affordances the maintainer actually wants on an
- * agent pane (file path + URL) by splitting the work:
+ * The #796-REOPENED gate turned ALL per-frame, full-viewport, **on-main**
+ * affordance scanners OFF for an agent pane to kill the ANR. This overlay
+ * restores the two affordances the maintainer actually wants on an agent pane
+ * (file path + URL) by splitting the work:
  *
  * 1. **On the main thread, debounced on viewport-settle** (NOT every frame): read
  *    the visible rows into a thread-safe [ViewportRowsSnapshot] via
@@ -236,7 +50,9 @@ public fun FilePathOverlay(
  *
  * The heavier/less-valuable smart-selection match + engine-command scanners stay
  * OFF for an agent pane (the conversation view, #818, is the richer agent
- * surface); only path + URL are restored here, which is the scope of #871.
+ * surface); only path + URL are restored here, which is the scope of #871. Issue
+ * #1233 applies the SAME single-snapshot + off-main split to the SHELL-pane path
+ * (all four scanners) — see [ShellPaneAffordanceOverlay].
  *
  * @param onFilePathsChanged latest visible file-path snapshot for hit-testing.
  * @param onUrlsChanged latest visible URL snapshot for hit-testing.
@@ -269,41 +85,52 @@ public fun AgentPaneAffordanceOverlay(
         // The Main dispatcher. The cheap viewport extraction and the Compose-state
         // publish MUST run on Main (the live emulator is not thread-safe, and an
         // off-main snapshot-state write would not notify the recomposer reliably).
-        // Only the regex pass is moved OFF it onto [scanDispatcher]. We use an
-        // explicit [Dispatchers.Main] rather than the LaunchedEffect's own context
-        // because `conflate()` runs the collector on the upstream/producer
-        // dispatcher (here a background pool), so `coroutineContext` is NOT Main.
-        val mainDispatcher = Dispatchers.Main
+        // Only the regex pass is moved OFF it onto [scanDispatcher].
+        //
+        // Issue #1260: drive the collect on the Handler-based
+        // [Dispatchers.Main.immediate], NOT the LaunchedEffect's default Compose
+        // `AndroidUiDispatcher.Main`. AndroidUiDispatcher batches its dispatch to
+        // Choreographer frames; during a `%output` burst on a non-invalidating
+        // surface those frames stop, so this collect stalls for the whole burst and
+        // the agent-pane file-path / URL affordance never populates (the #1260
+        // agent-pane regression, exposed by #1216's `renderRequests replay = 1`).
+        // The main-thread Handler dispatcher is not frame-gated, so the collect
+        // frame is serviced regardless. This is ALSO why `mainDispatcher` is
+        // Main.immediate: `conflate()` can run the collector off the LaunchedEffect
+        // context, so the extract/publish are explicitly pinned to the main thread.
+        val mainDispatcher = Dispatchers.Main.immediate
         // Each render-settle (or initial composition) triggers ONE off-main scan
         // of the latest snapshot. `conflate` drops intermediate emissions while a
         // scan is in flight, so a Codex `%output` burst never queues N scans — the
         // collector always re-extracts the freshest settled viewport, never a
         // backlog. `onStart { emit(Unit) }` runs the initial scan before the first
         // render signal arrives.
-        renderRequests.onStart { emit(Unit) }.conflate().collect {
-            // CHEAP, on Main: copy the live, non-thread-safe viewport into a
-            // plain-data snapshot.
-            val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
-            // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
-            // per-frame cost that caused the #803/#866 ANR; here it never touches
-            // the UI thread.
-            val (freshPaths, freshUrls) = withContext(scanDispatcher) {
-                val p = runCatching { filePathRegionsForRows(snapshot.rows, snapshot.columns) }
-                    .getOrDefault(emptyList())
-                val u = runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }
-                    .getOrDefault(emptyList())
-                p to u
-            }
-            // Publish the Compose-state diff back ON Main so the recomposer reliably
-            // picks it up (and the host's hit-test snapshot / hairline update).
-            withContext(mainDispatcher) {
-                if (freshPaths != paths) {
-                    paths = freshPaths
-                    latestOnPathsChanged(freshPaths)
+        withContext(mainDispatcher) {
+            renderRequests.onStart { emit(Unit) }.conflate().collect {
+                // CHEAP, on Main: copy the live, non-thread-safe viewport into a
+                // plain-data snapshot.
+                val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
+                // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
+                // per-frame cost that caused the #803/#866 ANR; here it never touches
+                // the UI thread.
+                val (freshPaths, freshUrls) = withContext(scanDispatcher) {
+                    val p = runCatching { filePathRegionsForRows(snapshot.rows, snapshot.columns) }
+                        .getOrDefault(emptyList())
+                    val u = runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }
+                        .getOrDefault(emptyList())
+                    p to u
                 }
-                if (freshUrls != urls) {
-                    urls = freshUrls
-                    latestOnUrlsChanged(freshUrls)
+                // Publish the Compose-state diff back ON Main so the recomposer reliably
+                // picks it up (and the host's hit-test snapshot / hairline update).
+                withContext(mainDispatcher) {
+                    if (freshPaths != paths) {
+                        paths = freshPaths
+                        latestOnPathsChanged(freshPaths)
+                    }
+                    if (freshUrls != urls) {
+                        urls = freshUrls
+                        latestOnUrlsChanged(freshUrls)
+                    }
                 }
             }
         }
@@ -357,92 +184,18 @@ public fun AgentPaneAffordanceOverlay(
 }
 
 /**
- * Issue #770: paints a cyan underline under every tappable engine command the
- * [findVisibleEngineCommands] scanner reports on the visible viewport, and keeps
- * the host's [EngineCommandRegion] snapshot in sync for hit-testing. Like
- * [FilePathOverlay], the actual tap routing happens in the View's gesture
- * pipeline via
- * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
- *
- * [knownCommands] is the set of valid command strings for the pane's detected
- * engine, supplied by the app from `AgentCommandCatalog`; an empty set scans
- * nothing.
- */
-@Composable
-public fun EngineCommandOverlay(
-    view: TerminalView?,
-    renderRequests: Flow<Unit>,
-    knownCommands: Set<String>,
-    viewportChangeKey: Any? = Unit,
-    onEngineCommandsChanged: (List<EngineCommandRegion>) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var commands by remember { mutableStateOf<List<EngineCommandRegion>>(emptyList()) }
-    val latestOnCommandsChanged by rememberUpdatedState(onEngineCommandsChanged)
-
-    LaunchedEffect(view, renderRequests, viewportChangeKey, knownCommands) {
-        if (view == null) {
-            latestOnCommandsChanged(emptyList())
-            return@LaunchedEffect
-        }
-        val initial = findVisibleEngineCommands(view, knownCommands)
-        commands = initial
-        latestOnCommandsChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleEngineCommands(view, knownCommands)
-            if (fresh != commands) {
-                commands = fresh
-                latestOnCommandsChanged(fresh)
-            }
-        }
-    }
-
-    val regions = remember(commands) {
-        commands.map { region ->
-            TerminalMatchRegion(
-                match = TerminalMatch.EngineCommand(region.command),
-                row = region.row,
-                startCol = region.startCol,
-                endColExclusive = region.endColExclusive,
-            )
-        }
-    }
-
-    Layout(
-        content = {},
-        modifier = modifier.drawBehind {
-            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
-                drawRect(
-                    color = segment.color,
-                    topLeft = Offset(segment.left, segment.top),
-                    size = Size(
-                        width = segment.right - segment.left,
-                        height = segment.thicknessPx,
-                    ),
-                )
-            }
-        },
-    ) { _, constraints ->
-        // Issue: a draw-only overlay sized to the pane — but robust to the
-        // pager/lookahead's intermittent UNBOUNDED-height measure pass (the
-        // v0.4.17 `Size(W x Int.MAX_VALUE)` crash). See [layoutOverlayBounded].
-        layoutOverlayBounded(constraints)
-    }
-}
-
-/**
  * Lay out a draw-only terminal affordance overlay at the available size — but
  * NEVER at an unbounded dimension.
  *
- * These overlays ([SmartSelectionAffordanceOverlay], [FilePathOverlay],
- * [AgentPaneAffordanceOverlay], [EngineCommandOverlay]) are inert `drawBehind`
- * boxes that just need to fill the terminal pane so their hairlines paint. Each
- * previously called `layout(maxWidth.coerceAtLeast(0), maxHeight.coerceAtLeast(0))`,
- * which is fine under a normal bounded measure — but the overlay sits inside the
- * terminal pane, which is itself inside a [androidx.compose.foundation.pager.Pager]
+ * These overlays ([ShellPaneAffordanceOverlay], [AgentPaneAffordanceOverlay]) are
+ * inert `drawBehind` boxes that just need to fill the terminal pane so their
+ * hairlines paint. Each previously called
+ * `layout(maxWidth.coerceAtLeast(0), maxHeight.coerceAtLeast(0))`, which is fine
+ * under a normal bounded measure — but the overlay sits inside the terminal pane,
+ * which is itself inside a [androidx.compose.foundation.pager.Pager]
  * (`TmuxTerminalPager`). The pager / lookahead runs intermittent measure passes
  * with an **unbounded** (`Constraints.Infinity`, i.e. `Int.MAX_VALUE`) maximum
- * dimension. `coerceAtLeast(0)` leaves that `Int.MAX_VALUE` intact, so
+ * dimension. `coerceAtLeast(0)` left that `Int.MAX_VALUE` intact, so
  * `layout(width, Int.MAX_VALUE)` threw
  * `IllegalStateException: Size(<w> x 2147483647) is out of range. Each dimension
  * must be between 0 and 16777215.` — the v0.4.17 RELEASE-BLOCKING crash that
@@ -456,9 +209,9 @@ public fun EngineCommandOverlay(
  *
  * Issue #966/#967: the helper itself now lives in [layoutTerminalOverlayBounded]
  * (in `TerminalOverlayMeasure.kt`) so EVERY terminal measure site can share the
- * unbounded-safe guard, not just the four affordance overlays here.
+ * unbounded-safe guard, not just the affordance overlays here.
  */
-private fun MeasureScope.layoutOverlayBounded(constraints: Constraints): MeasureResult =
+internal fun MeasureScope.layoutOverlayBounded(constraints: Constraints): MeasureResult =
     layoutTerminalOverlayBounded(constraints)
 
 internal data class SmartSelectionAffordanceSegment(

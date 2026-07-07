@@ -247,6 +247,26 @@ class HostListViewModel internal constructor(
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
+    /**
+     * Issue #1241: the landing app-bar glance pill. The most-constraining
+     * provider percent across every cached host, or null when there is no
+     * usable reading yet (the pill is then hidden). Reads the SAME cached
+     * [UsageScheduler.snapshots] the warning banners + per-card badges consult
+     * — NO new fetch cadence (D21-compliant). The warn-threshold gate is read
+     * from settings so the pill's severity tint stays in sync with the other
+     * in-app usage surfaces.
+     */
+    val usageGlancePill: StateFlow<com.pocketshell.app.usage.UsageGlancePillState?> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        com.pocketshell.app.usage.usageGlancePillState(
+            snapshots = snapshots,
+            warnPercent = settings.usageWarnThresholdPercent.toDouble(),
+        )
+    }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), null)
+
     // Issue #483 introduced a per-host usage summary chip (`usageSummaries`)
     // rendered under each host card; issue #506 dropped that chip because it
     // read as a cryptic floating row. Usage is reachable per-host via the
@@ -745,10 +765,14 @@ class HostListViewModel internal constructor(
                     auth = SshImportAuth.KeyReference(name = key.name),
                 ),
             )
-            val payload = QrChunkCodec.encode(importPayload).single()
+            // Issue #1230: encode returns one-or-more envelope chunks. Do NOT
+            // `.single()` — that throws (and crashes viewModelScope) the moment
+            // the payload needs more than one QR. Keep every part; the share
+            // dialog renders the multi-QR sequence and the scanner reassembles.
+            val payloads = QrChunkCodec.encode(importPayload)
             _sharePayload.value = HostSharePayload(
                 hostName = host.name,
-                payload = payload,
+                payloads = payloads,
             )
             _shareMessage.value = null
         }
@@ -1665,7 +1689,17 @@ class HostListViewModel internal constructor(
 
     data class HostSharePayload(
         val hostName: String,
-        val payload: String,
+        /**
+         * The one-or-more QR envelope strings the payload split into
+         * (issue #1230). [QrChunkCodec.encode] is explicitly multi-part
+         * (1500-byte chunks) — a host with long name/hostname/username or a
+         * long key name pushes the payload past one chunk. Rendering (and
+         * text-sharing) must iterate ALL parts; the old export did
+         * `encode(...).single()`, which threw and crashed the app for any
+         * multi-chunk payload. `part=1/N` order is preserved so the in-app
+         * scanner ([QrChunkAssembler]) can reassemble them.
+         */
+        val payloads: List<String>,
     )
 
     /**

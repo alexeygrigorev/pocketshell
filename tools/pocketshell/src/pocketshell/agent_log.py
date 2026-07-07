@@ -66,6 +66,16 @@ import click
 #          daemon consumer can tell "session id is wrong" apart from
 #          "binary is missing".
 _EXIT_LOG_NOT_FOUND = 66
+# Issue #1225/#1267: sentinel emitted in place of a transcript line that
+# exceeded ``--max-line-bytes``, immediately followed by the line's original
+# UTF-8 byte length. MUST stay byte-identical to ``LINE_TRUNCATION_SENTINEL``
+# in the Kotlin ``AgentConversationRepository`` so the app recognises it and
+# renders a VISIBLE truncation marker instead of feeding the (now absent)
+# oversized JSON to the parser. This is the Codex/OpenCode counterpart of the
+# ``awk`` per-line byte clamp #1225 applied to the Claude flat-JSONL tail: one
+# multi-megabyte rollout line (an inline base64 image, a huge ``tool_result``)
+# is degraded server-side so its bytes never cross SSH into the phone's heap.
+_LINE_TRUNCATION_SENTINEL = "@@PS_LINE_TRUNCATED@@"
 _DEFAULT_HANDOFF_MAX_TURNS = 30
 _DEFAULT_HANDOFF_MAX_CHARS = 20_000
 _HANDOFF_PROMPT = (
@@ -283,6 +293,28 @@ def _tail(lines: Iterable[str], n: Optional[int]) -> List[str]:
     if n is None or n <= 0 or n >= len(materialised):
         return list(materialised)
     return materialised[-n:]
+
+
+def _clamp_line_bytes(lines: List[str], max_line_bytes: Optional[int]) -> List[str]:
+    """Byte-bound each line, server-side, before it is emitted.
+
+    Any line whose UTF-8 byte length exceeds ``max_line_bytes`` is replaced by
+    ``<_LINE_TRUNCATION_SENTINEL><byte-length>`` so a single multi-megabyte
+    rollout line (an inline base64 image, a huge ``tool_result``) never crosses
+    SSH into the phone's heap — the Codex/OpenCode counterpart of the Claude
+    ``awk`` clamp (#1225/#1267). ``None`` or a non-positive cap disables the
+    clamp (the whole-file default); normal lines pass through verbatim.
+    """
+    if not max_line_bytes or max_line_bytes <= 0:
+        return lines
+    clamped: List[str] = []
+    for line in lines:
+        byte_length = len(line.encode("utf-8"))
+        if byte_length > max_line_bytes:
+            clamped.append(f"{_LINE_TRUNCATION_SENTINEL}{byte_length}")
+        else:
+            clamped.append(line)
+    return clamped
 
 
 def _parse_json_line(line: str) -> Optional[dict[str, Any]]:
@@ -631,6 +663,18 @@ def _emit_json(
     is_flag=True,
     help="Emit a JSON envelope (`{engine, session, path, count, lines}`) instead of raw JSONL.",
 )
+@click.option(
+    "--max-line-bytes",
+    "max_line_bytes",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Replace any single log line longer than N bytes with a compact "
+        "truncation marker, server-side, so one multi-megabyte line (a pasted "
+        "image / huge tool result) cannot balloon the read into the client's "
+        "heap. Default: no clamp (emit lines verbatim)."
+    ),
+)
 @click.pass_context
 def agent_log_command(
     ctx: click.Context,
@@ -639,13 +683,16 @@ def agent_log_command(
     cwd: Optional[str],
     tail_count: Optional[int],
     json_output: bool,
+    max_line_bytes: Optional[int],
 ) -> None:
     """Print an agent JSONL conversation log.
 
     Reads the canonical per-engine path for the given session and emits
     the JSONL content either as raw lines (default) or wrapped in a JSON
     envelope (``--json``). ``--tail N`` bounds the output to the last N
-    events.
+    events. ``--max-line-bytes N`` degrades any single line longer than N
+    bytes to a compact truncation marker so one pathological line cannot
+    balloon the read (#1225/#1267).
 
     Exit codes:
 
@@ -679,7 +726,7 @@ def agent_log_command(
         )
         ctx.exit(_EXIT_LOG_NOT_FOUND)
 
-    lines = _tail(_read_lines(path), tail_count)
+    lines = _clamp_line_bytes(_tail(_read_lines(path), tail_count), max_line_bytes)
     if json_output:
         _emit_json(engine_normalised, session, path, lines)
     else:

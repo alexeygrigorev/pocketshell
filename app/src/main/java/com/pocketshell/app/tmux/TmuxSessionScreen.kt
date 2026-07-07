@@ -68,6 +68,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -114,6 +115,7 @@ import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.ConversationToolArgsSection
 import com.pocketshell.app.conversation.ConversationToolCardExpansion
+import com.pocketshell.app.conversation.conversationTimelineVisibleEvents
 import com.pocketshell.app.conversation.filterConversationRows
 import com.pocketshell.app.conversation.isHiddenConversationTimelineRow
 import com.pocketshell.app.conversation.runningToolCallIds
@@ -781,7 +783,22 @@ public fun TmuxSessionScreen(
     // into a tmux pane (see #123 — the primary user route was completely
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
+    // Issue #585: when the composer is opened via the launcher's hold+swipe-up
+    // ENTRY gesture, it must open WITH recording already started + locked
+    // hands-free. A plain launcher tap opens the composer with NO recording. This
+    // flag carries that intent into the sheet; it is reset every time the sheet
+    // closes so the next plain-tap open never inherits a stale auto-record.
+    var micSheetAutoStartRecording by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+    // Issue #1207: when a TUI-only slash-command (/model, /config, a picker) is
+    // sent from the Conversation composer, the picker opens in the covered
+    // alt-screen Terminal and writes NOTHING to the transcript — so the
+    // Conversation surface can never show it. Instead of the misleading
+    // optimistic bubble + silent nothing, we raise an inline notice holding the
+    // command text with a one-tap "Open in Terminal" action. Null when no notice
+    // is up. Reset whenever the send target identity changes so a stale notice
+    // never bleeds into another session on a switch/recreation.
+    var tuiCommandNotice by remember(targetSessionId.value) { mutableStateOf<String?>(null) }
     var showCardFeedSheet by remember(activeSessionCardsTargetKey) { mutableStateOf(false) }
     val sessionCardInteractions = remember(viewModel) {
         object : SessionCardInteractions {
@@ -807,6 +824,10 @@ public fun TmuxSessionScreen(
     LaunchedEffect(initialComposerAttachments) {
         if (initialComposerAttachments.isNotEmpty()) {
             initialComposerAttachments.forEach { promptComposerViewModel.seedAttachment(it) }
+            // Issue #585: a share/attach intent opens the composer to edit + Send,
+            // never to auto-record — keep the flag false so no stale swipe-open
+            // intent bleeds into this entry.
+            micSheetAutoStartRecording = false
             showMicSheet = true
             onInitialComposerAttachmentsConsumed()
         }
@@ -820,6 +841,9 @@ public fun TmuxSessionScreen(
     LaunchedEffect(initialComposerPrompt) {
         if (initialComposerPrompt.isNotBlank()) {
             promptComposerViewModel.seedDraftPrompt(initialComposerPrompt)
+            // Issue #585: a routed review-prompt opens the composer to edit + Send,
+            // not to auto-record.
+            micSheetAutoStartRecording = false
             showMicSheet = true
             onInitialComposerPromptConsumed()
         }
@@ -976,7 +1000,30 @@ public fun TmuxSessionScreen(
                 false
             } else when (target.route) {
                 OutboundRoute.AgentConversation ->
-                    viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
+                    // Issue #1207: a TUI-only slash-command (/model, /config, any
+                    // picker) writes NOTHING to the transcript — it drives an
+                    // alt-screen picker in the covered Terminal pane. Echoing an
+                    // optimistic "/model" user bubble (the old `sendToAgentPaneResult`
+                    // path) is actively misleading: the bubble sits there as if a
+                    // normal turn ran while the picker is invisible on the
+                    // Conversation surface by construction. So for a slash-command we
+                    // send the keystrokes to the pane WITHOUT the optimistic echo (the
+                    // same raw text+Enter delivery a confirmed agent uses on the
+                    // Terminal tab) and raise the inline "Open in Terminal" notice.
+                    when (tmuxAgentConversationSend(request.text)) {
+                        TmuxAgentConversationSend.TuiCommandNoEcho -> {
+                            val ok = viewModel.writeInputToPaneResult(
+                                paneId,
+                                (request.text.trimEnd('\n') + "\r").toByteArray(Charsets.UTF_8),
+                            ).isSuccess
+                            if (ok) {
+                                tuiCommandNotice = request.text.trim()
+                            }
+                            ok
+                        }
+                        TmuxAgentConversationSend.Echo ->
+                            viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
+                    }
                 OutboundRoute.AgentPayload ->
                     tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
                         viewModel.sendAgentPayloadToPaneResult(
@@ -995,6 +1042,7 @@ public fun TmuxSessionScreen(
             }
             if (sent) {
                 showMicSheet = false
+                micSheetAutoStartRecording = false
             }
             sent
         }
@@ -1002,7 +1050,10 @@ public fun TmuxSessionScreen(
     PromptComposerSendDispatcher(
         viewModel = promptComposerViewModel,
         onSend = composerSendHandler,
-        onDelivered = { showMicSheet = false },
+        onDelivered = {
+            showMicSheet = false
+            micSheetAutoStartRecording = false
+        },
     )
 
     // Issue #167: intercept system-back so the user returns to the host
@@ -1034,7 +1085,10 @@ public fun TmuxSessionScreen(
             showSessionDrawer = false
             sessionPickerViewModel.dismiss()
         },
-        onDismissMicSheet = { showMicSheet = false },
+        onDismissMicSheet = {
+            showMicSheet = false
+            micSheetAutoStartRecording = false
+        },
         onDismissSnippetPicker = { showSnippetPicker = false },
         onDismissCardFeedSheet = { showCardFeedSheet = false },
         onBack = onBack,
@@ -1106,8 +1160,18 @@ public fun TmuxSessionScreen(
     // user is looking at once promotion makes it active — not a no-op.
     val focusedPaneId = surfacePane?.paneId
     LaunchedEffect(inlineDictationViewModel, dictationMode, focusedPaneId) {
+        // Issue #1226: do NOT drain the durable delivery channel while there
+        // is no pane to receive the text. The old code collected the flow even
+        // when `focusedPaneId` was null and then `return@collect`-discarded the
+        // value — so a transcript that resolved during a brief drop/reconnect
+        // (pane flipped to null mid Whisper round-trip) was pulled out of the
+        // channel and thrown away, silently losing the user's command. By
+        // returning early here we leave the transcript buffered in the
+        // ViewModel's channel; when the session re-attaches and the pane
+        // re-keys to a live id, this effect re-runs and delivers the buffered
+        // transcript into the pane the user is now looking at.
+        val paneId = focusedPaneId ?: return@LaunchedEffect
         inlineDictationViewModel.transcriptions.collect { text ->
-            val paneId = focusedPaneId ?: return@collect
             when (dictationMode) {
                 InlineDictationViewModel.DictationMode.Prompt -> {
                     if (text.isNotEmpty()) {
@@ -1533,22 +1597,24 @@ public fun TmuxSessionScreen(
             // flush but the resulting [TmuxSessionTabState] is structurally equal,
             // so the body is not invalidated.
             // Issue #1158: the active session's RECORDED agent kind
-            // (`@ps_agent_kind`, collected above at [currentSessionRecordedKind])
-            // projected to a stable boolean so it can force the Conversation tab
-            // present for a recorded agent even when live detection /
-            // transcript-source binding never bound. Independent of the
-            // per-pane `presumedAgent` gate so a recorded Codex / Z.AI-Claude
-            // session shows the toggle regardless of the fragile binding.
-            val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
-            val tabState by remember(surfaceConversationPaneId, presumedAgent, recordedAgentKind) {
-                derivedStateOf {
-                    tmuxSessionTabState(
-                        surfaceConversationPaneId?.let { agentConversationsState.value[it] },
-                        presumedAgent,
-                        recordedAgentKind,
-                    )
-                }
-            }
+            // (`@ps_agent_kind`) AND the sticky alt-buffer agent signal are both
+            // folded into [rememberTmuxSessionTabState], an extracted @Composable,
+            // so the `recordedAgentKind` projection, the `altBufferAgentPaneIds`
+            // collectAsState, the `altBufferAgent` derivation and the
+            // `derivedStateOf` remember all live in THAT small method's register
+            // frame instead of this enormous body. That is the R2 fix: the extra
+            // locals had inflated [TmuxSessionScreen]'s method past ART's dex
+            // verifier register limit (`v273` VerifyError) and crashed the session
+            // screen at class load. Same recomposition semantics as the previous
+            // inline block — the returned [State] is read via `by` here so the
+            // derived-state read stays attributed to this caller's restart scope.
+            val tabState by rememberTmuxSessionTabState(
+                viewModel = viewModel,
+                surfaceConversationPaneId = surfaceConversationPaneId,
+                presumedAgent = presumedAgent,
+                currentSessionRecordedKind = currentSessionRecordedKind,
+                agentConversationsState = agentConversationsState,
+            )
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
                     // Issue #778: honour a Conversation tap whenever the tab is
@@ -1701,63 +1767,19 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Issue #165: replace the bare one-line "connecting" status
-            // with a visible progress overlay (linear indeterminate bar
-            // + host string) so a 2-5s SSH handshake doesn't feel like
-            // the app is frozen. After 5s a "Still working, this may
-            // be slow" subline appears; after 15s a Cancel affordance
-            // tears down the in-flight [connectJob] (#151's
-            // join-on-cancel machinery makes the teardown deterministic).
-            (status as? ConnectionStatus.Connecting)?.let {
-                ConnectingProgressOverlay(
-                    user = it.user,
-                    host = it.host,
-                    port = it.port,
-                    sessionLabel = "tmux $sessionName",
-                    onCancel = { viewModel.cancelConnect() },
-                )
-            }
-            // Issue #750: a same-host session switch ([Switching]) no longer
-            // renders a thin under-header progress line here. During a switch the
-            // terminal surface is always replaced by a centered placeholder —
-            // either the "Attaching…" [SwitchingLoadingPlaceholder]
-            // (switchHidesTerminal) or the "waiting for tmux panes…"
-            // [EmptyPanesPlaceholder] (warm open, panes emptied) — and each of
-            // those now shows the canonical centered spinner (#757). Keeping the
-            // top bar produced the maintainer's reported "two loading indicators"
-            // on the reattach screen, so the centered spinner is the SOLE attach
-            // affordance and the top line is removed. Input stays gated because
-            // [Switching] is not [Connected].
-            //
-            // Issue #750 (post-#766 regression): the SAME two-loaders symptom came
-            // back on the RECONNECT/REATTACH screen. The #766 connection migration
-            // made the controller the authoritative status source: a recoverable
-            // drop projects [ConnectionStatus.Reconnecting] (this top
-            // [ReconnectingProgressRow] bar) WHILE the id-keyed [RevealStateMachine]
-            // maps the controller's `Reattaching`/`Reconnecting` to
-            // [RevealState.Seeding] → [effectiveHidesTerminal] is true → the
-            // centered "Attaching…" [SwitchingLoadingPlaceholder] is already up in
-            // the surface Box below. Two indicators at once. Gate the top bar on
-            // `!effectiveHidesTerminal` so it is suppressed exactly while the
-            // centered hold is showing — the centered "Attaching…" is then the SOLE
-            // reattach affordance, matching the [Switching] fix above. The top bar
-            // is NOT the sole indicator for any other state: it ONLY renders for
-            // [ConnectionStatus.Reconnecting], and every reconnect/reattach keeps
-            // the terminal held (the reveal machine never reveals Live for a
-            // Reattaching/Reconnecting controller state — see RevealStateMachine
-            // §"loading" mapping), so suppressing it here never leaves a reconnect
-            // with zero indicators. (Reconnect speed/behaviour is untouched — this
-            // is presentation-only.)
-            if (shouldShowReconnectingProgressRow(status, effectiveHidesTerminal)) {
-                (status as ConnectionStatus.Reconnecting).let {
-                    ReconnectingProgressRow(
-                        status = it,
-                        sessionLabel = "tmux $sessionName",
-                        onRetryNow = { viewModel.reconnect() },
-                        onCancel = { viewModel.cancelConnect() },
-                    )
-                }
-            }
+            // Issue #750 (4th occurrence): the top under-header connecting /
+            // reconnecting banner region. Both banners are routed through the
+            // single [primaryLoadingSurface] reducer so neither can ever stack on
+            // top of the centered "Attaching…" hold painted by the surface Box
+            // below (the maintainer's recurring "two loaders at once" symptom). See
+            // [TmuxTopConnectingBanner] for the per-banner rationale.
+            TmuxTopConnectingBanner(
+                status = status,
+                effectiveHidesTerminal = effectiveHidesTerminal,
+                sessionName = sessionName,
+                onCancelConnect = { viewModel.cancelConnect() },
+                onRetryNow = { viewModel.reconnect() },
+            )
             // Issue #145: render a user-facing error band (status text +
             // Reconnect affordance) when the SSH transport drops
             // mid-session. The view model's `client.disconnected`
@@ -2163,11 +2185,27 @@ public fun TmuxSessionScreen(
                     // a clear Failed terminal state (with Retry) once the
                     // watchdog trips, instead of an infinite "Waiting for agent…"
                     // spinner.
+                    // Issue #1207 (stranded-spinner race): when the conversation
+                    // row is GONE (`visibleConversation == null`) — e.g. the
+                    // 2-consecutive-null detection teardown removed it BEFORE the
+                    // 12s load watchdog fired — there is no watchdog left behind
+                    // this placeholder, so the old `?: Loading` fallback spins
+                    // FOREVER. [tmuxConversationPlaceholderLoadState] resolves a
+                    // missing row to a terminal, legible Empty state ("No
+                    // conversation yet — the agent is live in the Terminal tab")
+                    // with the same one-tap Open-in-Terminal action, never Loading.
                     ConversationDetectingPlaceholder(
-                        loadState = visibleConversation?.loadState
-                            ?: ConversationLoadState.Loading,
+                        loadState = tmuxConversationPlaceholderLoadState(
+                            visibleConversation?.loadState,
+                        ),
                         onRetry = {
                             surfacePane?.paneId?.let { viewModel.retryAgentConversationLoad(it) }
+                        },
+                        onOpenTerminal = {
+                            surfacePane?.paneId?.let {
+                                viewModel.selectSessionTab(it, SessionTab.Terminal)
+                            }
+                            tuiCommandNotice = null
                         },
                     )
                 } else if (unifiedPanes.isEmpty()) {
@@ -2180,6 +2218,36 @@ public fun TmuxSessionScreen(
                 // all stable, so an overlay-visibility toggle skips it) and supplies
                 // the warm, attached terminal surface for BOTH the raw-Terminal tab
                 // and (covered, underneath) the Conversation tab.
+
+                // Issue #1207: a TUI-only slash-command (/model, /config, a
+                // permission picker) sent from the Conversation composer opens its
+                // picker in the covered alt-screen Terminal and writes NOTHING to
+                // the transcript — so nothing appears here. Instead of the old
+                // misleading optimistic bubble + silent nothing, an inline notice
+                // over the Conversation surface tells the user the picker is live in
+                // the Terminal and offers a one-tap jump. Only on the Conversation
+                // tab (the Terminal already shows the picker). The notice self-clears
+                // on the jump, on dismiss, and on a session switch (state key).
+                val activeTuiCommandNotice = tuiCommandNotice
+                if (activeTuiCommandNotice != null &&
+                    currentSelectedTab == SessionTab.Conversation
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        ConversationTuiCommandNotice(
+                            command = activeTuiCommandNotice,
+                            onOpenTerminal = {
+                                surfacePane?.paneId?.let {
+                                    viewModel.selectSessionTab(it, SessionTab.Terminal)
+                                }
+                                tuiCommandNotice = null
+                            },
+                            onDismiss = { tuiCommandNotice = null },
+                        )
+                    }
+                }
             }
             Box(
                 modifier = Modifier
@@ -2309,7 +2377,18 @@ public fun TmuxSessionScreen(
                     // Issue #810: the composer launcher is UNCONDITIONAL — it only
                     // opens the Prompt Composer sheet (no pane needed), so it is
                     // never gated on `surfacePane`.
-                    onDictateTap = { showMicSheet = true },
+                    onDictateTap = {
+                        // Plain tap: open the composer with NO recording (unchanged).
+                        micSheetAutoStartRecording = false
+                        showMicSheet = true
+                    },
+                    // Issue #585: hold the launcher + swipe UP → open the composer
+                    // AND start recording immediately (locked hands-free), one
+                    // gesture. The sheet consumes `autoStartRecording` on open.
+                    onDictateHoldSwipeUp = {
+                        micSheetAutoStartRecording = true
+                        showMicSheet = true
+                    },
                     onEnterTap = pane?.let { p -> { viewModel.onKeyBarKey(p.paneId, "Enter") } },
                     // Issue #131: surface the show-keyboard chip on the tmux
                     // route too. The helper looks up the TerminalView of the
@@ -2758,7 +2837,15 @@ public fun TmuxSessionScreen(
             // the exact target identity so a "Not sent" draft authored here never
             // bleeds into another session on a switch or same-name recreation.
             composerTargetKey = targetSessionId.value,
-            onDismiss = { showMicSheet = false },
+            // Issue #585: when the launcher's hold+swipe-up entry gesture opened
+            // this sheet, start recording immediately (locked hands-free) as the
+            // sheet appears. A plain-tap open leaves this false = no recording.
+            autoStartRecording = micSheetAutoStartRecording,
+            onDismiss = {
+                showMicSheet = false
+                // Reset so the next plain-tap open never inherits auto-record.
+                micSheetAutoStartRecording = false
+            },
             // Issue #745: surface the live connection state in the composer so a
             // send while the SSH/tmux link is degraded shows a connection-lost
             // indicator immediately rather than leaving the user waiting blind.
@@ -3675,6 +3762,64 @@ internal fun tmuxSessionShouldPromoteSettledCachedPane(
 }
 
 /**
+ * Issue #1158 (R2 ART VerifyError fix): the session's Terminal/Conversation
+ * [TmuxSessionTabState], derived in its OWN @Composable so the alt-buffer wiring
+ * does not inflate the enormous [TmuxSessionScreen] method past ART's dex
+ * verifier register limit.
+ *
+ * The reviewer found that adding the `altBufferAgentPaneIds` collectAsState, the
+ * `altBufferAgent` local and the extra `remember(...)` key directly into the
+ * mega-composable body tipped its method past the ART verifier's register
+ * ceiling (`VerifyError ... copy1 v273<-...`), so the session screen — the app's
+ * MAIN screen — crashed at class load on-device (invisible to the JVM verifier).
+ * Extracting the derivation here moves ALL of that register pressure
+ * (`recordedAgentKind` projection, `altBufferAgentPaneIds` collectAsState,
+ * `altBufferAgent` derivation, the `derivedStateOf` remember) into this small
+ * method's own frame, letting [TmuxSessionScreen] verify again.
+ *
+ * Behaviour is IDENTICAL to the previous inline block: it returns a
+ * [State]<[TmuxSessionTabState]> which the caller reads via `by`, so the
+ * derived-state read stays attributed to the caller's restart scope and the tab
+ * chrome still stays OFF the 60ms agent-streaming flush (#1085). The alt-buffer
+ * signal is a detection-INDEPENDENT positive agent signal (see
+ * [TmuxSessionViewModel.altBufferAgentPaneIds]); a plain shell on the main buffer
+ * never latches it, preserving the #894/#815 no-flap invariant.
+ */
+@Composable
+private fun rememberTmuxSessionTabState(
+    viewModel: TmuxSessionViewModel,
+    surfaceConversationPaneId: String?,
+    presumedAgent: Boolean,
+    currentSessionRecordedKind: SessionAgentKind?,
+    agentConversationsState: State<Map<String, AgentConversationUiState>>,
+): State<TmuxSessionTabState> {
+    val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
+    // Issue #1158: the STICKY set of pane ids whose emulator has been seen on the
+    // ALTERNATE screen buffer — the detection-independent positive agent signal
+    // that keeps the Conversation tab reachable for an agent launched directly
+    // inside a shell-recorded session (where `@ps_agent_kind=shell`, the
+    // confirmed-shell verdict is never cleared, and live detection never binds).
+    val altBufferAgentPaneIds by viewModel.altBufferAgentPaneIds.collectAsState()
+    val altBufferAgent = surfaceConversationPaneId != null &&
+        surfaceConversationPaneId in altBufferAgentPaneIds
+    return remember(
+        surfaceConversationPaneId,
+        presumedAgent,
+        recordedAgentKind,
+        altBufferAgent,
+    ) {
+        derivedStateOf {
+            tmuxSessionTabState(
+                surfaceConversationPaneId?.let { agentConversationsState.value[it] },
+                presumedAgent,
+                recordedAgentKind,
+                altBufferAgent,
+            )
+        }
+    }
+}
+
+/**
  * Issue #1158 (recurrence of #962/#1057): whether the tree has RECORDED this
  * session as a known agent kind (Claude / Codex / OpenCode), independent of
  * whether live agent-detection or conversation-source binding has succeeded.
@@ -3713,6 +3858,7 @@ internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,
     presumedAgent: Boolean = false,
     recordedAgentKind: Boolean = false,
+    altBufferAgent: Boolean = false,
 ): TmuxSessionTabState {
     // The Conversation tab exists for a live-detected agent OR a presumed
     // agent (#716). Issue #778: the active index now follows the user's
@@ -3762,9 +3908,22 @@ internal fun tmuxSessionTabState(
     // the user reaches the existing Placeholder/Failed surface
     // ([tmuxSessionConversationSurface]) — the whole tab is NEVER collapsed on a
     // source-binding hiccup.
+    //
+    // Issue #1158 (REOPENED — the maintainer still can't reach conversations when
+    // an agent is launched DIRECTLY inside an existing shell session, so nothing
+    // ever recorded `@ps_agent_kind` and live detection never binds for the
+    // node-wrapped-Claude / Codex-`/proc` / Z.AI fleet). [altBufferAgent] is a
+    // detection-INDEPENDENT positive agent signal: the visible pane's emulator is
+    // on the ALTERNATE screen buffer, which a full-screen agent TUI holds for its
+    // whole run while a plain shell at a prompt does not. It is fed STICKY from the
+    // VM ([TmuxSessionViewModel.altBufferAgentPaneIds]) — once a pane/session has
+    // been seen on the alt-buffer the tab stays for the session's life even if the
+    // buffer later leaves alt-mode or detection drops. Because it is a POSITIVE
+    // signal, a genuine plain interactive shell (main buffer) still shows NO
+    // Conversation tab, preserving the #894/#815 no-flap invariant.
     val showsConversationTab =
         hasLiveDetection || presumedAgent || hasConversationContent ||
-            userOpenedConversation || recordedAgentKind
+            userOpenedConversation || recordedAgentKind || altBufferAgent
     return TmuxSessionTabState(
         labels = if (showsConversationTab) listOf("Terminal", "Conversation") else listOf("Terminal"),
         selectedIndex = if (showsConversationTab && userOpenedConversation) 1 else 0,
@@ -3862,6 +4021,68 @@ internal fun tmuxComposerSendRoute(
     presumedAgentKind != null -> TmuxComposerSendRoute.AgentPayload
     else -> TmuxComposerSendRoute.RawBytes
 }
+
+/**
+ * Issue #1207: true when [text] is an agent TUI slash-command — an alt-screen
+ * interaction (`/model`, `/config`, `/login`, `/agents`, permission pickers …)
+ * that the agent handles in its terminal UI and writes NOTHING to the JSONL
+ * transcript. Such input can NEVER appear on the Conversation surface by
+ * construction, so it must NOT get an optimistic transcript bubble, and the user
+ * must be offered the Terminal (the only surface that can drive the picker).
+ *
+ * The grammar is deliberately narrow so a normal prompt or a filesystem path is
+ * NOT misclassified:
+ *  - the trimmed text is a single line (a multi-line message is a prompt);
+ *  - its first whitespace-delimited token is `/word[...]` where `word` starts
+ *    with a letter and contains only `[A-Za-z0-9_-]` (no further `/`), so
+ *    `/model`, `/model sonnet`, `/config` match but `/home/user/file`,
+ *    `/`, and `/2 + 2` (a leading-slash math prompt) do not.
+ */
+internal fun tmuxComposerIsTuiSlashCommand(text: String): Boolean {
+    val trimmed = text.trim()
+    if (!trimmed.startsWith("/")) return false
+    // A multi-line message is a prompt the user typed, not a slash-command.
+    if (trimmed.contains('\n') || trimmed.contains('\r')) return false
+    val firstToken = trimmed.substringBefore(' ').substringBefore('\t')
+    return firstToken.matches(Regex("^/[A-Za-z][A-Za-z0-9_-]*$"))
+}
+
+/**
+ * Issue #1207: which agent-conversation send path a composer submit takes.
+ *  - [Echo]: a normal prompt — submit to the agent AND echo the optimistic user
+ *    turn into the transcript (`sendToAgentPaneResult`), unchanged from before.
+ *  - [TuiCommandNoEcho]: a TUI-only slash-command — deliver the keystrokes to
+ *    the pane WITHOUT an optimistic transcript bubble and raise the
+ *    Open-in-Terminal notice, because the picker it opens shows only on the
+ *    covered Terminal pane, never on the Conversation surface.
+ */
+internal enum class TmuxAgentConversationSend { Echo, TuiCommandNoEcho }
+
+internal fun tmuxAgentConversationSend(text: String): TmuxAgentConversationSend =
+    if (tmuxComposerIsTuiSlashCommand(text)) {
+        TmuxAgentConversationSend.TuiCommandNoEcho
+    } else {
+        TmuxAgentConversationSend.Echo
+    }
+
+/**
+ * Issue #1207: resolve the load state the Conversation-tab placeholder renders
+ * when it has NO backing conversation row (`rowLoadState == null`).
+ *
+ * The stranded-spinner bug: the 2-consecutive-null detection teardown
+ * (`AGENT_EXIT_CONFIRMATIONS`) can remove the conversation row BEFORE the 12s
+ * load watchdog fires. The placeholder is still shown (the tab stays reachable
+ * via `presumedAgent`), but with no row there is no watchdog behind it — so a
+ * `?: Loading` fallback spins FOREVER. A missing row means no load is in flight
+ * and nothing can ever flip it to a terminal state, so it MUST resolve to a
+ * terminal legible state ([ConversationLoadState.Empty] — "No conversation yet,
+ * the agent is live in the Terminal tab"), never [ConversationLoadState.Loading].
+ * When a row exists we honour its own load state (a `Loading` row always has the
+ * watchdog armed behind it).
+ */
+internal fun tmuxConversationPlaceholderLoadState(
+    rowLoadState: ConversationLoadState?,
+): ConversationLoadState = rowLoadState ?: ConversationLoadState.Empty
 
 internal fun tmuxComposerOutboundRoute(route: TmuxComposerSendRoute): OutboundRoute = when (route) {
     TmuxComposerSendRoute.AgentConversation -> OutboundRoute.AgentConversation
@@ -3966,6 +4187,86 @@ internal fun reconnectKebabEnabled(
         status !is ConnectionStatus.Reconnecting
 
 /**
+ * Issue #750 (4th occurrence — the beyond-grace RECONNECT path): the single
+ * authoritative primary loading surface for the tmux session screen.
+ *
+ * The maintainer's recurring symptom is TWO loading surfaces at once on a
+ * connect/reconnect. The screen has THREE mutually-exclusive primary loading
+ * surfaces, and this reducer makes "two of them at once" TYPE-UNREPRESENTABLE —
+ * it returns EXACTLY ONE (or [None]):
+ *
+ *  - [CenteredAttaching] — the centered "Attaching…" [SwitchingLoadingPlaceholder]
+ *    hold, painted by the surface whenever the id-keyed [RevealStateMachine] holds
+ *    the terminal ([effectiveHidesTerminal] == true). This is the CANONICAL loader
+ *    per #750's original decision and WINS over any top banner: every in-progress
+ *    connect/switch/reattach/reconnect holds the terminal in [RevealState.Seeding],
+ *    so the centered hold is the sole loader for all of them.
+ *  - [ConnectingBanner] — the top [ConnectingProgressOverlay] ("Connecting to
+ *    host…", + slow hint + Cancel). It renders ONLY when the terminal is NOT held
+ *    (the rare live-frame-kept Connecting edge, e.g. the #178 dead-session-mid-
+ *    switch fallback), so it can never stack on top of the centered hold.
+ *  - [ReconnectingBand] — the top [ReconnectingProgressRow] (text + Retry now /
+ *    Cancel). Same rule: only when the terminal is NOT held.
+ *
+ * The 4th recurrence (2026-07-03): a beyond-grace reconnect re-dials through the
+ * controller's `Connecting` state, which projects to [ConnectionStatus.Connecting]
+ * (the top [ConnectingProgressOverlay] banner). The previous #750 fix gated only
+ * the [ReconnectingProgressRow] band on `!effectiveHidesTerminal` — it never gated
+ * the [ConnectingProgressOverlay], so on the reconnect re-dial BOTH the top
+ * "Connecting to host…" banner AND the centered "Attaching…" hold rendered at
+ * once. Routing BOTH banners through this reducer closes that gap: when the
+ * terminal is held (which it always is on a reconnect re-dial), the reducer
+ * returns [CenteredAttaching] and BOTH banners are suppressed.
+ */
+internal enum class PrimaryLoadingSurface {
+    /** No primary loading surface (Connected / Idle / Failed steady states). */
+    None,
+
+    /** The centered "Attaching…" [SwitchingLoadingPlaceholder] hold. */
+    CenteredAttaching,
+
+    /** The top [ConnectingProgressOverlay] "Connecting to host…" banner. */
+    ConnectingBanner,
+
+    /** The top [ReconnectingProgressRow] "Reconnecting to host…" band. */
+    ReconnectingBand,
+}
+
+/**
+ * Issue #750: the SINGLE source of truth for which primary loading surface is
+ * shown, so the screen can never paint two at once. See [PrimaryLoadingSurface].
+ */
+internal fun primaryLoadingSurface(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+): PrimaryLoadingSurface = when {
+    // The terminal is held → the surface paints the centered "Attaching…" hold,
+    // which is the canonical SOLE loader. Both top banners are suppressed so the
+    // maintainer never sees the top connecting banner AND the centered spinner at
+    // once (the 4th-recurrence beyond-grace reconnect symptom).
+    effectiveHidesTerminal -> PrimaryLoadingSurface.CenteredAttaching
+    status is ConnectionStatus.Connecting -> PrimaryLoadingSurface.ConnectingBanner
+    status is ConnectionStatus.Reconnecting -> PrimaryLoadingSurface.ReconnectingBand
+    else -> PrimaryLoadingSurface.None
+}
+
+/**
+ * Issue #750: the single-indicator gate for the top under-header
+ * [ConnectingProgressOverlay] "Connecting to host…" banner. Derived from
+ * [primaryLoadingSurface] so it can never coexist with the centered "Attaching…"
+ * hold — the exact 4th-recurrence beyond-grace-reconnect stacking (a reconnect
+ * re-dials through `Connecting`, projecting this banner, WHILE the reveal machine
+ * holds the terminal and paints the centered spinner). The banner renders ONLY in
+ * the live-frame-kept Connecting edge (terminal NOT held), so it is never the sole
+ * indicator stripped from a state that needs it.
+ */
+internal fun shouldShowConnectingProgressOverlay(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+): Boolean =
+    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ConnectingBanner
+
+/**
  * Issue #750: the single-indicator gate for the top under-header
  * [ReconnectingProgressRow] progress line.
  *
@@ -3976,19 +4277,20 @@ internal fun reconnectKebabEnabled(
  * terminal in [RevealState.Seeding] ([effectiveHidesTerminal] == true) and
  * paints the centered spinner — the two-loaders regression.
  *
- * This pure predicate makes the invariant a unit-testable wiring guard rather
- * than a comment: the top bar renders ONLY for a [ConnectionStatus.Reconnecting]
- * status AND only when the terminal is NOT held (so the centered spinner is not
- * up). Every real reconnect/reattach holds the terminal, so in practice the
- * centered spinner is the sole reattach affordance — but the predicate keeps the
- * top bar as a (currently unreached) fallback for any future reconnect that does
- * keep a live frame painted, so suppressing it can never leave a reconnect with
- * zero indicators.
+ * Derived from [primaryLoadingSurface] (single source of truth): the top bar
+ * renders ONLY for a [ConnectionStatus.Reconnecting] status AND only when the
+ * terminal is NOT held (so the centered spinner is not up). Every real
+ * reconnect/reattach holds the terminal, so in practice the centered spinner is
+ * the sole reattach affordance — but the reducer keeps the top bar as a
+ * (currently unreached) fallback for any future reconnect that does keep a live
+ * frame painted, so suppressing it can never leave a reconnect with zero
+ * indicators.
  */
 internal fun shouldShowReconnectingProgressRow(
     status: ConnectionStatus,
     effectiveHidesTerminal: Boolean,
-): Boolean = status is ConnectionStatus.Reconnecting && !effectiveHidesTerminal
+): Boolean =
+    primaryLoadingSurface(status, effectiveHidesTerminal) == PrimaryLoadingSurface.ReconnectingBand
 
 /**
  * Issue #463: the short leaf label for the header project crumb, derived
@@ -4186,6 +4488,12 @@ internal const val TMUX_CONVERSATION_DETECTING_TAG = "tmux:conversation:detectin
 internal const val TMUX_CONVERSATION_LOAD_FAILED_TAG = "tmux:conversation:load-failed"
 internal const val TMUX_CONVERSATION_LOAD_RETRY_TAG = "tmux:conversation:load-retry"
 internal const val TMUX_CONVERSATION_LOAD_EMPTY_TAG = "tmux:conversation:load-empty"
+// Issue #1207: one-tap "Open in Terminal" action on the terminal-state
+// Conversation placeholder + the TUI-command notice — the only surface that can
+// drive a TUI-only slash-command picker (/model, /config …).
+internal const val TMUX_CONVERSATION_OPEN_TERMINAL_TAG = "tmux:conversation:open-terminal"
+internal const val TMUX_CONVERSATION_TUI_NOTICE_TAG = "tmux:conversation:tui-command-notice"
+internal const val TMUX_CONVERSATION_TUI_NOTICE_OPEN_TAG = "tmux:conversation:tui-command-open-terminal"
 // Issue #793: top-of-list progress row shown while older messages page in on
 // upward scroll (tail-first windowed load).
 internal const val TMUX_CONVERSATION_PAGING_OLDER_TAG = "tmux:conversation:paging-older"
@@ -4617,6 +4925,74 @@ private fun StatusLine(text: String) {
 }
 
 /**
+ * Issue #750 (4th occurrence): the top under-header connecting / reconnecting
+ * banner region — the SINGLE render site for both top loading banners.
+ *
+ * Both the cold-dial [ConnectingProgressOverlay] ("Connecting to host…") and the
+ * recovery [ReconnectingProgressRow] band are gated through [primaryLoadingSurface]
+ * (via [shouldShowConnectingProgressOverlay] / [shouldShowReconnectingProgressRow]),
+ * so NEITHER can render while the terminal is held ([effectiveHidesTerminal] ==
+ * true) — that is exactly when the surface Box paints the centered "Attaching…"
+ * hold. This makes the maintainer's recurring "top connecting banner AND centered
+ * spinner at once" symptom structurally impossible: while the terminal is held the
+ * reducer resolves to [PrimaryLoadingSurface.CenteredAttaching] and this whole
+ * region renders nothing.
+ *
+ * The two banners are mutually exclusive by status ([ConnectionStatus.Connecting]
+ * vs [ConnectionStatus.Reconnecting]), so at most one ever renders here — and only
+ * in the (currently unreached) live-frame-kept edge where the terminal is NOT held.
+ *
+ * Extracting this as a composable (rather than inlining the two `if` blocks in the
+ * screen body) makes it a genuine WIRING guard: the #750 regression test drives
+ * this exact composable in the beyond-grace state and hard-asserts a single loader,
+ * so a future re-introduction of an ungated banner is caught in CI.
+ */
+@Composable
+internal fun TmuxTopConnectingBanner(
+    status: ConnectionStatus,
+    effectiveHidesTerminal: Boolean,
+    sessionName: String,
+    onCancelConnect: () -> Unit,
+    onRetryNow: () -> Unit,
+) {
+    // Issue #165: the cold-dial progress overlay (linear bar + host string + slow
+    // hint + Cancel). Gated on [shouldShowConnectingProgressOverlay] so it never
+    // stacks on top of the centered "Attaching…" hold on a reconnect re-dial (the
+    // 4th-recurrence beyond-grace symptom: a reconnect re-dials through the
+    // controller's `Connecting`, projecting this banner, while the terminal is
+    // held). It renders ONLY in the live-frame-kept Connecting edge.
+    if (shouldShowConnectingProgressOverlay(status, effectiveHidesTerminal)) {
+        (status as ConnectionStatus.Connecting).let {
+            ConnectingProgressOverlay(
+                user = it.user,
+                host = it.host,
+                port = it.port,
+                sessionLabel = "tmux $sessionName",
+                onCancel = onCancelConnect,
+            )
+        }
+    }
+    // Issue #750: the recovery band. A same-host session switch ([Switching]) and
+    // every reconnect/reattach hold the terminal and paint the centered
+    // "Attaching…" [SwitchingLoadingPlaceholder] (the SOLE attach affordance), so
+    // the band is suppressed while held ([shouldShowReconnectingProgressRow]). It
+    // renders ONLY for a [ConnectionStatus.Reconnecting] status that keeps a live
+    // frame painted (terminal NOT held) — the fallback so a reconnect is never left
+    // with zero indicators. (Reconnect speed/behaviour is untouched — this is
+    // presentation-only.)
+    if (shouldShowReconnectingProgressRow(status, effectiveHidesTerminal)) {
+        (status as ConnectionStatus.Reconnecting).let {
+            ReconnectingProgressRow(
+                status = it,
+                sessionLabel = "tmux $sessionName",
+                onRetryNow = onRetryNow,
+                onCancel = onCancelConnect,
+            )
+        }
+    }
+}
+
+/**
  * Issue #165: progress overlay rendered above the terminal viewport
  * while the screen is in [ConnectionStatus.Connecting].
  *
@@ -4892,6 +5268,10 @@ internal fun ConversationDetectingPlaceholder(
     // "no messages yet" terminal state.
     loadState: ConversationLoadState = ConversationLoadState.Loading,
     onRetry: () -> Unit = {},
+    // Issue #1207: switch to the Terminal tab — the only surface that can show a
+    // live agent's alt-screen TUI (a fresh session's picker / prompt). Offered on
+    // the terminal Empty state so a stranded placeholder is never a dead end.
+    onOpenTerminal: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier
@@ -4920,17 +5300,87 @@ internal fun ConversationDetectingPlaceholder(
                     Text("Retry")
                 }
             }
-            ConversationLoadState.Empty -> Text(
-                text = "No conversation events yet.",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 14.sp,
-                modifier = Modifier.testTag(TMUX_CONVERSATION_LOAD_EMPTY_TAG),
-            )
+            // Issue #1207: the Empty terminal state is no longer a dead "No
+            // conversation events yet." line. A fresh Claude/Codex session shows
+            // nothing on the Conversation surface because the agent is live in its
+            // alt-screen TUI (the picker / prompt) that writes NOTHING to the
+            // transcript — so this state points the user at the Terminal tab, the
+            // only surface that can show it, with a one-tap action. This is also
+            // the terminal state a stranded placeholder (torn-down row, no
+            // watchdog) now resolves to, instead of an eternal spinner.
+            ConversationLoadState.Empty -> Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .padding(horizontal = 24.dp)
+                    .testTag(TMUX_CONVERSATION_LOAD_EMPTY_TAG),
+            ) {
+                Text(
+                    text = "No conversation yet — the agent is live in the Terminal tab.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                PocketShellButton(
+                    text = "Open in Terminal",
+                    onClick = onOpenTerminal,
+                    modifier = Modifier.testTag(TMUX_CONVERSATION_OPEN_TERMINAL_TAG),
+                    variant = ButtonVariant.Text,
+                )
+            }
             else -> LoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
                 label = "Loading conversation…",
             )
         }
+    }
+}
+
+/**
+ * Issue #1207: inline notice shown over the Conversation surface after a TUI-only
+ * slash-command ([tmuxComposerIsTuiSlashCommand]) is sent from the composer. Such
+ * a command (`/model`, `/config`, a permission picker …) drives an alt-screen
+ * picker in the covered Terminal pane and writes NOTHING to the transcript, so
+ * the Conversation view can never show it. Rather than the old misleading
+ * optimistic bubble + a silent nothing, this banner is honest about where the
+ * interaction is and gives a one-tap jump to the only surface that can drive it.
+ *
+ * `internal` so the #1207 rendered-UI regression test can mount the REAL notice.
+ */
+@Composable
+internal fun ConversationTuiCommandNotice(
+    command: String,
+    onOpenTerminal: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag(TMUX_CONVERSATION_TUI_NOTICE_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "“$command” opens an interactive picker in the Terminal — " +
+                "it doesn't show here.",
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        PocketShellButton(
+            onClick = onOpenTerminal,
+            modifier = Modifier.testTag(TMUX_CONVERSATION_TUI_NOTICE_OPEN_TAG),
+            variant = ButtonVariant.Text,
+        ) {
+            Text("Open in Terminal", color = PocketShellColors.Accent)
+        }
+        PocketShellButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            variant = ButtonVariant.Text,
+        )
     }
 }
 
@@ -4962,7 +5412,7 @@ private fun EmptyPanesPlaceholder() {
  * reveals the real terminal the instant the new session's panes are seeded.
  */
 @Composable
-private fun SwitchingLoadingPlaceholder() {
+internal fun SwitchingLoadingPlaceholder() {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -5269,9 +5719,11 @@ internal fun TmuxConversationPane(
     // [filterConversationRows] call STAYS (it also does tool-result pairing +
     // the searched-tool-call expansion merge) but is fed an empty query, so it
     // never filters out rows — every event is shown.
+    // Issue #176/#1267: honour the system-notes preference, but the byte-clamp
+    // truncation marker (#1225) stays visible even when notes are off — see
+    // [conversationTimelineVisibleEvents].
     val visibleEvents = remember(events, showSystemNotes) {
-        val timelineEvents = events.filterNot { it.isHiddenConversationTimelineRow() }
-        if (showSystemNotes) timelineEvents else timelineEvents.filterNot { it is ConversationEvent.SystemNote }
+        conversationTimelineVisibleEvents(events, showSystemNotes)
     }
     val toolResultPairing = remember(visibleEvents) { visibleEvents.toolResultPairing() }
     val filteredConversation = remember(visibleEvents, toolResultPairing) {
@@ -6305,86 +6757,92 @@ internal fun ConsolidatedTopChrome(
         )
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Issue #463: the tappable project/folder crumb. Opens a dropdown of
-        // this project's sibling sessions; selecting one warm-switches to it.
-        // Hidden entirely when we don't know the project; the chevron is
-        // hidden when there's nothing to switch to (single-session project).
-        if (projectLabel != null) {
-            ProjectSwitcherCrumb(
-                projectLabel = projectLabel,
-                switcher = projectSwitcher,
-                onOpen = onProjectSwitcherOpen,
-                onSwitchToSibling = onSwitchToSibling,
+        // Issue #1320: the LEADING yielding region — the ONLY part of the
+        // header that gives up width under pressure. It holds the project
+        // crumb, the title, and the connection-status pill, all wrapped in a
+        // single `weight(1f)` slot. Everything to its right (the
+        // Terminal/Conversation toggle and the kebab) is a NON-weighted sibling
+        // measured at its full intrinsic width FIRST, so the toggle can never be
+        // squeezed/clipped — it is a primary control and must always be fully
+        // visible + tappable.
+        //
+        // Why this shape (the 5×-recurrence root cause #962/#975/#1057/#1158):
+        // the toggle used to live INSIDE a `weight(1f, fill = false)` trailing
+        // slot that competed with the title's own `weight(1f)`. Two `weight(1f)`
+        // slots split the remaining width, so a long agent/session title (e.g.
+        // "pocketshell Claude Code") starved the toggle's slot and its
+        // "Conversation" segment ellipsised away — leaving only "Terminal" and
+        // no way to switch to the conversation view. Pulling the toggle OUT of
+        // the weighted slot and reserving it at intrinsic width fixes the clip
+        // at the layout level (not by adding another detection OR-term — the
+        // detection gate was never the cause of this report).
+        //
+        // Within this region the yield order is: the title (its own
+        // `weight(1f)` + ellipsis) shrinks FIRST; the crumb (capped ≤120dp,
+        // ellipsis) and the connection-status pill only clip under extreme
+        // pressure — both are acceptable to shrink, the toggle is not.
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Issue #463: the tappable project/folder crumb. Opens a dropdown
+            // of this project's sibling sessions; selecting one warm-switches
+            // to it. Hidden entirely when we don't know the project; the
+            // chevron is hidden when there's nothing to switch to.
+            if (projectLabel != null) {
+                ProjectSwitcherCrumb(
+                    projectLabel = projectLabel,
+                    switcher = projectSwitcher,
+                    onOpen = onProjectSwitcherOpen,
+                    onSwitchToSibling = onSwitchToSibling,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+
+            // Issue #481: the title — the agent/model name when a conversation
+            // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
+            // tmux session name. It takes the inner `weight(1f)` slot so it is
+            // the FIRST element to yield/ellipsise (issue #1320), keeping the
+            // crumb, pill, toggle, and kebab intact. The 8dp end padding keeps
+            // the name from butting straight against the pill/toggle.
+            val sessionLabelModifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp)
+                .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG)
+            Text(
+                text = agentName ?: sessionName,
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = sessionLabelModifier,
             )
-            Spacer(modifier = Modifier.width(6.dp))
+
+            // Issues #177 / #249: the compact "Reconnecting"/"Disconnected"
+            // pill. It sits at the right edge of the yielding region (adjacent
+            // to the toggle) so, under extreme width pressure, it clips AFTER
+            // the title but BEFORE the toggle (#1320 — the toggle never yields).
+            ConnectionStatusPill(connectionStatus)
         }
 
-        // Issue #481: the title — the agent/model name when a conversation
-        // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
-        // tmux session name.
-        //
-        // Issue #637: the title takes the full weighted slot (`weight(1f)`,
-        // fill = true) so it consumes ALL remaining width and pushes the
-        // trailing control cluster flush against the right edge. This is what
-        // gives the kebab a CONSISTENT right-anchored position in both
-        // states — the previous `fill = false` left the title hugging its
-        // own text, so the kebab floated in the middle of the row next to a
-        // short name instead of sitting at the edge ("⋮ position looks off").
-        // Because the title is the only element that yields width, a long
-        // host/session name ellipsises inside this slot WITHOUT squeezing the
-        // toggle or pushing the kebab off screen. The 8dp end padding
-        // guarantees the name never butts straight against the trailing
-        // controls.
-        val sessionLabelModifier = Modifier
-            .weight(1f)
-            .padding(end = 8.dp)
-            .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG)
-        Text(
-            text = agentName ?: sessionName,
-            color = PocketShellColors.Text,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = sessionLabelModifier,
-        )
-
-        // Issue #637 / #747: the trailing controls. The SHRINKABLE middle group
-        // (connection-status pill + Terminal/Conversation toggle) sits in its
-        // OWN weighted slot — `weight(1f, fill = false)` — so it yields width
-        // before anything else, while the kebab is a FIXED 48dp sibling of the
-        // outer row that is laid out AFTER the weighted slots and so can never
-        // be displaced.
-        //
-        // Why this matters (#747): previously the whole trailing cluster was a
-        // single non-shrinking [Row]. When that cluster was wide (forwarding
-        // active -> agent present -> the wide "Terminal Conversation" toggle, a
-        // non-live "Disconnected"/"Reconnecting" pill, and a project crumb all
-        // competing for width), the cluster overflowed the 56dp row and Compose
-        // shoved its LAST child — the kebab — past the right edge. The
-        // maintainer saw the kebab "can't be selected" because it was
-        // off-screen. Putting the kebab outside the weighted slot reserves its
-        // 48dp unconditionally; the toggle's segment labels ellipsise (they are
-        // `maxLines = 1`) instead of pushing the kebab off-screen.
-        Row(
-            modifier = Modifier
-                .weight(1f, fill = false)
-                .padding(end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ConnectionStatusPill(connectionStatus)
-
-            if (tabLabels.size > 1) {
-                TabsRowWithPulse(pulseVisible = pulseConversationTab) {
-                    ConsolidatedTabPill(
-                        labels = tabLabels,
-                        selectedIndex = selectedTabIndex,
-                        onSelected = onTabSelected,
-                        modifier = Modifier.testTag(TMUX_TABS_TAG),
-                    )
-                }
+        // Issue #1320: the Terminal/Conversation toggle — a PRIMARY control that
+        // must have GUARANTEED width. It is a NON-weighted sibling of the outer
+        // row rendered at its full intrinsic width, so it is measured before the
+        // weighted leading region gets the remainder and can never be
+        // clipped/ellipsised no matter how long the title is. The kebab stays a
+        // fixed 48dp sibling laid out after it (#747), so both survive.
+        if (tabLabels.size > 1) {
+            Spacer(modifier = Modifier.width(8.dp))
+            TabsRowWithPulse(pulseVisible = pulseConversationTab) {
+                ConsolidatedTabPill(
+                    labels = tabLabels,
+                    selectedIndex = selectedTabIndex,
+                    onSelected = onTabSelected,
+                    modifier = Modifier.testTag(TMUX_TABS_TAG),
+                )
             }
+            Spacer(modifier = Modifier.width(4.dp))
         }
 
         // The kebab — fixed 48dp, OUTSIDE every weighted slot, so it is always
@@ -6922,6 +7380,9 @@ internal fun TmuxSessionBottomControlsCallSite(
     isAgentPane: Boolean,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked hands-free.
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
@@ -6945,6 +7406,7 @@ internal fun TmuxSessionBottomControlsCallSite(
         isAgentPane = isAgentPane,
         onChipTap = onChipTap,
         onDictateTap = onDictateTap,
+        onDictateHoldSwipeUp = onDictateHoldSwipeUp,
         onEnterTap = onEnterTap,
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
@@ -6962,6 +7424,9 @@ internal fun TmuxTerminalBottomControls(
     isAgentPane: Boolean,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
+    // Composer WITH recording already active + locked hands-free.
+    onDictateHoldSwipeUp: (() -> Unit)? = null,
     onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
@@ -7036,6 +7501,7 @@ internal fun TmuxTerminalBottomControls(
                 if (onDictateTap != null) {
                     ConversationComposerLauncherRow(
                         onDictateTap = onDictateTap,
+                        onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                         inputEnabled = sessionLive,
                         modifier = modifier,
                     )
@@ -7052,6 +7518,7 @@ internal fun TmuxTerminalBottomControls(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = onChipTap,
                     onDictateTap = onDictateTap,
+                    onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                     onEnterTap = onEnterTap,
                     onShowKeyboardTap = onShowKeyboardTap,
                     onAddSnippetTap = onAddSnippetTap,

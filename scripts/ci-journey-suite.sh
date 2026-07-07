@@ -133,6 +133,18 @@ JOURNEY_CLASSES=(
   # self-skip on CI.
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
+  # Issue #666 REOPEN (2026-07-06): a session killed on the host must NOT be
+  # RESURRECTED when the app REATTACHES to it (lifecycle/reconnect path) with the
+  # tmux SERVER still alive. The prior fix only guarded the process-death
+  # cold-restore path; the reattach path still fell through to `new-session -A`
+  # (attach-OR-create) and recreated the killed session — the maintainer's exact
+  # dogfood report. This journey seeds a KEEPALIVE session so the server survives
+  # the target kill (the server-alive-session-gone branch, distinct from #998's
+  # dead-server), attaches, kills only the target, backgrounds past grace, and
+  # foregrounds (a LifecycleReattach reconnect). It asserts the target is NOT
+  # recreated, the server stayed alive (keepalive present), and the app drops to
+  # the session list. Runs on agents:2222; does NOT self-skip on CI.
+  "$FQCN_PREFIX.LifecycleReattachGoneSessionNoResurrectE2eTest"
   # Issue #998: a remote tmux SERVER death (host reboot / OOM / `kill-server`)
   # must NOT be silently resurrected via `new-session -A` into a blank
   # "Connected" session. This journey attaches, `tmux kill-server`s the whole
@@ -336,6 +348,16 @@ JOURNEY_CLASSES=(
   # retry callbacks in the same per-push androidTest lane as the send-feedback
   # composer proofs. Pure Compose, no Docker fixture.
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  # ADDED (#1308): batch "Resend all" for the queued backlog. The presence/absence
+  # + callback + within-root containment of the new button live in
+  # PromptComposerOutboundQueueTest above; this class is its keyboard-UP occlusion
+  # sibling — it composes the production SheetContent with the queue expanded and
+  # >= 2 Failed rows under a SYNTHETIC ime() inset (the #780 model — deterministic
+  # on CI swiftshader, no real keyboard, HARD-asserts the inset applied, no
+  # assumeTrue skip) and asserts the Resend all button stays ABOVE the keyboard via
+  # the #657/F1 assertNodeFullyAboveImeOrKeyboard containment helper. Pure Compose,
+  # no Docker fixture. Carries its fully-qualified name directly.
+  "com.pocketshell.app.composer.ComposerResendAllImeProofTest"
   # PROMOTED (#746): the composer "Not sent" DISCARD + draft session-scoping
   # journey. The maintainer's dogfood report: a "Not sent" draft authored in one
   # session had no Discard control (only Send + the close ×, which PRESERVES the
@@ -370,6 +392,17 @@ JOURNEY_CLASSES=(
   # drag detector. This was repeatedly emulator-green but device-broken, so the
   # focused journey is gate-wired per D31/G9; it uses no Docker fixture.
   "com.pocketshell.app.composer.PromptComposerMicSwipeLockJourneyTest"
+  # ADDED (#585 REOPENED — the TRUE desired behavior): the ENTRY gesture on the
+  # composer LAUNCHER button, not the mic inside the already-open sheet. Hold the
+  # launcher (SESSION_COMPOSER_LAUNCHER_TAG) + swipe UP → the Prompt Composer opens
+  # AND recording begins immediately, locked hands-free, in one gesture; a plain
+  # tap still opens the composer with NO recording. Drives the real
+  # ConversationComposerLauncherRow launcher + real PromptComposerSheet
+  # (autoStartRecording) inside its ModalBottomSheet so the launcher gesture
+  # competes with the same ancestor arbitration it does on device. RED on base (a
+  # launcher hold+swipe opens with NO recording); GREEN with the fix. This is the
+  # 7th reopen of #585 — gate-wired per D31/G9. No Docker fixture (fakes only).
+  "com.pocketshell.app.voice.ComposerLauncherHoldSwipeUpJourneyTest"
   # ADDED (#832 — durable per-session composer draft store): a draft authored in
   # session A and lost on a FAILED attachment-send (despite the "Your draft was
   # kept" banner) must survive. The ComposerDraftStore persists the per-session
@@ -439,6 +472,21 @@ JOURNEY_CLASSES=(
   # Uses ONLY the deterministic agents:2222 fixture (the black state is injected LOCALLY
   # on the emulator, no toxiproxy) and does NOT self-skip on CI, so it belongs here.
   "$FQCN_PREFIX.RedrawFullViewportReseedJourneyE2eTest"
+  # ADDED (#1206 — fresh Claude pane whose FIRST prewarm capture-pane comes back EMPTY on a
+  # busy shared -CC channel lands fragments-over-black instead of a painted grid). The prewarm
+  # seed is single-shot: seedPrewarmedPane returned on the empty/wedged first capture and only
+  # future incremental %output painted → the initial Claude TUI frame was unrecoverable. This
+  # journey seeds exactly two sessions (A attach + B prewarm target), opens the in-session
+  # switcher to fire prewarmLikelySwitchTargets, and uses a #780 synthetic injection
+  # (PrewarmSeedFaultTestOverride) to force B's FIRST seed capture EMPTY while the pane HAS
+  # content — the exact non-happy state the happy real-agent workbench structurally cannot
+  # enter. It HARD-asserts the fault was consumed by the prewarm seed path (the #1206 code
+  # path ran — no vacuous pass) AND that B lands on a PAINTED grid (its marker visible, not
+  # blank) after switching to it (the retry/deferred-reseed recovered the full grid). The clean
+  # red→green for the retry is at the JVM layer (TmuxSessionViewModelTest.prewarmSeedRetries*);
+  # this is the on-device GREEN acceptance (G4/G10). Deterministic agents:2222 only, no
+  # toxiproxy, no CI self-skip — belongs in this per-push subset.
+  "$FQCN_PREFIX.Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest"
   # ADDED (#1181 — BLACK terminal on tapping the connection notification / background→
   # foreground resume while the FGS keeps the connection ALIVE): a port-forward pin (#1159
   # Part 3) SUPPRESSES the bounded-grace teardown, so the VM never stashes a pendingReattach
@@ -513,6 +561,24 @@ JOURNEY_CLASSES=(
   # with the union predicate `visibleRenderLostFrameVsCapture`. Uses ONLY the deterministic
   # agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT self-skip on CI.
   "$FQCN_PREFIX.AgentAltScreenPartialBlackHealJourneyE2eTest"
+  # ADDED (#1205 — pane delivery-backlog / seed-gate OVERFLOW must self-heal, not latch a dead
+  # `surfaceError` card): per-pane `%output` delivery is a bounded `Channel(4096)` fed by
+  # non-blocking `trySend`; a sustained Claude alt-screen burst on a contended main thread
+  # overflows and drops. Before #1205 the FIRST dropped frame cancelled the producer, detached
+  # the pane, and latched `surfaceError` — a permanently dead pane the blank/stale watchdog and
+  # heal oracle early-return on, so the user had to tap "Recreate terminal" (the 2 MB seed-gate
+  # overflow latched the same way). This journey attaches a full-viewport banner, wipes the LIVE
+  # emulator to black (the REMOTE tmux grid keeps the banner → transport GUARANTEED LIVE), then
+  # trips a REAL overflow through the SAME private handler the `outputBacklogOverflows` collector
+  # calls (only the trigger is synthetic — the #780 model; a 4096-deep channel overflow can't be
+  # forced deterministically on swiftshader). GREEN: no dead surfaceError card, a FRESH
+  # capture-pane reseed restores the banner, the producer reattaches to the LIVE client, session
+  # stays Connected (renderer backpressure, no reconnect); RED on base (the pane latches
+  # surfaceError). Three tests class-cover backlog + seed-gate self-heal AND the bounded-retry
+  # EXHAUSTION give-up (a still-saturated channel lands on the Recreate-terminal card exactly once
+  # — no reseed storm). Deterministic agents:2222 only (state injected LOCALLY, no toxiproxy) and
+  # does NOT self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.PaneOutputOverflowRecoveryJourneyE2eTest"
   # ADDED (epic #687 slice 2, #717 — reveal/reflow-heal absorbed from #658): after a
   # voice-send the active pane must NEVER go black. The composer/keyboard dismissal
   # shrinks the IME inset → `resizeRemotePty` → `maybeRefreshControlClientSize`; for an
@@ -527,6 +593,39 @@ JOURNEY_CLASSES=(
   # UNCONDITIONAL `reseedActivePaneForReattach`, not blank-only). Uses ONLY the
   # deterministic agents:2222 fixture (no toxiproxy) and does NOT self-skip on CI.
   "$FQCN_PREFIX.VoiceSendActivePaneStaysVisibleE2eTest"
+  # ADDED (#1214 — mostly-empty-model reveal-time leg of the #1208 fragments-over-black audit): the
+  # reveal/resize/switch nets gate an authoritative `capture-pane` diff on the cheap LOCAL pre-check
+  # `visibleRenderMayHaveLostFrame`, which before #1214 only flagged a live-fraction in (0.5, 0.75]
+  # or a ≤3-line partial-blank. A mostly-empty pane with >3 scattered live lines but live-fraction
+  # BELOW 0.5 read "healthy" at reveal → it REVEALED UNHEALED (fragments-over-black), only maybe
+  # caught ~4s later by the steady watchdog. This journey seeds a FULL 40-row banner, attaches,
+  # injects a mostly-empty model (local `CSI 2J`+`CSI H` + 5 scattered live lines — >3 lines and
+  # <0.5 fraction; the REMOTE tmux grid keeps the full banner → transport GUARANTEED LIVE), then
+  # drives the EXACT same-dimension (no-op) resize heal branch. RED on base (the sub-0.5 pane is
+  # skipped → banner never restored in the SHORT window); GREEN with #1214 (the widened pre-check
+  # flags it → the reveal-time heal re-captures the full banner AT reveal, not ~4s later). Uses ONLY
+  # the deterministic agents:2222 fixture (state injected LOCALLY, no toxiproxy) and does NOT
+  # self-skip on CI.
+  "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"
+  # ADDED (#1302/#1208 — the COMPOSITE recovery journey, the campaign's acceptance gate that
+  # PROVES the reconciler ends the maintainer's fragments-over-black once and for all). The
+  # maintainer's residual black (recurred 2026-07-06 AFTER v0.4.23) needs three ingredients the
+  # old happy fixture cannot produce (G10): a mostly-empty model, an idle Claude that repaints
+  # ONLY a spinner (so it can never self-heal a lost grid), and a recovery layer that is not
+  # healing the pane. This journey drives the REAL idle-incremental fixture
+  # (tests/docker/agent-fixtures/idle-incremental-claude.sh, reuses agents:2222) into
+  # fragments-over-black on the LIVE emulator, then asserts the visible pane converges to
+  # AUTHORITATIVE tmux content via the PERIODIC reconciler alone (no explicit reveal/resize/
+  # switch/heal trigger). Within-run RED->GREEN (#780 synthetic): RED = the reconciler is
+  # suppressed (auto-arm off + watchdog cancelled) -> the pane STAYS fragments-over-black for a
+  # full reconcile window (the maintainer's unhealable persistent black; a fresh capture-pane
+  # proves tmux's grid still holds the banner the render lost — the authoritative count-diff);
+  # GREEN = re-arm the reconciler -> it ticks on its own cadence and converges the pane to the
+  # full banner, transport stays Connected, no reconnect surface. A busy-agent lane
+  # (busy-agent-burst.sh) proves the merged #1297 wedge-proof lane reconciles under -CC
+  # saturation. Deterministic agents:2222 only (state injected LOCALLY, no toxiproxy) and does
+  # NOT self-skip on CI, so it belongs in this per-push subset.
+  "$FQCN_PREFIX.IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest"
   # ADDED (#1153 — send-with-attachment half-black, v0.4.21 dogfood): a composer Send WITH AN
   # ATTACHMENT is ALWAYS multi-line (it appends an "Attached files:" block), so it takes the
   # bracketed-paste + submit branch and the alt-screen agent clear+redraws its WHOLE viewport; the
@@ -885,6 +984,19 @@ JOURNEY_CLASSES=(
   #     second kind in the class (Codex), covering the recurrence #962/#975 missed by
   #     only proving vanilla Claude. (Fast JVM sibling: TmuxSessionScreenTest
   #     .tmuxSessionTabStateShowsConversationForRecorded{Claude,Codex,ZaiClaude,OpenCode}*.)
+  #   - conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession
+  #     (#1158 REOPENED — the maintainer's EXACT dogfood path): an agent launched
+  #     DIRECTLY inside an existing shell tmux session (NOT the `pocketshell agent`
+  #     wrapper), so `@ps_agent_kind` stays `shell`, the confirmed-shell verdict is
+  #     never cleared, and live detection never binds — every prior signal false, the
+  #     toggle GONE for the session's life. The detection-INDEPENDENT alt-buffer
+  #     signal (a full-screen agent TUI holds the alternate screen buffer) restores
+  #     it, STICKY. The pane's alt-buffer state is injected synthetically on the REAL
+  #     connected pane (#780 model — tmux -CC cannot mirror a remote alt-buffer into
+  #     the client emulator), hard-failing (no assumeTrue). RED on base (no
+  #     `|| altBufferAgent`): the toggle stays absent even with the alt-buffer set.
+  #     (Fast JVM siblings: TmuxSessionScreenTest.tmuxSessionTabStateShowsConversation
+  #     ForAltBufferAgent* + TmuxSessionViewModelTest.altBufferAgent*.)
   # It uses ONLY agents:2222 (DEFAULT_HOST/DEFAULT_PORT -> 10.0.2.2:2222) that
   # tests.yml already brings up, and does NOT self-skip on CI (no assumeTrue /
   # assumeFalse(isRunningOnCi())). Lives under com.pocketshell.app.tmux.
@@ -911,6 +1023,26 @@ JOURNEY_CLASSES=(
   #     a toggle for a conversation-less shell).
   # Uses ONLY agents:2222 that tests.yml already brings up; no self-skip on CI.
   "com.pocketshell.app.tmux.ConversationStaysReachableAfterDetectionDropsDockerTest"
+  # ADDED (#1207 — reviewer BLOCKED-G4 residual, D33/G10): the composer-send
+  # INTEGRATION on the REAL TmuxSessionScreen that the component/JVM proofs
+  # could not cover. A fresh Claude session opens on the Conversation view; a
+  # `/model` (an alt-screen TUI picker that writes NOTHING to the JSONL) used to
+  # echo a MISLEADING optimistic user bubble and offer no way forward. This class
+  # drives the REAL app + REAL Docker agent:
+  #   - modelCommandFromConversationShowsNoticeNoEchoBubbleThenTapOpensTerminal:
+  #     the LOAD-BEARING real-path red->green. Detection binds via the #975
+  #     transcript-evidence fallback (so the composer routes AgentConversation);
+  #     `/model` is typed into the REAL composer and Sent. On base (echo-always)
+  #     sendToAgentPaneResult inserts a misleading /model User bubble and no
+  #     Open-in-Terminal notice appears (RED); with the #1207 fix the no-echo path
+  #     runs -> NO optimistic bubble + the notice IS shown + one tap lands the user
+  #     on SessionTab.Terminal and the notice self-clears (GREEN).
+  #   - confirmedShellShowsNoConversationNoticeOrPlaceholder (#894 no-flap
+  #     ADJACENCY): a genuine no-agent recorded shell shows NO Conversation tab, so
+  #     neither the #1207 notice nor the Conversation placeholder can appear on a
+  #     confirmed shell.
+  # Uses ONLY agents:2222 that tests.yml already brings up; no self-skip on CI.
+  "com.pocketshell.app.tmux.ConversationTuiCommandJourneyDockerTest"
   # ADDED (#813): the composer-launcher NARROW / LARGE-FONT clip proof. The
   # maintainer dogfooded (2026-06-18 07:53) the launcher being CLIPPED off the
   # right edge of the bottom bar by the 4-chip primary cluster on a narrow /
@@ -925,6 +1057,25 @@ JOURNEY_CLASSES=(
   # self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi()) on the
   # load-bearing assertion). It lives under com.pocketshell.app.tmux.
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"
+  # ADDED (#1320): the Terminal/Conversation TOGGLE-CLIP regression guard — the
+  # REAL (layout) cause behind the 5×-recurring "Conversation tab missing"
+  # (#962/#975/#1057/#1158). The toggle used to live in a `weight(1f, fill=false)`
+  # slot that split width 50/50 with the title's own `weight(1f)`, so a long
+  # agent title starved the toggle and its "Conversation" segment ellipsised away
+  # (detection had already fired — the header showed the agent name — so the prior
+  # detection-gate fixes never addressed this). This proof renders the PRODUCTION
+  # ConsolidatedTopChrome at a narrow phone width with a long title (+ status pill
+  # + long crumb + narrowest-width variants) and HARD-asserts the Conversation
+  # segment renders at its FULL intrinsic width (compared to a reference
+  # unconstrained SegmentedToggle — density-independent, no pixel threshold), not
+  # a bare assertIsDisplayed (a squeezed/ellipsised segment still reports
+  # displayed). RED on base (segment starved ~119px vs ~291px intrinsic); GREEN
+  # after the toggle is pulled OUT of the weighted slot and reserved at intrinsic
+  # width. Pure Compose-rule UI test — NO Docker fixture, NO SSH/tmux, NO
+  # toxiproxy, NO 2222/2226 port — so it needs no tests.yml service change, and it
+  # does NOT self-skip on CI (no assumeTrue / assumeFalse(isRunningOnCi())). It
+  # lives under com.pocketshell.app.tmux, so it carries its FQCN directly.
+  "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"
   # ADDED (#859 Slice B): the typed-card RENDERER REGISTRY proof. The session
   # feed is now a generic typed-card list dispatched through
   # SessionCardRenderers (no `when (type)` in the feed). This connected Compose
@@ -993,6 +1144,20 @@ JOURNEY_CLASSES=(
   # the inline-image render + the path-text FALLBACK on a failed fetch stay
   # durably guarded. It lives under com.pocketshell.app.conversation.
   "com.pocketshell.app.conversation.ConversationImageContentRenderTest"
+  # ADDED (#1207 — black-screen audit UX leg, D33/G10): a fresh Claude session
+  # opens on the Conversation view with zero transcript; `/model` (an alt-screen
+  # TUI picker that writes NOTHING to the JSONL) showed a silent nothing + a
+  # misleading optimistic bubble, and a torn-down row stranded an eternal
+  # "Loading conversation…" spinner. This class renders the REAL production
+  # composables (ConversationTuiCommandNotice + ConversationDetectingPlaceholder
+  # via the production tmuxConversationPlaceholderLoadState fallback) and asserts
+  # the Open-in-Terminal affordance is shown + the terminal Empty state renders
+  # instead of the eternal spinner. PURE Compose (NO Docker fixture, NO SSH/tmux,
+  # NO port) — no tests.yml service change — and it does NOT self-skip on CI (no
+  # assumeTrue / assumeFalse(isRunningOnCi())). Per G9 it must run per-push so the
+  # TUI-command UX + spinner-race fix stay durably guarded. It lives under
+  # com.pocketshell.app.conversation.
+  "com.pocketshell.app.conversation.ConversationTuiCommandNoticeRenderTest"
   # ADDED (#931 — D33/G10 reproduce-first): the port-forward panel LazyColumn
   # duplicate-key crash guard. The maintainer's captured crash
   # (IllegalArgumentException: Key "22" already used) was a real Compose
@@ -1488,6 +1653,23 @@ JOURNEY_CLASSES=(
   # fixture tests.yml already brings up (no toxiproxy / new port), and does NOT
   # self-skip on CI. Lives under com.pocketshell.app.tmux, so it carries its FQCN.
   "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest#cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut"
+  # ADDED (#1241): the landing app-bar usage GLANCE PILL on-device proof. The
+  # routine non-warning "how much have I burned this week" question was 2-3 taps
+  # deep (Settings->Diagnostics / in-session kebab); this small most-constraining-
+  # percent pill surfaces it on the landing app bar next to Settings and taps into
+  # UsageScreen. This connected UI test composes the PRODUCTION HostsAppBar in the
+  # real PocketShellTheme and asserts: the percent renders, the pill is HIDDEN with
+  # no data / no route, tapping routes to Usage, a stale reading renders honestly
+  # ("cached from HH:mm"), and the pill + Settings gear are BOTH fully within the
+  # window root (the #418 declutter / no-crowd guard — assertNodeFullyWithinRoot,
+  # not a bare assertIsDisplayed). Pure Compose-rule UI test (like EnvScreenE2eTest):
+  # no Docker fixture / SSH / tmux / toxiproxy / port, so it needs NO tests.yml
+  # service change, is deterministic on the CI swiftshader AVD, and does NOT
+  # self-skip on CI. The pure state-derivation backstop (most-constraining pick,
+  # hidden-when-no-data, kind, stale flag) is the per-push Unit-job
+  # UsageGlancePillStateTest. It lives under com.pocketshell.app.usage, so it
+  # carries its FQCN directly.
+  "com.pocketshell.app.usage.UsageGlancePillE2eTest"
 )
 
 # ---------------------------------------------------------------------------
@@ -2433,6 +2615,51 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #1233 shell-pane single-snapshot affordance-scan proof (core-terminal
+# androidTest). A shell / non-agent pane used to run FOUR independent per-frame
+# on-main full-viewport affordance scanners (URL + SmartSelection + FilePath +
+# EngineCommand), each re-extracting the whole viewport AND running its regex on
+# Main every frame — a milder cousin of the #796 ANR on a high-throughput
+# streaming pane with the keyboard up. The fix consolidates them into ONE
+# ShellPaneAffordanceOverlay that extracts the viewport ONCE per coalesced frame
+# and runs the enabled passes OFF-main (the #871 single-snapshot split applied to
+# all four shell scanners). This proof asserts BOTH (a) URL / file-path /
+# engine-command affordances stay tappable on a real shell pane (behavior
+# UNCHANGED), and (b) the LOAD-BEARING property — the scan runs OFF the main
+# thread and dispatches ONE debounced single-snapshot scan per frame, NOT four
+# on-main scans per tick. Because #1233 is adjacent to the #796/#803/#866/#871
+# terminal-ANR class it runs alongside those proofs in this per-push gate. Uses
+# NO Docker fixture (in-process Compose UI test).
+CORE_TERMINAL_SHELL_SNAPSHOT_CLASS="com.pocketshell.core.terminal.ui.ShellPaneAffordanceSingleSnapshotProofTest"
+SHELL_SNAPSHOT_STATUS="PASS"
+
+run_core_terminal_shell_snapshot() {
+  run_ct_class "$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS"
+}
+
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  SHELL_SNAPSHOT_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #1233 shell-pane single-snapshot proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #1233 SHELL-PANE SINGLE-SNAPSHOT PROOF: $CORE_TERMINAL_SHELL_SNAPSHOT_CLASS (attempt 1)"
+  echo "=========================================================="
+  shell_snapshot_start=$SECONDS
+  if run_core_terminal_shell_snapshot; then
+    echo "SHELL_SNAPSHOT_PASS: passed on attempt 1 (elapsed $((SECONDS - shell_snapshot_start))s)"
+  else
+    echo ">>> SHELL-PANE SINGLE-SNAPSHOT PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_shell_snapshot; then
+      echo "SHELL_SNAPSHOT_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "SHELL_SNAPSHOT_FAILED: #1233 proof failed twice"
+      SHELL_SNAPSHOT_STATUS="FAIL"
+    fi
+  fi
+fi
+
 SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
 # The job is red iff at least one class failed BOTH attempts, OR the #803
@@ -2446,14 +2673,14 @@ if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
       && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
       && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
       && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
-      && "$SURFACE_REPAINT_STATUS" == "PASS" ]]; then
+      && "$SURFACE_REPAINT_STATUS" == "PASS" && "$SHELL_SNAPSHOT_STATUS" == "PASS" ]]; then
   JOURNEY_EXIT=0
   journey_status="PASS"
 elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
         && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
         && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
         && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
-        && "$SURFACE_REPAINT_STATUS" != "FAIL" ]]; then
+        && "$SURFACE_REPAINT_STATUS" != "FAIL" && "$SHELL_SNAPSHOT_STATUS" != "FAIL" ]]; then
   # Only the budget timeout fired (no class failed BOTH attempts on its own
   # merits): a pure #470-stall time-budget casualty.
   JOURNEY_EXIT=1
@@ -2505,6 +2732,9 @@ echo "=========================================================="
   echo
   echo "Core-terminal #1203 surface-only-black recovery proof (\`shared:core-terminal\`): **$SURFACE_REPAINT_STATUS**"
   echo "- \`$CORE_TERMINAL_SURFACE_REPAINT_CLASS\`"
+  echo
+  echo "Core-terminal #1233 shell-pane single-snapshot affordance-scan proof (\`shared:core-terminal\`): **$SHELL_SNAPSHOT_STATUS**"
+  echo "- \`$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS\`"
   if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
     echo
     echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"

@@ -227,26 +227,6 @@ sealed interface FolderListUiState {
 }
 
 /**
- * Issue #1155 (Part B): a live "This session no longer exists — create a new
- * session in this folder?" recovery prompt, raised when a persisted session the
- * user tried to open was confirmed GENUINELY GONE on attach (absent tmux
- * session, not a transient reconnect). Confirming reuses the SAME folder's
- * create-session path so the user recovers in one tap; dismissing clears it.
- *
- * @property sessionName the gone session's name (also its `tmux new-session -A`
- *   name for the same folder, so recreating with it reproduces the same slot).
- * @property folderPath the gone session's working directory — the folder the
- *   recreate happens in. `null` when the gone session carried no known start
- *   directory (the recreate then falls back to the host home directory).
- * @property folderLabel a short human label for the folder, for the prompt copy.
- */
-data class StaleSessionRecreatePrompt(
-    val sessionName: String,
-    val folderPath: String?,
-    val folderLabel: String,
-)
-
-/**
  * Host-detail action feedback surface (#656).
  *
  * For a routine **success** there is deliberately no final status state at all
@@ -534,20 +514,6 @@ class FolderListViewModel internal constructor(
     private val _actionStatus: MutableStateFlow<FolderActionStatus> =
         MutableStateFlow(FolderActionStatus.Idle)
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
-
-    /**
-     * Issue #1155 (Part B): non-null when a persisted session the user tried to
-     * open was confirmed GENUINELY GONE on attach (an absent tmux session, not a
-     * transient reconnect blip — see [SessionLifecycleSignals.emitStaleSession]).
-     * The FolderList surfaces it as a "This session no longer exists — create a
-     * new session in this folder?" prompt; confirming reuses the SAME folder's
-     * create-session path ([confirmRecreateStaleSession]), dismissing clears it
-     * ([dismissStaleSessionPrompt]). `null` while there is nothing to recover.
-     */
-    private val _staleSessionPrompt: MutableStateFlow<StaleSessionRecreatePrompt?> =
-        MutableStateFlow(null)
-    val staleSessionPrompt: StateFlow<StaleSessionRecreatePrompt?> =
-        _staleSessionPrompt.asStateFlow()
 
     /**
      * Issue #885: passive host-CLI-version mismatch, detected from the
@@ -1097,55 +1063,28 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Issue #1155 (Part B): handle a persisted-but-GENUINELY-GONE session
-     * broadcast from the per-session screen ([SessionLifecycleSignals.staleSessions]).
-     * The attach confirmed the tmux session is absent (`TmuxSessionNotFoundException`)
-     * — NOT a transient reconnect (those never emit this) — so instead of leaving
-     * the user on a blank list we raise the "create a new session in this folder?"
-     * recreate prompt for the SAME folder. Also drops the dead row from the held
-     * tree (it is confirmed gone), matching [onSessionKilled]. Ignores other hosts.
+     * Issue #1155: handle a persisted-but-GENUINELY-GONE session broadcast from
+     * the per-session screen ([SessionLifecycleSignals.staleSessions]). The attach
+     * confirmed the tmux session is absent (`TmuxSessionNotFoundException`) — NOT a
+     * transient reconnect (those never emit this) — so drop the dead row from the
+     * held tree (it is confirmed gone), matching [onSessionKilled], keeping the
+     * list accurate. Ignores other hosts.
+     *
+     * The user-facing "This session no longer exists — create in this folder, or
+     * go home?" recovery PROMPT is no longer raised here: it is owned app-level by
+     * `MainActivity` ([com.pocketshell.app.tmux.StaleSessionPromptController]) so
+     * it also surfaces on the cold-restore path where this view model never
+     * exists (the folder tree was never opened). This collector only keeps the
+     * tree it IS bound to accurate.
      */
     @androidx.annotation.VisibleForTesting
     internal fun onStaleSession(stale: com.pocketshell.app.tmux.StaleSession) {
         val params = bound ?: return
         if (params.hostId != stale.hostId) return
-        // The session is confirmed gone — drop its row from the maintained tree so
-        // the list the prompt sits over is already accurate.
+        // The session is confirmed gone — drop its row from the maintained tree.
         if (tree.removeSession(stale.sessionName)) {
             emitReady()
         }
-        _staleSessionPrompt.value = StaleSessionRecreatePrompt(
-            sessionName = stale.sessionName,
-            folderPath = stale.folderPath,
-            folderLabel = stale.folderPath
-                ?.let { defaultLabelForPath(canonicalisePath(it)) }
-                ?: "home",
-        )
-    }
-
-    /**
-     * Issue #1155 (Part B): confirm the recreate prompt — create a fresh session
-     * in the gone session's SAME folder (reusing the standard [createSession]
-     * create-in-folder path, `tmux new-session -A` semantics) and route to it via
-     * [onResolved]. A no-op when there is no active prompt. The gone session's name
-     * is reused (it maps to that folder), and a null folder falls back to the host
-     * home directory (`~`), so the user always recovers — never a blank/error.
-     */
-    fun confirmRecreateStaleSession(onResolved: (sessionName: String) -> Unit) {
-        val prompt = _staleSessionPrompt.value ?: return
-        _staleSessionPrompt.value = null
-        createSession(
-            sessionName = prompt.sessionName,
-            cwd = prompt.folderPath ?: "~",
-            startCommand = null,
-            chosenKind = null,
-            onResolved = onResolved,
-        )
-    }
-
-    /** Issue #1155 (Part B): dismiss the stale-session recreate prompt. */
-    fun dismissStaleSessionPrompt() {
-        _staleSessionPrompt.value = null
     }
 
     /**

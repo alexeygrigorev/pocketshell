@@ -432,6 +432,20 @@ public class TmuxSessionViewModel @Inject constructor(
     private val seedCaptureTimeoutMs: Long = SEED_CAPTURE_TIMEOUT_MS
 
     /**
+     * Issue #1206: backoff (ms) between bounded prewarm seed-recovery capture
+     * retries ([schedulePrewarmSeedRecovery]). Defaults to the production value;
+     * a unit test may shorten it via [setPrewarmSeedRetryBackoffForTest] so the
+     * retry window doesn't need real wall-clock delay under a real-thread driver
+     * (the virtual-clock `runTest` driver auto-advances it either way).
+     */
+    private var prewarmSeedRetryBackoffMs: Long = PREWARM_SEED_RETRY_BACKOFF_MS
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setPrewarmSeedRetryBackoffForTest(backoffMs: Long) {
+        prewarmSeedRetryBackoffMs = backoffMs
+    }
+
+    /**
      * Issue #576 (Slice A of #792): the dispatcher the structural reconcile's
      * pane-state APPLY step runs on. The `list-panes`/`capture-pane` IO runs
      * off-main on [reconcileDispatcher], but the resulting `_panes` /
@@ -1305,6 +1319,27 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerClients[paneId]?.let { System.identityHashCode(it) }
 
     /**
+     * Issue #1205 test seam: is [paneId]'s live-output producer currently attached
+     * and active? The overflow-recovery proof uses this to confirm the producer
+     * was REATTACHED after a reseed (live %output resumes), not left dead.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun paneProducerActiveForTest(paneId: String): Boolean =
+        paneProducerJobs[paneId]?.isActive == true
+
+    /**
+     * Issue #1205 test seam: is an overflow reseed-and-reattach recovery currently
+     * in flight for [paneId]? The connected exhaustion journey polls this to know
+     * a recovery cycle has fully COMPLETED (the in-flight slot released in its
+     * `finally`) before tripping the next overflow, so each trip is counted against
+     * [OVERFLOW_RECOVERY_MAX_ATTEMPTS] rather than de-duped as a still-in-flight
+     * burst signal — making the budget exhaustion deterministic on-device.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun paneOverflowRecoveryInFlightForTest(paneId: String): Boolean =
+        paneId in paneOverflowRecoveryInFlight
+
+    /**
      * Issue #895 (switch-while-black) test seam: force the inline connection
      * state to [ConnectionState.Attaching] so a regression test can drive a
      * passive drop while [inlineConnectionStatus] projects to
@@ -2160,6 +2195,43 @@ public class TmuxSessionViewModel @Inject constructor(
         _confirmedShellPaneIds.asStateFlow()
 
     /**
+     * Issue #1158 (REOPENED chain #962→#975→#1057→#1158): the STICKY set of tmux
+     * session ids whose visible pane has been observed on the ALTERNATE screen
+     * buffer — the maintainer's real "agent launched directly inside an existing
+     * shell" case. That session records `@ps_agent_kind=shell`, so the
+     * confirmed-shell verdict is never cleared (live detection never binds for
+     * node-wrapped Claude / Codex `/proc` / Z.AI transcript-path fleets), and
+     * every other tab signal is false — the Conversation tab was gone for the
+     * session's whole life. A full-screen agent TUI holds the alternate buffer for
+     * its run, which [TerminalSurfaceState.isAlternateBufferActive] reports
+     * detection-INDEPENDENTLY.
+     *
+     * STICKY (latch): a session is only ever ADDED here, never removed within a
+     * runtime — once the tab has been shown it stays for the session's life even
+     * if the buffer later leaves alt-mode or detection drops, so a failed/again-
+     * null detection can't collapse the tab back to Terminal-only. Cleared only
+     * with the other per-runtime caches on park/restore/clear so a different
+     * session never inherits a stale latch.
+     *
+     * POSITIVE signal: a genuine plain shell at a prompt (main buffer) never
+     * enters this set, so the #894/#815 no-flap invariant holds.
+     */
+    private val altBufferAgentSessionIds: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
+
+    /**
+     * Issue #1158: the per-pane projection of [altBufferAgentSessionIds] over the
+     * current pane rows, consumed by the screen to force the Conversation tab
+     * present on the visible pane. Mirrors [confirmedShellPaneIds]'s shape:
+     * republished whenever the pane set changes or a new alt-buffer sighting
+     * latches a session.
+     */
+    private val _altBufferAgentPaneIds: MutableStateFlow<Set<String>> =
+        MutableStateFlow(emptySet())
+    public val altBufferAgentPaneIds: StateFlow<Set<String>> =
+        _altBufferAgentPaneIds.asStateFlow()
+
+    /**
      * Issue #858: the active session's recorded NON-default profile label
      * (e.g. `"Claude (Z.AI)"`), read fresh from the host-side
      * `@ps_agent_profile` tmux user option alongside the kind. `null` for a
@@ -2305,8 +2377,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // The crash class: closing the attached/last session → the gateway kill
     // destroys tmux → the live `-CC` control client EOFs → that EOF fans out
     // to several `bridgeScope.launch {}` collectors (client.events →
-    // onControlEvent, client.disconnected, per-pane output/port, agent tail /
-    // detection / conversation watchdog) AT THE SAME MOMENT the scopes are
+    // structural reconcile, client.disconnected, per-pane output/port, agent
+    // tail / detection / conversation watchdog) AT THE SAME MOMENT the scopes are
     // torn down. A SupervisorJob isolates SIBLING cancellation but does NOT
     // swallow a child's exception — so a single unguarded suspend-IO call that
     // throws (e.g. `SshException: SSH session is not connected`, the captured
@@ -2479,6 +2551,12 @@ public class TmuxSessionViewModel @Inject constructor(
     // would also stop them, but we want to release the bridge cleanly
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    // Issue #1206: background seed-recovery jobs for ACTIVE-runtime panes whose
+    // seed capture came back empty/wedged (e.g. the surface-error recovery
+    // reseed in [reseedRecoveredSurface]). The prewarm path tracks its own local
+    // map per [PrewarmedPaneRuntime]; this is the active-runtime registry so the
+    // retry/deferred-reseed is cancellable when the runtime is deactivated.
+    private val paneSeedRecoveryJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneOutputActivityJobs: MutableMap<String, Job> = ConcurrentHashMap()
     // Issue #959: track the EXACT `-CC` client each pane's output producer +
     // input drain are currently bound to. A beyond-grace background→foreground
@@ -2505,6 +2583,21 @@ public class TmuxSessionViewModel @Inject constructor(
     // The SSH/tmux transport stays untouched the whole time.
     private val paneSurfaceRecoveryTimestamps: MutableMap<String, ArrayDeque<Long>> =
         ConcurrentHashMap()
+
+    // Issue #1205: per-pane sliding window of backlog/seed-gate overflow recovery
+    // attempts (reseed-and-reattach). Bounds a saturated channel to
+    // [OVERFLOW_RECOVERY_MAX_ATTEMPTS] reseeds inside [OVERFLOW_RECOVERY_WINDOW_MS]
+    // before the pane falls to the `surfaceError` card, so a burst that keeps
+    // overflowing after each reseed cannot loop into a reseed storm.
+    private val paneOverflowRecoveryTimestamps: MutableMap<String, ArrayDeque<Long>> =
+        ConcurrentHashMap()
+
+    // Issue #1205: panes with a reseed-and-reattach recovery currently in flight.
+    // A single overflow BURST fires the overflow signal many times (once per
+    // dropped frame); this de-dups the burst to ONE recovery per pane so we don't
+    // launch a reseed per dropped event. Cleared when the recovery job completes.
+    private val paneOverflowRecoveryInFlight: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
 
     /**
      * Open the SSH transport, spawn `tmux -CC` against [sessionName], and
@@ -3834,6 +3927,11 @@ public class TmuxSessionViewModel @Inject constructor(
             // this attach — the live client never re-attached, so the pane stays in
             // panesSeededThisAttach and a skip would leave the surface black (#1181).
             reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+            // Issue #1295: the pinned beyond-grace foreground resume is another one-shot reseed
+            // that armed NO steady watchdog. On a port-forward-pinned "always-on" connection the
+            // original connect-time watchdog may have hit its lifetime tick-ceiling across a long
+            // session, so re-arm the single lifetime net here too (arm-dedup keeps it singular).
+            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
         }
     }
 
@@ -3973,6 +4071,17 @@ public class TmuxSessionViewModel @Inject constructor(
             // dropped if the runtime/target was superseded mid-flight (the guard),
             // so a late seed for a switched-away session can never paint.
             reseedActivePaneForReattach(guard)
+            // Issue #1295: the within-grace reseed-only reattach is a ONE-SHOT reseed that
+            // (pre-#1295) armed NO steady stale-render watchdog — it relied on the original
+            // connect-time watchdog having SURVIVED. But that watchdog can be gone (a
+            // superseded runtime exited its loop, a prior disconnect-recovery left it dead,
+            // the lifetime tick-ceiling elapsed), and Claude repaints only incrementally after
+            // reveal, so an idle pane that later diverges on such a runtime had NO post-reveal
+            // net and stayed black FOREVER. Re-arm the single lifetime net here so the
+            // reattached runtime always has exactly one live watchdog. [armActivePaneStaleRenderWatchdog]
+            // cancels any prior loop before launching (arm-dedup), so this can never stack a
+            // second concurrent watchdog even when the connect-time one is still alive.
+            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
         }
     }
 
@@ -4608,6 +4717,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = panes.paneProducerJobs,
                 paneInputQueues = panes.paneInputQueues,
                 paneInputJobs = panes.paneInputJobs,
+                // Issue #1206: carry the prewarm seed-recovery jobs into the
+                // cache entry so a promoted-but-still-parked recovery job is
+                // cancelled on cache eviction / deactivate rather than leaking
+                // until whole-VM `bridgeScope` teardown.
+                paneSeedRecoveryJobs = panes.paneSeedRecoveryJobs,
                 paneAgentJobs = emptyMap(),
                 paneAgentInputs = emptyMap(),
                 agentConversations = emptyMap(),
@@ -4651,7 +4765,13 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         client: TmuxClient,
     ): PrewarmedPaneRuntime {
-        val response = client.sendCommand(buildListPanesCommand(target))
+        // Issue #1316: the prewarm enumeration rides the same dedicated exec lane
+        // as the attach reconcile, so a busy sibling session's `-CC` burst cannot
+        // head-of-line-block a prewarm behind the shared control channel.
+        val response = client.listPanesViaExec(
+            buildListPanesCommand(target),
+            timeoutMs = RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS,
+        )
         if (response.isError) {
             throw TmuxAttachPanesReadyException(
                 "tmux list-panes failed during prewarm: " +
@@ -4661,6 +4781,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val paneInputQueues = LinkedHashMap<String, TmuxPaneInputQueue>()
         val paneInputJobs = LinkedHashMap<String, Job>()
         val paneProducerJobs = LinkedHashMap<String, Job>()
+        // Issue #1206: background seed-recovery jobs (bounded capture retry +
+        // one deferred reseed on the first live %output) for panes whose FIRST
+        // capture came back empty/error/timeout on a busy shared -CC channel.
+        val paneSeedRecoveryJobs = LinkedHashMap<String, Job>()
         val paneRows = LinkedHashMap<String, TmuxPaneState>()
         try {
             val parsed = response.output
@@ -4704,6 +4828,7 @@ public class TmuxSessionViewModel @Inject constructor(
                             paneProducerJobs = paneProducerJobs,
                             paneInputQueues = paneInputQueues,
                             paneInputJobs = paneInputJobs,
+                            paneSeedRecoveryJobs = paneSeedRecoveryJobs,
                         )
                     },
                 )
@@ -4711,7 +4836,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // Issue #448 (epic #432 slice C): also tap the prewarmed
                 // pane's shared output flow for new-port detection.
                 startPortDetectionForPane(paneId = pane.paneId, client = client)
-                seedPrewarmedPane(client, row)
+                seedPrewarmedPane(client, row, paneSeedRecoveryJobs)
             }
             return PrewarmedPaneRuntime(
                 panes = paneRows.values.toList(),
@@ -4719,6 +4844,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = paneProducerJobs,
                 paneInputQueues = paneInputQueues,
                 paneInputJobs = paneInputJobs,
+                paneSeedRecoveryJobs = paneSeedRecoveryJobs,
             )
         } catch (t: Throwable) {
             PrewarmedPaneRuntime(
@@ -4727,6 +4853,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneProducerJobs = paneProducerJobs,
                 paneInputQueues = paneInputQueues,
                 paneInputJobs = paneInputJobs,
+                paneSeedRecoveryJobs = paneSeedRecoveryJobs,
             ).closePartialPrewarm()
             throw t
         }
@@ -4738,48 +4865,123 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerJobs: MutableMap<String, Job>,
         paneInputQueues: MutableMap<String, TmuxPaneInputQueue>,
         paneInputJobs: MutableMap<String, Job>,
+        paneSeedRecoveryJobs: MutableMap<String, Job>,
     ) {
         val existing = paneRows[paneId] ?: return
         if (existing.surfaceError) return
         paneProducerJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
+        // Issue #1206: the pane's feed failed — stop any background seed-recovery
+        // retry/deferred-reseed too so it doesn't reseed a dead surface.
+        paneSeedRecoveryJobs.remove(paneId)?.cancel()
         runCatching { existing.terminalState.detachExternalProducer() }
         paneRows[paneId] = existing.copy(surfaceError = true)
     }
 
-    private suspend fun seedPrewarmedPane(client: TmuxClient, pane: TmuxPaneState) {
+    private suspend fun seedPrewarmedPane(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        paneSeedRecoveryJobs: MutableMap<String, Job> = this.paneSeedRecoveryJobs,
+    ) {
         // Issue #468: the live %output producer is gated behind the seed.
         // appendRemoteOutput opens the gate when a snapshot lands; if the
         // capture fails (or anything throws) we must still open the gate so
         // buffered live output is flushed in order rather than swallowed.
-        var seeded = false
-        try {
-            // Issue #640: single-flight combined capture+cursor exchange (see
-            // [TmuxClient.captureWithCursor]) shared with the cold-open seed
-            // path so both pay one wire round-trip and restore the #259 cursor.
-            // Issue #926: the round-trip runs OFF Main on [seedIoDispatcher] with
-            // the short seed ceiling — the prewarm seed must never park the UI
-            // thread on a wedged channel either.
-            val combined = runCatching {
-                withContext(seedIoDispatcher) {
-                    client.captureWithCursor(
-                        pane.paneId,
-                        scrollbackLines = SEED_SCROLLBACK_LINES,
-                        timeoutMs = seedCaptureTimeoutMs,
-                    )
-                }
-            }.getOrNull() ?: return
-            val capture = combined.capture
-            if (capture.isError || capture.output.isEmpty()) return
-            val cursor = parseTmuxPaneCursor(combined.cursorReply)
-            pane.terminalState.appendRemoteOutput(
-                capture.output.toTerminalViewportBytes(cursor),
-            )
-            seeded = true
-        } finally {
-            if (!seeded) pane.terminalState.openSeedGateWithoutSeed()
+        val seeded = captureAndApplyPrewarmSeed(client, pane)
+        if (!seeded) {
+            // Open the gate immediately (do NOT hold live %output behind a
+            // multi-second retry) and recover in the background.
+            pane.terminalState.openSeedGateWithoutSeed()
+            // Issue #1206: the FIRST capture came back empty/error/timeout on a
+            // busy shared -CC channel (Claude floods at startup and can wedge the
+            // capture acquire). Without recovery the model grid stays empty and
+            // only future incremental %output paints → fragments-over-black. Retry
+            // a bounded number of times with backoff, and failing that re-arm ONE
+            // deferred reseed on the first live %output so the full grid is
+            // recovered the moment the pane produces anything.
+            schedulePrewarmSeedRecovery(client, pane, paneSeedRecoveryJobs)
         }
+    }
+
+    /**
+     * Issue #640/#926: one combined capture+cursor seed attempt for a prewarmed
+     * pane, run OFF Main on [seedIoDispatcher] with the short seed ceiling.
+     * Returns true and applies the snapshot (firing the full-repaint) when the
+     * capture returned content; false on empty/error/timeout/throw so the caller
+     * can open the gate and schedule recovery (#1206).
+     */
+    private suspend fun captureAndApplyPrewarmSeed(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+    ): Boolean {
+        // Issue #1206 (connected AC4 proof, #780 synthetic-injection): a busy
+        // shared `-CC` channel can wedge/empty the FIRST `capture-pane` on a
+        // fresh prewarmed pane even though the pane HAS content — the exact
+        // non-happy state the happy real-agent workbench structurally cannot
+        // enter. This seam lets a connected journey force the first seed attempt
+        // to be TREATED as empty (deterministically, BEFORE the wire round-trip),
+        // driving the retry/deferred-reseed recovery against a real pane.
+        // [onSeedAttempt] is a diagnostic counter (how many times the prewarm
+        // seed path ran). Production never arms the seam (default 0), so this is
+        // a pure test hook.
+        PrewarmSeedFaultTestOverride.onSeedAttempt()
+        if (PrewarmSeedFaultTestOverride.consumeForcedEmpty(pane.paneId)) return false
+        val combined = runCatching {
+            withContext(seedIoDispatcher) {
+                client.captureWithCursor(
+                    pane.paneId,
+                    scrollbackLines = SEED_SCROLLBACK_LINES,
+                    timeoutMs = seedCaptureTimeoutMs,
+                )
+            }
+        }.getOrNull() ?: return false
+        val capture = combined.capture
+        if (capture.isError || capture.output.isEmpty()) return false
+        val cursor = parseTmuxPaneCursor(combined.cursorReply)
+        pane.terminalState.appendRemoteOutput(
+            capture.output.toTerminalViewportBytes(cursor),
+        )
+        return true
+    }
+
+    /**
+     * Issue #1206: background recovery for a prewarmed pane whose first seed
+     * capture came back empty/error/timeout. Runs on [bridgeScope] (never blocks
+     * the prewarm loop; cancelled with the VM), retries the capture a bounded
+     * number of times with backoff, and — if the capture stays wedged/empty for
+     * the whole window — re-arms ONE deferred reseed that fires the moment the
+     * first live %output lands (an idle pane emits nothing, so no wasted
+     * capture; when Claude finally paints a cell, one fresh capture seeds the
+     * full grid over the fragment-only screen).
+     */
+    private fun schedulePrewarmSeedRecovery(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        paneSeedRecoveryJobs: MutableMap<String, Job>,
+    ) {
+        val paneId = pane.paneId
+        paneSeedRecoveryJobs.remove(paneId)?.cancel()
+        val job = bridgeScope.launch {
+            // Bounded retry with backoff (≈PREWARM_SEED_RETRY_ATTEMPTS attempts
+            // over ≈PREWARM_SEED_RETRY_BACKOFF_MS spacing).
+            repeat(PREWARM_SEED_RETRY_ATTEMPTS) {
+                delay(prewarmSeedRetryBackoffMs)
+                if (captureAndApplyPrewarmSeed(client, pane)) return@launch
+            }
+            // Retry window exhausted while the capture stayed empty/wedged.
+            // Re-arm ONE deferred reseed: wait for the first live %output, then
+            // do a single fresh capture. The wait parks harmlessly for a truly
+            // idle pane (nothing to reseed) and is torn down with bridgeScope.
+            runCatching { client.outputFor(paneId).first() }
+                .onSuccess { captureAndApplyPrewarmSeed(client, pane) }
+        }
+        // The map is a per-runtime cancellation registry only (torn down with the
+        // runtime); a completed entry left behind is harmless (`cancel()` on a
+        // finished job is a no-op). Deliberately NOT self-removed on completion so
+        // a completion handler can't mutate the map while [closePartialPrewarm]
+        // iterates it.
+        paneSeedRecoveryJobs[paneId] = job
     }
 
     /**
@@ -5524,6 +5726,22 @@ public class TmuxSessionViewModel @Inject constructor(
             runtime = cached,
             trigger = trigger,
         )
+        // Issue #1295: the WARM cached-runtime activation (a fast switch BACK to a cached
+        // session — the A→B→A return) restores a LIVE-attached runtime but, unlike the
+        // cold/fast-switch reveal (`:6545`/`:7041`), armed NO steady stale-render watchdog:
+        // [launchCachedRuntimeRemoteRefresh] below only reconciles panes + refreshes size, it
+        // never arms the lifetime net. An idle Claude pane on a warm-switched-back session that
+        // later diverges would then have NO post-reveal recovery net and stay BLACK forever —
+        // the exact #1295 unarmed-watchdog class. Arm the single lifetime net for the
+        // reactivated runtime now (the cached active pane is already non-blank from its cached
+        // frame, so the stale-render oracle can fire; arm-dedup keeps it singular, so the
+        // switch can never stack a second loop for the reactivated runtime).
+        val activationGuard = RuntimeRefreshGuard(
+            generation = generation,
+            target = target,
+            client = cached.client,
+        )
+        if (isCurrentRuntime(activationGuard)) armActivePaneStaleRenderWatchdog(activationGuard)
         StartupTiming.mark(
             "tmux-runtime-cache-hit",
             "attempt" to attempt,
@@ -5675,6 +5893,10 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
+        // Issue #1206: cancel any active-runtime seed-recovery retry/deferred
+        // reseed — the runtime is being parked; a fresh attach/restore re-seeds.
+        paneSeedRecoveryJobs.values.forEach { it.cancel() }
+        paneSeedRecoveryJobs.clear()
         // Issue #959: the parked panes' producers will be re-bound to a (new
         // or same) client on restore via [rebindRestoredRuntimePaneJobsIfNeeded];
         // drop the stale-client bindings so a restore re-binds rather than
@@ -5689,6 +5911,8 @@ public class TmuxSessionViewModel @Inject constructor(
         panePortDetectorClients.clear()
         panePortDetectorGenerations.clear()
         paneSurfaceRecoveryTimestamps.clear()
+        paneOverflowRecoveryTimestamps.clear()
+        paneOverflowRecoveryInFlight.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
         conversationLoadWatchdogJobs.values.forEach { it.cancel() }
@@ -5705,6 +5929,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -5812,7 +6040,17 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.putAll(runtime.paneInputQueues)
         paneInputJobs.clear()
         paneInputJobs.putAll(runtime.paneInputJobs)
+        // Issue #1206: a restored prewarmed runtime may still carry a parked
+        // seed-recovery job (its capture stayed empty). Move it into the
+        // active-runtime registry so it is cancelled on the next
+        // [deactivateCurrentRuntimeToCache] (and the whole-VM teardown) rather
+        // than leaking. Cancel any stale active entry first.
+        paneSeedRecoveryJobs.values.forEach { it.cancel() }
+        paneSeedRecoveryJobs.clear()
+        paneSeedRecoveryJobs.putAll(runtime.paneSeedRecoveryJobs)
         paneSurfaceRecoveryTimestamps.clear()
+        paneOverflowRecoveryTimestamps.clear()
+        paneOverflowRecoveryInFlight.clear()
         paneAgentJobs.clear()
         // Issue #793: drop any pending load watchdogs from the prior runtime so
         // a restored, already-populated conversation row is not flipped to
@@ -5833,6 +6071,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // the `@ps_agent_kind` on the restored connection and re-derives it.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -7801,6 +8043,12 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    // Issue #1224: fed by the per-pane [TmuxClient.outputFor] tap
+    // ([recordVisiblePaneOutput]), NOT by `%output` on the structural
+    // [TmuxClient.events] bus. `%output` is no longer multiplexed onto that
+    // shared bus — a dense output burst used to fill it and silently drop a
+    // burst-tail structural event (`%window-close` / `%session-changed`). The
+    // first-visible-output milestone now rides the pane's own output stream.
     private fun logFirstPaneOutput(event: ControlEvent.Output) {
         val milestone = activeAttachMilestone ?: return
         if (milestone.firstPaneOutputLogged) return
@@ -7857,8 +8105,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // are OFFERED into it; a Codex `/new` storm of N of them collapses to
         // ~1 reconcile per frame on [reconcileDispatcher], so the UI thread is
         // no longer head-of-line-blocked behind N `list-panes`/`capture-pane`
-        // round-trips (the ANR). `%output` and everything else still flow
-        // through `onControlEvent` synchronously on the collector.
+        // round-trips (the ANR). Issue #1224: `%output` no longer rides the
+        // events bus at all — it is delivered via the per-pane `outputFor` pipes.
         layoutChangeCoalescer?.stop()
         layoutCoalescerScope?.cancel()
         // The coalescer drain loop gets its OWN child Job parented to
@@ -7892,14 +8140,13 @@ public class TmuxSessionViewModel @Inject constructor(
 
         val job = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.events.collect { event ->
-                // Structural events drive a `list-panes` reconcile; route them
-                // through the coalescer (non-blocking offer) so a burst collapses
-                // to ~1 off-main reconcile per frame. Everything else
-                // (notably `%output`) keeps the existing synchronous path.
+                // Issue #1224: [TmuxClient.events] carries STRUCTURAL events only
+                // now (`%output` is off the shared bus). Structural events drive a
+                // `list-panes` reconcile; route them through the coalescer
+                // (non-blocking offer) so a burst collapses to ~1 off-main
+                // reconcile per frame. No non-structural event needs handling here.
                 if (LayoutChangeCoalescer.isStructural(event)) {
                     coalescer.offer(event)
-                } else {
-                    onControlEvent(event)
                 }
             }
         }
@@ -9670,29 +9917,6 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Process one NON-structural event from the bus.
-     *
-     * Issue #576 (Slice A of #792): the structural events
-     * ([ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
-     * [ControlEvent.LayoutChange] / [ControlEvent.PaneModeChanged]) that each
-     * trigger a session-scoped `list-panes` reconcile are NOT handled here —
-     * the collector in [bindClientObservers] routes them through
-     * [layoutChangeCoalescer] instead, so a Codex `%layout-change` storm
-     * collapses to ~1 off-main reconcile per frame rather than N synchronous
-     * main-thread reconciles (the ANR). [LayoutChangeCoalescer.isStructural]
-     * is the single source of truth for that classification. This function
-     * handles the remaining events (notably `%output` logging).
-     */
-    private suspend fun onControlEvent(event: ControlEvent) {
-        when (event) {
-            is ControlEvent.Output -> {
-                logFirstPaneOutput(event)
-            }
-            else -> Unit
-        }
-    }
-
-    /**
      * Ask tmux for the current pane set and reconcile [_panes].
      *
      * Format string carries pane/window/session metadata plus command
@@ -9729,7 +9953,19 @@ public class TmuxSessionViewModel @Inject constructor(
         val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
             withContext(seedIoDispatcher) {
-                client.sendCommand(buildListPanesCommand(target))
+                // Issue #1316: run the reconcile `list-panes` on the DEDICATED exec
+                // lane (mirror of #1297's capture-pane move), NOT the shared per-host
+                // `-CC` control channel. A new-session attach's reconcile used to
+                // head-of-line-block behind a busy sibling session's `-CC` `%output`
+                // burst on the ONE shared transport reader — the v0.4.24 "Attaching…"
+                // wedge. The bounded [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS] ceiling is
+                // the escape: a genuinely wedged/half-open transport surfaces a
+                // `Failed` fast (→ retryable "Tap Reconnect"), never a tens-of-seconds
+                // input-gated freeze.
+                client.listPanesViaExec(
+                    buildListPanesCommand(target),
+                    timeoutMs = RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS,
+                )
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -10010,6 +10246,8 @@ public class TmuxSessionViewModel @Inject constructor(
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
+            paneOverflowRecoveryTimestamps.remove(paneId)
+            paneOverflowRecoveryInFlight.remove(paneId)
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
@@ -10020,6 +10258,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // a pane added/removed by this reconcile picks up (or drops) its
         // session's durable shell verdict for the screen + seed gate.
         refreshConfirmedShellPaneIds()
+        // Issue #1158: republish the sticky alt-buffer agent signal so a pane
+        // added by this reconcile for an already-latched session keeps the
+        // Conversation tab (the latch is per-session; the pane id can rotate).
+        refreshAltBufferAgentPaneIds()
         rebuildUnifiedPanes()
         return newRows
     }
@@ -10248,13 +10490,74 @@ public class TmuxSessionViewModel @Inject constructor(
         return port
     }
 
+    /**
+     * Issue #1205: the synchronous verdict the overflow handlers get from
+     * [beginPaneOverflowRecovery] and record on the `terminal_output_overflow`
+     * diagnostic, deciding what the handler does next.
+     */
+    private enum class OverflowRecoveryDecision {
+        /** Reseed-and-reattach this pane (within the retry budget). */
+        RESEED,
+
+        /** Budget exhausted — fall to the actionable `surfaceError` card. */
+        EXHAUSTED,
+
+        /** A recovery is already running for this pane — drop the burst signal. */
+        IN_FLIGHT,
+    }
+
+    /**
+     * Issue #1205: a pane's delivery backlog (or the 2 MB seed gate) overflowed
+     * under a sustained high-output burst. The KDoc on
+     * [TmuxClient.outputBacklogOverflows] already prescribes the correct
+     * recovery: this is a LOCAL rendering/ingestion backpressure signal, NOT a
+     * transport disconnect, so the pane must recover by RESEEDING from
+     * `capture-pane` — a transient burst costs one reseed, not the pane.
+     *
+     * Before #1205 the FIRST dropped frame cancelled the producer, detached the
+     * pane, and latched `surfaceError` — a permanently dead pane the blank/stale
+     * watchdog and heal oracle both early-return on, so nothing self-heals and
+     * the user must tap "Recreate terminal". This routes both overflow classes
+     * through the existing [reseedActivePaneForReattach]-family machinery
+     * ([drainPaneOutputBacklog] → [seedPaneFromCapture] →
+     * [attachTerminalProducerForPane]) with a bounded retry budget
+     * ([OVERFLOW_RECOVERY_MAX_ATTEMPTS] within [OVERFLOW_RECOVERY_WINDOW_MS]) so
+     * a still-saturated channel can't loop into a reseed storm — after the
+     * budget the pane lands on the same `surfaceError` card as a LAST resort.
+     */
+    private fun beginPaneOverflowRecovery(paneId: String): OverflowRecoveryDecision {
+        // De-dup a burst: a single overflow fires the signal once per DROPPED
+        // frame. If a recovery is already running for this pane, drop the
+        // duplicate. The running job clears the flag on completion; only then can
+        // a genuinely-new overflow re-trigger and be counted against the budget,
+        // so a still-in-flight recovery can never be pre-empted into the card.
+        if (paneId in paneOverflowRecoveryInFlight) return OverflowRecoveryDecision.IN_FLIGHT
+        val now = SystemClock.elapsedRealtime()
+        val attempts = paneOverflowRecoveryTimestamps.getOrPut(paneId) { ArrayDeque() }
+        val recent = synchronized(attempts) {
+            while (attempts.isNotEmpty() && now - attempts.first() > OVERFLOW_RECOVERY_WINDOW_MS) {
+                attempts.removeFirst()
+            }
+            attempts.size
+        }
+        if (recent >= OVERFLOW_RECOVERY_MAX_ATTEMPTS) return OverflowRecoveryDecision.EXHAUSTED
+        // Reserve the in-flight slot atomically so a concurrent burst signal
+        // (the seed-gate path can fire from a producer-feed thread) can't also
+        // start a second recovery for the same pane.
+        if (!paneOverflowRecoveryInFlight.add(paneId)) return OverflowRecoveryDecision.IN_FLIGHT
+        synchronized(attempts) { attempts.addLast(now) }
+        return OverflowRecoveryDecision.RESEED
+    }
+
     private fun handleTerminalOutputBacklogOverflow(overflow: TmuxOutputBacklogOverflow) {
         val existing = paneRows[overflow.paneId] ?: return
         if (existing.surfaceError) return
+        val decision = beginPaneOverflowRecovery(overflow.paneId)
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             "tmux-terminal-output-backlog-overflow pane=${overflow.paneId} " +
-                "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value}",
+                "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value} " +
+                "recovery=${decision.name.lowercase()}",
         )
         DiagnosticEvents.record(
             "connection",
@@ -10265,6 +10568,11 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "pane_output_backlog",
             "classification" to "local_terminal_renderer_backpressure",
             "reconnect" to false,
+            // Issue #1205: the recovery outcome DECISION on the existing event —
+            // reseed (auto-heal), exhausted (fell to the card), or in_flight
+            // (deduped burst). The async outcome lands on
+            // `terminal_output_overflow_recovery`.
+            "recovery" to decision.name.lowercase(),
             "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
@@ -10276,20 +10584,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "attempt" to activeAttachMilestone?.attempt,
             "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
-
-        paneProducerJobs.remove(overflow.paneId)?.cancel()
-        paneProducerClients.remove(overflow.paneId) // Issue #959
-        paneOutputActivityJobs.remove(overflow.paneId)?.cancel()
-        panePortDetectorJobs.remove(overflow.paneId)?.cancel()
-        panePortDetectorClients.remove(overflow.paneId)
-        panePortDetectorGenerations.remove(overflow.paneId)
-        runCatching { existing.terminalState.detachExternalProducer() }
-
-        val errored = existing.copy(surfaceError = true)
-        paneRows[overflow.paneId] = errored
-        _panes.update { rows ->
-            rows.map { row -> if (row.paneId == overflow.paneId) errored else row }
-        }
+        dispatchPaneOverflowRecovery(overflow.paneId, source = "pane_output_backlog", decision = decision)
     }
 
     private fun handleTerminalSeedGateOverflow(
@@ -10298,11 +10593,13 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         val existing = paneRows[paneId] ?: return
         if (existing.surfaceError) return
+        val decision = beginPaneOverflowRecovery(paneId)
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             "tmux-terminal-seed-gate-overflow pane=$paneId " +
                 "pendingBytes=${overflow.pendingBytes} incomingBytes=${overflow.incomingBytes} " +
-                "maxBytes=${overflow.maxBytes} status=${_connectionStatus.value}",
+                "maxBytes=${overflow.maxBytes} status=${_connectionStatus.value} " +
+                "recovery=${decision.name.lowercase()}",
             overflow,
         )
         DiagnosticEvents.record(
@@ -10316,6 +10613,7 @@ public class TmuxSessionViewModel @Inject constructor(
             "source" to "seed_gate_live_buffer",
             "classification" to "local_terminal_renderer_backpressure",
             "reconnect" to false,
+            "recovery" to decision.name.lowercase(),
             "tmuxDisconnected" to clientRef?.disconnected?.value,
             "hostId" to activeTarget?.hostId,
             "host" to activeTarget?.host,
@@ -10327,7 +10625,151 @@ public class TmuxSessionViewModel @Inject constructor(
             "attempt" to activeAttachMilestone?.attempt,
             "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
         )
+        dispatchPaneOverflowRecovery(paneId, source = "seed_gate_live_buffer", decision = decision)
+    }
 
+    private fun dispatchPaneOverflowRecovery(
+        paneId: String,
+        source: String,
+        decision: OverflowRecoveryDecision,
+    ) {
+        when (decision) {
+            OverflowRecoveryDecision.RESEED -> launchPaneOverflowReseed(paneId, source)
+            OverflowRecoveryDecision.EXHAUSTED ->
+                latchPaneSurfaceError(paneId, source, outcome = "surface_error_retry_exhausted")
+            // A recovery for this pane is already running; the burst signal is a
+            // duplicate — drop it (the in-flight job will finish the reseed).
+            OverflowRecoveryDecision.IN_FLIGHT -> Unit
+        }
+    }
+
+    /**
+     * Issue #1205: reseed-and-reattach the overflowed pane through the existing
+     * chokepoint machinery — drain the stale burst backlog, recapture the
+     * authoritative server-side grid, and reattach a fresh producer — SILENTLY,
+     * with NO user action and WITHOUT touching the SSH/tmux transport (this is
+     * local renderer backpressure, not a disconnect). Mirrors
+     * [rebindVisiblePaneProducersToClient]'s producer teardown+reattach so a
+     * duplicate producer/input drain is never left behind. Releases the in-flight
+     * slot in a `finally` so the retry budget can re-arm.
+     */
+    private fun launchPaneOverflowReseed(paneId: String, source: String) {
+        val client = clientRef
+        val guard = client?.let { currentRuntimeGuardForClient(it) }
+        if (client == null || client.disconnected.value || guard == null) {
+            // Nothing live to reseed from (dropped / reconnecting). Fall to the
+            // actionable card and release the slot so a later live overflow can
+            // recover.
+            paneOverflowRecoveryInFlight.remove(paneId)
+            latchPaneSurfaceError(paneId, source, outcome = "surface_error_no_live_client")
+            return
+        }
+        bridgeScope.launch {
+            var reseeded = false
+            var drainedFrames = 0
+            var reattached = false
+            // Issue #1297: FREEZE %output delivery across the whole producer swap.
+            // The teardown (step 1) tears the sole pane collector down and step 3
+            // reattaches a fresh one; every %output emitted in that gap used to be
+            // emitted into the zero-subscriber (replay = 0) pipe and vanish, so
+            // recovery leaned SOLELY on the step-4 capture (the same SPOF this
+            // issue closes). With delivery paused the frames are HELD in the
+            // bounded backlog: on a successful capture the snapshot is
+            // authoritative and the (pre-capture, now-stale) held frames are
+            // dropped so they can't double-apply; on a FAILED capture they are
+            // replayed to the fresh producer on resume instead of being lost.
+            runCatching { client.pauseOutputDelivery(paneId) }
+            try {
+                val pane = paneRows[paneId] ?: return@launch
+                // 1. Detach the current (dropped / feed-failed) producer + its
+                //    output-activity, port-detector, and input drains — the same
+                //    teardown [rebindVisiblePaneProducersToClient] does before a
+                //    clean reattach, so nothing is left double-bound.
+                paneProducerJobs.remove(paneId)?.cancel()
+                paneProducerClients.remove(paneId)
+                paneOutputActivityJobs.remove(paneId)?.cancel()
+                panePortDetectorJobs.remove(paneId)?.cancel()
+                panePortDetectorClients.remove(paneId)
+                panePortDetectorGenerations.remove(paneId)
+                paneInputJobs.remove(paneId)?.cancel()
+                paneInputQueues.remove(paneId)?.close()
+                runCatching { pane.terminalState.detachExternalProducer() }
+                // 2. Drain the stale burst frames still queued in the pane's
+                //    channel so they can't replay to the fresh producer and
+                //    double-apply on top of the capture-pane snapshot.
+                drainedFrames = runCatching { client.drainPaneOutputBacklog(paneId) }.getOrDefault(0)
+                if (!isCurrentRuntime(guard) || client.disconnected.value) return@launch
+                // 3. Reattach a FRESH producer (new bridge + emulator, seed gate
+                //    CLOSED via awaitSeed) BEFORE reseeding: the seed must land on
+                //    the SAME bridge the live producer feeds. Delivery is still
+                //    PAUSED here, so the fresh collector receives nothing yet —
+                //    the held frames wait for the capture outcome (step 4/5).
+                attachTerminalProducerForPane(
+                    paneId = paneId,
+                    state = pane.terminalState,
+                    client = client,
+                )
+                reattached = paneProducerJobs[paneId]?.isActive == true
+                // 4. Reseed from tmux's authoritative server-side grid onto the
+                //    fresh bridge; [appendRemoteOutput] OPENS the seed gate so the
+                //    buffered live deltas flush in order after the snapshot. The
+                //    non-destructive swap keeps the last good frame if the capture
+                //    is momentarily near-blank.
+                reseeded = seedPaneFromCapture(client, pane, guard, recordMilestone = false)
+                if (reseeded) {
+                    // Issue #1297: the snapshot is authoritative — the held frames
+                    // are all PRE-capture (already reflected server-side in the
+                    // snapshot), so DROP them before the resume so they cannot
+                    // double-apply on top of the fresh grid.
+                    drainedFrames +=
+                        runCatching { client.drainPaneOutputBacklog(paneId) }.getOrDefault(0)
+                }
+                // 5. If no snapshot ever landed (all retries near-blank/errored),
+                //    still OPEN the gate so buffered live output is flushed rather
+                //    than swallowed — the same fallback the cold-open seed uses
+                //    ([seedPrewarmedPane]/preload). Otherwise the reattached
+                //    producer would be gated forever. On resume (finally) the held
+                //    frames then replay to the fresh producer through this open
+                //    gate — the #1297 belt so recovery isn't solely the capture.
+                if (!reseeded && isCurrentRuntime(guard)) {
+                    runCatching { pane.terminalState.openSeedGateWithoutSeed() }
+                }
+            } finally {
+                // Issue #1297: THAW delivery last. On success the backlog was just
+                // drained (nothing stale replays); on failure the held frames now
+                // replay to the fresh producer through the opened gate. Always
+                // resume so a pane is never left frozen, even on an early return.
+                runCatching { client.resumeOutputDelivery(paneId) }
+                paneOverflowRecoveryInFlight.remove(paneId)
+                DiagnosticEvents.record(
+                    "connection",
+                    "terminal_output_overflow_recovery",
+                    "pane" to paneId,
+                    "source" to source,
+                    "outcome" to when {
+                        reseeded && reattached -> "reseeded_and_reattached"
+                        reattached -> "reattached_gate_opened"
+                        else -> "reseed_declined"
+                    },
+                    "reattached" to reattached,
+                    "drainedFrames" to drainedFrames,
+                    "generation" to connectGeneration,
+                    "status" to _connectionStatus.value.javaClass.simpleName,
+                )
+            }
+        }
+    }
+
+    /**
+     * Issue #1205: the LAST-RESORT actionable-error card — the pre-#1205
+     * latch-first behavior, now reached ONLY after the bounded reseed retry
+     * budget is exhausted (or there is no live client to reseed from). Tears the
+     * pane's producer/input drains down and flips it to `surfaceError` so the
+     * user recovers via "Recreate terminal".
+     */
+    private fun latchPaneSurfaceError(paneId: String, source: String, outcome: String) {
+        val existing = paneRows[paneId] ?: return
+        if (existing.surfaceError) return
         paneProducerJobs.remove(paneId)?.cancel()
         paneProducerClients.remove(paneId) // Issue #959
         paneOutputActivityJobs.remove(paneId)?.cancel()
@@ -10343,6 +10785,60 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) errored else row }
         }
+        // Issue #1205: the terminal PAGER renders `unifiedPanes`, NOT `_panes`
+        // directly, so the flipped-to-`surfaceError` row must be republished into
+        // the unified list or the user-visible "Recreate terminal" give-up card
+        // never appears — the pane just sits frozen with no recovery affordance.
+        // (An on-device exhaustion journey caught this; the JVM proof only asserts
+        // the `_panes` state, which the pager does not read.)
+        rebuildUnifiedPanes()
+        DiagnosticEvents.record(
+            "connection",
+            "terminal_output_overflow_recovery",
+            "pane" to paneId,
+            "source" to source,
+            "outcome" to outcome,
+            "generation" to connectGeneration,
+            "status" to _connectionStatus.value.javaClass.simpleName,
+        )
+    }
+
+    // Issue #1205 (test seam): drive the production seed-gate overflow handler
+    // directly. The backlog-overflow class is driven end-to-end through the real
+    // `outputBacklogOverflows` collector by a test emitting an overflow event;
+    // the seed-gate class originates from the terminal bridge's
+    // `onTerminalFeedFailure` callback, which a JVM test cannot raise without a
+    // real 2 MB feed, so this seam calls the SAME private handler the callback
+    // does. No production logic added.
+    internal fun handleTerminalSeedGateOverflowForTest(
+        paneId: String,
+        overflow: TerminalSeedGateOverflowException,
+    ) {
+        handleTerminalSeedGateOverflow(paneId, overflow)
+    }
+
+    // Issue #1205 (connected-journey test seam): trip the LIVE-output backlog
+    // overflow class the maintainer reported. A real 4096-deep `Channel` overflow
+    // needs a sustained burst outrunning the frame-budgeted drain — timing-
+    // dependent and flaky to force deterministically on the emulator (the #780
+    // reason to inject the failing state synthetically). This calls the SAME
+    // private handler the real `outputBacklogOverflows` collector calls
+    // ([handleTerminalOutputBacklogOverflow], wired at the `outputOverflowJob`
+    // collect), so everything downstream — `beginPaneOverflowRecovery`, the
+    // bounded-retry budget, `launchPaneOverflowReseed`'s drain → capture-pane
+    // reseed → producer reattach — runs on the REAL on-device path against the
+    // REAL client/transport. Only the trigger is synthetic. No production logic
+    // added; symmetric with [handleTerminalSeedGateOverflowForTest].
+    internal fun handleTerminalOutputBacklogOverflowForTest(
+        paneId: String,
+        droppedEvents: Int,
+    ) {
+        handleTerminalOutputBacklogOverflow(
+            com.pocketshell.core.tmux.TmuxOutputBacklogOverflow(
+                paneId = paneId,
+                droppedEvents = droppedEvents,
+            ),
+        )
     }
 
     /**
@@ -10484,6 +10980,8 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun recreateTerminalSurface(paneId: String) {
         val existing = paneRows[paneId] ?: return
         paneSurfaceRecoveryTimestamps.remove(paneId)
+        paneOverflowRecoveryTimestamps.remove(paneId)
+        paneOverflowRecoveryInFlight.remove(paneId)
         paneProducerJobs.remove(paneId)?.cancel()
         paneProducerClients.remove(paneId)
         paneOutputActivityJobs.remove(paneId)?.cancel()
@@ -10540,6 +11038,16 @@ public class TmuxSessionViewModel @Inject constructor(
             client = client,
         )
     }
+
+    /**
+     * Issue #1295 (test seam): expose the production [isCurrentRuntime] predicate so a JVM
+     * test can assert, after a GENUINE session switch (supersede), that a runtime guard
+     * captured before the switch is no longer current (its generation/client/session was
+     * superseded) — the exact predicate every arm/heal call site gates on. Test-only.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isCurrentRuntimeForTest(guard: RuntimeRefreshGuard): Boolean =
+        isCurrentRuntime(guard)
 
     /**
      * Issue #722 (characterization test seam): build a [RuntimeRefreshGuard]
@@ -10654,6 +11162,27 @@ public class TmuxSessionViewModel @Inject constructor(
         } finally {
             connectedBlankWatchdogAutoArmEnabled = previousAutoArm
         }
+    }
+
+    /**
+     * Issue #1295 (test seam): drop the inline [ConnectionState] to a TRANSIENT
+     * `Reconnecting` band while KEEPING the runtime (`activeTarget`/`clientRef` intact),
+     * so a JVM test can drive the disconnect-recovery blank-watchdog case where the band
+     * is still settling on a live client. Sets `_connectionState` directly (no controller
+     * drive) so `inlineConnectionStatus` reads not-Connected on the next watchdog tick.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun forceInlineReconnectingBandForTest() {
+        val target = activeTarget ?: return
+        _connectionState = ConnectionState.Reconnecting(
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            attempt = 1,
+            maxAttempts = 3,
+            retryDelayMs = 1_000L,
+            reason = "test transient band (#1295)",
+        )
     }
 
     /**
@@ -10996,7 +11525,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
+                if (inlineConnectionStatus !is ConnectionStatus.Connected) {
+                    // Issue #1295 (disconnect-recovery re-arm gap): a TRANSIENT reconnecting
+                    // band during the blank window (a disconnect-recovery still settling on a
+                    // still-live client + current runtime) must NOT strand the recovered
+                    // runtime watchdog-less. On the silent-reattach / reconnect nets
+                    // (surfaceErrorOnExhaustion=false) hand off the LIFETIME stale-render
+                    // watchdog before exiting — it itself tolerates the transient band (it
+                    // continues, healing once Connected resumes), so an idle pane that later
+                    // diverges is still caught. Before #1295 this bare-exited, leaving the
+                    // recovered runtime with NO post-reveal net (permanent black on a live
+                    // transport). The cold/switch ATTACH reveal (surfaceErrorOnExhaustion=true)
+                    // keeps its bare exit: its still-Seeding reveal is owned by the reveal gate,
+                    // not this net, and a not-Connected there is a genuine attach failure.
+                    if (!surfaceErrorOnExhaustion) armActivePaneStaleRenderWatchdog(refreshGuard)
+                    return@launch
+                }
                 val activePane = activeVisiblePane()
                 if (activePane == null || !activePane.terminalState.visibleScreenIsBlank()) {
                     // A frame landed (seed or live %output) — drop the loading
@@ -11114,20 +11658,28 @@ public class TmuxSessionViewModel @Inject constructor(
      *    round-trip entirely (0 captures/min while backgrounded or screen-off). On
      *    resume the back-off is reset so the FIRST foreground tick captures at the
      *    hot 4s cadence — a pane that changed while away heals right on return.
-     *  - **Back-off when stable.** A tick that finds NO divergence AND saw no new
-     *    streamed `%output` widens the next interval (4s → 8s → 16s, capped). ANY
-     *    detected divergence, new streamed output, session switch (fresh arm), or a
-     *    reconnecting band snaps the cadence back to 4s so a black/partial-black
-     *    pane heals within the same bound as today (#1138/#1153/#874).
-     *  - **Immediate wake on output (issue #1166 heal-latency fix).** The back-off
-     *    is NOT purely poll-based: a fresh active-pane `%output` fires
-     *    [staleRenderWatchdogWake] (see [recordVisiblePaneOutput]) and the loop
-     *    RACES its backed-off `delay(...)` against that wake (see
-     *    [awaitStaleRenderWatchdogTick]). So a redraw arriving ~1s into a 16s
-     *    backed-off window is captured/diffed/healed within the hot bound (≤4s),
-     *    not up to 16s later — the partial-black (#1138) case whose sole steady-
-     *    state oracle is this watchdog can never sit visibly broken for a whole
-     *    backed-off interval.
+     *  - **Back-off when HEALTHY (issue #1219 steady-heat fix).** A tick whose
+     *    authoritative capture-diff oracle finds NO divergence widens the next
+     *    interval (4s → 8s → 16s, capped) — EVEN while the pane is actively
+     *    streaming `%output`. Only a real detected divergence (the heal fired), a
+     *    session switch (fresh arm), or a reconnecting band snaps the cadence back
+     *    to 4s. Before #1219 ANY streamed `%output` reset the back-off, so a
+     *    continuously-streaming-but-CORRECT agent pane never left the hot 4s cadence
+     *    and paid a `capture-pane` round-trip every 4s forever (the #1164 "runs
+     *    warm" lever, the heaviest-use foreground window). A streaming-but-BLACK
+     *    pane still heals within the same bound (#1138/#1153/#874) via the suspect
+     *    wake below.
+     *  - **Immediate wake on a SUSPECT redraw (issue #1166 heal-latency fix, #1219
+     *    scoped).** The back-off is NOT purely poll-based: a fresh active-pane
+     *    `%output` fires [staleRenderWatchdogWake] (see [recordVisiblePaneOutput])
+     *    and the loop RACES its backed-off `delay(...)` against that wake (see
+     *    [awaitStaleRenderWatchdogTick]) — but honors it ONLY while the render looks
+     *    locally black/partial-black ([activeVisiblePaneRenderLooksSuspect]). So a
+     *    redraw that turns the pane black ~1s into a 16s backed-off window is
+     *    captured/diffed/healed within the hot bound (≤4s), not up to 16s later —
+     *    the partial-black (#1138) case whose sole steady-state oracle is this
+     *    watchdog can never sit visibly broken for a whole backed-off interval —
+     *    while a healthy streaming pane's output is ignored so it reaps the back-off.
      *  - **Arm-dedup.** [staleRenderWatchdogJob] is cancelled before each re-arm so
      *    rapid A→B→A switching can never stack multiple concurrent 4s loops.
      */
@@ -11145,15 +11697,20 @@ public class TmuxSessionViewModel @Inject constructor(
             var tick = 0
             // Issue #1166: consecutive stable ticks drive the back-off interval.
             var stableTicks = 0
-            // Issue #1166: the last `%output` wall-clock we saw for the active pane;
-            // a newer stamp means the pane streamed output since the previous tick,
-            // so we snap the cadence back to hot rather than backing off a live pane.
-            var lastSeenOutputAtMs = 0L
+            // Issue #1294: consecutive UNVERIFIED heal ticks (capture timeout/error/empty/
+            // mutex-starved). Recorded into the exportable diagnostics so a shared log can
+            // tell a genuinely-idle backed-off pane from a pane whose heal captures are
+            // WEDGED while it is black. Reset on any confirming (HEALTHY/HEALED) tick.
+            var unverifiedStreak = 0
             while (tick < staleRenderWatchdogMaxTicks) {
                 // Issue #1166: wait out the (possibly backed-off) interval, but a
-                // fresh active-pane %output wake cuts a backed-off wait short so the
-                // redraw is captured within the hot bound, not the next long tick.
-                val wokenByOutput = awaitStaleRenderWatchdogTick(stableTicks)
+                // fresh active-pane %output wake cuts a backed-off wait short so a
+                // SUSPECT (locally black/partial-black) redraw is captured within the
+                // hot bound, not the next long tick. Issue #1219: a HEALTHY streaming
+                // pane's %output no longer cuts the wait short (see
+                // [awaitStaleRenderWatchdogTick]), so a correctly-rendering agent pane
+                // actually reaps the back-off instead of thrashing capture-pane at 4s.
+                awaitStaleRenderWatchdogTick(stableTicks)
                 if (!isCurrentRuntime(refreshGuard)) return@launch
                 val client = clientRef ?: return@launch
                 if (client.disconnected.value) return@launch
@@ -11162,6 +11719,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // watchdog alive but skip the heal until Connected resumes. Reset
                     // the back-off so the resume tick captures at the hot cadence.
                     stableTicks = 0
+                    unverifiedStreak = 0
                     tick += 1
                     continue
                 }
@@ -11170,23 +11728,69 @@ public class TmuxSessionViewModel @Inject constructor(
                 // reset the back-off so the first tick after resume captures hot.
                 if (!shouldRunStaleRenderWatchdogCapture()) {
                     stableTicks = 0
+                    unverifiedStreak = 0
                     tick += 1
                     continue
                 }
+                // Issue #1158: latch the visible pane's alt-buffer agent signal on
+                // the tick we already pay for (cheap local emulator read, no SSH
+                // round-trip, no new timer). Sticky — this is how the Conversation
+                // tab appears for an agent launched directly in a shell-recorded
+                // session where detection never binds.
+                noteActivePaneAltBufferState()
                 val activePane = activeVisiblePane()
                 if (activePane != null) {
-                    // Issue #1166: did the pane stream NEW %output since last tick?
-                    val lastOutputAtMs = paneLastOutputAtMs[activePane.paneId] ?: 0L
-                    val hadNewOutput = lastOutputAtMs > lastSeenOutputAtMs
-                    lastSeenOutputAtMs = lastOutputAtMs
-                    val healed = runCatching {
+                    // Issue #1295 (deliverable 1) — the POSITIVE watchdog-liveness heartbeat.
+                    // We have passed every gate above, so at THIS point the watchdog is proven
+                    // ARMED + running, the runtime is CURRENT + live-attached (isCurrentRuntime),
+                    // the app is FOREGROUNDED + screen-on (shouldRunStaleRenderWatchdogCapture),
+                    // and a visible pane is on screen. Fingerprint that fact into the exportable
+                    // ring BEFORE the heal capture (so the heartbeat lands even when the capture
+                    // is UNVERIFIED). Its ABSENCE alongside foreground+live evidence is the
+                    // positive signature of the #1295 unarmed-watchdog bug.
+                    recordWatchdogLiveness(
+                        pane = activePane,
+                        refreshGuard = refreshGuard,
+                        tick = tick,
+                        backedOff = stableTicks > 0,
+                    )
+                    val outcome = runCatching {
                         healActivePaneIfStaleRender(client, activePane, refreshGuard)
-                    }.getOrDefault(false)
-                    // Back off ONLY a truly-idle, non-diverging pane; a divergence
-                    // (heal fired), fresh streamed output, OR an output WAKE that cut
-                    // the backed-off wait short (issue #1166) keeps the cadence at 4s.
-                    stableTicks =
-                        if (healed || hadNewOutput || wokenByOutput) 0 else stableTicks + 1
+                    }.getOrDefault(HealOutcome.Unverified)
+                    // Issue #1294 (three-state scoring — the load-bearing fix): score the
+                    // tick by WHICH of the three oracle outcomes it was, never conflating a
+                    // capture FAILURE with a confirmed-healthy tick.
+                    //
+                    //  - HEALTHY: the authoritative capture CONFIRMED the render matches tmux.
+                    //    This — and ONLY this — earns the #1219 steady-heat back-off (4s -> 8s
+                    //    -> 16s), even while the pane streams %output (the #1164 "runs warm"
+                    //    lever). Before #1294 a capture FAILURE was scored identically here, so
+                    //    consecutive failures throttled the watchdog to 16s exactly while the
+                    //    pane was black and a Claude burst had the -CC capture mutex wedged.
+                    //  - HEALED: the oracle found + repaired a real divergence (black / partial-
+                    //    black / stale render vs tmux's grid). Snap the cadence back to hot so a
+                    //    just-blacked pane is re-checked at 4s (#1138/#1153 heal preservation).
+                    //  - UNVERIFIED: the capture could NOT confirm health (timeout / error /
+                    //    empty-on-live-transport / mutex-starved). Keep the HOT cadence — never
+                    //    throttle — so a black pane whose heal captures are wedged keeps retrying
+                    //    at 4s until the mutex frees and the heal lands, instead of backing off
+                    //    to 16s while the user stares at a black pane. Record the streak into the
+                    //    exportable diagnostics (#1175) so an export tells "blind" from "idle".
+                    when (outcome) {
+                        HealOutcome.Healthy -> {
+                            stableTicks += 1
+                            unverifiedStreak = 0
+                        }
+                        HealOutcome.Healed -> {
+                            stableTicks = 0
+                            unverifiedStreak = 0
+                        }
+                        HealOutcome.Unverified -> {
+                            stableTicks = 0
+                            unverifiedStreak += 1
+                            recordHealCaptureUnverified(activePane, unverifiedStreak)
+                        }
+                    }
                 }
                 tick += 1
             }
@@ -11194,18 +11798,29 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #1166 (heal-latency fix): wait out the watchdog interval for the
-     * current run of [stableTicks] stable ticks, but make the wait WAKEABLE while
-     * backed off. Returns `true` when a fresh active-pane `%output` wake cut the
-     * wait short (the caller then re-checks the pane immediately and snaps the
-     * cadence back to hot), `false` when the full interval simply elapsed.
+     * Issue #1166 (heal-latency fix) + issue #1219 (steady-heat fix): wait out the
+     * watchdog interval for the current run of [stableTicks] stable ticks, but make
+     * the wait WAKEABLE while backed off — ONLY for a wake that arrives while the
+     * active pane's local render currently looks SUSPECT (black / partial-black).
+     * Returns `true` when a suspect-pane `%output` wake cut the wait short (the
+     * caller then re-checks the pane immediately so a black redraw heals within the
+     * hot bound), `false` when the full interval simply elapsed.
      *
      * At the HOT cadence (interval == [STALE_RENDER_WATCHDOG_TICK_MS]) there is
      * nothing to snap back to, so it drains any stale wake and plain-delays — the
      * churning-pane behavior is unchanged (still a capture every 4s, no extra
-     * captures from output bursts). Only a BACKED-OFF wait (8s/16s) races the
-     * delay against a wake, so a redraw during the long window is captured within
-     * the hot bound instead of being deferred to the next backed-off tick.
+     * captures from output bursts).
+     *
+     * Only a BACKED-OFF wait (8s/16s) races the delay against a wake:
+     *  - Issue #1166 (heal latency): a redraw on a locally-SUSPECT pane wakes at
+     *    once, so a black / partial-black frame (#1138/#966/#928) heals within the
+     *    hot bound instead of being deferred up to a whole backed-off interval.
+     *  - Issue #1219 (steady heat): a redraw on a HEALTHY (fully-rendered) pane is
+     *    IGNORED — the loop keeps waiting out the interval — so a continuously-
+     *    streaming-but-correct agent pane actually reaps the back-off instead of
+     *    being snapped hot on every %output. The authoritative capture-diff oracle
+     *    still runs when the interval elapses, catching any divergence a purely-
+     *    local check would miss; it just no longer fires every 4s on a hot pane.
      */
     private suspend fun awaitStaleRenderWatchdogTick(stableTicks: Int): Boolean {
         val interval = staleRenderWatchdogIntervalMs(stableTicks)
@@ -11216,15 +11831,52 @@ public class TmuxSessionViewModel @Inject constructor(
             delay(interval)
             return false
         }
-        // Backed off: whichever finishes first wins — the long delay OR a wake.
-        return withTimeoutOrNull(interval) { staleRenderWatchdogWake.receive() } != null
+        // Backed off: race the long delay against a SUSPECT wake. A healthy pane's
+        // wakes are consumed and ignored (keep waiting); the first wake that lands
+        // while the render looks locally black/partial-black cuts the wait short so
+        // the black redraw heals hot. If the interval elapses first, return false.
+        return withTimeoutOrNull(interval) {
+            while (true) {
+                staleRenderWatchdogWake.receive()
+                if (activeVisiblePaneRenderLooksSuspect()) break
+            }
+            true
+        } ?: false
     }
 
     /**
-     * Issue #1166: the stale-render watchdog interval for the given run of
-     * consecutive stable (no-divergence, no-new-output) ticks. A steady pane
-     * widens 4s → 8s → 16s (capped); [stableTicks] is reset to 0 on any
-     * divergence / new output / switch, snapping the next interval back to 4s.
+     * Issue #1219: a cheap, IO-free local read of whether the active visible pane's
+     * render currently looks like it may have LOST tmux's frame (black / partial-black
+     * / scattered-fragments-over-black / surface-black). Used to decide whether a
+     * `%output` wake should cut a backed-off watchdog wait short: a SUSPECT pane wakes
+     * immediately so a black redraw heals within the hot bound (#1138/#966/#1214),
+     * while a confidently-dense HEALTHY streaming pane's output is ignored so it reaps
+     * the back-off (the #1164 steady-heat lever).
+     *
+     * It reuses [TerminalSurfaceState.visibleRenderMayHaveLostFrame] — the SAME cheap
+     * local pre-check the switch-reveal / no-op-resize heals (#1176/#1214) already run
+     * to decide whether an authoritative `capture-pane` diff is worthwhile — so this
+     * wake gate covers the whole fragments-over-black class (fully blank, ≤3-line
+     * partial-black, the #1176 dead-zone band, the #1214 mostly-empty model), NOT just
+     * the ≤3-line partial-black. It ORs the #1192 surface-black-model-intact class,
+     * which has a full model the frame predicate cannot see. Both are pure model/surface
+     * reads — no seed, no `capture-pane`. When wrong-positive the honored wake just runs
+     * the real capture-diff oracle a little sooner (a no-op heal), never a wrong heal.
+     */
+    private fun activeVisiblePaneRenderLooksSuspect(): Boolean {
+        val pane = activeVisiblePane() ?: return false
+        val state = pane.terminalState
+        return state.visibleRenderMayHaveLostFrame() ||
+            state.surfaceIsBlackWhileModelHasContent()
+    }
+
+    /**
+     * Issue #1166 + #1301: the continuous reconciler's interval for the given run of
+     * consecutive HEALTHY (no-divergence) ticks. A verified-clean pane cools
+     * 4s → 8s → 16s → 30s (capped) even while streaming; [stableTicks] is reset to 0 on
+     * any real divergence / switch (issue #1219) or FAILED/UNVERIFIED verification (issue
+     * #1294), snapping the next interval back to 4s. The 30s ceiling (#1301) roughly halves
+     * the idle-pane steady-state capture rate vs the v0.4.23 16s ceiling (the #1164 lever).
      */
     @androidx.annotation.VisibleForTesting
     internal fun staleRenderWatchdogIntervalMs(stableTicks: Int): Long {
@@ -11274,10 +11926,10 @@ public class TmuxSessionViewModel @Inject constructor(
      * without waiting on the watchdog cadence.
      */
     @androidx.annotation.VisibleForTesting
-    internal suspend fun healActivePaneIfStaleRenderForTest(): Boolean {
-        val client = clientRef ?: return false
-        val activePane = activeVisiblePane() ?: return false
-        val target = activeTarget ?: return false
+    internal suspend fun healActivePaneIfStaleRenderForTest(): HealOutcome {
+        val client = clientRef ?: return HealOutcome.Unverified
+        val activePane = activeVisiblePane() ?: return HealOutcome.Unverified
+        val target = activeTarget ?: return HealOutcome.Unverified
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
             target = target,
@@ -11503,14 +12155,19 @@ public class TmuxSessionViewModel @Inject constructor(
         pane: TmuxPaneState,
         blackClass: String,
         captureText: String?,
+        // Issue #1294: present only on the [BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED]
+        // class — the count of consecutive UNVERIFIED heal ticks (capture timeout / error /
+        // empty / mutex-starved) the watchdog has seen without a confirming capture. It lets
+        // a shared-log export distinguish a genuinely-healthy pane that BACKED OFF (watchdog
+        // throttled, unverifiedStreak absent) from a pane whose heal captures are WEDGED
+        // (watchdog BLIND, unverifiedStreak climbing) — the exact #1294 mechanism.
+        unverifiedStreak: Int? = null,
     ) {
         val nowMs = SystemClock.elapsedRealtime()
         val lastSeedAtMs = paneLastSeedAtMs[pane.paneId]
         val lastOutputAtMs = paneLastOutputAtMs[pane.paneId]
         val state = pane.terminalState
-        DiagnosticEvents.record(
-            "terminal",
-            BLACK_FRAME_OBSERVED_EVENT,
+        val fields = mutableListOf<Pair<String, Any?>>(
             "class" to blackClass,
             "paneId" to pane.paneId,
             "windowId" to pane.windowId,
@@ -11518,7 +12175,8 @@ public class TmuxSessionViewModel @Inject constructor(
             "renderedChars" to state.renderedNonBlankCharCount(),
             // Byte count of the authoritative capture this observation was judged
             // against; 0 when the capture was empty/errored (the capture_empty /
-            // never_seeded classes) or unavailable at the site (the reveal gate).
+            // never_seeded / heal_capture_unverified classes) or unavailable at the
+            // site (the reveal gate).
             "captureBytes" to (captureText?.length ?: 0),
             "visibleRows" to state.visibleRowCount(),
             // -1 means the field is unavailable (never seeded / never streamed output).
@@ -11529,15 +12187,72 @@ public class TmuxSessionViewModel @Inject constructor(
             "screenOn" to isScreenInteractive(),
             "partialBlank" to state.visibleScreenIsPartiallyBlank(),
         )
+        if (unverifiedStreak != null) {
+            fields += "unverifiedStreak" to unverifiedStreak
+        }
+        DiagnosticEvents.record("terminal", BLACK_FRAME_OBSERVED_EVENT, *fields.toTypedArray())
+    }
+
+    /**
+     * Issue #1294: record a watchdog tick whose authoritative `capture-pane` could NOT
+     * confirm the render's health (a [HealOutcome.Unverified] outcome — capture timeout,
+     * error response, empty-on-live-transport, or mutex-starved by a concurrent burst).
+     * Rides the existing exportable `black_frame_observed` ring (#1175 conventions) under a
+     * dedicated class + an `unverifiedStreak` field, so an export can tell an idle healthy
+     * pane that legitimately backed off from a pane whose heal captures are WEDGED while it
+     * is black (the #1294 "watchdog blind, not throttled" distinction). Emitted from the
+     * watchdog tick that already paid the capture — no new poll/timer/round-trip.
+     */
+    private fun recordHealCaptureUnverified(pane: TmuxPaneState, unverifiedStreak: Int) {
+        recordBlackFrameObserved(
+            pane,
+            BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED,
+            captureText = null,
+            unverifiedStreak = unverifiedStreak,
+        )
+    }
+
+    /**
+     * Issue #1295 — emit the POSITIVE watchdog-liveness heartbeat ([WATCHDOG_LIVENESS_EVENT]).
+     * Called once per steady stale-render watchdog tick AFTER every gate has passed (runtime
+     * current + foregrounded + screen-on + a visible pane), so the heartbeat certifies exactly
+     * "an armed watchdog is ticking over a live-attached, foregrounded, visible pane". The
+     * runtime identity is [refreshGuard]'s `generation` + the live client identity hash, so an
+     * export can correlate the heartbeat to the same runtime the reconnect trail names, and its
+     * ABSENCE (while the export otherwise shows foreground+live) convicts the unarmed-watchdog
+     * bug. Rides the tick that already runs — no new poll/timer/round-trip.
+     */
+    private fun recordWatchdogLiveness(
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard,
+        tick: Int,
+        backedOff: Boolean,
+    ) {
+        DiagnosticEvents.record(
+            "terminal",
+            WATCHDOG_LIVENESS_EVENT,
+            "paneId" to pane.paneId,
+            "windowId" to pane.windowId,
+            "session" to activeTarget?.sessionName,
+            // Runtime identity — the same (generation, client) pair the reconnect/heal trail
+            // carries, so an export can bind the heartbeat to a specific attached runtime.
+            "generation" to refreshGuard.generation,
+            "clientHash" to System.identityHashCode(refreshGuard.client),
+            "atMs" to SystemClock.elapsedRealtime(),
+            "tick" to tick,
+            "foreground" to isProcessForegroundForCleared(),
+            "screenOn" to isScreenInteractive(),
+            "backedOff" to backedOff,
+        )
     }
 
     private suspend fun healActivePaneIfStaleRender(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
-    ): Boolean {
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
-        if (client.disconnected.value) return false
+    ): HealOutcome {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
+        if (client.disconnected.value) return HealOutcome.Unverified
         // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
         // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
         // decision: it only fires when tmux's grid HAS substantial content while
@@ -11546,6 +12261,49 @@ public class TmuxSessionViewModel @Inject constructor(
         // a few scattered fragments (#966), or a post-burst clear. The heal is
         // idempotent (a full clear+repaint of tmux's authoritative grid), so even
         // if the blank watchdog also fires it just re-paints identical content.
+        //
+        // Issue #1294: the SURFACE-BLACK detector/heal runs FIRST — BEFORE and
+        // INDEPENDENT of the `capture-pane` round-trip below. A surface-only black (the
+        // MODEL grid is intact but the on-screen SURFACE is confirmed black, spike #874
+        // GAP-1) recovers with a PURE surface repaint that needs NO tmux content — so a
+        // wedged / timed-out capture must never gate it. Before #1294 this #1203 auto-heal
+        // sat INSIDE the capture-success branch, behind the empty/errored early-return, so
+        // a Claude burst that starved the shared capture mutex (the exact window a pane
+        // goes black) blocked the one recovery that never needed a capture at all. The
+        // repaint fires here on the surface-black signal; its exportable FINGERPRINT is
+        // recorded below where the authoritative captureBytes is known (or, when the
+        // capture then fails, in the capture-failed branch with captureBytes unknown).
+        val surfaceBlack = pane.terminalState.surfaceIsBlackWhileModelHasContent()
+        if (surfaceBlack) {
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-surface-black-model-intact-heal pane=${pane.paneId} " +
+                    "window=${pane.windowId} session=${activeTarget?.sessionName} " +
+                    "status=${_connectionStatus.value} " +
+                    "rendered=${pane.terminalState.renderedNonBlankCharCount()}",
+            )
+            pane.terminalState.requestSurfaceRepaint()
+        }
+        // Issue #1301 (capture-clobbers-newer-delta race): QUIESCE live `%output`
+        // delivery around the reconcile capture+apply — but ONLY for a pane whose render
+        // already looks SUSPECT (black / partial-black / mostly-empty / surface-black),
+        // i.e. one we are about to reseed. Closing the seed gate buffers any NEWER
+        // in-flight delta (in arrival order) instead of letting it paint the emulator and
+        // then be wiped by the (older) snapshot's `CSI 2J` clear; [appendRemoteOutput]'s
+        // `seedThenOpenGate` re-applies the buffered deltas ON TOP of the snapshot
+        // (newest-wins). A HEALTHY (dense, correctly-rendering) pane is NOT quiesced — its
+        // gate stays OPEN so its steady live output never buffers, preserving the
+        // #1219/#1164 steady-heat back-off with zero added stutter. The gate is REOPENED
+        // in the `finally` on EVERY exit (healthy / unverified / healed), flushing any
+        // buffered delta so live output is never swallowed (#468 fail-safe). This is the
+        // #1298 design §5 "quiesce-around-apply" widened to the whole capture+apply window
+        // for a suspect pane (strictly stronger, deterministically testable, and — since
+        // the target class is the idle non-repainting pane with NO concurrent deltas —
+        // free there; a busy suspect pane briefly buffers then flushes in order).
+        val quiesceLiveDeltas =
+            surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+        if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
+        try {
         val combined = runCatching {
             withContext(seedIoDispatcher) {
                 client.captureWithCursor(
@@ -11555,17 +12313,36 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }.getOrNull()
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
         val captureResponse = combined?.capture
         if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
-            // Issue #1175: capture-pane came back empty/errored on a LIVE transport.
-            // Fingerprint it ONLY when the render is actually degenerate (a healthy
-            // pane whose capture momentarily failed is NOT a black screen — stay
-            // silent so healthy ticks never record). A never-seeded pane (no seed has
-            // ever landed) is the distinct `never_seeded` class; otherwise this is the
-            // server-side `capture_empty` class. Rides the heal's existing capture — no
-            // new round-trip, no new poll.
-            if (pane.terminalState.renderedNonBlankCharCount() == 0 ||
+            // Issue #1294: the `capture-pane` round-trip could NOT confirm the render against
+            // tmux's grid — it timed out, errored, or came back EMPTY on a live transport (or
+            // was starved out by a concurrent burst holding the shared capture mutex). The
+            // surface repaint above already fired if the surface was black, so a
+            // surface-only-black recovers even on this path.
+            //
+            // The scoring turns on whether the LOCAL render currently looks LOST (black /
+            // partial-black / mostly-empty / surface-black — the same cheap local pre-check
+            // [visibleRenderMayHaveLostFrame] the suspect-wake gate uses):
+            //  - render LOOKS LOST → this is the #1294 UNVERIFIED case: we NEEDED this capture
+            //    to heal a suspect pane and could not get it. The watchdog MUST keep the hot
+            //    cadence (never throttle) so a black pane whose heal captures are wedged by a
+            //    Claude burst keeps retrying at 4s until the mutex frees — instead of scoring
+            //    the failure as a healthy tick and backing off to 16s (the exact bug).
+            //  - render looks HEALTHY → a momentarily-empty/failed capture over a confidently-
+            //    dense render is a non-urgent no-op; scoring it HEALTHY preserves the #1219 /
+            //    #1164 battery back-off (criterion 3 — do not regress the steady-heat lever).
+            val renderLooksLost = surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+            // Issue #1175: fingerprint the observed frame when it is degenerate so an export
+            // sees WHICH class of black it was — no new round-trip, it rides this same (failed)
+            // capture tick. A surface-only-black whose capture failed is the #1192 class
+            // (captureBytes unknown → 0); an empty capture over a degenerate render is the
+            // server-side `capture_empty`, or `never_seeded` when no seed ever landed. A healthy
+            // pane whose capture momentarily blipped stays silent here.
+            if (surfaceBlack) {
+                recordBlackFrameObserved(pane, BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT, captureText = null)
+            } else if (pane.terminalState.renderedNonBlankCharCount() == 0 ||
                 pane.terminalState.visibleScreenIsBlankOrPartiallyBlank()
             ) {
                 val blackClass = if (paneLastSeedAtMs[pane.paneId] == null) {
@@ -11575,7 +12352,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 recordBlackFrameObserved(pane, blackClass, captureText = null)
             }
-            return false
+            return if (renderLooksLost) HealOutcome.Unverified else HealOutcome.Healthy
         }
         val captureText = captureResponse.output.joinToString(separator = "\n")
         // The discriminating check: tmux carries a real frame but the local render
@@ -11591,37 +12368,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // guarded), restoring the FULL viewport from tmux's authoritative capture.
         if (!pane.terminalState.visibleRenderLostFrameVsCapture(captureText)) {
             // Issue #1192: the MODEL grid did NOT lose tmux's frame — the heal oracle,
-            // comparing model-vs-tmux, calls this pane HEALTHY and returns without
-            // touching the grid. But the on-screen SURFACE can still be black while the
-            // model is intact (a surface-only black never diverges from tmux by
-            // construction, spike #874 GAP-1), so it emits NONE of the five #1175
-            // classes above. Fingerprint that ONE otherwise-invisible class here — the
-            // exact site the oracle short-circuits — ONLY when the paint-confirmation
-            // seam says the surface is CONFIRMED black while the model holds content.
-            // Rides this same already-paid capture tick: NO new poll/timer (#1164).
-            if (pane.terminalState.surfaceIsBlackWhileModelHasContent()) {
+            // comparing model-vs-tmux, calls this pane HEALTHY. The authoritative capture
+            // CONFIRMED the render, so this is [HealOutcome.Healthy] — the ONLY outcome that
+            // earns the #1219 back-off. But the on-screen SURFACE can still be black while
+            // the model is intact (a surface-only black never diverges from tmux by
+            // construction, spike #874 GAP-1), so it emits NONE of the five #1175 classes.
+            // The #1203 surface repaint already fired above (issue #1294 moved it out from
+            // behind the capture); fingerprint that ONE otherwise-invisible class here where
+            // the authoritative captureBytes is known. Rides this same already-paid capture
+            // tick: NO new poll/timer (#1164).
+            if (surfaceBlack) {
                 recordBlackFrameObserved(
                     pane,
                     BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT,
                     captureText,
                 )
-                // Issue #1203: the AUTO-HEAL recovery for this class. A model reseed
-                // restores nothing here (the model already matches tmux — the oracle is
-                // blind to this class by construction), so the recovery is a SURFACE
-                // force-repaint: re-bind the View's emulator + full-clip invalidate so
-                // the surface repaints what the model already holds. This is the
-                // self-heal without user action — the maintainer no longer has to tap
-                // Redraw for a surface-only-black.
-                Log.i(
-                    ISSUE_145_RECONNECT_TAG,
-                    "tmux-surface-black-model-intact-heal pane=${pane.paneId} " +
-                        "window=${pane.windowId} session=${activeTarget?.sessionName} " +
-                        "status=${_connectionStatus.value} " +
-                        "rendered=${pane.terminalState.renderedNonBlankCharCount()}",
-                )
-                pane.terminalState.requestSurfaceRepaint()
             }
-            return false
+            return HealOutcome.Healthy
         }
         // Issue #1175: the render LOST tmux's frame (capture carries materially more
         // than the render). Fingerprint the observed black frame BEFORE the heal
@@ -11661,9 +12424,24 @@ public class TmuxSessionViewModel @Inject constructor(
         } catch (cause: Throwable) {
             if (cause is CancellationException) throw cause
             reportTerminalSurfaceFailure(pane.paneId, cause)
-            return false
+            // Issue #1294: the divergence was real but the surface write failed — the heal
+            // did not complete, so this is UNVERIFIED (keep the hot cadence to retry), not a
+            // confirmed-healthy back-off.
+            return HealOutcome.Unverified
         }
-        return true
+        return HealOutcome.Healed
+        } finally {
+            // Issue #1301 (fail-safe): if we quiesced above, REOPEN the seed gate on EVERY
+            // exit — the HEALED path already opened it (via `seedThenOpenGate`, an idempotent
+            // no-op flush here), while the HEALTHY / UNVERIFIED / capture-failed / cancelled /
+            // surface-write-error paths never applied a snapshot, so this flushes any delta
+            // buffered during the capture window (in order) and opens the gate. Without this a
+            // suspect pane that scored HEALTHY/UNVERIFIED would be left with the gate CLOSED,
+            // silently swallowing all future live `%output` — a far worse bug than the race.
+            if (quiesceLiveDeltas) {
+                runCatching { pane.terminalState.openSeedGateWithoutSeed() }
+            }
+        }
     }
 
     private suspend fun seedPaneFromCaptureOnce(
@@ -12123,6 +12901,71 @@ public class TmuxSessionViewModel @Inject constructor(
         if (_confirmedShellPaneIds.value != next) {
             _confirmedShellPaneIds.value = next
         }
+    }
+
+    /**
+     * Issue #1158: read the VISIBLE pane's alternate-screen-buffer state and, when
+     * active, LATCH its session into [altBufferAgentSessionIds] (sticky — never
+     * removed within the runtime). Cheap: a single local emulator read, no SSH
+     * round-trip — safe to call on the existing stale-render watchdog tick (no new
+     * timer, respects #1164/#1166). Republishes the per-pane projection only when a
+     * NEW session is latched, so steady-state ticks allocate nothing.
+     *
+     * A no-op for a plain shell on the main buffer (the #894/#815 no-flap
+     * invariant): nothing is latched, so the Conversation tab stays hidden.
+     */
+    private fun noteActivePaneAltBufferState() {
+        val pane = activeVisiblePane() ?: return
+        if (!pane.terminalState.isAlternateBufferActive()) return
+        val sessionId = pane.sessionId.trim()
+        if (sessionId.isEmpty()) return
+        if (altBufferAgentSessionIds.add(sessionId)) {
+            refreshAltBufferAgentPaneIds()
+        }
+    }
+
+    /**
+     * Issue #1158: recompute [altBufferAgentPaneIds] from the current pane rows and
+     * the sticky [altBufferAgentSessionIds] latch. Called after a new alt-buffer
+     * sighting and on pane reconcile so a pane added to a latched session picks up
+     * (and never drops) the signal.
+     */
+    private fun refreshAltBufferAgentPaneIds() {
+        val next = paneRows.values
+            .filter { altBufferAgentSessionIds.contains(it.sessionId.trim()) }
+            .map { it.paneId }
+            .toSet()
+        if (_altBufferAgentPaneIds.value != next) {
+            _altBufferAgentPaneIds.value = next
+        }
+    }
+
+    /**
+     * Issue #1158 test seam: drive the alt-buffer poll directly (the production
+     * caller is the stale-render watchdog tick, which a JVM unit test would have to
+     * stand up a whole runtime to reach) so a test can prove the sticky latch +
+     * per-pane projection deterministically against a synthetic alt-buffer state.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun noteActivePaneAltBufferStateForTest() {
+        noteActivePaneAltBufferState()
+    }
+
+    /**
+     * Issue #1158 connected-test seam (#780 synthetic-state model): force the REAL
+     * active pane's emulator alt-buffer verdict, then run the production latch poll.
+     * The tmux `-CC` control path does not reliably mirror a REMOTE pane's alternate
+     * screen buffer into the CLIENT emulator (the capture-pane seed replays the
+     * screen TEXT onto the main buffer, and an idle full-screen agent emits no fresh
+     * `%output` carrying the `?1049h` toggle), so a connected journey cannot enter
+     * the on-device alt-buffer state on its own. This injects that failing state
+     * synthetically on the REAL connected pane + real production tab gate, exactly
+     * as the maintainer's full-screen agent TUI would — with NO self-skip.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun forceActivePaneAltBufferForTest(active: Boolean) {
+        activeVisiblePane()?.terminalState?.setAlternateBufferActiveForTest(active)
+        noteActivePaneAltBufferState()
     }
 
     /**
@@ -13829,7 +14672,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // re-seed ONLY when the render is materially less than the authoritative frame.
                 val healed = runCatching {
                     healActivePaneIfStaleRender(client, activePane, guard)
-                }.getOrDefault(false)
+                }.getOrDefault(HealOutcome.Unverified) == HealOutcome.Healed
                 if (healed) {
                     Log.i(
                         ISSUE_145_RECONNECT_TAG,
@@ -16905,6 +17748,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         _agentConversations.value = emptyMap()
         // Issue #959 (#780 synthetic-injection seam): when the test forces the
         // pane-runtime-survives-teardown race, KEEP paneRows + their producers +
@@ -17061,6 +17908,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
+        // Issue #1158: drop the sticky alt-buffer agent latch with the other
+        // per-runtime caches so a different session never inherits a stale verdict.
+        altBufferAgentSessionIds.clear()
+        _altBufferAgentPaneIds.value = emptySet()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -17963,9 +18814,15 @@ private data class PrewarmedPaneRuntime(
     val paneProducerJobs: Map<String, Job>,
     val paneInputQueues: Map<String, TmuxPaneInputQueue>,
     val paneInputJobs: Map<String, Job>,
+    // Issue #1206: background seed-recovery jobs (bounded capture retry + one
+    // deferred reseed on first live %output) for empty/wedged-capture panes.
+    val paneSeedRecoveryJobs: Map<String, Job> = emptyMap(),
 )
 
 private suspend fun PrewarmedPaneRuntime.closePartialPrewarm() {
+    // Issue #1206: cancel background seed recovery first so no retry/deferred
+    // reseed touches a pane whose producer we are tearing down.
+    paneSeedRecoveryJobs.values.forEach { it.cancel() }
     paneProducerJobs.values.forEach { it.cancelAndJoin() }
     paneInputJobs.values.forEach { it.cancelAndJoin() }
     paneInputQueues.values.forEach { it.close() }
@@ -18325,6 +19182,25 @@ internal const val SEED_SCROLLBACK_LINES: Int = 200
 internal const val SEED_CAPTURE_TIMEOUT_MS: Long = 2_500L
 
 /**
+ * Issue #1206: how many times a prewarmed pane whose FIRST seed `capture-pane`
+ * came back empty/error/timeout retries the capture in the background before it
+ * falls back to a deferred reseed on the first live %output. Bounded so a
+ * genuinely-empty (brand-new, nothing-drawn-yet) pane isn't captured forever,
+ * but generous enough to ride out a Claude startup flood wedging the shared
+ * `-CC` capture acquire.
+ */
+internal const val PREWARM_SEED_RETRY_ATTEMPTS: Int = 3
+
+/**
+ * Issue #1206: backoff (ms) between prewarm seed-recovery capture retries. Three
+ * attempts at ≈1.6 s spacing covers the ≈5 s window a startup flood typically
+ * takes to drain enough for the capture acquire to succeed. The retry runs in
+ * the background on `bridgeScope`, so this spacing never blocks the prewarm loop
+ * or the UI thread.
+ */
+internal const val PREWARM_SEED_RETRY_BACKOFF_MS: Long = 1_600L
+
+/**
  * Issue #662: how long the post-reveal black-pane safety net waits before
  * deciding a visible pane is genuinely blank and re-seeding it. The wait lets
  * the first post-reveal Compose layout report the phone grid and the
@@ -18364,6 +19240,23 @@ internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
 internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L
 
 /**
+ * Issue #1205: how many times a pane may be auto-recovered from a delivery
+ * backlog / seed-gate overflow (reseed-and-reattach) inside
+ * [OVERFLOW_RECOVERY_WINDOW_MS] before the recovery is abandoned and the pane
+ * falls to the actionable `surfaceError` card as a last resort. Bounds a
+ * saturated channel so a burst that keeps overflowing after each reseed cannot
+ * loop into a reseed storm. Two attempts, then the card.
+ */
+internal const val OVERFLOW_RECOVERY_MAX_ATTEMPTS: Int = 2
+
+/**
+ * Issue #1205: sliding window over which [OVERFLOW_RECOVERY_MAX_ATTEMPTS] is
+ * counted. A single transient burst costs one reseed; only a pane that keeps
+ * overflowing inside this window exhausts the budget and lands on the card.
+ */
+internal const val OVERFLOW_RECOVERY_WINDOW_MS: Long = 60_000L
+
+/**
  * Issue #989: the user-visible message shown when the manual Redraw kebab item is
  * tapped but Redraw cannot act — there is no live tmux client (dropped /
  * reconnecting), the client is disconnected, or there is no active target. Surfaced
@@ -18390,6 +19283,30 @@ internal const val ACTIVE_PANE_REVEAL_SEED_ATTEMPTS: Int = 5
  */
 internal const val BLACK_FRAME_OBSERVED_EVENT: String = "black_frame_observed"
 
+/**
+ * Issue #1294 — the three-state result of the stale-render heal oracle
+ * ([TmuxSessionViewModel.healActivePaneIfStaleRender]). It replaces the old boolean that
+ * conflated a capture FAILURE with a confirmed-healthy tick, which let the watchdog score
+ * consecutive capture failures identically to consecutive healthy ticks and back off to 16s
+ * exactly while the pane was black and the shared `-CC` capture mutex was wedged by a Claude
+ * burst. Only [Healthy] earns the #1219 back-off; [Unverified] keeps the hot cadence.
+ */
+internal enum class HealOutcome {
+    /** A real divergence was found and the model grid was re-seeded from tmux. Resets back-off. */
+    Healed,
+
+    /** The authoritative `capture-pane` CONFIRMED the render matches tmux. The ONLY outcome that backs off. */
+    Healthy,
+
+    /**
+     * The `capture-pane` round-trip could NOT confirm the render's health: it timed out,
+     * errored, came back empty on a live transport, or was starved out by a concurrent burst
+     * holding the shared capture mutex. Keeps the HOT cadence — never throttles — so a black
+     * pane whose heal captures are wedged keeps retrying at 4s instead of backing off to 16s.
+     */
+    Unverified,
+}
+
 /** Server-side black: capture-pane also empty/errored while the render is degenerate. */
 internal const val BLACK_FRAME_CLASS_CAPTURE_EMPTY: String = "capture_empty"
 
@@ -18415,6 +19332,33 @@ internal const val BLACK_FRAME_CLASS_PARTIAL_BLANK: String = "partial_blank"
  * self-heals every known surface-blank trigger; this is the safety-net for an UNKNOWN one).
  */
 internal const val BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT: String = "surface_black_model_intact"
+
+/**
+ * Issue #1294 — a watchdog heal tick whose authoritative `capture-pane` could NOT confirm the
+ * render (a [HealOutcome.Unverified] outcome: timeout / error / empty-on-live-transport /
+ * mutex-starved). Carries an `unverifiedStreak` field (the run of consecutive such ticks) so a
+ * shared-log export distinguishes a genuinely-idle pane that BACKED OFF (watchdog throttled)
+ * from a pane whose heal captures are WEDGED while it is black (watchdog BLIND) — the exact
+ * #1294 mechanism. Rides the watchdog tick that already paid the capture; no new poll.
+ */
+internal const val BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED: String = "heal_capture_unverified"
+
+/**
+ * Issue #1295 — the POSITIVE watchdog-liveness heartbeat. Emitted on each ARMED,
+ * foregrounded, visible-pane steady stale-render watchdog tick over a live-attached
+ * runtime (fields: `paneId`, `windowId`, `session`, `generation` + `clientHash` = the
+ * runtime identity, `atMs` = monotonic timestamp, `tick`, `foreground`, `screenOn`,
+ * `backedOff`). It is the diagnostics PREREQUISITE for #1295: every `black_frame_observed`
+ * class is emitted only from INSIDE a watchdog tick / the reveal gate, so when the steady
+ * watchdog is UNARMED (the #1295 bug) the export contains ZERO events — indistinguishable
+ * from recording-off / ring-eviction / backgrounded. The ABSENCE of this heartbeat while an
+ * export otherwise shows a foregrounded visible pane on a live-attached runtime is the
+ * POSITIVE signature that convicts the unarmed-watchdog state. Rides the tick that already
+ * runs; no new poll/timer/round-trip (it fires BEFORE the tick's capture, so it is present
+ * even when the capture itself is UNVERIFIED). Redacted like the other terminal events (only
+ * `session` is host-identifying, as it already is on `stale_render_heal`).
+ */
+internal const val WATCHDOG_LIVENESS_EVENT: String = "watchdog_liveness"
 
 /**
  * Issue #693/#661: backoff between active-pane reveal-gate seed retries.
@@ -18448,19 +19392,30 @@ internal const val CONNECTED_BLANK_WATCHDOG_MAX_TICKS: Int = 20
 internal const val STALE_RENDER_WATCHDOG_TICK_MS: Long = 4_000L
 
 /**
- * Issue #1166 (battery/heat): the stale-render watchdog interval ceiling. A stable
- * foreground pane backs off 4s → 8s → 16s (each stable tick doubles the interval,
- * capped here) so an idle pane stops paying ~15 `capture-pane` round-trips/min; any
- * divergence / new streamed output / switch snaps the cadence back to
- * [STALE_RENDER_WATCHDOG_TICK_MS] so a churning/agent pane heals as fast as before.
+ * Issue #1166 (battery/heat) + issue #1301 (reconciler cool ceiling): the continuous
+ * full-frame reconciler's interval ceiling. A verified-clean (HEALTHY) foreground pane
+ * cools 4s → 8s → 16s → 30s (each consecutive HEALTHY tick doubles the interval, capped
+ * here) so an idle pane stops paying ~15 `capture-pane` round-trips/min; any divergence /
+ * new streamed output / switch / UNVERIFIED tick snaps the cadence back to
+ * [STALE_RENDER_WATCHDOG_TICK_MS] so a churning/agent/suspect pane reconciles as fast as
+ * before.
+ *
+ * Issue #1301: raised 16s → 30s (with [STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS] 2 → 3)
+ * so a fully-idle HEALTHY pane's steady-state capture rate drops from one/16s (~3.75/min,
+ * the v0.4.23 baseline) to one/30s (~2/min) — a ~47% reduction that is the #1164 battery
+ * answer to promoting the event-only heal into a continuous reconciler. Per #1294 the
+ * ceiling is reached ONLY by consecutive CONFIRMED-healthy ticks; a FAILED (UNVERIFIED)
+ * verification never advances the back-off, so a wedged black pane can never cool to 30s.
  */
-internal const val STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS: Long = 16_000L
+internal const val STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS: Long = 30_000L
 
 /**
- * Issue #1166: the number of interval doublings from [STALE_RENDER_WATCHDOG_TICK_MS]
- * to reach [STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS] (4s → 8s → 16s = 2 doublings).
+ * Issue #1166 + #1301: the number of interval doublings from [STALE_RENDER_WATCHDOG_TICK_MS]
+ * to reach [STALE_RENDER_WATCHDOG_MAX_INTERVAL_MS] (4s → 8s → 16s → 30s = 3 doublings, the
+ * fourth doubling 4s<<3 = 32s coerced down to the 30s ceiling). Reached after 3 consecutive
+ * HEALTHY ticks.
  */
-internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 2
+internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 3
 
 /**
  * Issue #966/#967: upper bound on stale-render watchdog ticks for the runtime's
@@ -18662,8 +19617,25 @@ internal const val AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS: Int = 24
  * mid-word) still matches the original prompt's tail.
  */
 private val WHITESPACE_RUN_REGEX = Regex("\\s+")
-internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
+// Issue #1316: the OUTER attach-reveal ceiling. Was 30 s — the maintainer's
+// "it took forever to attach / wouldn't let me touch" felt-freeze while the
+// `list-panes` reconcile head-of-line-blocked behind a busy sibling's `-CC`
+// burst. With the reconcile now on the dedicated exec lane it returns in ms, so
+// this bound only ever fires on a genuinely stuck attach; a much shorter
+// ceiling turns that into a fast user-visible "Tap Reconnect to retry" escape
+// (→ evict lease → fresh-transport runConnect) instead of a tens-of-seconds
+// input-gated overlay. The reconcile itself is separately bounded by
+// [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS].
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+
+// Issue #1316: per-reconcile exec ceiling for the attach/switch/refresh
+// `list-panes` on the dedicated exec lane. Healthy reconciles return in
+// milliseconds; this is the safety bound so a genuinely wedged/half-open
+// transport surfaces a `Failed` fast (→ retryable attach error) rather than
+// parking the reveal. Well under the outer [ATTACH_PANES_READY_TIMEOUT_MS] so
+// the reconcile-level escape fires first.
+internal const val RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS: Long = 6_000L
 
 /**
  * Issue #552 / #685 (Bug A): a passive tmux reader EOF during a brief foreground
@@ -18847,6 +19819,79 @@ internal object LivenessProbeTestOverride {
 
     fun failureThreshold(): Int =
         failureThresholdOverride ?: LivenessProbe.DEFAULT_FAILURE_THRESHOLD
+}
+
+/**
+ * Issue #1206: test-only synthetic-injection seam (the #780 model) for the
+ * prewarm seed path. A fresh Claude pane's FIRST `capture-pane` can come back
+ * empty/wedged on a busy shared `-CC` channel even though the pane HAS content
+ * — the exact non-happy state the happy real-agent workbench structurally
+ * cannot enter, which is why AC4 must inject it synthetically to prove the pane
+ * still lands on a PAINTED grid via the retry/deferred-reseed recovery.
+ *
+ * A connected journey arms [setForcedEmptyFirstCaptures] BEFORE launching the
+ * activity; the production seed path calls [consumeForcedEmpty] once per
+ * capture and, while budget remains, TREATS that capture as empty (after the
+ * real wire round-trip). [consumedCount] lets the journey hard-assert the
+ * injected fault was actually hit by the prewarm seed path (no vacuous pass),
+ * and the analogue of [LivenessProbeTestOverride]. Production keeps it at 0.
+ */
+internal object PrewarmSeedFaultTestOverride {
+    @Volatile
+    private var forcedEmptyFirstCaptures: Int = 0
+
+    /** Number of forced-empty captures actually consumed by the seed path. */
+    @Volatile
+    var consumedCount: Int = 0
+        private set
+
+    /**
+     * Diagnostic: how many times the prewarm seed path entered
+     * [captureAndApplyPrewarmSeed]. A connected journey reads this to tell
+     * "prewarm never seeded the target" (0) apart from "prewarm seeded but the
+     * seam wasn't armed / consumed" (>0, consumed 0).
+     */
+    @Volatile
+    var seedAttemptCount: Int = 0
+        private set
+
+    /**
+     * Arm the seam so the next [count] prewarm seed captures are treated as
+     * empty (simulating a wedged/empty first `capture-pane`). Resets the
+     * consumed + attempt counters so a journey can assert the injection landed.
+     */
+    fun setForcedEmptyFirstCaptures(count: Int) {
+        require(count >= 0) { "count must be >= 0" }
+        forcedEmptyFirstCaptures = count
+        consumedCount = 0
+        seedAttemptCount = 0
+    }
+
+    fun clear() {
+        forcedEmptyFirstCaptures = 0
+        consumedCount = 0
+        seedAttemptCount = 0
+    }
+
+    /** Record that the prewarm seed path ran once (diagnostic counter). */
+    @Synchronized
+    fun onSeedAttempt() {
+        seedAttemptCount += 1
+    }
+
+    /**
+     * Consume one unit of forced-empty budget for [paneId]. Returns true (and
+     * decrements the budget) when this capture must be treated as empty. The
+     * [paneId] is accepted for future per-pane targeting and diagnostic logging;
+     * the budget itself is process-global and consumed in call order.
+     */
+    @Synchronized
+    fun consumeForcedEmpty(paneId: String): Boolean {
+        if (forcedEmptyFirstCaptures <= 0) return false
+        forcedEmptyFirstCaptures -= 1
+        consumedCount += 1
+        return true
+    }
 }
 
 /**

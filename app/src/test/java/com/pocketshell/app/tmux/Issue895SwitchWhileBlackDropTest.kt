@@ -67,6 +67,11 @@ class Issue895SwitchWhileBlackDropTest {
                 nowMillis = { scheduler.currentTime },
             ),
             sessionLifecycleSignals = null,
+            // Issue #1168: the default real-IO `tailScope` is safe here — these
+            // tests only connect/drop SHELL sessions and never start an agent
+            // follow, so `tailScope` never launches a drain and there is no
+            // `invokeOnCompletion -> bridgeScope.launch` Main read to leak past
+            // teardown. (No agent pane is bound/followed anywhere in this class.)
             agentRepository = com.pocketshell.app.session.AgentConversationRepository(),
         ).also {
             it.setReconcileDispatcherForTest(testMainDispatcher)

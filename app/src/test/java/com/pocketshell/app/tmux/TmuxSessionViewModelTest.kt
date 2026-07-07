@@ -168,6 +168,23 @@ class TmuxSessionViewModelTest {
     // It is a real `Dispatchers.IO` scope (off-Main), so the F2 off-Main
     // hand-off it backs is genuine, not a virtual-clock proxy.
     private val defaultTeardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Issue #1168: third real-`Dispatchers.IO` scope of the same species as
+    // factoryScope/defaultTeardownScope. The default `newVm()` builds its
+    // AgentConversationRepository with THIS injected scope instead of the
+    // repository's own default real-IO `tailScope`, so the test owns the tail
+    // drain. The drain runs infinite `while (isActive) { delay() }` loops
+    // (AgentConversationRepository JSONL-batch/OpenCode-poll tails); when a
+    // follow job completes/cancels, the VM's `invokeOnCompletion` hops back via
+    // `bridgeScope.launch { ... }` — and `bridgeScope` is `Dispatchers.Main`-
+    // bound — so a foreign IO thread READS `Dispatchers.Main`. Left un-joined,
+    // that read races the NEXT test's `setMain`/`resetMain` write and
+    // kotlinx-coroutines-test throws "Dispatchers.Main is used concurrently
+    // with setting it" (TestMainDispatcher.kt:72), attributed to whichever
+    // victim test is doing setMain at that instant. We cancel-THEN-join this
+    // scope in @After (the drain is infinite, so cancel first) BEFORE the
+    // rule's `resetMain()` runs — exactly the factoryScope rationale.
+    private val agentTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     private fun newVm(
@@ -187,7 +204,11 @@ class TmuxSessionViewModelTest {
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
         folderListGateway: FolderListGateway? = null,
         hostDao: HostDao? = null,
-        agentRepository: AgentConversationRepository = AgentConversationRepository(),
+        // Issue #1168: inject the test-owned real-IO `agentTailScope` so the
+        // tail drain is joinable in @After (see the field doc). The #576
+        // burst-ingest test keeps its own `tailScope = backgroundScope`.
+        agentRepository: AgentConversationRepository =
+            AgentConversationRepository(tailScope = agentTailScope),
         agentKindRemoteSource: com.pocketshell.app.agents.AgentKindRemoteSource =
             // Issue #1001 (CI-flake fix): pin the daemon-RPC bounded-exec
             // dispatcher to the SHARED virtual-clock scheduler. In production it
@@ -403,6 +424,20 @@ class TmuxSessionViewModelTest {
             // concurrently with setting it".
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 defaultTeardownScope.coroutineContext.job.children.forEach { it.join() }
+            }
+            // Issue #1168: drain the AgentConversationRepository tail scope
+            // BEFORE the rule's `resetMain()` runs. Unlike the FINITE teardown
+            // closes above, the tail drain is an infinite
+            // `while (isActive) { delay() }` loop that never self-completes, so
+            // it must be CANCELLED FIRST, THEN joined — a bare join would hang.
+            // Joining here (Main still installed by the rule) forces every
+            // `invokeOnCompletion -> bridgeScope.launch` foreign-IO-thread
+            // `Dispatchers.Main` read to happen and finish while Main is stable
+            // and no `setMain`/`resetMain` write is in flight, so no tail
+            // completion touches Main after `resetMain`.
+            agentTailScope.cancel()
+            withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                agentTailScope.coroutineContext.job.children.forEach { it.join() }
             }
         }
         defaultTeardownScope.cancel()
@@ -1576,6 +1611,10 @@ class TmuxSessionViewModelTest {
             sessionName = "work",
             client = client,
         )
+        // Issue #1224: the first-visible-output milestone is fed by the per-pane
+        // outputFor tap (recordVisiblePaneOutput), NOT by %output on the
+        // structural events bus. The fake's outputFor reads emittedEvents, so
+        // emitting a pane %output here drives that tap.
         client.emittedEvents.emit(ControlEvent.Output("%0", "live".toByteArray()))
         advanceUntilIdle()
 
@@ -3273,6 +3312,26 @@ class TmuxSessionViewModelTest {
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        // Issue #1258 (CI-flake fix, sibling of #1250/#1259): pin the
+        // TerminalSurfaceState external-producer dispatcher to the SHARED
+        // virtual-clock scheduler. The default factory builds
+        // `TerminalSurfaceState()` on the production `Dispatchers.IO` (a real
+        // off-Main thread — correct on-device). But this warm silent reattach
+        // REBINDS each pane's producer several times (initial attach → reattach
+        // rebindVisiblePaneProducersToClient → each connected-blank-watchdog
+        // reseed), and every rebind CANCELS the prior producer whose `finally`
+        // runs `detachCompletedExternalProducer` (nulling `bridge`/`_session`)
+        // via a `Dispatchers.Main.immediate` hop OFF that real IO thread. Under
+        // `runTest`'s virtual clock that real-thread hop lands at a
+        // non-deterministic point, so the pane's emulator was sometimes DETACHED
+        // (isAttached=false) at assertion time — and `visibleScreenIsBlank()`
+        // returns false with NO emulator, spuriously failing the "seed stayed
+        // empty -> black" precondition under load. Confining the producer to the
+        // shared scheduler makes attach/detach step deterministically under
+        // `advanceTimeBy`/`runCurrent` (same pin as the sibling heal tests).
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(scheduler))
+        }
         val session = FakeSshSession()
         val deadClient = FakeTmuxClient()
         val replacementClient =
@@ -3350,6 +3409,25 @@ class TmuxSessionViewModelTest {
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        // Issue #1250 (CI-flake fix): pin the TerminalSurfaceState external-producer
+        // dispatcher to the SHARED virtual-clock scheduler. The default factory builds
+        // `TerminalSurfaceState()` on the production `Dispatchers.IO` (a real off-Main
+        // thread — correct for the on-device feed). But this fresh-transport reattach
+        // REBINDS each pane's producer several times (initial attach → reattach
+        // rebindVisiblePaneProducersToClient → each connected-blank-watchdog reseed),
+        // and every rebind CANCELS the prior producer whose `finally` runs
+        // `detachCompletedExternalProducer` (nulling `bridge`/`_session`) via a
+        // `Dispatchers.Main.immediate` hop OFF that real IO thread. Under `runTest`'s
+        // virtual clock that real-thread hop lands at a non-deterministic point, so the
+        // pane's emulator was sometimes DETACHED (isAttached=false) at assertion time —
+        // and `visibleScreenIsBlank()` returns false with NO emulator, spuriously
+        // failing the "seed stayed empty -> black" precondition (~70% in isolation).
+        // Confining the producer to the shared scheduler makes attach/detach step
+        // deterministically under `advanceTimeBy`/`runCurrent` (same pin as the sibling
+        // heal tests, e.g. PartialBlackPaneHealTest / ReseedBlankWatchdogCharacterizationTest).
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(StandardTestDispatcher(scheduler))
+        }
         val deadClient = FakeTmuxClient()
         val replacementClient =
             FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
@@ -6757,8 +6835,15 @@ class TmuxSessionViewModelTest {
                 "local output overflow must not flip the tmux disconnected signal",
                 client.disconnectedSignal.value,
             )
-            assertTrue(
-                "overflowed pane should expose local terminal recovery instead of fake reconnect",
+            // Issue #1205: a backlog overflow no longer LATCHES the pane into a
+            // dead surfaceError card — it reseeds-and-reattaches the pane through
+            // the existing chokepoint (a transient burst costs one reseed, not the
+            // pane). The load-bearing invariant this test guards is unchanged: the
+            // overflow stays LOCAL (no reconnect, stable transport). The pane now
+            // self-heals rather than requiring "Recreate terminal".
+            assertFalse(
+                "Issue #1205: local output overflow must reseed-and-reattach the pane, " +
+                    "not latch it into a dead surfaceError card",
                 vm.panes.value.single().surfaceError,
             )
         } finally {
@@ -6894,11 +6979,15 @@ class TmuxSessionViewModelTest {
                 val overflow = diagnostics.eventsNamed("terminal_output_overflow").singleOrNull()
 
                 assertNotNull(
-                    "seed-gate live buffer overflow should become a local pane surface error",
+                    "seed-gate live buffer overflow should record the local backpressure event",
                     overflow,
                 )
-                assertTrue(
-                    "seed-gate live buffer overflow should mark the pane surface as errored",
+                // Issue #1205: the seed-gate overflow reseeds-and-reattaches the
+                // pane (same recovery as the backlog overflow) instead of latching
+                // it into a dead surfaceError card.
+                assertFalse(
+                    "Issue #1205: seed-gate overflow must reseed-and-reattach the pane, " +
+                        "not latch it into a dead surfaceError card",
                     vm.panes.value.single().surfaceError,
                 )
                 val overflowEvent = overflow!!
@@ -9867,6 +9956,114 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─── Issue #1158 (REOPENED chain #962→#975→#1057→#1158) — the STICKY ────────
+    // alt-buffer agent latch. The maintainer launches `claude`/`codex` DIRECTLY
+    // inside a shell-recorded session, so `@ps_agent_kind` stays `shell`, the
+    // confirmed-shell verdict is never cleared, and live detection never binds for
+    // the node-wrapped-Claude / Codex-`/proc` / Z.AI fleet. The detection-
+    // INDEPENDENT alt-buffer signal restores the Conversation tab and, once shown,
+    // must STAY for the session's life (a later detection drop / buffer flip must
+    // not collapse it). ─────────────────────────────────────────────────────────
+
+    @Test
+    fun altBufferAgentLatchesShellRecordedSessionAndIsStickyAcrossBufferFlip() = runTest(scheduler) {
+        // A single held surface state so the test can drive the active pane's
+        // alt-buffer verdict synthetically (the #780 model — CI has no real curses
+        // agent). The factory returns the SAME instance the (single) pane uses.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        // The maintainer's exact state: the session is a CONFIRMED shell
+        // (`@ps_agent_kind=shell`) — nothing else will ever show the tab.
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        assertTrue(
+            "precondition: the session is a confirmed shell",
+            "%0" in vm.confirmedShellPaneIds.value,
+        )
+        assertTrue(
+            "precondition: no alt-buffer sighting yet → tab still hidden (RED on base)",
+            "%0" !in vm.altBufferAgentPaneIds.value,
+        )
+
+        // The agent (claude/codex/glm — kind-agnostic) goes full-screen: the pane's
+        // emulator switches to the ALTERNATE screen buffer. The watchdog tick reads
+        // it (driven here directly) and LATCHES the session.
+        surface.setAlternateBufferActiveForTest(true)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#1158: the alt-buffer sighting latches the session → Conversation tab shown",
+            "%0" in vm.altBufferAgentPaneIds.value,
+        )
+
+        // STICKY: the agent leaves the alt-buffer (exits a full-screen view / drops
+        // detection). The tab MUST stay for the rest of the session.
+        surface.setAlternateBufferActiveForTest(false)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#1158 sticky: a later buffer flip / detection drop must NOT collapse the tab",
+            "%0" in vm.altBufferAgentPaneIds.value,
+        )
+    }
+
+    @Test
+    fun altBufferAgentSurvivesReattachPaneIdRotation() = runTest(scheduler) {
+        // Sticky across the real reattach path: tmux re-attach assigns a NEW pane
+        // id under the SAME session ($0). The latch is per-SESSION, so the new pane
+        // id inherits the Conversation tab without needing a fresh alt-buffer
+        // sighting — the maintainer's long-lived sessions keep the tab across
+        // reconnects.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+        surface.setAlternateBufferActiveForTest(true)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue("precondition: latched on the original pane id", "%0" in vm.altBufferAgentPaneIds.value)
+
+        // Reattach: same session $0, new pane id %7. No fresh alt-buffer read.
+        surface.setAlternateBufferActiveForTest(false)
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "work", paneIndex = 0, sessionName = "work"),
+            ),
+        )
+        runCurrent()
+        assertTrue(
+            "#1158 sticky: the new pane id under the latched session keeps the tab",
+            "%7" in vm.altBufferAgentPaneIds.value,
+        )
+        assertTrue("old pane id is gone", "%0" !in vm.altBufferAgentPaneIds.value)
+    }
+
+    @Test
+    fun plainShellOnMainBufferNeverLatchesNoFlap() = runTest(scheduler) {
+        // #894/#815 no-flap adjacency: a plain interactive shell sitting at a prompt
+        // is on the MAIN buffer, so the alt-buffer poll never latches it → NO
+        // Conversation tab. The alt-buffer signal is POSITIVE-only.
+        val surface = TerminalSurfaceState()
+        val vm = newVm()
+        vm.setTerminalSurfaceStateFactoryForTest { surface }
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
+        runCurrent()
+        // Main buffer (the emulator override defaults to null → the real read, and a
+        // stub emulator with no alt-screen reports false; assert false explicitly).
+        surface.setAlternateBufferActiveForTest(false)
+        vm.noteActivePaneAltBufferStateForTest()
+        runCurrent()
+        assertTrue(
+            "#894 no-flap: a main-buffer shell never latches → tab stays hidden",
+            "%0" !in vm.altBufferAgentPaneIds.value,
+        )
+    }
+
     @Test
     fun notShellVerdictDoesNotClobberLiveRowNoYank() = runTest(scheduler) {
         // #815 no-yank invariant (class coverage): the #874 re-seed must NOT
@@ -11882,7 +12079,15 @@ class TmuxSessionViewModelTest {
             .filter { it.role == ConversationRole.User && it.text == "previous user prompt" }
         assertEquals("Conversation should keep one optimistic user turn", 1, messages.size)
         assertEquals(MessageSendState.Pending, messages.single().sendState)
-        assertTrue("overflowed pane is shown as a surface error", vm.panes.value.single().surfaceError)
+        // Issue #1205: the overflow that fired mid-submit reseeds-and-reattaches
+        // the pane instead of latching it into a dead surfaceError card — and it
+        // must NOT disturb the in-flight Codex send (no reconnect, no duplicate
+        // prompt, one optimistic turn), which the assertions above already prove.
+        assertFalse(
+            "Issue #1205: overflow during a delayed submit must reseed-and-reattach the " +
+                "pane, not latch it into a dead surfaceError card",
+            vm.panes.value.single().surfaceError,
+        )
     }
 
     @Test
@@ -12625,6 +12830,79 @@ class TmuxSessionViewModelTest {
         assertEquals(SessionTab.Conversation, after.selectedTab)
         assertEquals("assistant-late", after.events.single().id)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    // Issue #1168: durable anchor for the tmux TestMainDispatcher flake
+    // (blocked PRs #1211/#1217). The AgentConversationRepository tail drain
+    // (`tailScope.launch { while (isActive) delay() }`) runs on the injected
+    // real-`Dispatchers.IO` `tailScope`. The default `newVm()` repo USED to be
+    // built with the repository's OWN default real-IO `tailScope`, which this
+    // class's @After never cancelled/joined (unlike factoryScope /
+    // defaultTeardownScope). So a live drain — or its
+    // `invokeOnCompletion -> bridgeScope.launch` (a Main-bound scope) foreign-IO
+    // `Dispatchers.Main` READ on non-cancel completion — survived past
+    // `resetMain` and, racing the next test's `setMain`/`resetMain` WRITE,
+    // threw "Dispatchers.Main is used concurrently with setting it"
+    // (TestMainDispatcher.kt:72), attributed to a random victim test.
+    //
+    // This proves the fix's two properties deterministically on the REAL path
+    // (real VM + real repository + real batched tail):
+    //  (a) LEAK EXISTS — an OPEN tail (its umbrella never completes) leaves a
+    //      LIVE drain coroutine on the tail scope; that is precisely the real-IO
+    //      coroutine the un-joined default scope leaked across the test boundary.
+    //  (b) DRAIN WORKS — cancel-THEN-join (the fix's @After shape, run here while
+    //      the rule's Main is STILL installed, i.e. BEFORE resetMain) drains it,
+    //      so no tail coroutine survives to race the next test's setMain.
+    // The drain is an infinite loop, so it must be cancelled FIRST, then joined.
+    @Test
+    fun issue1168AgentTailScopeLeaksALiveDrainThatCancelJoinDrains() {
+        val probeTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val repository = AgentConversationRepository(tailScope = probeTailScope)
+            val vm = newVm(agentRepository = repository)
+            vm.attachClientForTest(FakeTmuxClient())
+            val detection = newClaudeDetection()
+            vm.startAgentConversationForTest("%0", detection)
+            // An OPEN tail: FakeSshSession's tail Job is never completed, so the
+            // umbrella never completes and the batched drain keeps looping on
+            // the injected real-IO tailScope — the un-joined leak.
+            val umbrella = vm.startAgentTailForTest(
+                paneId = "%0",
+                session = FakeSshSession(tailJob = Job()),
+                detection = detection,
+                fromLineExclusive = 0L,
+            )
+            assertNotNull("the follow tail must start (umbrella job non-null)", umbrella)
+
+            // (a) the real-IO drain child is ALIVE on the tail scope.
+            val liveChildren = probeTailScope.coroutineContext.job.children
+                .filter { it.isActive }
+                .toList()
+            assertTrue(
+                "expected a live tail-drain coroutine on the real-IO tailScope " +
+                    "(the un-joined #1168 leak), found none",
+                liveChildren.isNotEmpty(),
+            )
+
+            // (b) cancel-THEN-join drains it (the fix's @After shape), while the
+            // rule's Main is still installed — i.e. before any resetMain.
+            probeTailScope.cancel()
+            runBlocking {
+                withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
+                    probeTailScope.coroutineContext.job.children.forEach { it.join() }
+                }
+            }
+            val survivors = probeTailScope.coroutineContext.job.children
+                .filter { it.isActive }
+                .toList()
+            assertTrue(
+                "cancel-then-join must drain every tail coroutine before " +
+                    "resetMain; survivors=$survivors",
+                survivors.isEmpty(),
+            )
+        } finally {
+            probeTailScope.cancel()
+        }
     }
 
     @Test
@@ -14552,6 +14830,289 @@ class TmuxSessionViewModelTest {
         assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
         assertFalse("prewarm capture timeout must not close tmux client", prewarmClient.closed)
         assertFalse("prewarm capture timeout must not mark tmux disconnected", prewarmClient.disconnected.value)
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #1206 — fresh-pane seed: retry an empty/error/wedged first
+    // capture-pane instead of leaving the model grid empty (fragments-over-
+    // black on a fresh Claude session). Reproduce-first (D33/G10): each fixture
+    // makes the FIRST capture come back the non-happy way (empty / error /
+    // wedged-throw) while the pane HAS content the retry can seed — a happy
+    // fixture proves nothing (#847). The prewarmed pane is inspected DIRECTLY
+    // from the cached runtime (no switch/reveal reseed masking the RED), so the
+    // ONLY seeding path under test is the prewarm seed + #1206 retry.
+    //
+    // RED on base (no retry): the pane stays blank — the second (content)
+    // capture response is never consumed. GREEN with the fix: the background
+    // retry consumes it and seeds the full grid.
+    // ---------------------------------------------------------------------
+
+    /** Empty first capture, content on retry (G2 — empty-capture class). */
+    @Test
+    fun prewarmSeedRetriesEmptyFirstCaptureUntilContentSeedsTheGrid() = runTest(scheduler) {
+        val pane = prewarmSeedRetryPane(
+            firstCapture = CommandResponse(number = 2L, output = emptyList(), isError = false),
+        )
+        assertFalse(
+            "empty first capture must NOT leave the fresh pane blank — the #1206 retry " +
+                "must seed the full grid (transcript='${renderedTranscriptFrom(pane.terminalState)}')",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            "the retry's captured content must be on the pane grid",
+            renderedTranscriptFrom(pane.terminalState).contains(ISSUE_1206_SEED_MARKER),
+        )
+    }
+
+    /** Error first capture, content on retry (G2 — error-capture class). */
+    @Test
+    fun prewarmSeedRetriesErrorFirstCaptureUntilContentSeedsTheGrid() = runTest(scheduler) {
+        val pane = prewarmSeedRetryPane(
+            firstCapture = CommandResponse(
+                number = 2L,
+                output = listOf("capture-pane: no such pane"),
+                isError = true,
+            ),
+        )
+        assertFalse(
+            "error first capture must NOT leave the fresh pane blank — the #1206 retry must seed it",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            renderedTranscriptFrom(pane.terminalState).contains(ISSUE_1206_SEED_MARKER),
+        )
+    }
+
+    /**
+     * Wedged/thrown first capture (the busy -CC acquire timeout), content on
+     * retry (G2 — timeout/wedged-acquire class). Modeled by making the first
+     * `capture-pane` THROW (as `captureWithCursor` does on a wedged acquire),
+     * then succeed.
+     */
+    @Test
+    fun prewarmSeedRetriesWedgedFirstCaptureUntilContentSeedsTheGrid() = runTest(scheduler) {
+        val pane = prewarmSeedRetryPane(
+            firstCapture = null,
+            wedgeFirstCapture = true,
+        )
+        assertFalse(
+            "a wedged/thrown first capture must NOT leave the fresh pane blank — #1206 retry seeds it",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            renderedTranscriptFrom(pane.terminalState).contains(ISSUE_1206_SEED_MARKER),
+        )
+    }
+
+    /**
+     * Issue #1206 — deferred reseed on the first live %output. When the capture
+     * stays empty/wedged for the WHOLE bounded retry window, the pane opens its
+     * gate blank; the moment the pane emits its first live %output, ONE fresh
+     * capture reseeds the full grid. RED on base: no retry AND no deferred
+     * reseed, so an idle Claude pane whose non-visible first frame arrives after
+     * the seed window stays fragments-over-black. GREEN: the deferred reseed
+     * seeds the full grid on that first output.
+     */
+    @Test
+    fun prewarmDeferredReseedOnFirstOutputSeedsTheGridAfterExhaustedRetries() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        vm.setPrewarmSeedRetryBackoffForTest(50L)
+        // Every capture across the inline attempt + all retries returns empty.
+        val prewarmClient = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf("%4\t@0\t\$0\trecent\trecent\t0"),
+                    isError = false,
+                ),
+            )
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+
+        val pane = runtimeCache.cachedRuntimesForHost(1L).single().panes.single { it.paneId == "%4" }
+        // The retry window is exhausted (all captures empty) — pane still blank,
+        // deferred reseed parked on the first live %output.
+        assertTrue(
+            "after an all-empty retry window the pane is blank until it produces output",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+
+        // The pane produces its first live %output — non-visible bytes (a cursor
+        // home escape) so the OUTPUT itself paints nothing: the deferred reseed
+        // is the only thing that can fill the grid. Queue the content the reseed
+        // capture will pick up, then emit.
+        prewarmClient.capturePaneResponses.addLast(
+            CommandResponse(number = 9L, output = listOf(ISSUE_1206_SEED_MARKER), isError = false),
+        )
+        prewarmClient.tryEmitPaneOutput("%4", "[H".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
+        assertFalse(
+            "the first live %output must trigger ONE deferred reseed that fills the grid " +
+                "(transcript='${renderedTranscriptFrom(pane.terminalState)}')",
+            pane.terminalState.visibleScreenIsBlank(),
+        )
+        assertTrue(
+            "the deferred reseed's captured content must be on the pane grid",
+            renderedTranscriptFrom(pane.terminalState).contains(ISSUE_1206_SEED_MARKER),
+        )
+    }
+
+    /**
+     * Drives a prewarm whose FIRST seed capture is [firstCapture] (or throws
+     * when [wedgeFirstCapture]) and whose RETRY capture returns the
+     * [ISSUE_1206_SEED_MARKER] content, then returns the cached prewarmed pane
+     * for the caller to assert on. Shared by the #1206 empty/error/wedged tests.
+     */
+    private fun TestScope.prewarmSeedRetryPane(
+        firstCapture: CommandResponse?,
+        wedgeFirstCapture: Boolean = false,
+    ): TmuxPaneState {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        vm.setPrewarmSeedRetryBackoffForTest(50L)
+        val prewarmClient = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf("%4\t@0\t\$0\trecent\trecent\t0"),
+                    isError = false,
+                ),
+            )
+            if (wedgeFirstCapture) {
+                // The first capture-pane THROWS (a wedged -CC acquire), then the
+                // retry succeeds — throwOnCommandPrefix does NOT consume a queued
+                // capture response, so only the content response is queued.
+                throwOnCommandPrefix = "capture-pane"
+                throwOnCommandException = TmuxClientException("capture-pane acquire wedged")
+                throwOnCommandRemaining = 1
+            } else {
+                capturePaneResponses.addLast(requireNotNull(firstCapture))
+            }
+            // The retry capture returns real content that must seed the grid.
+            capturePaneResponses.addLast(
+                CommandResponse(number = 8L, output = listOf(ISSUE_1206_SEED_MARKER), isError = false),
+            )
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+
+        return runtimeCache.cachedRuntimesForHost(1L).single().panes.single { it.paneId == "%4" }
+    }
+
+    /**
+     * Issue #1206 (recovery-job cancellation — the reviewer's #2 residual). A
+     * prewarmed pane whose seed capture stays empty for the WHOLE bounded retry
+     * window PARKS a recovery job on the first-live-%output wait. That job is
+     * promoted with the runtime into the cache entry; it MUST be cancelled when
+     * the cached runtime is evicted/closed (`closeCachedRuntime`) — not leaked
+     * as a parked coroutine until whole-VM `bridgeScope` teardown.
+     *
+     * Load-bearing assertion: after [closeCachedRuntime] the parked recovery job
+     * is CANCELLED (`isCancelled` / not `isActive`). Before the fix the cache
+     * entry did not carry the recovery job and `closeCachedRuntime` had nothing
+     * to cancel, so the job leaked — this test would fail (the job stays active).
+     */
+    @Test
+    fun prewarmSeedRecoveryJobIsCancelledOnCachedRuntimeClose() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        vm.setPrewarmSeedRetryBackoffForTest(50L)
+        // Every capture (inline + all retries) returns empty → the recovery job
+        // exhausts its retries and PARKS on the first-live-%output wait.
+        val prewarmClient = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf("%4\t@0\t\$0\trecent\trecent\t0"),
+                    isError = false,
+                ),
+            )
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+
+        val runtime = runtimeCache.cachedRuntimesForHost(1L).single()
+        val recoveryJob = runtime.paneSeedRecoveryJobs["%4"]
+        assertNotNull(
+            "an all-empty-capture prewarm must carry its parked seed-recovery job into the " +
+                "cache entry so it is cancellable on eviction",
+            recoveryJob,
+        )
+        assertTrue(
+            "the parked recovery job must be active (waiting on first %output) before teardown",
+            recoveryJob!!.isActive,
+        )
+
+        // Cache eviction / deactivate must cancel the parked recovery job.
+        runtime.closeCachedRuntime()
+        advanceUntilIdle()
+
+        assertTrue(
+            "the parked seed-recovery job MUST be cancelled on cache close — a promoted " +
+                "prewarmed pane's recovery job must not leak until whole-VM teardown",
+            recoveryJob.isCancelled,
+        )
+        assertFalse(
+            "the cancelled recovery job must no longer be active",
+            recoveryJob.isActive,
+        )
     }
 
     @Test
@@ -17830,6 +18391,11 @@ class TmuxSessionViewModelTest {
     }
 
     private companion object {
+        // Issue #1206: distinctive content the retry / deferred-reseed capture
+        // returns, so the pane transcript can be asserted to CONTAIN it (proving
+        // the reseed — not some incidental output — filled the grid).
+        const val ISSUE_1206_SEED_MARKER = "ISSUE1206-RESEED-CONTENT-fresh-pane-grid"
+
         // Issue #713: the slow-feed / real-async terminal tests below keep
         // `factoryScope` on real `Dispatchers.IO` (#708 judgment call A), so
         // they drain the real bridge feed / final marker via real-wall-clock
@@ -17976,7 +18542,16 @@ class TmuxSessionViewModelTest {
         @Volatile
         var closed: Boolean = false
 
-        val execCommands = mutableListOf<String>()
+        // Issue #1289: exec() appends to this list from a real Dispatchers.IO
+        // thread (the recorded-kind read runs off-Main), while test-thread
+        // `awaitCondition` predicates walk it via Kotlin `.count { }` / `.any { }`
+        // (an iterator walk). A plain ArrayList throws ConcurrentModificationException
+        // on that concurrent iterate+append — the flake that red-blocked the
+        // pre-release confidence gate under `--no-parallel --max-workers=2`. A
+        // CopyOnWriteArrayList iterates over a stable snapshot and copies on append,
+        // so no predicate read can ever race the exec() append. Class-covering: this
+        // makes EVERY execCommands read across the suite race-safe, not just one test.
+        val execCommands: MutableList<String> = java.util.concurrent.CopyOnWriteArrayList()
         private var cardGetIndex: Int = 0
 
         // Issue #793: let a paging test reprogram the window the fake returns.

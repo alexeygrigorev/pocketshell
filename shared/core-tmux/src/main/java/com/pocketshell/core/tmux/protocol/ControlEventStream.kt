@@ -1,5 +1,6 @@
 package com.pocketshell.core.tmux.protocol
 
+import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
@@ -41,7 +42,37 @@ import kotlinx.coroutines.flow.flow
 public class ControlEventStream(
     private val parser: ControlModeParser = ControlModeParser(),
     private val onResponsePayload: (commandNumber: Long, line: String) -> Unit = { _, _ -> },
+    private val maxOpenBlockLines: Int = MAX_OPEN_BLOCK_LINES,
+    private val maxOpenBlockBytes: Long = MAX_OPEN_BLOCK_BYTES,
 ) {
+    public companion object {
+        /**
+         * Ceiling on payload lines accumulated inside a single `%begin` /
+         * (`%end`|`%error`) block before it is abandoned as never-closing
+         * (issue #1231 T4).
+         *
+         * A legit tmux `-CC` response block is tiny: the largest one
+         * PocketShell issues is a `capture-pane -p -e -S -200` seed
+         * (`SEED_SCROLLBACK_LINES = 200`); `list-sessions` / `list-panes` /
+         * `list-windows` are smaller still. This ceiling is three orders of
+         * magnitude above any real response, so it never trips on legitimate
+         * output — it only fires when a truncated / garbled `%end` (one that
+         * fails `parseBeginEnd` and so never matches the open block) latches
+         * `openBlock` forever, silently swallowing EVERY subsequent line —
+         * including real `%output` — as payload. That is a permanent render
+         * freeze invisible to the black-screen / heal apparatus, because bytes
+         * stop reaching the model entirely.
+         */
+        public const val MAX_OPEN_BLOCK_LINES: Int = 50_000
+
+        /**
+         * Byte ceiling companion to [MAX_OPEN_BLOCK_LINES] — bounds an open
+         * block that stays under the line count but accumulates huge lines.
+         * 8 MB is far beyond any legit `-CC` response block yet caps the
+         * pathological never-closing block's transient memory.
+         */
+        public const val MAX_OPEN_BLOCK_BYTES: Long = 8L * 1024 * 1024
+    }
 
     /**
      * Map [lines] into the structured event stream.
@@ -55,6 +86,11 @@ public class ControlEventStream(
         // `%end` / `%error` — holds the command-number from the `%begin`
         // so we can forward payload lines correctly.
         var openBlock: Long? = null
+        // Payload accumulated inside the current open block. Bounds the block
+        // so a never-closing / garbled `%end` cannot latch the stream into a
+        // permanent silent freeze (issue #1231 T4).
+        var openBlockLines = 0
+        var openBlockBytes = 0L
 
         lines.collect { rawLine ->
             // Byte-level DCS strip; the parser re-strips defensively but we
@@ -72,15 +108,56 @@ public class ControlEventStream(
                     parsed is ControlEvent.Error && parsed.number == openBlock
                 if (closing) {
                     openBlock = null
+                    openBlockLines = 0
+                    openBlockBytes = 0L
                     // Emit the closing event so callers can observe success
                     // vs. failure of the command.
                     emit(parsed!!)
-                } else {
-                    // Payload line. Forward it to the response-correlation
-                    // callback as a String — command-response bodies are
-                    // ASCII / UTF-8 text, never partial multi-byte fragments.
-                    onResponsePayload(openBlock!!, String(lineBytes, Charsets.UTF_8))
+                    return@collect
                 }
+
+                // Not a closing marker — this is a payload line. Guard against
+                // a never-closing block FIRST: a truncated / garbled `%end`
+                // (one that fails `parseBeginEnd` so `parsed` is null or a
+                // non-matching number) would otherwise leave `openBlock`
+                // latched forever, routing every subsequent line — including
+                // real `%output` — to `onResponsePayload` and never emitting an
+                // event again. That is a total silent render freeze the
+                // black-screen / heal apparatus cannot see. Once the block
+                // exceeds the ceiling, abandon it, record a diagnostic, and
+                // resume normal event parsing by re-processing THIS line
+                // outside the block so a real event flows immediately.
+                if (openBlockLines >= maxOpenBlockLines || openBlockBytes >= maxOpenBlockBytes) {
+                    val abandonedNumber = openBlock
+                    TmuxClientDiagnostics.record(
+                        "tmux_control_block_abandoned",
+                        buildMap {
+                            put("commandNumber", abandonedNumber)
+                            put("lines", openBlockLines)
+                            put("bytes", openBlockBytes)
+                            put("maxLines", maxOpenBlockLines)
+                            put("maxBytes", maxOpenBlockBytes)
+                        },
+                    )
+                    openBlock = null
+                    openBlockLines = 0
+                    openBlockBytes = 0L
+                    // Re-process this same line as if it arrived outside a
+                    // block. `parsed` is the parse of `lineBytes`, so reuse it.
+                    val event = parsed ?: return@collect
+                    if (event is ControlEvent.Begin) {
+                        openBlock = event.number
+                    }
+                    emit(event)
+                    return@collect
+                }
+
+                // Payload line. Forward it to the response-correlation
+                // callback as a String — command-response bodies are
+                // ASCII / UTF-8 text, never partial multi-byte fragments.
+                onResponsePayload(openBlock!!, String(lineBytes, Charsets.UTF_8))
+                openBlockLines += 1
+                openBlockBytes += lineBytes.size
                 return@collect
             }
 
@@ -88,6 +165,8 @@ public class ControlEventStream(
             val event = parser.parse(lineBytes) ?: return@collect
             if (event is ControlEvent.Begin) {
                 openBlock = event.number
+                openBlockLines = 0
+                openBlockBytes = 0L
             }
             emit(event)
         }

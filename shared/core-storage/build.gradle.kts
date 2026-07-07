@@ -22,6 +22,15 @@ android {
         jvmTarget = "17"
     }
 
+    // Room `exportSchema = true` writes the versioned schema JSON here so every
+    // shipped schema has a durable, checked-in artifact and a future migration
+    // gap is caught at build time rather than on-device.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir("$projectDir/schemas")
+        }
+    }
+
     testOptions {
         // Room requires an Android Context to build a database. Robolectric
         // gives the host JVM a real Android runtime without booting an
@@ -37,6 +46,11 @@ android {
             }
         }
     }
+}
+
+ksp {
+    // Destination for the Room `exportSchema = true` JSON artifacts.
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

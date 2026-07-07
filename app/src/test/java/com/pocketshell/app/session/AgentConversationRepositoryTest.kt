@@ -2,8 +2,10 @@ package com.pocketshell.app.session
 
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ClaudeCodeParser
 import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationImage
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.ssh.ExecResult
@@ -917,19 +919,25 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
-    fun detectLiveTranscriptForPaneBindsTheMostRecentKindWithoutAKnownKind() = runTest {
-        // Issue #975 (B1): the kind-agnostic transcript fallback. With NO known
-        // kind (the daemon returned `unknown`), it enumerates ALL kinds for the
-        // cwd, picks the MOST-RECENT candidate's kind, and binds its source. Here
-        // Claude is the most recent, so a Claude detection binds — this is the
-        // masked-live-agent evidence the recorded-shell verdict could not see.
+    fun detectLiveTranscriptForPaneBindsTheFdOwnedKindWithoutAKnownKind() = runTest {
+        // Issue #975 (B1) + #1228: the kind-agnostic transcript fallback. With NO
+        // known kind (the daemon returned `unknown`) and MORE THAN ONE engine's
+        // transcript live in the cwd, the kind must come from the pane's OWN
+        // process identity (`/proc/<pid>/fd`), NEVER a cross-kind mtime race. Here
+        // a busier Codex sibling flushed MORE RECENTLY, but the pane's own claude
+        // (node) process holds the Claude transcript open, so Claude binds.
         val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/live.jsonl"
         val session = FakeSshSession(
             detectionOutput = """
-                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/live.jsonl
-                codex|${now - 600}|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-older.jsonl
+                claude|${now - 600}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/06/18/rollout-busier.jsonl
             """.trimIndent(),
             hostWideProcessOutput = "1001 1 pts/7 node node",
+            // The pane's own node/claude process (pid 1001) holds the Claude
+            // transcript fd open — the identity signal that beats the busier
+            // Codex sibling's newer mtime.
+            procFdOutput = ownClaude,
         )
 
         val detection = AgentConversationRepository().detectLiveTranscriptForPane(
@@ -940,8 +948,8 @@ class AgentConversationRepositoryTest {
         )
 
         assertEquals(
-            "#975 (B1): the kind-agnostic fallback binds the most-recent live " +
-                "transcript's kind (Claude) without a known/recorded kind",
+            "#1228: the kind-agnostic fallback binds the fd-OWNED kind (Claude), " +
+                "never the busier same-cwd Codex sibling picked by cross-kind mtime",
             AgentKind.ClaudeCode,
             detection?.agent,
         )
@@ -993,6 +1001,449 @@ class AgentConversationRepositoryTest {
                 paneTty = "",
                 paneCommand = "bash",
             ),
+        )
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #1228: cross-kind mtime wrong-binding (#819/#807 class). When TWO
+    // engines' transcripts share one cwd, the masked-agent fallback must pick the
+    // kind from the pane's OWN `/proc/<pid>/fd` ownership — NEVER a cross-kind
+    // mtime race won by a busier sibling — and REFUSE to bind when no ownership
+    // signal is present. Reproduce-first (G10): each two-kind case is RED on the
+    // base `candidates.maxByOrNull { it.modifiedAtMillis }?.agent` pick.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectLiveTranscriptForPaneNeverBindsBusierCodexSiblingOverFdOwnedClaude() = runTest {
+        // THE reported instance: pane A runs a MASKED Claude; a sibling pane runs a
+        // busier Codex that flushed its rollout 3 s ago. Both live in the same cwd.
+        // Base code: recordedKind = maxByOrNull(mtime).agent = Codex (newer) →
+        // pane A shows the OTHER agent's transcript (wrong-pane foreign content).
+        // Fix: the pane's own claude process holds the Claude fd open → bind Claude.
+        val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/paneA.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 400}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-busier.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3100 1 pts/5 node node",
+            procFdOutput = ownClaude,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "#1228: a masked-Claude pane must bind Claude via fd ownership, never " +
+                "the busier same-cwd Codex sibling the mtime pick would choose",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("paneA", detection?.sessionId)
+        assertEquals(ownClaude, detection?.sourcePath)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsFdOwnedCodexOverBusierClaudeSibling() = runTest {
+        // Class coverage — the SYMMETRIC direction: the pane runs Codex while a
+        // busier Claude sibling flushed more recently in the same cwd. Base code
+        // picks Claude (newer mtime); the fd-owned Codex rollout must win.
+        val now = System.currentTimeMillis() / 1000
+        val ownCodex = "/home/testuser/.codex/sessions/2026/07/03/rollout-paneB.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/busier.jsonl
+                codex|${now - 400}|/workspace/proj|$ownCodex
+            """.trimIndent(),
+            hostWideProcessOutput = "3200 1 pts/6 codex /usr/local/bin/codex",
+            procFdOutput = ownCodex,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/6",
+            paneCommand = "codex",
+        )
+
+        assertEquals(
+            "#1228: a Codex pane must bind Codex via fd ownership, never the busier " +
+                "same-cwd Claude sibling the mtime pick would choose",
+            AgentKind.Codex,
+            detection?.agent,
+        )
+        assertEquals("rollout-paneB", detection?.sessionId)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneRefusesToBindWhenTwoKindsShareCwdWithoutFdOwnership() = runTest {
+        // Missing-data class case: two engines' transcripts share the cwd but the
+        // pane's process holds NO resolvable transcript fd (older CLI build,
+        // non-Linux host, permission error). Base code guesses the newer kind by
+        // mtime — here the busier sibling is CLAUDE, which base binds with
+        // requireProcessMatch=false → wrong-pane foreign content. The fix REFUSES
+        // to bind (null) and surfaces a diagnostic instead.
+        val now = System.currentTimeMillis() / 1000
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+                codex|${now - 400}|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-x.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3300 1 pts/7 node node",
+            // No fd resolvable → cannot prove which kind this pane runs.
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/7",
+                paneCommand = "node",
+            )
+
+        assertEquals(
+            "#1228: two kinds share the cwd with NO fd-ownership signal — must " +
+                "refuse to bind, never guess by cross-kind mtime",
+            null,
+            detection,
+        )
+        assertTrue(
+            "#1228: the refusal must surface a diagnostic naming the ambiguity; got $diagnostics",
+            diagnostics.any {
+                it.contains("refusing to bind by cross-kind mtime") &&
+                    it.contains("Conversation will not bind")
+            },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneResolvesFdOwnershipThroughPaneSubtree() = runTest {
+        // Nested/sub-agent class case: the pane's tty leader is a shell; the agent
+        // (node/claude) runs as a CHILD on a different tty, reachable only through
+        // the ppid subtree walk. The fd-ownership scan must include the child pid,
+        // so the Claude fd it holds still resolves the kind (over a busier Codex
+        // sibling). Base code would pick Codex by mtime.
+        val now = System.currentTimeMillis() / 1000
+        val ownClaude = "/home/testuser/.claude/projects/-workspace-proj/child.jsonl"
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|${now - 400}|/workspace/proj|$ownClaude
+                codex|$now|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-busier.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                4000 1 pts/9 bash -bash
+                4001 4000 ? node node
+            """.trimIndent(),
+            procFdOutput = ownClaude,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/9",
+            paneCommand = "bash",
+        )
+
+        assertEquals(
+            "#1228: fd ownership must resolve through the pane's process SUBTREE " +
+                "(the child agent pid), binding Claude over the busier Codex sibling",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("child", detection?.sessionId)
+        assertTrue(
+            "#1228: the /proc fd scan must cover the child pid reached via ppid walk",
+            session.execCommands.any { it.contains("/proc/") && it.contains(" 4001") },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsOnlyKindWithoutFdOwnershipWhenSingleKindPresent() = runTest {
+        // Boundary: only ONE engine's transcript is live in the cwd. There is no
+        // cross-kind guess to make, so the fallback binds it even WITHOUT an
+        // fd-ownership signal — the #1228 refusal is scoped strictly to the
+        // >1-kind case and must NOT regress the #975 single-kind masked-agent bind.
+        val now = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/solo.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "5000 1 pts/3 node node",
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/3",
+            paneCommand = "node",
+        )
+
+        assertEquals(
+            "#1228: a single-kind cwd must still bind (no cross-kind ambiguity)",
+            AgentKind.ClaudeCode,
+            detection?.agent,
+        )
+        assertEquals("solo", detection?.sessionId)
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneRefusesWhenPaneOwnsNeitherOfTheTwoForeignKinds() = runTest {
+        // Foreign-session class case: two engines' transcripts share the cwd (the
+        // busier sibling is CLAUDE, which base would bind with
+        // requireProcessMatch=false → wrong foreign content), and the pane's own
+        // process holds open a transcript that belongs to NEITHER enumerated kind
+        // (a stray fd, or a rollout for a cwd not in-window). ownedKinds
+        // intersected with presentKinds is empty → refuse to bind rather than
+        // mis-attribute a foreign sibling.
+        val now = System.currentTimeMillis() / 1000
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$now|/workspace/proj|/home/testuser/.claude/projects/-workspace-proj/c.jsonl
+                codex|${now - 400}|/workspace/proj|/home/testuser/.codex/sessions/2026/07/03/rollout-x.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "3400 1 pts/8 node node",
+            // A fd that is NOT a recognised transcript convention → classifies to
+            // no kind → provides no usable ownership signal.
+            procFdOutput = "/home/testuser/somewhere/unrelated.log",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/8",
+                paneCommand = "node",
+            )
+
+        assertEquals(
+            "#1228: an fd that maps to no enumerated kind is not an ownership " +
+                "signal — must refuse to bind, never fall back to mtime",
+            null,
+            detection,
+        )
+        assertTrue(
+            "#1228: the refusal must be surfaced; got $diagnostics",
+            diagnostics.any { it.contains("Conversation will not bind") },
+        )
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #1227: version-skew fragility (#847 class). A drifted/mismatched
+    // Codex CLI or a host-helper preamble must NOT silently blank the
+    // Conversation view. These reproduce the non-happy state first (G10) and
+    // prove the fd fallback / diagnostic / tolerant parse recover it.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectLiveTranscriptForPaneBindsCodexViaFdWhenCwdExtractionYieldsNothing() = runTest {
+        // #1227 site 1 (version-skew, reproduce-first): a LIVE Codex pane whose
+        // rollout has a drifted/moved `session_meta` cwd field yields ZERO
+        // candidate rows from the shell enumeration (the shell-side cwd
+        // extraction silently drops it — see
+        // detectionCommandTolerantlyExtractsCwd* below for the real-shell proof
+        // of that drop). Base code returns null here (candidates empty → no kind
+        // → give up), silently blanking Conversation. The fd-owned fallback must
+        // degrade to fd-identity: bind the rollout the pane's OWN codex process
+        // holds open via /proc/<pid>/fd, never trusting the drifted cwd field.
+        val ownPath = "/home/testuser/.codex/sessions/2026/07/03/rollout-drift.jsonl"
+        val session = FakeSshSession(
+            // Empty enumeration == the version-skew drop the shell would produce.
+            detectionOutput = "",
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex",
+            // The pane's own codex process (pid 4242) holds the drifted rollout open.
+            procFdOutput = ownPath,
+        )
+
+        val detection = AgentConversationRepository().detectLiveTranscriptForPane(
+            session = session,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/5",
+            paneCommand = "codex",
+        )
+
+        assertEquals(
+            "#1227: a live Codex pane whose cwd extraction drifted must still bind " +
+                "via the /proc fd owned-rollout fallback, not silently blank",
+            AgentKind.Codex,
+            detection?.agent,
+        )
+        assertEquals(ownPath, detection?.sourcePath)
+        assertEquals("rollout-drift", detection?.sessionId)
+        assertTrue(
+            "the fd fallback must resolve the owned rollout via /proc fd",
+            session.execCommands.any { it.contains("/proc/") && it.contains(".codex/sessions/") },
+        )
+    }
+
+    @Test
+    fun detectLiveTranscriptForPaneEmitsDiagnosticWhenNothingBinds() = runTest {
+        // #1227 criterion 3: a failure to bind must be surfaced as a DIAGNOSTIC,
+        // not a silent empty Conversation view. A live-looking Codex pane whose
+        // enumeration yields nothing AND whose process holds no resolvable
+        // rollout fd cannot bind — the repository must log WHY.
+        val diagnostics = mutableListOf<String>()
+        val session = FakeSshSession(
+            detectionOutput = "",
+            hostWideProcessOutput = "4242 1 pts/5 codex /usr/local/bin/codex",
+            // No fd-owned rollout resolvable (older Codex build that doesn't hold
+            // the fd, non-Linux host, permission error) → genuinely cannot bind.
+            procFdOutput = "",
+        )
+
+        val detection = AgentConversationRepository(diagnostic = { diagnostics += it })
+            .detectLiveTranscriptForPane(
+                session = session,
+                cwd = "/workspace/proj",
+                paneTty = "/dev/pts/5",
+                paneCommand = "codex",
+            )
+
+        assertEquals(null, detection)
+        assertTrue(
+            "#1227: a bind failure must surface a diagnostic, not silently blank " +
+                "the view; got $diagnostics",
+            diagnostics.any { it.contains("Conversation will not bind") },
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesSkipsPreambleBeforeEnvelope() = runTest {
+        // #1227 site 2 (version-skew, reproduce-first): a host-helper preamble
+        // line printed BEFORE the JSON envelope (an update banner / warning /
+        // MOTD leak) must not blank the whole window. Base code commits to the
+        // first non-blank line being the envelope → JSONObject(preamble) fails →
+        // returns empty (indistinguishable from "no messages yet"). The parser
+        // must scan past non-JSON preamble to the first JSON object carrying
+        // `lines`.
+        val envelope = JSONObject(
+            mapOf(
+                "count" to 2,
+                "engine" to "codex",
+                "lines" to JSONArray(listOf("first line", "second line")),
+            ),
+        ).toString()
+        val outputWithPreamble = buildString {
+            appendLine("pocketshell: a newer version is available (run `pocketshell self-update`)")
+            appendLine(envelope)
+        }
+
+        assertEquals(
+            "#1227: an agent-log preamble ahead of the envelope must not blank the window",
+            listOf("first line", "second line"),
+            AgentConversationRepository().parseAgentLogEnvelopeLines(outputWithPreamble),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesSkipsMultiLineAndNonEnvelopeJsonPreamble() = runTest {
+        // #1227 class coverage (G2) for site 2: multiple preamble lines, AND a
+        // JSON object that is NOT the envelope (no `lines` key) ahead of the real
+        // envelope, must all be skipped — not just a single non-JSON banner.
+        val envelope = JSONObject(
+            mapOf("engine" to "codex", "lines" to JSONArray(listOf("only line"))),
+        ).toString()
+        val output = buildString {
+            appendLine("Warning: locale not set")
+            appendLine("")
+            // A JSON object that is not the envelope (a stray status line).
+            appendLine("""{"status":"ok","note":"warming up"}""")
+            appendLine(envelope)
+        }
+
+        assertEquals(
+            listOf("only line"),
+            AgentConversationRepository().parseAgentLogEnvelopeLines(output),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesStaysSilentAndEmptyForNoOutput() = runTest {
+        // #1227 missing-data case (G2): genuinely no output ("no messages yet")
+        // must return empty WITHOUT emitting a drift diagnostic — the diagnostic
+        // is reserved for the non-blank-but-unparseable version-skew case.
+        val diagnostics = mutableListOf<String>()
+        val repo = AgentConversationRepository(diagnostic = { diagnostics += it })
+
+        assertEquals(emptyList<String>(), repo.parseAgentLogEnvelopeLines(""))
+        assertEquals(emptyList<String>(), repo.parseAgentLogEnvelopeLines("   \n  \n"))
+        assertTrue(
+            "blank output is 'no messages yet', not a drift — must stay silent; got $diagnostics",
+            diagnostics.isEmpty(),
+        )
+    }
+
+    @Test
+    fun parseAgentLogEnvelopeLinesEmitsDiagnosticForUnparseableOutput() = runTest {
+        // #1227 criterion 3 for site 2: non-blank output that carries no JSON
+        // envelope with `lines` (total format drift) must surface a diagnostic
+        // instead of a silent empty view.
+        val diagnostics = mutableListOf<String>()
+        val repo = AgentConversationRepository(diagnostic = { diagnostics += it })
+
+        val result = repo.parseAgentLogEnvelopeLines(
+            "pocketshell: unknown flag --json\nusage: pocketshell agent-log ...\n",
+        )
+
+        assertEquals(emptyList<String>(), result)
+        assertTrue(
+            "#1227: unparseable agent-log output must surface a diagnostic; got $diagnostics",
+            diagnostics.any { it.contains("no JSON envelope") },
+        )
+    }
+
+    @Test
+    fun detectionCommandTolerantlyExtractsCwdFromPrettyPrintedCodexRollout() {
+        // #1227 site 1 (G10 non-happy fixture, REAL shell): the Codex candidate
+        // enumeration extracts each rollout's cwd from its session_meta record.
+        // If Codex PRETTY-PRINTS the rollout JSONL (session_meta split across
+        // lines, cwd on its own line), the OLD extraction (grep the session_meta
+        // line, sed the cwd off the SAME line) yields nothing → the rollout is
+        // dropped → zero candidates → Conversation never binds. Run the REAL
+        // detectionCommand shell against a drifted fixture and prove a `codex|`
+        // row is emitted (RED on base: no codex row).
+        val prettyRollout = """
+            {
+              "type": "session_meta",
+              "payload": {
+                "id": "rollout-pretty",
+                "cwd": "/workspace/proj"
+              }
+            }
+        """.trimIndent()
+
+        val row = runCodexDetectionRow(rolloutContent = prettyRollout, cwd = "/workspace/proj")
+
+        assertTrue(
+            "#1227: a pretty-printed Codex rollout must still emit a codex candidate " +
+                "row (tolerant cwd extraction); got: $row",
+            row != null && row.startsWith("codex|") && row.endsWith("rollout-pretty.jsonl"),
+        )
+    }
+
+    @Test
+    fun detectionCommandTolerantlyExtractsCwdWhenFieldMovedOutsidePayload() {
+        // #1227 site 1 class coverage (G2): a rollout whose `cwd` field moved
+        // OUTSIDE `payload` (a plausible schema drift) also broke the old
+        // `"payload":{...,"cwd"...}`-on-one-line extraction. The tolerant scan
+        // must still find it (RED on base: no codex row).
+        val movedFieldRollout =
+            """{"type":"session_meta","cwd":"/workspace/proj","payload":{"id":"rollout-moved"}}"""
+
+        val row = runCodexDetectionRow(rolloutContent = movedFieldRollout, cwd = "/workspace/proj")
+
+        assertTrue(
+            "#1227: a rollout with cwd moved outside payload must still emit a codex " +
+                "candidate row; got: $row",
+            row != null && row.startsWith("codex|") && row.endsWith("rollout-moved.jsonl"),
         )
     }
 
@@ -2028,13 +2479,29 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
-    fun detectionCommandFiltersCodexCandidatesBySessionMetaPayloadCwd() {
+    fun detectionCommandTolerantlyExtractsCodexCwdAndStillGatesOnCwdMatch() {
+        // Issue #1227 (site 1, version-skew): the Codex cwd extraction is now
+        // tolerant of drift — it scans the rollout's metadata region (first 50
+        // lines) for any `"cwd":"..."` instead of requiring
+        // `"payload":{...,"cwd":"..."}` all on the FIRST session_meta line — so a
+        // pretty-printed or moved cwd field no longer silently drops the rollout.
+        // The cwd-equality gate is preserved so a different-cwd rollout is still
+        // filtered out (the fd fallback binds the true-cwd-unknown case).
         val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
 
-        assertTrue(command.contains("\"session_meta\""))
-        assertTrue(command.contains("\"payload\""))
-        assertTrue(command.contains("\"cwd\""))
-        assertTrue(command.contains("[ \"${'$'}codex_cwd\" = \"${'$'}cwd\" ] || continue"))
+        assertTrue("must still extract the cwd field", command.contains("\"cwd\""))
+        assertTrue(
+            "must scan the metadata region tolerantly, not just the first session_meta line",
+            command.contains("head -n 50"),
+        )
+        assertFalse(
+            "must not re-couple extraction to a payload-scoped single-line match (#1227)",
+            command.contains("\"payload\"[[:space:]]*:[[:space:]]*{[^}]*\"cwd\""),
+        )
+        assertTrue(
+            "must still gate on cwd equality so a foreign-cwd rollout is filtered out",
+            command.contains("[ \"${'$'}codex_cwd\" = \"${'$'}cwd\" ] || continue"),
+        )
     }
 
     @Test
@@ -2227,6 +2694,471 @@ class AgentConversationRepositoryTest {
         assertTrue("expected the agent-log window in the same exec", command.contains("pocketshell agent-log --engine codex"))
     }
 
+    // ===================================================================
+    // Issue #1225: the cold-open transcript read is bounded by LINE count
+    // only, never by BYTES — one multi-MB JSONL line (an inline base64
+    // image, the #842 path, or a huge tool_result) balloons the read into
+    // the JVM heap → jank/OOM on the phone. A server-side per-line byte
+    // clamp bounds the read; the oversized line degrades to a VISIBLE
+    // truncation marker instead of crashing or vanishing.
+    // ===================================================================
+
+    @Test
+    fun readInitialEventsByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // The pathological transcript: a normal user turn, then ONE ~5 MB line
+        // (an inline base64 image, far above the 256 KiB per-line cap), then a
+        // normal assistant turn. Cold-open must not materialise the 5 MB line
+        // into the heap.
+        val hugeBase64 = "A".repeat(5 * 1024 * 1024) // ~5 MB, >> MAX_TRANSCRIPT_LINE_BYTES
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"here is a screenshot"}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$hugeBase64"}}]}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"got it"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, detection)
+
+        // RED on base: the tail read has NO server-side byte clamp, so the 5 MB
+        // line crosses SSH verbatim. GREEN with the fix: the command pipes the
+        // tail through the awk clamp.
+        val tailCommand = session.execCommands.single { it.trimStart().startsWith("tail -n") }
+        assertTrue(
+            "the cold-open tail must byte-clamp each line server-side; got: $tailCommand",
+            tailCommand.contains(LINE_TRUNCATION_SENTINEL) && tailCommand.contains("awk"),
+        )
+
+        // The read is bounded: no event carries the multi-MB payload. RED on
+        // base (the 5 MB base64 arrives as an image/text event far above cap).
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no cold-open event may exceed the per-line byte cap " +
+                "($MAX_TRANSCRIPT_LINE_BYTES); largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+
+        // The truncation is USER-VISIBLE (a marker), not a silently dropped
+        // message. RED on base (no marker exists).
+        val note = events.filterIsInstance<ConversationEvent.SystemNote>()
+            .singleOrNull { it.tag == "truncated" }
+        assertNotNull("the oversized line must degrade to a visible truncation note", note)
+        assertTrue(
+            "the marker must name the truncated byte size; got: ${note?.content}",
+            note!!.content.contains("truncated"),
+        )
+
+        // The normal turns around the pathological line still render.
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("the leading user turn survives; got $messages", messages.contains("here is a screenshot"))
+        assertTrue("the trailing assistant turn survives; got $messages", messages.contains("got it"))
+    }
+
+    @Test
+    fun readEventsWindowByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed cold-open read (readEventsWindow) shares
+        // the same balloon risk and must byte-clamp too.
+        val hugeToolResult = "B".repeat(4 * 1024 * 1024) // ~4 MB huge tool_result
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"dump the file"}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"$hugeToolResult"}]}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"done"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(wcOutput = "12\n", jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = detection,
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val windowCommand = session.execCommands.single { it.contains("@@PS_WINDOW@@") }
+        assertTrue(
+            "the windowed read must byte-clamp each line server-side; got: $windowCommand",
+            windowCommand.contains(LINE_TRUNCATION_SENTINEL) && windowCommand.contains("awk"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized tool_result must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>()
+                .singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal turns survive; got $messages", messages.contains("dump the file"))
+        assertTrue("normal turns survive; got $messages", messages.contains("done"))
+    }
+
+    @Test
+    fun readInitialEventsLeavesANormalTranscriptUnchangedByTheByteClamp() = runTest {
+        // Counter-pin: a normal transcript (every line well under the cap) must
+        // be byte-clamped harmlessly — same events, NO spurious truncation
+        // marker. Guards against over-clamping legitimate content.
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"run the tests"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"all green"}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, detection)
+
+        assertTrue(
+            "a normal transcript must not produce any truncation marker",
+            events.none { it is ConversationEvent.SystemNote && it.tag == "truncated" },
+        )
+        assertEquals(
+            listOf(
+                ConversationRole.User to "run the tests",
+                ConversationRole.Assistant to "all green",
+            ),
+            events.filterIsInstance<ConversationEvent.Message>().map { it.role to it.text },
+        )
+        // The clamp is still present in the command — it is a byte CEILING, not a
+        // transform of normal content.
+        assertTrue(
+            session.execCommands.single { it.trimStart().startsWith("tail -n") }
+                .contains(LINE_TRUNCATION_SENTINEL),
+        )
+    }
+
+    @Test
+    fun resolveRecordedSessionOpenByteClampsTheFoldedClaudePrefetchWindow() = runTest {
+        // Class coverage: the single-round-trip cold-open (resolveRecordedSessionOpen)
+        // folds the FIRST Claude window into its exec, so it must byte-clamp that
+        // prefetch too — a pathological line in the prefetch would otherwise
+        // balloon the very first read.
+        val now = System.currentTimeMillis() / 1000
+        val sourcePath = "/home/testuser/.claude/projects/-workspace-proj/sess-huge.jsonl"
+        val hugeBase64 = "C".repeat(3 * 1024 * 1024)
+        val session = FakeSshSession(
+            recordedKindOutput = "claude\n",
+            recordedSourceOutput = "$sourcePath\n",
+            detectionOutput = "claude|$now|/workspace/proj|$sourcePath",
+            hostWideProcessOutput = "1001 1 pts/7 claude claude",
+            foldedClaudeWcOutput = "3",
+            foldedClaudeTail = listOf(
+                """{"type":"user","uuid":"u1","message":{"role":"user","content":"look at this"}}""",
+                """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$hugeBase64"}}]}}""",
+                """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"seen"}}""",
+            ).joinToString("\n"),
+            emulateFoldedClaudePathFromShell = true,
+        )
+
+        val open = AgentConversationRepository().resolveRecordedSessionOpen(
+            session = session,
+            sessionTarget = "\$3",
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+        )
+
+        assertTrue(
+            "the folded cold-open exec must byte-clamp the prefetch tail; got: " +
+                session.execCommands.single(),
+            session.execCommands.single().contains(LINE_TRUNCATION_SENTINEL) &&
+                session.execCommands.single().contains("awk"),
+        )
+        val window = open.prefetchedWindow
+        assertNotNull("recorded Claude open must prefetch a window", window)
+        val maxEventBytes = window!!.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no prefetched event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized prefetch line must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>()
+                .singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal prefetch turns survive; got $messages", messages.contains("look at this"))
+        assertTrue("normal prefetch turns survive; got $messages", messages.contains("seen"))
+    }
+
+    @Test
+    fun parseTranscriptTailLinesTurnsTheClampMarkerIntoAVisibleNoteAndParsesNormalLines() {
+        // Unit-level: the parser helper maps a LINE_TRUNCATION_SENTINEL line to a
+        // visible SystemNote (never silently dropped) and hands normal lines to
+        // the real parser unchanged, with ordinal-stable placeholder ids.
+        val lines = sequenceOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"first"}}""",
+            "${LINE_TRUNCATION_SENTINEL}5242880",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"second"}}""",
+            "${LINE_TRUNCATION_SENTINEL}9999999",
+        )
+
+        val events = parseTranscriptTailLines(ClaudeCodeParser(), AgentKind.ClaudeCode, lines)
+
+        val notes = events.filterIsInstance<ConversationEvent.SystemNote>().filter { it.tag == "truncated" }
+        assertEquals("both markers become visible notes", 2, notes.size)
+        assertEquals(
+            "placeholder ids are ordinal-stable within a read",
+            listOf("ps-truncated-line-0", "ps-truncated-line-1"),
+            notes.map { it.id },
+        )
+        assertTrue("the marker note names the byte size", notes.first().content.contains("5242880"))
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertEquals(listOf("first", "second"), messages)
+    }
+
+    // ===================================================================
+    // Issue #1267: extend the #1225 byte-bound to the Codex AND OpenCode
+    // cold-open reads (a G2 class-coverage gap — they use different read
+    // mechanisms than the Claude flat-JSONL tail). A multi-MB single line
+    // (huge tool_result / inline image) must degrade to a VISIBLE marker,
+    // per agent kind, instead of ballooning the read or vanishing.
+    // ===================================================================
+
+    @Test
+    fun codexReadInitialEventsByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // The Codex read goes through `pocketshell agent-log`, so the clamp is the
+        // tool-side `--max-line-bytes` flag; the giant envelope line is degraded
+        // server-side to a marker. FakeSshSession emulates that server clamp.
+        val hugeText = "A".repeat(5 * 1024 * 1024) // ~5 MB, >> MAX_TRANSCRIPT_LINE_BYTES
+        val codexLines = listOf(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"look at this"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"$hugeText"}]}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m3","role":"assistant","content":[{"type":"output_text","text":"seen"}]}}""",
+        )
+        val session = FakeSshSession(
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxLines = 20,
+        )
+
+        // RED on base: the Codex read passes no byte cap to the tool.
+        val command = session.execCommands.single { it.contains("pocketshell agent-log --engine codex") }
+        assertTrue(
+            "the Codex cold-open must byte-clamp server-side via --max-line-bytes; got: $command",
+            command.contains("--max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES"),
+        )
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no Codex cold-open event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized Codex line must degrade to a visible truncation note",
+            events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("look at this"))
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("seen"))
+    }
+
+    @Test
+    fun codexReadEventsWindowByteClampsAMultiMegabyteLineToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed Codex cold-open (readEventsWindow) folds
+        // the agent-log call into its exec and must byte-clamp it too.
+        val hugeText = "B".repeat(4 * 1024 * 1024)
+        val codexLines = listOf(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"dump it"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"$hugeText"}]}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"m3","role":"assistant","content":[{"type":"output_text","text":"done"}]}}""",
+        )
+        val session = FakeSshSession(
+            wcOutput = "3\n",
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val command = session.execCommands.single { it.contains("pocketshell agent-log --engine codex") }
+        assertTrue(
+            "the windowed Codex read must byte-clamp via --max-line-bytes; got: $command",
+            command.contains("--max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed Codex event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized Codex line must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("dump it"))
+        assertTrue("normal Codex turns survive; got $messages", messages.contains("done"))
+    }
+
+    @Test
+    fun openCodeReadInitialEventsByteClampsAMultiMegabyteRowToAVisibleTruncationMarker() = runTest {
+        // The OpenCode read is a `sqlite3` export, one JSON object per line, so
+        // the SAME per-line `awk` byte clamp #1225 used for Claude is the
+        // format-appropriate bound. A row whose `part_data` is a multi-MB tool
+        // result must degrade to a visible marker, not balloon the read.
+        val hugePart = "D".repeat(4 * 1024 * 1024)
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "hello"),
+                    openCodeRow(2, hugePart),
+                    openCodeRow(3, "bye"),
+                ),
+            ),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, openCodeDetection())
+
+        // RED on base: the OpenCode sqlite export is not piped through the clamp.
+        val command = session.execCommands.single { it.contains("sqlite3 -readonly") }
+        assertTrue(
+            "the OpenCode cold-open must byte-clamp each row server-side; got: $command",
+            command.contains(LINE_TRUNCATION_SENTINEL) && command.contains("awk"),
+        )
+        val maxEventBytes = events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no OpenCode cold-open event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        val note = events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" }
+        assertNotNull("the oversized OpenCode row must degrade to a visible truncation note", note)
+        assertEquals(AgentKind.OpenCode, note!!.agent)
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("hello"))
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("bye"))
+    }
+
+    @Test
+    fun openCodeReadEventsWindowByteClampsAMultiMegabyteRowToAVisibleTruncationMarker() = runTest {
+        // Class coverage: the windowed OpenCode cold-open (readEventsWindow) must
+        // byte-clamp too.
+        val hugePart = "E".repeat(4 * 1024 * 1024)
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "first"),
+                    openCodeRow(2, hugePart),
+                    openCodeRow(3, "third"),
+                ),
+            ),
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = openCodeDetection(),
+            maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
+        )
+
+        val command = session.execCommands.single { it.contains("sqlite3 -readonly") }
+        assertTrue(
+            "the windowed OpenCode read must byte-clamp each row server-side; got: $command",
+            command.contains(LINE_TRUNCATION_SENTINEL) && command.contains("awk"),
+        )
+        val maxEventBytes = window.events.maxOfOrNull { estimatedEventBytes(it) } ?: 0L
+        assertTrue(
+            "no windowed OpenCode event may exceed the per-line byte cap; largest was $maxEventBytes bytes",
+            maxEventBytes <= MAX_TRANSCRIPT_LINE_BYTES.toLong(),
+        )
+        assertNotNull(
+            "the oversized OpenCode row must degrade to a visible truncation note",
+            window.events.filterIsInstance<ConversationEvent.SystemNote>().singleOrNull { it.tag == "truncated" },
+        )
+        val messages = window.events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("first"))
+        assertTrue("normal OpenCode messages survive; got $messages", messages.contains("third"))
+    }
+
+    @Test
+    fun openCodeReadInitialEventsLeavesANormalTranscriptUnchangedByTheByteClamp() = runTest {
+        // Counter-pin: a normal OpenCode transcript (every row well under the cap)
+        // is byte-clamped harmlessly — same messages, NO spurious marker.
+        val session = FakeSshSession(
+            sqliteOutput = openCodeRows(
+                listOf(
+                    openCodeRow(1, "run the tests"),
+                    openCodeRow(2, "all green"),
+                ),
+            ),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, openCodeDetection())
+
+        assertTrue(
+            "a normal OpenCode transcript must not produce any truncation marker",
+            events.none { it is ConversationEvent.SystemNote && it.tag == "truncated" },
+        )
+        val messages = events.filterIsInstance<ConversationEvent.Message>().map { it.text }
+        assertEquals(listOf("run the tests", "all green"), messages)
+        assertTrue(
+            session.execCommands.single { it.contains("sqlite3 -readonly") }.contains(LINE_TRUNCATION_SENTINEL),
+        )
+    }
+
+    private fun estimatedEventBytes(event: ConversationEvent): Long = when (event) {
+        is ConversationEvent.Message ->
+            event.text.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.images.sumOf { imageBytes(it) }
+        is ConversationEvent.ToolResult ->
+            event.output.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.images.sumOf { imageBytes(it) }
+        is ConversationEvent.ToolCall ->
+            event.name.toByteArray(Charsets.UTF_8).size.toLong() +
+                event.input.toByteArray(Charsets.UTF_8).size.toLong()
+        is ConversationEvent.SystemNote ->
+            event.content.toByteArray(Charsets.UTF_8).size.toLong()
+    }
+
+    private fun imageBytes(image: ConversationImage): Long =
+        (image.base64Data?.length ?: 0).toLong() +
+            (image.path?.length ?: 0).toLong() +
+            (image.url?.length ?: 0).toLong()
+
     private fun assertOpenCodeSqliteQueryIsShellSingleQuoted(cwd: String) {
         val sqliteLine = openCodeSqliteLine(AgentConversationRepository().detectionCommand(cwd))
         val normalizedCwd = cwd.trim().trimEnd('/').ifBlank { "/" }
@@ -2266,6 +3198,42 @@ class AgentConversationRepositoryTest {
 
     private fun openCodePartRow(index: Int, partId: String, text: String): String =
         """{"message_id":"m$index","message_data":"{\"role\":\"assistant\"}","message_time_created":$index,"message_time_updated":$index,"part_id":"$partId","part_data":"{\"type\":\"output_text\",\"text\":\"$text\"}","part_time_created":$index}"""
+
+    /**
+     * Issue #1227 (site 1, G10 real-shell fixture): run the REAL
+     * [AgentConversationRepository.detectionCommand] shell script against a
+     * temporary `$HOME` that contains a single Codex rollout whose content is
+     * [rolloutContent], and return the first `codex|...` enumeration row the
+     * shell emits (or `null` if none). This exercises the actual grep/sed/head
+     * cwd extraction — the exact code path that silently drops a rollout on a
+     * version-skew drift — rather than a mocked enumeration. The rollout file is
+     * named after its `"id"` so the caller can assert on the emitted path.
+     */
+    private fun runCodexDetectionRow(rolloutContent: String, cwd: String): String? {
+        val id = Regex(""""id"\s*:\s*"([^"]+)"""").find(rolloutContent)?.groupValues?.get(1)
+            ?: "rollout-fixture"
+        val home = File.createTempFile("ps-codex-home", "").let { tmp ->
+            tmp.delete()
+            tmp.mkdirs()
+            tmp
+        }
+        try {
+            val rolloutDir = File(home, ".codex/sessions/2026/07/03")
+            rolloutDir.mkdirs()
+            File(rolloutDir, "$id.jsonl").writeText(rolloutContent)
+
+            val script = AgentConversationRepository().detectionCommand(cwd)
+            val process = ProcessBuilder("sh", "-c", script)
+                .apply { environment()["HOME"] = home.absolutePath }
+                .redirectErrorStream(false)
+                .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+            return stdout.lineSequence().firstOrNull { it.startsWith("codex|") }
+        } finally {
+            home.deleteRecursively()
+        }
+    }
 
     private class FakeSshSession(
         private val sqliteOutput: String = "",
@@ -2326,7 +3294,10 @@ class AgentConversationRepositoryTest {
                         append("PATH=").append(emulatedFoldedPath).append("\n")
                         append(foldedClaudeWcOutput.trim()).append("\n")
                         append("@@PS_CLAUDE_WINDOW@@\n")
-                        append(foldedClaudeTail)
+                        // Issue #1225: emulate the server-side per-line byte clamp
+                        // on the folded prefetch tail so the fold reproduces what
+                        // the real host would send (marker for oversized lines).
+                        append(applyLineClamp(command, foldedClaudeTail))
                     }
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
@@ -2346,23 +3317,69 @@ class AgentConversationRepositoryTest {
                 // tail into ONE round-trip. Emit them in that shape so the
                 // repository can split total-lines from the tail window.
                 command.contains("@@PS_WINDOW@@") ->
-                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n$jsonlTailOutput"
+                    "${wcOutput.trim()}\n@@PS_WINDOW@@\n${applyLineClamp(command, jsonlTailOutput)}"
                 // Issue #817: the Codex windowed read folds wc -l + a sentinel +
                 // the agent-log window into ONE round-trip so it carries the
                 // raw-file line count (the follow cursor) without a separate
                 // lineCount exec.
                 command.contains("@@PS_CODEX_WINDOW@@") ->
-                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n$agentLogOutput"
+                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n${applyAgentLogEnvelopeClamp(command, agentLogOutput)}"
                 command.contains("wc -l < ") -> wcOutput
-                command.contains("pocketshell agent-log") -> agentLogOutput
-                command.trimStart().startsWith("tail -n") -> jsonlTailOutput
+                command.contains("pocketshell agent-log") -> applyAgentLogEnvelopeClamp(command, agentLogOutput)
+                command.trimStart().startsWith("tail -n") -> applyLineClamp(command, jsonlTailOutput)
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
-                    sqliteOutputs.removeFirstOrNull() ?: sqliteOutput
+                    // Issue #1267: the OpenCode read now pipes the sqlite output
+                    // through the same server-side per-line byte clamp; emulate it
+                    // so an over-cap row degrades to the sentinel exactly as on the
+                    // real host (identity for normal small rows).
+                    applyLineClamp(command, sqliteOutputs.removeFirstOrNull() ?: sqliteOutput)
                 }
                 else -> ""
             }
             return ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
+
+        // Issue #1225: faithfully emulate the server-side per-line byte clamp
+        // ([transcriptLineClampPipe]) so a byte-bound regression test is a
+        // genuine red->green. If the repository's command does NOT pipe through
+        // the awk clamp (base code), the raw text is returned unchanged and a
+        // multi-MB line balloons the read exactly as on-device. If the command
+        // DOES carry the clamp, each line whose UTF-8 byte length exceeds the
+        // `-v m=<N>` cap is replaced by the sentinel + byte length, mirroring the
+        // real host `LC_ALL=C awk` behaviour.
+        private fun applyLineClamp(command: String, text: String): String {
+            if (!command.contains("@@PS_LINE_TRUNCATED@@")) return text
+            val cap = Regex("-v m=(\\d+)").find(command)?.groupValues?.get(1)?.toIntOrNull()
+                ?: return text
+            return text.split("\n").joinToString("\n") { line ->
+                val bytes = line.toByteArray(Charsets.UTF_8).size
+                if (bytes > cap) "@@PS_LINE_TRUNCATED@@$bytes" else line
+            }
+        }
+
+        // Issue #1267: faithfully emulate the SERVER-SIDE `pocketshell agent-log
+        // --max-line-bytes N` clamp (agent_log.py `_clamp_line_bytes`). The Codex
+        // read goes through the tool, not the `awk` pipe, so the byte clamp lives
+        // in the tool: each element of the envelope's `lines` array whose UTF-8
+        // byte length exceeds N is replaced by `@@PS_LINE_TRUNCATED@@<bytes>`
+        // before the envelope is serialised. When the command does NOT carry
+        // `--max-line-bytes` (base code), the envelope is returned unchanged and a
+        // multi-MB line balloons the read exactly as on-device — a genuine
+        // red->green. A blank/unparseable envelope is passed through untouched.
+        private fun applyAgentLogEnvelopeClamp(command: String, envelope: String): String {
+            val cap = Regex("--max-line-bytes (\\d+)").find(command)
+                ?.groupValues?.get(1)?.toIntOrNull() ?: return envelope
+            val json = runCatching { JSONObject(envelope) }.getOrNull() ?: return envelope
+            val lines = json.optJSONArray("lines") ?: return envelope
+            val clamped = JSONArray()
+            for (index in 0 until lines.length()) {
+                val line = lines.optString(index)
+                val bytes = line.toByteArray(Charsets.UTF_8).size
+                clamped.put(if (bytes > cap) "@@PS_LINE_TRUNCATED@@$bytes" else line)
+            }
+            json.put("lines", clamped)
+            return json.toString()
         }
 
         private fun emulatedFoldedClaudePath(command: String): String {

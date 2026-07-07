@@ -375,6 +375,112 @@ def test_json_envelope_with_tail(fake_home: Path) -> None:
     assert envelope["lines"] == [json.dumps(e, sort_keys=True) for e in events[-2:]]
 
 
+# ----- --max-line-bytes clamp (#1225/#1267) --------------------------
+
+
+def test_max_line_bytes_degrades_an_oversized_line_to_a_marker(fake_home: Path) -> None:
+    """A single multi-megabyte rollout line is replaced by
+    `@@PS_LINE_TRUNCATED@@<bytes>` server-side; normal lines pass through.
+
+    This is the Codex/OpenCode counterpart of the Claude `awk` byte clamp
+    (#1225): the oversized bytes never cross SSH into the phone's heap. The
+    Kotlin `AgentConversationRepository` recognises the marker and renders a
+    visible truncation note.
+    """
+    session = "clamp-session"
+    huge = "A" * (5 * 1024 * 1024)  # ~5 MB, far above a 256 KiB cap
+    events = [
+        {"type": "user", "message": "look at this"},
+        {"type": "assistant", "message": huge},
+        {"type": "assistant", "message": "seen"},
+    ]
+    log_path = (
+        fake_home / ".codex" / "sessions" / "2026" / "07" / "03" / f"{session}.jsonl"
+    )
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        [
+            "--engine",
+            "codex",
+            "--session",
+            session,
+            "--json",
+            "--max-line-bytes",
+            str(256 * 1024),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output)
+    lines = envelope["lines"]
+    assert len(lines) == 3
+    # The oversized line is a marker naming its original byte length; no envelope
+    # line exceeds the cap now.
+    marker = lines[1]
+    assert marker.startswith("@@PS_LINE_TRUNCATED@@")
+    original_bytes = len(json.dumps(events[1], sort_keys=True).encode("utf-8"))
+    assert marker == f"@@PS_LINE_TRUNCATED@@{original_bytes}"
+    assert all(len(line.encode("utf-8")) <= 256 * 1024 for line in lines)
+    # The normal turns around the pathological line are untouched.
+    assert lines[0] == json.dumps(events[0], sort_keys=True)
+    assert lines[2] == json.dumps(events[2], sort_keys=True)
+
+
+def test_max_line_bytes_leaves_a_normal_transcript_unchanged(fake_home: Path) -> None:
+    """Counter-pin: every line under the cap passes through verbatim, no marker."""
+    session = "clamp-normal"
+    events = _sample_events("c", count=4)
+    log_path = (
+        fake_home / ".codex" / "sessions" / "2026" / "07" / "03" / f"{session}.jsonl"
+    )
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        [
+            "--engine",
+            "codex",
+            "--session",
+            session,
+            "--json",
+            "--max-line-bytes",
+            str(256 * 1024),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output)
+    assert envelope["lines"] == [json.dumps(e, sort_keys=True) for e in events]
+    assert not any("@@PS_LINE_TRUNCATED@@" in line for line in envelope["lines"])
+
+
+def test_no_max_line_bytes_keeps_the_oversized_line_verbatim(fake_home: Path) -> None:
+    """Without the flag (the whole-file default) an oversized line is NOT clamped
+    — proving the clamp is what the flag opts into (the red state on base)."""
+    session = "clamp-off"
+    huge = "Z" * (300 * 1024)
+    events = [{"type": "assistant", "message": huge}]
+    log_path = (
+        fake_home / ".codex" / "sessions" / "2026" / "07" / "03" / f"{session}.jsonl"
+    )
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["--engine", "codex", "--session", session, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output)
+    assert envelope["lines"] == [json.dumps(events[0], sort_keys=True)]
+    assert "@@PS_LINE_TRUNCATED@@" not in result.output
+
+
 # ----- handoff export ------------------------------------------------
 
 

@@ -41,6 +41,7 @@ import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -603,6 +604,12 @@ class TmuxSessionVoiceSurfaceUiTest {
         // sticky `Ctrl` MODIFIER for the general `Ctrl+<letter>` escape hatch; the
         // direct combos below are unchanged and this test does not assert against
         // the modifier.)
+        //
+        // Issue #1332: Esc / ^C / ^D are now in the COMMON (always-shown) set, so
+        // they are tapped while collapsed (a single node each). ^B (tmux prefix)
+        // lives in the EXTENDED CTRL COMBOS grid behind the "Show more keys"
+        // expander, so it is tapped after revealing the extended set. The taps
+        // still route through `onKey` unchanged — order/disclosure only.
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
@@ -615,11 +622,15 @@ class TmuxSessionVoiceSurfaceUiTest {
         }
 
         compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
-        compose.onNodeWithText("^B").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^C").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
 
-        assertEquals(listOf("Esc", "^B", "^C", "^D"), taps)
+        // Reveal the extended set, then tap the restored ^B (tmux prefix).
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("^B").assertIsDisplayed().assertHasClickAction().performClick()
+
+        assertEquals(listOf("Esc", "^C", "^D", "^B"), taps)
     }
 
     @Test

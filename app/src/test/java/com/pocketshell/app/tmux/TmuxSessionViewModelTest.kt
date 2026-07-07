@@ -7775,35 +7775,41 @@ class TmuxSessionViewModelTest {
         // #1091 FILLED the missing nano/TUI control keys into CTRL COMBOS
         // (`^G ^J ^K ^O ^T ^U ^W ^X ^\`) and DELIBERATELY restored a sticky
         // `Ctrl` modifier plus the a–z LETTERS grid so `Ctrl+<any letter>` is
-        // reachable. Verify the curated set is exactly what we expect and has
-        // no duplicate labels.
+        // reachable. Issue #1332 reordered ARROWS to the TOP and introduced
+        // progressive disclosure: a compact COMMON set (arrows + Esc/Tab/Enter/
+        // ^C/^D) shown by default, everything else EXTENDED behind the expander.
+        // Verify the curated set is exactly what we expect in the new order.
         val labels = TmuxHotkeyPanelSections.flatMap { it.keys }.map { it.label }
         assertEquals(
             listOf(
-                // KEYS — Issue #893: ⇧Tab (back-tab / Shift+Tab) sits between
-                // Tab and Enter.
-                "Esc", "Tab", "⇧Tab", "Enter",
+                // ARROWS — Issue #1332: now the FIRST/top section.
+                "←", "↑", "↓", "→",
+                // COMMON — Issue #1332: the everyday essentials shown by default.
+                "Esc", "Tab", "Enter", "^C", "^D",
                 // CTRL COMBOS — Issue #1091 ordered by control byte; the
-                // previously-missing nano/TUI keys are filled in.
+                // previously-missing nano/TUI keys are filled in. Now EXTENDED.
                 "^A", "^B", "^C", "^D", "^E", "^G", "^J", "^K", "^L", "^O",
                 "^R", "^T", "^U", "^W", "^X", "^Z", "^\\",
-                // INTERRUPT / EOF — Issue #787 doubled chords.
+                // MORE KEYS — Issue #893 ⇧Tab (back-tab), Issue #1332 EXTENDED.
+                "⇧Tab",
+                // INTERRUPT / EOF — Issue #787 doubled chords. Now EXTENDED.
                 TmuxHotkeyInterruptX2Label, TmuxHotkeyEofX2Label,
-                // CTRL + LETTER — Issue #1091 sticky modifier.
+                // CTRL + LETTER — Issue #1091 sticky modifier. Now EXTENDED.
                 TmuxHotkeyCtrlModifierLabel,
-                // LETTERS — Issue #1091 a–z grid for Ctrl composition.
+                // LETTERS — Issue #1091 a–z grid for Ctrl composition. Now EXTENDED.
                 "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
                 "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-                // ARROWS.
-                "←", "↑", "↓", "→",
             ),
             labels,
         )
-        // Issue #893: the back-tab key is present in the KEYS section.
+        // Issue #893: the back-tab key is present (now in the EXTENDED MORE KEYS).
         assertTrue(labels.contains("⇧Tab"))
-        // No duplicates (the maintainer's "/ appears twice" / "Esc duplicated"
-        // complaints) — still holds with the filled keys + LETTERS grid added.
-        assertEquals(labels.size, labels.toSet().size)
+        // Issue #1332: the ONLY intentional duplicates are `^C` / `^D` — surfaced
+        // both in the common essentials row AND kept in the full CTRL COMBOS grid
+        // (the most-reached-for control keys). No OTHER label repeats (the
+        // maintainer's "/ appears twice" / "Esc duplicated" complaints still hold).
+        val duplicated = labels.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+        assertEquals(setOf("^C", "^D"), duplicated)
         // Issue #1091: the sticky `Ctrl` modifier is now INTENTIONALLY present
         // (it is the general `Ctrl+<letter>` escape hatch), and it is a
         // Modifier-kind key, not a lone Regular button.
@@ -7829,8 +7835,9 @@ class TmuxSessionViewModelTest {
         assertTrue(labels.contains(TmuxHotkeyEofX2Label))
         assertTrue(labels.contains("^C"))
         assertTrue(labels.contains("^D"))
-        // The arrow section uses the clean glyphs, marked as Arrow kind.
-        val arrows = TmuxHotkeyPanelSections.last().keys
+        // Issue #1332: the arrow section is now the FIRST section (was last), still
+        // using the clean glyphs, marked as Arrow kind.
+        val arrows = TmuxHotkeyPanelSections.first().keys
         assertEquals(listOf("←", "↑", "↓", "→"), arrows.map { it.label })
         assertTrue(arrows.all { it.kind == KeyKind.Arrow })
     }

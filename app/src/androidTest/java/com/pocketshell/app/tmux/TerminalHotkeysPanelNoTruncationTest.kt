@@ -8,9 +8,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsConfiguration
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.components.HotkeyLabelTruncatedKey
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Rule
@@ -84,6 +87,12 @@ class TerminalHotkeysPanelNoTruncationTest {
                 }
             }
         }
+        compose.waitForIdle()
+
+        // Issue #1332: the extended sections (CTRL COMBOS / letters / doubled
+        // chords / ⇧Tab / sticky Ctrl) sit behind the "Show more keys" expander,
+        // so expand the panel to render EVERY key before the truncation sweep.
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
         compose.waitForIdle()
 
         // Walk every label in the production key set. For each key:

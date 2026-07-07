@@ -144,26 +144,62 @@ class DesignRenders {
                 // Issue #1091: render the sticky `Ctrl` modifier ARMED so the
                 // accent treatment on the `Ctrl` key is visually checked.
                 modifierState = com.pocketshell.uikit.model.KeyModifierState.OneShot,
+                // Issue #1332: default-collapsed render shows the compact COMMON
+                // set only (ARROWS first, then Esc/Tab/Enter/^C/^D) + the "Show
+                // more keys" expander.
+                initiallyExpanded = true,
             )
         }
     }
 
     /**
-     * Issue #1091: the post-#1091 hotkeys panel — `CTRL COMBOS` filled with the
-     * nano keys (`^G`/`^J`/`^K`/`^O`/`^T`/`^U`/`^W`/`^X`/`^\`), the sticky
-     * `Ctrl` modifier, and the a–z LETTERS grid for `Ctrl+<any letter>`.
+     * Issue #1332: the DEFAULT (collapsed) hotkeys panel — the compact COMMON
+     * set the maintainer sees on open: ARROWS at the TOP, then the everyday
+     * `Esc`/`Tab`/`Enter`/`^C`/`^D` row, and the "Show more keys" expander. The
+     * full CTRL/letters grids are hidden until expanded.
+     */
+    @Test
+    fun terminalHotkeysPanelCollapsed() = render("terminal-hotkeys-panel-collapsed") {
+        Surface(color = PocketShellColors.Surface) {
+            com.pocketshell.uikit.components.TerminalHotkeysPanel(
+                sections = sampleHotkeySections(),
+                onKey = {},
+                onClose = {},
+                initiallyExpanded = false,
+            )
+        }
+    }
+
+    /**
+     * Issue #1091 + #1332: the EXPANDED hotkeys panel — `CTRL COMBOS` filled with
+     * the nano keys (`^G`/`^J`/`^K`/`^O`/`^T`/`^U`/`^W`/`^X`/`^\`), the sticky
+     * `Ctrl` modifier, and the a–z LETTERS grid — all revealed behind the
+     * expander, with ARROWS still pinned at the top.
      */
     private fun sampleHotkeySections(): List<com.pocketshell.uikit.components.HotkeySection> =
         listOf(
+            // Issue #1332: ARROWS first (common, always shown).
             com.pocketshell.uikit.components.HotkeySection(
-                title = "KEYS",
+                title = "ARROWS",
+                keys = listOf(
+                    KeyBinding("←", KeyKind.Arrow),
+                    KeyBinding("↑", KeyKind.Arrow),
+                    KeyBinding("↓", KeyKind.Arrow),
+                    KeyBinding("→", KeyKind.Arrow),
+                ),
+                columns = 4,
+            ),
+            // Issue #1332: the compact COMMON essentials row (always shown).
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "COMMON",
                 keys = listOf(
                     KeyBinding("Esc", KeyKind.Regular),
                     KeyBinding("Tab", KeyKind.Regular),
-                    KeyBinding("⇧Tab", KeyKind.Regular),
                     KeyBinding("Enter", KeyKind.Regular),
+                    KeyBinding("^C", KeyKind.Regular),
+                    KeyBinding("^D", KeyKind.Regular),
                 ),
-                columns = 4,
+                columns = 5,
             ),
             com.pocketshell.uikit.components.HotkeySection(
                 title = "CTRL COMBOS",
@@ -187,6 +223,13 @@ class DesignRenders {
                     KeyBinding("^\\", KeyKind.Regular),
                 ),
                 columns = 4,
+                extended = true,
+            ),
+            com.pocketshell.uikit.components.HotkeySection(
+                title = "MORE KEYS",
+                keys = listOf(KeyBinding("⇧Tab", KeyKind.Regular)),
+                columns = 4,
+                extended = true,
             ),
             com.pocketshell.uikit.components.HotkeySection(
                 title = "INTERRUPT / EOF",
@@ -195,26 +238,19 @@ class DesignRenders {
                     KeyBinding("^D×2", KeyKind.Regular),
                 ),
                 columns = 2,
+                extended = true,
             ),
             com.pocketshell.uikit.components.HotkeySection(
                 title = "CTRL + LETTER",
                 keys = listOf(KeyBinding("Ctrl", KeyKind.Modifier)),
                 columns = 4,
+                extended = true,
             ),
             com.pocketshell.uikit.components.HotkeySection(
                 title = "LETTERS",
                 keys = ('a'..'z').map { KeyBinding(it.toString(), KeyKind.Regular) },
                 columns = 7,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "ARROWS",
-                keys = listOf(
-                    KeyBinding("←", KeyKind.Arrow),
-                    KeyBinding("↑", KeyKind.Arrow),
-                    KeyBinding("↓", KeyKind.Arrow),
-                    KeyBinding("→", KeyKind.Arrow),
-                ),
-                columns = 4,
+                extended = true,
             ),
         )
 

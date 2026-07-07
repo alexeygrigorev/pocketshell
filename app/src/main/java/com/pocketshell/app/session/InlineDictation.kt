@@ -56,6 +56,8 @@ import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -1228,11 +1230,11 @@ private fun UndeliveredTranscriptBanner(
             .testTag(UNDELIVERED_TRANSCRIPT_BANNER_TAG)
             .background(
                 color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.small,
             )
             .border(
                 border = BorderStroke(1.dp, PocketShellColors.AccentDim),
-                shape = RoundedCornerShape(8.dp),
+                shape = PocketShellShapes.small,
             )
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1252,7 +1254,7 @@ private fun UndeliveredTranscriptBanner(
                 Text(
                     text = item.text,
                     color = PocketShellColors.Text,
-                    fontSize = 12.sp,
+                    style = PocketShellType.bodyDense,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -1284,14 +1286,14 @@ private fun UndeliveredTranscriptAction(
     Text(
         text = label,
         color = accent,
-        fontSize = 12.sp,
+        style = PocketShellType.bodyDense,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .testTag(testTag)
-            .background(color = PocketShellColors.Surface, shape = RoundedCornerShape(6.dp))
+            .background(color = PocketShellColors.Surface, shape = PocketShellShapes.small)
             .border(
                 border = BorderStroke(1.dp, PocketShellColors.Border),
-                shape = RoundedCornerShape(6.dp),
+                shape = PocketShellShapes.small,
             )
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 4.dp),

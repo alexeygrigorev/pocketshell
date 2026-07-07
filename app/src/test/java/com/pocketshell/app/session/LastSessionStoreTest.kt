@@ -488,6 +488,68 @@ class LastSessionStoreTest {
         assertEquals("claude-main", read!!.sessionName)
     }
 
+    // Issue #1239: peek() — the non-logging read backing the host-card Resume
+    // affordance + the widget deep-link. Same recency/validity rules as read().
+
+    @Test
+    fun `peek on cold store returns null`() {
+        val store = LastSessionStore(context)
+        assertNull(store.peek(nowMillis = 5_000L))
+    }
+
+    @Test
+    fun `peek returns the persisted snapshot when fresh`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+
+        val peeked = LastSessionStore(context).peek(nowMillis = 2_000L)
+        assertNotNull(peeked)
+        requireNotNull(peeked)
+        assertEquals(7L, peeked.hostId)
+        assertEquals("claude-main", peeked.sessionName)
+        assertEquals("10.0.0.5", peeked.hostname)
+        assertEquals(2222, peeked.port)
+        assertEquals("me", peeked.username)
+        assertEquals("/data/keys/id_ed25519", peeked.keyPath)
+    }
+
+    @Test
+    fun `peek returns null once the snapshot ages past the recency cap`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+
+        // Just inside the cap → present; just past it → gone (the host-card
+        // affordance is then absent and the user falls back to normal nav).
+        assertNotNull(
+            store.peek(
+                nowMillis = 1_000L + LastSessionStore.DEFAULT_MAX_AGE_MILLIS,
+            ),
+        )
+        assertNull(
+            store.peek(
+                nowMillis = 1_000L + LastSessionStore.DEFAULT_MAX_AGE_MILLIS + 1L,
+            ),
+        )
+    }
+
+    @Test
+    fun `peek returns null after the stored session is cleared`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+        store.clear()
+
+        assertNull(LastSessionStore(context).peek(nowMillis = 2_000L))
+    }
+
+    @Test
+    fun `peek returns null after the stored session is killed`() {
+        val store = LastSessionStore(context)
+        store.save(sample(savedAtMillis = 1_000L))
+        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+
+        assertNull(LastSessionStore(context).peek(nowMillis = 2_000L))
+    }
+
     private fun LastSessionStore.LastSession.copyWith(
         sessionName: String,
     ): LastSessionStore.LastSession = copy(sessionName = sessionName)

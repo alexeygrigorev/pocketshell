@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
+import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.release.launchUpdateDownload
@@ -128,6 +130,15 @@ fun HostListScreen(
      * navigation in MainActivity.
      */
     onOpenFolderList: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
+    /**
+     * Issue #1239: one-tap "Resume last session" — jump straight into the most
+     * recently-attached session (from [com.pocketshell.app.session.LastSessionStore])
+     * without walking the host → folder → session tree. The affordance only
+     * renders on the host card whose id matches the persisted snapshot; the
+     * caller routes the supplied [AppDestination.TmuxSession] to the live
+     * session screen.
+     */
+    onResumeSession: (AppDestination.TmuxSession) -> Unit = {},
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     /**
      * Issue #206: per-host watched-folders config screen. The kebab path
@@ -201,6 +212,10 @@ fun HostListScreen(
     // the SAME cached scheduler snapshots the warning banners use (no new
     // fetch). Null while there's no usable reading — the pill is then hidden.
     val usageGlancePill by viewModel.usageGlancePill.collectAsState()
+    // Issue #1239: the most-recently-attached session, surfaced as a one-tap
+    // "Resume" affordance on its host's card. Refreshed on every appearance
+    // below so returning from a session re-arms it for what was last open.
+    val resumableSession by viewModel.resumableSession.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
 
@@ -335,6 +350,15 @@ fun HostListScreen(
     // config changes.
     LaunchedEffect(Unit) {
         viewModel.reprobeUnknownHostsOnce()
+    }
+    // Issue #1239: re-read the persisted last-session snapshot every time the
+    // host list appears. `LastSessionStore` is written on `MainActivity.onStop`,
+    // so a fresh peek here means the Resume affordance reflects whatever session
+    // the user most recently backgrounded — no dead affordance for a session
+    // they already walked away from (it returns null once the snapshot is
+    // cleared / killed / stale).
+    LaunchedEffect(Unit) {
+        viewModel.refreshResumableSession()
     }
 
     // Fire navigation once the ViewModel marks the pending route ready.
@@ -699,6 +723,26 @@ fun HostListScreen(
                             // render here was dropped — it read as a cryptic
                             // floating row under the card. Usage stays one tap
                             // away via the kebab → "Usage" item.
+
+                            // Issue #1239: one-tap "Resume last session". Only
+                            // the host card whose id matches the persisted
+                            // last-session snapshot renders it; tapping jumps
+                            // straight into that live session (bypassing the
+                            // host → folder → session tree walk). When the
+                            // snapshot is absent / stale / killed the affordance
+                            // is simply not shown and the plain card tap routes
+                            // to the folder list (AC1: no dead end).
+                            resumableSession
+                                ?.takeIf { it.hostId == host.id }
+                                ?.let { resume ->
+                                    ResumeLastSessionRow(
+                                        sessionName = resume.sessionName,
+                                        onClick = { onResumeSession(resume.destination) },
+                                        modifier = Modifier.testTag(
+                                            HOST_RESUME_ROW_TAG_PREFIX + host.id,
+                                        ),
+                                    )
+                                }
                         }
                     }
                 }
@@ -836,6 +880,87 @@ private val HostListFabContentClearance = 104.dp
 
 internal const val HOST_LIST_CONTENT_TAG = "host-list:content"
 internal const val HOST_ROW_TAG_PREFIX = "host:row:"
+
+/**
+ * Issue #1239: stable test-tag prefix for the one-tap "Resume last session" row
+ * that renders under the host card whose id matches the persisted last-session
+ * snapshot. The full tag is `host:resume:<hostId>`. Instrumentation asserts the
+ * row is present exactly for the matching host, absent for the others, and that
+ * tapping it navigates into the correct live session.
+ */
+internal const val HOST_RESUME_ROW_TAG_PREFIX = "host:resume:"
+
+/**
+ * Issue #1239: one-tap "Resume last session" affordance shown beneath the host
+ * card whose id matches the persisted [com.pocketshell.app.session.LastSessionStore]
+ * snapshot. It reads as a subtle accent-tinted action row — an accent play glyph,
+ * a bright "Resume" label, and the muted monospace session name so the user knows
+ * exactly which session they'll jump back into. The whole row is one tap target
+ * held at the a11y touch floor; tapping routes straight into the live session,
+ * skipping the host → folder → session tree walk.
+ */
+@Composable
+private fun ResumeLastSessionRow(
+    sessionName: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .background(color = PocketShellColors.AccentSoft, shape = PocketShellShapes.medium)
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Accent.copy(alpha = 0.4f),
+                shape = PocketShellShapes.medium,
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Resume last session $sessionName" }
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ResumeGlyph()
+        Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+        Text(
+            text = "Resume",
+            color = PocketShellColors.Accent,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+        Text(
+            text = sessionName,
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.bodyMono,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * Small accent "play" triangle drawn inline (no drawable / material-icon
+ * dependency, matching the other hand-rolled glyphs on this screen) for the
+ * [ResumeLastSessionRow].
+ */
+@Composable
+private fun ResumeGlyph() {
+    val color = PocketShellColors.Accent
+    Canvas(modifier = Modifier.size(12.dp)) {
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(size.width * 0.15f, 0f)
+            lineTo(size.width * 0.15f, size.height)
+            lineTo(size.width * 0.95f, size.height / 2f)
+            close()
+        }
+        drawPath(path, color)
+    }
+}
 
 /**
  * Issue #418: stable test tag for the single compact "notices" block

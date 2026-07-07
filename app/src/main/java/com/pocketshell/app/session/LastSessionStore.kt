@@ -216,7 +216,38 @@ class LastSessionStore @VisibleForTesting internal constructor(
     fun read(
         nowMillis: Long = System.currentTimeMillis(),
         maxAgeMillis: Long = DEFAULT_MAX_AGE_MILLIS,
-    ): LastSession? {
+    ): LastSession? =
+        parse(nowMillis, maxAgeMillis)?.also { session ->
+            Log.i(
+                LAST_SESSION_LOG_TAG,
+                "last-session-restore trigger=cold-restore hostId=${session.hostId} " +
+                    "host=${session.hostname} port=${session.port} user=${session.username} " +
+                    "session=${session.sessionName} startDirectory=${session.startDirectory}",
+            )
+        }
+
+    /**
+     * Issue #1239: a non-logging read of the persisted last-session snapshot,
+     * used by the host-card "Resume last session" affordance and the
+     * Active-Sessions widget deep-link. Same recency + validity rules as
+     * [read] (returns null for a stale, killed, or absent snapshot — so a gone
+     * session simply hides the affordance and the user falls back to normal
+     * navigation, no dead end), but WITHOUT the `trigger=cold-restore` log line:
+     * this is peeked whenever the host list appears / a widget refreshes, not on
+     * an actual process-death restore, so tagging it `cold-restore` would be
+     * misleading log noise.
+     */
+    fun peek(
+        nowMillis: Long = System.currentTimeMillis(),
+        maxAgeMillis: Long = DEFAULT_MAX_AGE_MILLIS,
+    ): LastSession? = parse(nowMillis, maxAgeMillis)
+
+    /**
+     * Shared parse of the persisted snapshot into a [LastSession], applying the
+     * recency cap + field-validity guards. Both [read] (which logs) and [peek]
+     * (which does not) delegate here so the two never drift.
+     */
+    private fun parse(nowMillis: Long, maxAgeMillis: Long): LastSession? {
         val savedAt = prefs.safeLong(KEY_SAVED_AT, 0L) ?: return null
         if (savedAt <= 0L) return null
         if (nowMillis - savedAt > maxAgeMillis) return null
@@ -241,14 +272,7 @@ class LastSessionStore @VisibleForTesting internal constructor(
             sessionCreated = prefs.safeLong(KEY_SESSION_CREATED, 0L)?.takeIf { it > 0L },
             composerDraft = prefs.safeString(KEY_COMPOSER_DRAFT, "") ?: "",
             savedAtMillis = savedAt,
-        ).also { session ->
-            Log.i(
-                LAST_SESSION_LOG_TAG,
-                "last-session-restore trigger=cold-restore hostId=${session.hostId} " +
-                    "host=${session.hostname} port=${session.port} user=${session.username} " +
-                    "session=${session.sessionName} startDirectory=${session.startDirectory}",
-            )
-        }
+        )
     }
 
     private fun SharedPreferences.safeString(key: String, default: String?): String? =
@@ -303,7 +327,7 @@ class LastSessionStore @VisibleForTesting internal constructor(
         if (trimmed.isEmpty()) return
         val killed = SessionIdentity(hostId = hostId, sessionName = trimmed)
         killedTombstone = killed
-        val stored = read(maxAgeMillis = Long.MAX_VALUE)
+        val stored = peek(maxAgeMillis = Long.MAX_VALUE)
         if (stored != null && stored.identity() == killed) {
             Log.i(
                 LAST_SESSION_LOG_TAG,

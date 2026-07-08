@@ -123,7 +123,6 @@ import com.pocketshell.app.conversation.timelineActorLabel
 import com.pocketshell.app.conversation.timelinePreview
 import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.conversation.toolResultPairing
-import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
@@ -161,11 +160,9 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.cards.SessionCardFeedChip
-import com.pocketshell.app.cards.SessionCardFeedSheet
 import com.pocketshell.app.cards.SessionCardInteractions
 import com.pocketshell.app.cards.cardFeedChipState
 import com.pocketshell.app.snippets.SnippetKind
-import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.snippets.snippetDispatchText
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
@@ -2873,181 +2870,80 @@ public fun TmuxSessionScreen(
         }
     }
 
-    if (showMicSheet) {
-        // PromptComposerSheet drives dictation + the one-field API-key
-        // entry dialog (the inline-dictation path delegates the key entry
-        // here too). `onSend` routes through writeInputToPane so the
-        // composer's Send / Send+Enter buttons reach the focused tmux pane
-        // via `send-keys`, identical to chip taps and snippet picks.
-        //
-        // Issue #459: the Conversation tab now shares this same composer as
-        // its only send affordance (the bespoke in-pane "Message …" field
-        // is gone). When the focused pane is showing its Conversation tab we
-        // route through `sendToAgentPaneResult`, which submits to the agent
-        // AND appends the optimistic user Message into the conversation feed
-        // so the sent prompt appears in the transcript — exactly what the
-        // old in-pane composer did. Terminal-tab sends keep the raw
-        // write-bytes path.
-        // Issue #755: the terminal hotkey key bar now rides INSIDE the composer's
-        // inset-anchored column (PR2 of the composer redesign), so it can never be
-        // gone (hard-cut, D22). The terminal hotkeys now live in the dedicated
-        // [TerminalHotkeysPanel] bottom sheet (issue #784), opened from the
-        // terminal bottom controls — its own surface, never inside the composer,
-        // never part of the soft keyboard. The composer keeps ONLY compose-field +
-        // Send + mic + attach + snippets + `/`-autocomplete.
-        PromptComposerSheet(
-            viewModel = promptComposerViewModel,
-            // Issue #767: the detected engine for the focused pane drives the
-            // `/`-autocomplete command catalog in the composer. Reuse the same
-            // flicker-resilient `paletteAgent` (live detection, or the sticky
-            // last-known kind) the standalone command palette uses, falling back
-            // to the optimistic `presumedAgentKind` during the slow-detection
-            // window so `/` still offers commands the moment the user opens the
-            // composer over a freshly-launched agent pane. Null on a shell pane,
-            // where the dropdown is never shown.
-            agentKind = paletteAgent ?: presumedAgentKind,
-            // Issue #746/#899: scope the shared activity-level composer draft to
-            // the exact target identity so a "Not sent" draft authored here never
-            // bleeds into another session on a switch or same-name recreation.
-            composerTargetKey = targetSessionId.value,
-            // Issue #585: when the launcher's hold+swipe-up entry gesture opened
-            // this sheet, start recording immediately (locked hands-free) as the
-            // sheet appears. A plain-tap open leaves this false = no recording.
-            autoStartRecording = micSheetAutoStartRecording,
-            onDismiss = {
-                showMicSheet = false
-                // Reset so the next plain-tap open never inherits auto-record.
-                micSheetAutoStartRecording = false
-            },
-            // Issue #745: surface the live connection state in the composer so a
-            // send while the SSH/tmux link is degraded shows a connection-lost
-            // indicator immediately rather than leaving the user waiting blind.
-            connectionLost = !sessionLive,
-            sendTargetSnapshotProvider = { withEnter ->
-                val pane = surfacePane
-                // Issue #1085 (freeze F3 / R2): the send-route snapshot needs only
-                // the surface pane's detection + selected tab — both STABLE
-                // projections carried by [surfaceChrome] (`currentDetection` /
-                // `currentSelectedTab`). Same composition-time snapshot the old
-                // `currentAgentConversation` capture provided; they update whenever
-                // the body recomposes, which is exactly when detection/tab change.
-                val liveAgent = currentDetection?.agent
-                val viewingConversationNow = currentDetection != null &&
-                    currentSelectedTab == SessionTab.Conversation
-                val route = tmuxComposerSendRoute(
-                    viewingConversation = viewingConversationNow,
-                    liveAgent = liveAgent,
-                    presumedAgentKind = presumedAgentKind,
-                    withEnter = withEnter,
-                )
-                tmuxComposerSendTargetSnapshot(
-                    sessionKey = targetSessionId.value,
-                    paneId = pane?.paneId,
-                    route = route,
-                    agentKind = liveAgent ?: presumedAgentKind,
-                )
-            },
-            onSend = composerSendHandler,
-            collectSendRequests = false,
-            hostId = hostId.takeIf { it != 0L },
-            onStageAttachments = { uris ->
-                // Issue #451: Attach connects-on-action like Send. Do NOT
-                // hard-fail here on `!sessionLive` — the file picker
-                // backgrounds the app, so on return the session may be
-                // briefly absent. `stagePromptAttachments` lazily
-                // (re)connects and awaits the live session before uploading,
-                // surfacing the error (with the draft kept) only if the
-                // connect never lands within the bounded wait.
-                viewModel.stagePromptAttachments(uris)
-            },
-        )
-    }
-
-    if (showSnippetPicker && hostId != 0L) {
-        // Mirrors SessionScreen's snippet wiring.
-        //  - Explicit `Send` / `Send + ↵` chips (`onSnippetSend`) honour
-        //    the user's overt Enter intent for issue #187. The trailing
-        //    `\r` is appended when `withEnter == true` and only then.
-        //  - Per D22 (issue #227) the legacy row-body smart-default tap
-        //    surface was removed; the picker only routes through the
-        //    explicit-intent chip callback.
-        SnippetPickerSheet(
-            hostId = hostId,
-            onDismiss = { showSnippetPicker = false },
-            kindFilter = if (currentDetection != null) {
-                SnippetKind.Prompt
-            } else {
-                SnippetKind.Command
-            },
-            onSnippetSend = { snippet, withEnter ->
-                // Issue #249: same liveness guard as the prompt composer —
-                // never write a snippet into a dead pane and lose the tap.
-                // Issue #797: route to the SURFACE (visible) pane like the
-                // composer send, so a snippet on a settled (promoted) pane lands.
-                if (sessionLive) {
-                    surfacePane?.let { pane ->
-                        viewModel.writeInputToPane(
-                            pane.paneId,
-                            snippetDispatchText(snippet, withEnter).toByteArray(Charsets.UTF_8),
-                        )
-                    }
-                    showSnippetPicker = false
-                }
-            },
-        )
-    }
-
-    if (showCardFeedSheet) {
-        SessionCardFeedSheet(
-            cards = sessionCards,
-            interactions = sessionCardInteractions,
-            onDismiss = { showCardFeedSheet = false },
-        )
-    }
-
-    // Issue #787: the standalone agent slash-command palette (`AgentCommandSheet`)
-    // and the bottom `/ commands` chip were a hard-cut here (D22). Slash-command
-    // entry now lives ONLY in the composer (its `/` button + type-`/`
-    // autocomplete). The palette's `Ctrl-C ×2` / `Ctrl-D ×2` interrupt/EOF
-    // controls were re-homed into the hotkeys panel's "INTERRUPT / EOF" section
-    // (see [TmuxHotkeyInterruptX2Label] / [TmuxHotkeyEofX2Label]) so no function
-    // was lost.
-
-    // Issue #784: the dedicated terminal-hotkeys panel — its OWN bottom-sheet
-    // surface (not inside the composer, not part of the soft keyboard). Shows
-    // EVERY key at once in a tidy grid (no `…` overflow, no horizontal scroll).
-    // Terminal tab only (a raw pane to receive the control bytes); each key
-    // routes through [TmuxSessionViewModel.onKeyBarKey]. The panel stays open
-    // after a tap so the user can fire several keys (e.g. arrow navigation,
-    // `^B ^B`) without re-opening; `×` / scrim / back dismiss it.
-    // Issue #797: the hotkeys panel (opened from the surface-pane bottom
-    // controls) routes its control bytes to the SURFACE pane so a `^C`/arrow on
-    // a settled (promoted) pane reaches the session the user is looking at.
-    val hotkeysPane = surfacePane
-    if (showHotkeysPanel && hotkeysPane != null) {
-        // Issue #1091: the sticky `Ctrl` modifier state drives the panel's
-        // accent on the `Ctrl` key (and `onKeyBarKey` consults it to compose
-        // `Ctrl+<letter>`).
-        val ctrlModifierState by viewModel.ctrlModifier.collectAsState()
-        TerminalHotkeysSheet(
-            sections = TmuxHotkeyPanelSections,
-            enabled = sessionLive,
-            ctrlModifierState = ctrlModifierState,
-            onKey = { binding ->
-                if (sessionLive) {
-                    DiagnosticEvents.record(
-                        "action",
-                        "shortcut_sent",
-                        "mode" to "tmux",
-                        "paneId" to hotkeysPane.paneId,
-                        "key" to binding.label,
+    val ctrlModifierState by viewModel.ctrlModifier.collectAsState()
+    TmuxSessionSheets(
+        showMicSheet = showMicSheet,
+        promptComposerViewModel = promptComposerViewModel,
+        composerAgentKind = paletteAgent ?: presumedAgentKind,
+        composerTargetKey = targetSessionId.value,
+        micSheetAutoStartRecording = micSheetAutoStartRecording,
+        onDismissMicSheet = {
+            showMicSheet = false
+            micSheetAutoStartRecording = false
+        },
+        connectionLost = !sessionLive,
+        sendTargetSnapshotProvider = { withEnter ->
+            val pane = surfacePane
+            val liveAgent = currentDetection?.agent
+            val viewingConversationNow = currentDetection != null &&
+                currentSelectedTab == SessionTab.Conversation
+            val route = tmuxComposerSendRoute(
+                viewingConversation = viewingConversationNow,
+                liveAgent = liveAgent,
+                presumedAgentKind = presumedAgentKind,
+                withEnter = withEnter,
+            )
+            tmuxComposerSendTargetSnapshot(
+                sessionKey = targetSessionId.value,
+                paneId = pane?.paneId,
+                route = route,
+                agentKind = liveAgent ?: presumedAgentKind,
+            )
+        },
+        onSend = composerSendHandler,
+        composerHostId = hostId.takeIf { it != 0L },
+        onStageAttachments = viewModel::stagePromptAttachments,
+        showSnippetPicker = showSnippetPicker,
+        snippetsHostId = hostId,
+        snippetKindFilter = if (currentDetection != null) {
+            SnippetKind.Prompt
+        } else {
+            SnippetKind.Command
+        },
+        onDismissSnippetPicker = { showSnippetPicker = false },
+        onSnippetSend = { snippet, withEnter ->
+            if (sessionLive) {
+                surfacePane?.let { pane ->
+                    viewModel.writeInputToPane(
+                        pane.paneId,
+                        snippetDispatchText(snippet, withEnter).toByteArray(Charsets.UTF_8),
                     )
-                    viewModel.onKeyBarKey(hotkeysPane.paneId, binding.label)
                 }
-            },
-            onDismiss = { showHotkeysPanel = false },
-        )
-    }
+                showSnippetPicker = false
+            }
+        },
+        showCardFeedSheet = showCardFeedSheet,
+        sessionCards = sessionCards,
+        sessionCardInteractions = sessionCardInteractions,
+        onDismissCardFeedSheet = { showCardFeedSheet = false },
+        showHotkeysPanel = showHotkeysPanel,
+        hotkeysPaneId = surfacePane?.paneId,
+        sessionLive = sessionLive,
+        ctrlModifierState = ctrlModifierState,
+        onHotkey = { paneId, binding ->
+            if (sessionLive) {
+                DiagnosticEvents.record(
+                    "action",
+                    "shortcut_sent",
+                    "mode" to "tmux",
+                    "paneId" to paneId,
+                    "key" to binding.label,
+                )
+                viewModel.onKeyBarKey(paneId, binding.label)
+            }
+        },
+        onDismissHotkeys = { showHotkeysPanel = false },
+    )
 
 }
 

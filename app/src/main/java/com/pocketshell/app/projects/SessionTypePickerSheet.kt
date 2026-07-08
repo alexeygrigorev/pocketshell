@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteUiState
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.core.ssh.shellSingleQuote
 import com.pocketshell.uikit.components.ButtonVariant
@@ -49,6 +51,7 @@ import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * Picker for "new session" type — issue #171 round 2.
@@ -78,6 +81,7 @@ fun SessionTypePickerSheet(
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
     creating: Boolean = false,
+    allowMissingStartDirectoryCreation: Boolean = false,
     // Issue #678: the same picker also drives the in-session `+ window` flow,
     // which creates a new WINDOW rather than a new session. The only visible
     // difference is the heading, so the title is parameterised; everything else
@@ -108,6 +112,7 @@ fun SessionTypePickerSheet(
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             creating = creating,
+            allowMissingStartDirectoryCreation = allowMissingStartDirectoryCreation,
             title = title,
             deriveDefaultName = deriveDefaultName,
         )
@@ -129,6 +134,7 @@ internal fun SessionTypePickerContent(
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
     creating: Boolean = false,
+    allowMissingStartDirectoryCreation: Boolean = false,
     title: String = "New session",
     deriveDefaultName: (startDirectory: String) -> String = { it.trimEnd('/').substringAfterLast('/') },
 ) {
@@ -154,6 +160,45 @@ internal fun SessionTypePickerContent(
     // Issue #631: selected Codex profile. null = default (no config dir override).
     var codexProfile by remember { mutableStateOf<String?>(null) }
     val scrollState = rememberScrollState()
+    val fallbackAutocompleteState = remember { MutableStateFlow(StartDirectoryAutocompleteUiState()) }
+    val autocompleteState by (autocompleteController?.state ?: fallbackAutocompleteState).collectAsState()
+    val missingFolderOffer = if (allowMissingStartDirectoryCreation) {
+        missingStartDirectoryCreation(
+            baseFolderPath = folderPath,
+            typedStartDirectory = startDirectory,
+            suggestions = autocompleteState.suggestions,
+            loading = autocompleteState.loading,
+        )
+    } else {
+        null
+    }
+
+    fun emitCreateChoice(createStartDirectory: MissingStartDirectoryCreation?) {
+        val resolvedStartDirectory = createStartDirectory?.path
+            ?: startDirectory.trim().ifBlank { folderPath }
+        onCreate(
+            SessionTypeChoice(
+                type = sessionType,
+                agent = if (sessionType == SessionType.Agent) agentKind else null,
+                startDirectory = resolvedStartDirectory,
+                skipPermissions = skipPermissions,
+                claudeProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Claude) {
+                    claudeProfile
+                } else {
+                    null
+                },
+                codexProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Codex) {
+                    codexProfile
+                } else {
+                    null
+                },
+                // Issue #1184: carry the user's custom label. Blank falls
+                // back to the derived default at create time.
+                customName = sessionName.trim().ifBlank { null },
+                createStartDirectory = createStartDirectory,
+            ),
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -212,6 +257,16 @@ internal fun SessionTypePickerContent(
                     autocompleteController = autocompleteController,
                     suggestionsMaxHeight = SESSION_TYPE_PICKER_SUGGESTIONS_MAX_HEIGHT,
                 )
+                missingFolderOffer?.let { offer ->
+                    ListRow(
+                        title = "Create folder",
+                        subtitle = "${offer.path} - start the new session there.",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(SESSION_TYPE_PICKER_CREATE_MISSING_FOLDER_TAG),
+                        onClick = { emitCreateChoice(offer) },
+                    )
+                }
             }
 
             // Segmented control: Shell vs Agent. Uses the shared ui-kit
@@ -338,36 +393,7 @@ internal fun SessionTypePickerContent(
             Spacer(modifier = Modifier.padding(end = 8.dp))
             PocketShellButton(
                 onClick = {
-                    if (!creating) {
-                        onCreate(
-                            SessionTypeChoice(
-                                type = sessionType,
-                                agent = if (sessionType == SessionType.Agent) agentKind else null,
-                                startDirectory = startDirectory.trim().ifBlank { folderPath },
-                                skipPermissions = skipPermissions,
-                                claudeProfileName = if (
-                                    sessionType == SessionType.Agent &&
-                                    agentKind == AgentCli.Claude
-                                ) {
-                                    claudeProfile
-                                } else {
-                                    null
-                                },
-                                codexProfileName = if (
-                                    sessionType == SessionType.Agent &&
-                                    agentKind == AgentCli.Codex
-                                ) {
-                                    codexProfile
-                                } else {
-                                    null
-                                },
-                                // Issue #1184: carry the user's custom label.
-                                // Blank falls back to the derived default at
-                                // create time (SessionNameDerivation).
-                                customName = sessionName.trim().ifBlank { null },
-                            ),
-                        )
-                    }
+                    if (!creating) emitCreateChoice(missingFolderOffer)
                 },
                 variant = ButtonVariant.Primary,
                 enabled = startDirectory.isNotBlank() && !creating,
@@ -446,6 +472,12 @@ data class SessionTypeChoice(
      * time — it never bypasses collision handling.
      */
     val customName: String? = null,
+    /**
+     * Missing start folder the picker should create before creating the
+     * session. `null` means the typed [startDirectory] already exists or
+     * should be used as-is.
+     */
+    val createStartDirectory: MissingStartDirectoryCreation? = null,
 ) {
     /**
      * The start command to invoke inside the new tmux pane after
@@ -506,6 +538,59 @@ data class SessionTypeChoice(
             SessionType.Agent -> agent?.toSessionAgentKind()
         }
 }
+
+data class MissingStartDirectoryCreation(
+    val parentPath: String,
+    val folderName: String,
+    val path: String,
+)
+
+internal fun missingStartDirectoryCreation(
+    baseFolderPath: String,
+    typedStartDirectory: String,
+    suggestions: List<String>,
+    loading: Boolean,
+): MissingStartDirectoryCreation? {
+    if (loading) return null
+    val typed = typedStartDirectory.trim().trimEnd('/')
+    if (typed.isBlank()) return null
+    if (typed == "~" || typed == "\$HOME") return null
+    if (typed == baseFolderPath.trim().trimEnd('/')) return null
+    val exactMatch = suggestions.any { suggestion ->
+        suggestion.trim().trimEnd('/') == typed
+    }
+    if (exactMatch) return null
+
+    val normalised = typed.replace('\\', '/')
+    val slashIndex = normalised.lastIndexOf('/')
+    val rawParent = when {
+        slashIndex < 0 -> baseFolderPath
+        slashIndex == 0 -> "/"
+        else -> normalised.substring(0, slashIndex)
+    }.ifBlank { baseFolderPath }
+    if (slashIndex >= 0 && !isRootedRemoteParent(rawParent)) return null
+    if (rawParent.split('/').any { it == ".." }) return null
+    val rawName = when {
+        slashIndex < 0 -> normalised
+        else -> normalised.substring(slashIndex + 1)
+    }
+    val safeName = SshFolderListGateway.normaliseProjectFolderName(rawName) ?: return null
+    if (safeName != rawName.trim().trim('/')) return null
+    val parent = rawParent.trim().trimEnd('/').ifBlank { "~" }
+    return MissingStartDirectoryCreation(
+        parentPath = parent,
+        folderName = safeName,
+        path = SshFolderListGateway.childPath(parent, safeName),
+    )
+}
+
+private fun isRootedRemoteParent(parent: String): Boolean =
+    parent == "/" ||
+        parent == "~" ||
+        parent == "\$HOME" ||
+        parent.startsWith("/") ||
+        parent.startsWith("~/") ||
+        parent.startsWith("\$HOME/")
 
 enum class SessionType { Shell, Agent }
 
@@ -621,6 +706,8 @@ const val SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG: String = "session-type-picker:
 const val SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG: String = "session-type-picker:skip-permissions"
 const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
 const val SESSION_TYPE_PICKER_NAME_TAG: String = "session-type-picker:name"
+const val SESSION_TYPE_PICKER_CREATE_MISSING_FOLDER_TAG: String =
+    "session-type-picker:create-missing-folder"
 const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
 const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"

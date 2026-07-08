@@ -132,4 +132,41 @@ class RootProjectAddSheetTest {
                 .fetchSemanticsNodes().isEmpty(),
         )
     }
+
+    @Test
+    fun unmatchedSafeSearchOffersCreateAndStartThere() {
+        val root = FolderTreeRoot(
+            path = "/home/alexey/git",
+            label = "git",
+            folders = emptyList(),
+            isWatched = true,
+        )
+        val events = mutableListOf<String>()
+
+        compose.setContent {
+            PocketShellTheme {
+                RootProjectAddSheetContent(
+                    root = root,
+                    candidates = listOf(
+                        RootProjectCandidate(
+                            path = "/home/alexey/git/pocketshell",
+                            label = "pocketshell",
+                            source = RootProjectSource.Scanned,
+                        ),
+                    ),
+                    onStartSession = { events += "start:${it.path}" },
+                    onCreateEmptyProject = { events += "empty" },
+                    onCreateNamedProject = { events += "create:$it" },
+                    onCloneGitProject = { events += "clone" },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_SEARCH_TAG).performTextInput("new.project")
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_CREATE_MATCH_TAG)
+            .assertIsDisplayed()
+            .performClick()
+
+        assertEquals(listOf("create:new.project"), events)
+    }
 }

@@ -952,6 +952,22 @@ class TerminalSurfaceState(
      * half-black band (#1153), and a mostly-empty model (#1214) all reproduce only a small fraction
      * of tmux's content lines, so one line-diff catches them all.
      *
+     * ## Wrap / width tolerance (the #1153 reopen this closes)
+     *
+     * The per-line hash must compare LOGICAL lines, not PHYSICAL grid rows, or a correctly-restored
+     * frame scores falsely "lost" whenever a frame line is wider than the pane. `capture-pane`
+     * (without `-J`) emits a wrapped logical line as TWO physical rows, and a reseed writes each
+     * captured row via cursor addressing (so the render holds two full-width rows too), while a live
+     * soft-wrapped render folds them back — three different physical layouts of the SAME content. The
+     * #1300 physical-row hash mismatched them (every wrapped frame line counted as ≥2 lost rows), so
+     * the send-with-attachment E2E stayed chronically RED on CI even though the heal fully restored
+     * the frame (#1153). Both sides are therefore de-wrapped to width-independent LOGICAL lines first:
+     * the render via [TerminalBuffer.getVisibleScreenTextFullyJoined] (joins soft-wrapped AND
+     * full-width rows), the capture via [dewrapCaptureToLogicalLines] (joins each physical row that
+     * fills the pane width with the next). A genuinely lost / black frame is still lost — it is
+     * MISSING logical lines, which no amount of re-wrapping conjures back — so real black-frame
+     * detection is intact; only reflow is forgiven.
+     *
      * ## Position-free by design
      *
      * `getVisibleScreenText()` trims leading/trailing blank rows and joins wrapped rows, so a
@@ -984,19 +1000,29 @@ class TerminalSurfaceState(
             return false
         }
         if (visibleRows <= 0) return false
+        // The pane width the render (and, in production, the capture) is laid out at — used to
+        // de-wrap each side's physical rows back to width-independent LOGICAL lines (#1153).
+        val columns = try {
+            emulator.mColumns
+        } catch (_: Throwable) {
+            return false
+        }
         // tmux's authoritative visible content lines (the visible tail, scrollback excluded), each
         // ANSI-stripped, trimmed, and non-blank. Reuse THIS same capture text — no extra round-trip.
         // #1300: the capture is `capture-pane -e`, so each line carries raw SGR/colour escapes; strip
         // them FIRST ([stripAnsiEscapes]) so a coloured capture line (`ESC[32m…ESC[0m`) collapses to
         // the plain content the render holds — otherwise no coloured line ever hash-matches and every
-        // coloured pane scores divergent (reseed-thrash, #1164/#1219). Normalize with a full trim()
-        // (not just trimEnd) because `getVisibleScreenText()` trims the WHOLE rendered string,
-        // dropping a leading space on the render's first content line that the raw capture still
-        // carries — trimming both sides keeps those otherwise-identical lines matching. A bg-colour-
-        // only row (`ESC[44m   ESC[0m`) strips to spaces → trim → empty, matching its blank render.
-        val captureContentLines = captureText
-            .split('\n')
-            .map { stripAnsiEscapes(it).trim() }
+        // coloured pane scores divergent (reseed-thrash, #1164/#1219). #1153: de-wrap the capture's
+        // PHYSICAL rows into LOGICAL lines FIRST (join each row that fills the pane width with the
+        // next) so a frame line wider than the pane — which `capture-pane` (no `-J`) emits as two
+        // physical rows — compares equal to the render's single de-wrapped logical line, whatever
+        // width either side wrapped at. Normalize with a full trim() (not just trimEnd) because the
+        // render side trims the WHOLE string, dropping a leading space on the first content line the
+        // raw capture still carries — trimming both sides keeps those otherwise-identical lines
+        // matching. A bg-colour-only row (`ESC[44m   ESC[0m`) strips to spaces → trim → empty,
+        // matching its blank render.
+        val captureContentLines = dewrapCaptureToLogicalLines(captureText.split('\n'), columns)
+            .map { it.trim() }
             .filter { it.isNotEmpty() }
             .takeLast(visibleRows)
         if (captureContentLines.isEmpty()) return false
@@ -1008,9 +1034,12 @@ class TerminalSurfaceState(
         // multiset, not a set, so a black BAND over a uniform-content frame (many identical rows) is
         // seen as lost: the render reproduces only `liveRows` copies while tmux holds all of them.
         // The whole diff is two String.split + line hashes over ≤ visibleRows lines: well under 1 ms
-        // on-device, no allocation storm, and it runs only AFTER the capture already returned.
+        // on-device, no allocation storm, and it runs only AFTER the capture already returned. #1153:
+        // read the FULLY-joined visible text (soft-wrapped AND full-width rows folded to logical
+        // lines) so a reseeded / soft-wrapped render of a wide frame line compares equal to the
+        // de-wrapped capture, whatever physical layout either wrapped at.
         val renderedText = try {
-            emulator.screen.visibleScreenText
+            emulator.screen.visibleScreenTextFullyJoined
         } catch (_: Throwable) {
             return false
         }
@@ -1398,6 +1427,39 @@ class TerminalSurfaceState(
          */
         private fun stripAnsiEscapes(line: String): String =
             if (line.indexOf('\u001B') < 0) line else AnsiEscapeRegex.replace(line, "")
+
+        /**
+         * Issue #1153: de-wrap `capture-pane` PHYSICAL rows into width-independent LOGICAL lines so
+         * the [visibleRenderLostFrameVsCapture] per-line hash forgives WRAPPING/reflow while still
+         * catching a genuinely lost frame. `capture-pane` without `-J` emits a logical line wider
+         * than the pane as consecutive physical rows; a row whose last PRINTING cell reaches the
+         * pane's right edge ([columns]) is a hard wrap whose logical line continues on the next row,
+         * so it is joined (no boundary) with the following row — mirroring how the render's own
+         * full-width rows fold in [TerminalBuffer.getVisibleScreenTextFullyJoined]. Each row is
+         * ANSI-stripped first (a `-e` capture carries SGR escapes); trailing whitespace is ignored
+         * for the fill test so a partially-filled coloured row (bg colour to the edge) is NOT
+         * mistaken for a wrap. A row shorter than the pane width ends its logical line. This never
+         * conjures missing content back — a black band is missing whole logical lines regardless of
+         * how the surviving rows wrap — so it forgives reflow only, not lost frames.
+         */
+        private fun dewrapCaptureToLogicalLines(rawLines: List<String>, columns: Int): List<String> {
+            if (columns <= 0) return rawLines.map { stripAnsiEscapes(it) }
+            val logical = ArrayList<String>(rawLines.size)
+            val pending = StringBuilder()
+            for (raw in rawLines) {
+                val stripped = stripAnsiEscapes(raw)
+                pending.append(stripped)
+                // A physical row whose last PRINTING cell reaches the right edge is a hard wrap: the
+                // logical line continues on the next row. Otherwise the logical line ends here.
+                val fillsWidth = stripped.trimEnd().length >= columns
+                if (!fillsWidth) {
+                    logical.add(pending.toString())
+                    pending.setLength(0)
+                }
+            }
+            if (pending.isNotEmpty()) logical.add(pending.toString())
+            return logical
+        }
 
         /**
          * Issue #553 (J2): upper bound on live (non-blank) lines for

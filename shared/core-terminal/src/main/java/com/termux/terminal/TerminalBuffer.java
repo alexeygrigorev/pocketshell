@@ -56,6 +56,24 @@ public final class TerminalBuffer {
     }
 
     /**
+     * Issue #1153: the text of ONLY the currently VISIBLE screen rows (like
+     * {@link #getVisibleScreenText()}), but with wrapped AND full-width rows joined
+     * into their LOGICAL lines ({@code joinFullLines=true}). {@code getVisibleScreenText()}
+     * folds only soft-wrapped rows ({@code joinBackLines}); a pane reseeded from a
+     * {@code capture-pane} snapshot writes each captured PHYSICAL row via cursor
+     * addressing, so a frame line wider than the pane lands as two full-width rows with
+     * NO soft-wrap flag — which {@code getVisibleScreenText()} would keep split while an
+     * independent {@code capture-pane -p} snapshot (or a live soft-wrapped render) folds
+     * them differently. Joining full-width rows here collapses BOTH shapes to the same
+     * width-independent logical lines, so the {@code visibleRenderLostFrameVsCapture}
+     * per-line-hash oracle scores a correctly-restored-but-reflowed frame as HEALTHY
+     * instead of falsely "lost". Reads the visible viewport only, scrollback excluded.
+     */
+    public String getVisibleScreenTextFullyJoined() {
+        return getSelectedText(0, 0, mColumns, mScreenRows, true, true).trim();
+    }
+
+    /**
      * Issue #966/#967: the number of VISIBLE screen rows (the viewport height in
      * cells), so the stale-render oracle can compare the rendered visible grid
      * against the matching visible-tail of tmux's `capture-pane` text — an

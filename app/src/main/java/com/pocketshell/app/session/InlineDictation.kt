@@ -43,6 +43,9 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.app.voice.DictateDotIcon
+import com.pocketshell.app.voice.InMemoryUndeliveredTranscriptStore
+import com.pocketshell.app.voice.UndeliveredTranscript
+import com.pocketshell.app.voice.UndeliveredTranscriptStore
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
@@ -53,10 +56,13 @@ import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -159,6 +165,13 @@ public class InlineDictationViewModel @Inject constructor(
         UnavailableSpeechRecognitionProvider,
     internal val pendingTranscriptionStore: PromptComposerViewModel.PendingTranscriptionQueue =
         DisabledPendingTranscriptionQueue,
+    // Issue #1272: durable holding pen for a successful transcript whose text
+    // could not be delivered to a pane (permanent pane death / channel
+    // overflow). The default in-memory store keeps the persist/expose behavior
+    // testable without wiring; production binds the SharedPreferences-backed
+    // singleton via `VoiceModule`.
+    internal val undeliveredTranscriptStore: UndeliveredTranscriptStore =
+        InMemoryUndeliveredTranscriptStore(),
 ) : ViewModel() {
 
     private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
@@ -179,11 +192,27 @@ public class InlineDictationViewModel @Inject constructor(
     // subscribed, and hands each buffered value to exactly one collector
     // exactly once when the screen re-subscribes on re-key. That gives us the
     // "delivered on re-key, never dropped, never duplicated" contract:
-    //  - UNLIMITED + `trySend` so emission never suspends or fails.
+    //  - `trySend` so emission never suspends or fails.
     //  - `receiveAsFlow()` distributes each element to a single collector and
     //    resumes across consecutive collections (the LaunchedEffect re-key),
     //    so nothing is replayed to a fresh collector (no double-write).
-    private val deliveryChannel: Channel<String> = Channel(capacity = Channel.UNLIMITED)
+    //
+    // Issue #1272 hardens two gaps the #1226 reviewer flagged:
+    //  1. BOUNDED, not UNLIMITED. Rapid repeated dictation against a
+    //     permanently-dead pane could grow an UNLIMITED channel without bound.
+    //     A [DELIVERY_CHANNEL_CAPACITY]-deep buffer with `DROP_OLDEST` caps it;
+    //     an overflowed (dropped-oldest) transcript is NOT lost — it is routed
+    //     to [onUndeliveredElement] and persisted for retry.
+    //  2. PERMANENT-DEAD-PANE DRAIN. If the session never returns, no collector
+    //     ever subscribes, so the buffered transcript would be delivered to no
+    //     one. [onCleared] cancels this channel; cancellation hands every still-
+    //     buffered element to [onUndeliveredElement], persisting it instead of
+    //     silently dropping it.
+    private val deliveryChannel: Channel<String> = Channel(
+        capacity = DELIVERY_CHANNEL_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        onUndeliveredElement = { undelivered -> undeliveredTranscriptStore.persist(undelivered) },
+    )
 
     /**
      * Stream of successfully transcribed text. The session screen collects
@@ -201,6 +230,17 @@ public class InlineDictationViewModel @Inject constructor(
      * being dropped into the collector gap.
      */
     public val transcriptions: Flow<String> = deliveryChannel.receiveAsFlow()
+
+    /**
+     * Issue #1272: the queue of successfully-transcribed commands whose text
+     * could NOT be delivered to a pane (the session was gone by the time the
+     * transcript resolved, so no collector ever received it). Backed by the
+     * durable [undeliveredTranscriptStore] so the queue survives process death.
+     * A surface renders these as a visible "couldn't deliver — retry" list;
+     * [retryUndelivered] re-delivers a row and [dismissUndelivered] discards it.
+     */
+    public val undeliveredTranscripts: StateFlow<List<UndeliveredTranscript>> =
+        undeliveredTranscriptStore.items
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
@@ -817,6 +857,35 @@ public class InlineDictationViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1272: re-attempt delivery of a persisted undelivered transcript.
+     * Re-injects the text into the delivery channel — if a pane is now live the
+     * screen's collector writes it to the terminal, and if the pane is still
+     * gone the value re-buffers and re-persists on the next teardown, so the
+     * transcript is never lost. The persisted row is removed here so the retry
+     * item clears from the visible queue; the delivery path is the single
+     * source of truth for the actual terminal write.
+     */
+    public fun retryUndelivered(id: String) {
+        val item = undeliveredTranscriptStore.snapshot().firstOrNull { it.id == id } ?: return
+        undeliveredTranscriptStore.remove(id)
+        deliveryChannel.trySend(item.text)
+        DiagnosticEvents.record(
+            "action",
+            "inline_undelivered_transcript_retry",
+            "transcriptBytes" to item.text.toByteArray(Charsets.UTF_8).size,
+        )
+    }
+
+    /**
+     * Issue #1272: discard a persisted undelivered transcript the user no
+     * longer wants to recover.
+     */
+    public fun dismissUndelivered(id: String) {
+        undeliveredTranscriptStore.remove(id)
+        DiagnosticEvents.record("action", "inline_undelivered_transcript_dismiss")
+    }
+
+    /**
      * Called by the screen when the runtime `RECORD_AUDIO` prompt comes
      * back denied. Mirrors [PromptComposerViewModel.surfacePermissionDenied].
      */
@@ -844,6 +913,15 @@ public class InlineDictationViewModel @Inject constructor(
     override fun onCleared() {
         recordingJob?.cancel()
         transcribeJob?.cancel()
+        // Issue #1272: the ViewModel is being destroyed — the session screen is
+        // gone, so no collector will ever subscribe again (permanent pane
+        // death). Cancel the delivery channel: cancellation hands every still-
+        // buffered transcript to `onUndeliveredElement`, which persists it to
+        // the durable store so it surfaces as a retryable item instead of being
+        // silently dropped. (A transcript already handed to a live collector was
+        // removed from the buffer, so this never double-persists a delivered
+        // one.)
+        deliveryChannel.cancel()
         if (_uiState.value.recording == RecordingState.Recording) {
             if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
                 cancelAndroidSpeechRecognition()
@@ -960,6 +1038,19 @@ public class InlineDictationViewModel @Inject constructor(
     )
 
     public companion object {
+        /**
+         * Issue #1272: bound on the buffered-transcript delivery channel. The
+         * channel buffers transcripts across the transient collector gap (a
+         * pane flipping to `null` / re-keying during a reconnect, #1226); a
+         * handful is plenty for that. Beyond this depth (rapid dictation into a
+         * permanently-dead pane) the channel drops the OLDEST buffered element
+         * to `onUndeliveredElement`, which persists it to the durable store —
+         * so overflow means "moved to the retry queue", never "silently lost".
+         * Bounding replaces the old `Channel.UNLIMITED` so the buffer can never
+         * grow without limit.
+         */
+        public const val DELIVERY_CHANNEL_CAPACITY: Int = 32
+
         /** Same threshold as [PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD]. */
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
@@ -1056,6 +1147,14 @@ public fun KeyBarWithMic(
     // swallow [onKey] / [onMicTap] and render the mic slot in its muted
     // (non-interactive) form so the user sees that input is unavailable.
     inputEnabled: Boolean = true,
+    // Issue #1272: successfully-transcribed commands that could not be
+    // delivered to a pane (the session was gone by the time Whisper resolved).
+    // Surfaced as a visible "couldn't deliver — retry" list so the transcript
+    // is recoverable rather than silently lost. Empty by default so existing
+    // call sites are unaffected.
+    undeliveredTranscripts: List<UndeliveredTranscript> = emptyList(),
+    onRetryUndelivered: (String) -> Unit = {},
+    onDismissUndelivered: (String) -> Unit = {},
 ) {
     androidx.compose.foundation.layout.Column(
         modifier = modifier
@@ -1065,6 +1164,13 @@ public fun KeyBarWithMic(
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (undeliveredTranscripts.isNotEmpty()) {
+            UndeliveredTranscriptBanner(
+                items = undeliveredTranscripts,
+                onRetry = onRetryUndelivered,
+                onDismiss = onDismissUndelivered,
+            )
+        }
         InlineDictationModeSelector(
             selectedMode = dictationMode,
             onModeSelected = onDictationModeSelected,
@@ -1103,6 +1209,95 @@ public fun KeyBarWithMic(
             )
         }
     }
+}
+
+/**
+ * Issue #1272: the "couldn't deliver — retry" list. Each row shows the
+ * undelivered transcript text with a Retry (re-deliver) and Dismiss (discard)
+ * affordance so the user recovers a command that was transcribed successfully
+ * but never reached a pane. Rendered at the top of [KeyBarWithMic] whenever the
+ * durable [UndeliveredTranscriptStore] has entries.
+ */
+@Composable
+private fun UndeliveredTranscriptBanner(
+    items: List<UndeliveredTranscript>,
+    onRetry: (String) -> Unit,
+    onDismiss: (String) -> Unit,
+) {
+    androidx.compose.foundation.layout.Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(UNDELIVERED_TRANSCRIPT_BANNER_TAG)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = PocketShellShapes.small,
+            )
+            .border(
+                border = BorderStroke(1.dp, PocketShellColors.AccentDim),
+                shape = PocketShellShapes.small,
+            )
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "Couldn't deliver — retry",
+            color = PocketShellColors.Accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        items.forEach { item ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = item.text,
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyDense,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                UndeliveredTranscriptAction(
+                    label = "Retry",
+                    accent = PocketShellColors.Accent,
+                    testTag = "$UNDELIVERED_TRANSCRIPT_RETRY_TAG-${item.id}",
+                    onClick = { onRetry(item.id) },
+                )
+                UndeliveredTranscriptAction(
+                    label = "Dismiss",
+                    accent = PocketShellColors.TextSecondary,
+                    testTag = "$UNDELIVERED_TRANSCRIPT_DISMISS_TAG-${item.id}",
+                    onClick = { onDismiss(item.id) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UndeliveredTranscriptAction(
+    label: String,
+    accent: Color,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label,
+        color = accent,
+        style = PocketShellType.bodyDense,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .testTag(testTag)
+            .background(color = PocketShellColors.Surface, shape = PocketShellShapes.small)
+            .border(
+                border = BorderStroke(1.dp, PocketShellColors.Border),
+                shape = PocketShellShapes.small,
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    )
 }
 
 @Composable
@@ -1362,3 +1557,8 @@ internal const val INLINE_DICTATION_MIC_SLOT_TAG: String = "inline-dictation-mic
 internal const val INLINE_DICTATION_WAVEFORM_TAG: String = "inline-dictation-waveform"
 internal const val INLINE_DICTATION_TRANSCRIBING_TAG: String = "inline-dictation-transcribing"
 internal const val INLINE_DICTATION_STATUS_TAG: String = "inline-dictation-status"
+
+// Issue #1272: the undelivered-transcript retry banner + its per-row actions.
+internal const val UNDELIVERED_TRANSCRIPT_BANNER_TAG: String = "undelivered-transcript-banner"
+internal const val UNDELIVERED_TRANSCRIPT_RETRY_TAG: String = "undelivered-transcript-retry"
+internal const val UNDELIVERED_TRANSCRIPT_DISMISS_TAG: String = "undelivered-transcript-dismiss"

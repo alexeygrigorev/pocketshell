@@ -15,6 +15,8 @@ import com.pocketshell.app.voice.AndroidSpeechRecognitionProvider
 import com.pocketshell.app.voice.ConnectivityObserver
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.app.voice.PendingTranscriptionStore
+import com.pocketshell.app.voice.SharedPrefsUndeliveredTranscriptStore
+import com.pocketshell.app.voice.UndeliveredTranscriptStore
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.voice.AiCostRecord
@@ -179,6 +181,19 @@ object VoiceModule {
         store: PendingTranscriptionStore,
     ): PromptComposerViewModel.PendingTranscriptionQueue =
         PendingTranscriptionStoreAdapter(store)
+
+    /**
+     * Issue #1272: bind the [UndeliveredTranscriptStore] seam onto the durable
+     * SharedPreferences-backed [SharedPrefsUndeliveredTranscriptStore]. Singleton
+     * so a transcript persisted while one session screen is torn down (permanent
+     * pane death) is visible to the next session screen's inline-dictation
+     * ViewModel and survives a process restart.
+     */
+    @Provides
+    @Singleton
+    fun provideUndeliveredTranscriptStore(
+        store: SharedPrefsUndeliveredTranscriptStore,
+    ): UndeliveredTranscriptStore = store
 
     /**
      * Issue #180: bind [PromptComposerViewModel.ConnectivityProbe] onto

@@ -2634,6 +2634,7 @@ private fun OutboundQueueBanner(
     onRetry: (String) -> Unit,
     onResendAll: () -> Unit,
 ) {
+    val collapsedRetryItem = if (expanded) null else retryableOutboundQueueItem(items)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2671,6 +2672,18 @@ private fun OutboundQueueBanner(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (collapsedRetryItem != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                PendingActionButton(
+                    label = "Retry",
+                    primary = true,
+                    onClick = { onRetry(collapsedRetryItem.id) },
+                    modifier = Modifier.testTag(
+                        composerOutboundQueueRetryTestTag(collapsedRetryItem.id),
+                    ),
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             DisclosureIcon(
                 expanded = expanded,
                 tint = PocketShellColors.TextSecondary,

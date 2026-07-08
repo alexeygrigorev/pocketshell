@@ -39,8 +39,13 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 
 /**
@@ -275,6 +280,11 @@ public class PromptComposerViewModel @Inject constructor(
         null
     private var outboundSidecarDispatchInFlight: Boolean = false
     internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val draftStoreWriteMutex = Mutex()
+    private val draftStoreWriteGenerations: ConcurrentHashMap<String, AtomicLong> =
+        ConcurrentHashMap()
+    private val draftStoreOverrides: ConcurrentHashMap<String, String> =
+        ConcurrentHashMap()
 
     /**
      * Issue #971: the [SendRequest] for the prompt currently in flight, captured
@@ -453,8 +463,64 @@ public class PromptComposerViewModel @Inject constructor(
         // a single owner-stamped slot the #746 switch discards). Keyed by the
         // session that owns this draft; nothing to persist when no target is
         // wired yet (proof-of-life / pre-target restore).
-        composerTarget?.let { composerDraftStore.save(it, newText) }
+        saveComposerDraft(composerTarget, newText)
         _uiState.update { it.copy(draft = newText, error = null) }
+    }
+
+    private fun loadComposerDraft(sessionKey: String): String? {
+        val override = draftStoreOverrides[sessionKey]
+        if (override != null || draftStoreOverrides.containsKey(sessionKey)) {
+            return override?.takeIf { it.isNotEmpty() }
+        }
+        return composerDraftStore.load(sessionKey)
+    }
+
+    private fun saveComposerDraft(sessionKey: String?, draft: String) {
+        val key = sessionKey?.takeIf { it.isNotBlank() } ?: return
+        draftStoreOverrides[key] = draft
+        val generation = nextDraftStoreWriteGeneration(key)
+        if (composerDraftStore is SharedPrefsComposerDraftStore) {
+            viewModelScope.launch(outboundQueueDispatcher) {
+                writeLatestComposerDraft(key, generation) {
+                    composerDraftStore.save(key, draft)
+                }
+            }
+        } else {
+            composerDraftStore.save(key, draft)
+        }
+    }
+
+    private fun clearComposerDraft(sessionKey: String?) {
+        val key = sessionKey?.takeIf { it.isNotBlank() } ?: return
+        draftStoreOverrides[key] = ""
+        val generation = nextDraftStoreWriteGeneration(key)
+        if (composerDraftStore is SharedPrefsComposerDraftStore) {
+            viewModelScope.launch(outboundQueueDispatcher) {
+                writeLatestComposerDraft(key, generation) {
+                    composerDraftStore.clear(key)
+                }
+            }
+        } else {
+            composerDraftStore.clear(key)
+        }
+    }
+
+    private fun nextDraftStoreWriteGeneration(sessionKey: String): Long =
+        draftStoreWriteGenerations
+            .computeIfAbsent(sessionKey) { AtomicLong() }
+            .incrementAndGet()
+
+    private suspend fun writeLatestComposerDraft(
+        sessionKey: String,
+        generation: Long,
+        write: () -> Unit,
+    ) {
+        draftStoreWriteMutex.withLock {
+            val latest = draftStoreWriteGenerations[sessionKey]?.get()
+            if (latest == generation) {
+                write()
+            }
+        }
     }
 
     /**
@@ -972,14 +1038,16 @@ public class PromptComposerViewModel @Inject constructor(
                         withEnter = withEnter,
                         sendTarget = sendTarget,
                     )
-                    emitPreparedSendRequest(
-                        text = text,
-                        withEnter = withEnter,
-                        cleanDraft = draft,
-                        attachments = attachments,
-                        sendTarget = sendTarget,
-                        outboundQueueItemId = outboundItem?.id,
-                    )
+                    withContext(Dispatchers.Main.immediate) {
+                        emitPreparedSendRequest(
+                            text = text,
+                            withEnter = withEnter,
+                            cleanDraft = draft,
+                            attachments = attachments,
+                            sendTarget = sendTarget,
+                            outboundQueueItemId = outboundItem?.id,
+                        )
+                    }
                 } catch (cancelled: CancellationException) {
                     clearStrandedSendInFlight()
                     throw cancelled
@@ -1051,7 +1119,7 @@ public class PromptComposerViewModel @Inject constructor(
         savedStateHandle[KEY_DRAFT] = ""
         savedStateHandle[KEY_DRAFT_OWNER] = null
         composerTarget?.let { target ->
-            composerDraftStore.clear(target)
+            clearComposerDraft(target)
             composerDraftStore.clearAttachments(target)
         }
         _uiState.update { current ->
@@ -1182,7 +1250,7 @@ public class PromptComposerViewModel @Inject constructor(
         markOutboundSendDelivered(request)
         val deliveryTarget = request?.sendTarget?.sessionKey?.takeIf { it.isNotBlank() } ?: composerTarget
         if (deliveryTarget != null && deliveryTarget != composerTarget) {
-            composerDraftStore.clear(deliveryTarget)
+            clearComposerDraft(deliveryTarget)
             composerDraftStore.clearAttachments(deliveryTarget)
             _uiState.update {
                 it.copy(
@@ -1252,7 +1320,7 @@ public class PromptComposerViewModel @Inject constructor(
         val restoredAttachments = request.attachments
         val restoreTarget = request.sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: composerTarget
         if (restoreTarget != null && restoreTarget != composerTarget) {
-            composerDraftStore.save(restoreTarget, restoredDraft)
+            saveComposerDraft(restoreTarget, restoredDraft)
             composerDraftStore.saveAttachments(restoreTarget, restoredAttachments.toDurableRefs())
             _uiState.update { current ->
                 current.copy(
@@ -1275,7 +1343,7 @@ public class PromptComposerViewModel @Inject constructor(
         // draft was kept" promise becomes recoverable, not just true for an
         // instant — and now covers the attachment, not just the text).
         restoreTarget?.let { target ->
-            composerDraftStore.save(target, restoredDraft)
+            saveComposerDraft(target, restoredDraft)
             composerDraftStore.saveAttachments(target, restoredAttachments.toDurableRefs())
         }
         _uiState.update { current ->
@@ -1586,7 +1654,7 @@ public class PromptComposerViewModel @Inject constructor(
         // otherwise the next switch back would reload what the user just
         // discarded.
         composerTarget?.let {
-            composerDraftStore.clear(it)
+            clearComposerDraft(it)
             composerDraftStore.clearAttachments(it)
         }
         _uiState.update { current ->
@@ -1640,7 +1708,7 @@ public class PromptComposerViewModel @Inject constructor(
         // under the new owner, then keep it on screen (do not reload).
         if (hasDraft && draftOwner == null) {
             savedStateHandle[KEY_DRAFT_OWNER] = targetKey
-            composerDraftStore.save(targetKey, _uiState.value.draft)
+            saveComposerDraft(targetKey, _uiState.value.draft)
             // Issue #872: the orphan draft may carry staged attachment tiles
             // (e.g. a restored failed send); adopt those under the new owner too
             // so they are recoverable on a later switch.
@@ -1656,7 +1724,7 @@ public class PromptComposerViewModel @Inject constructor(
         // this covers any gap, e.g. a draft set without going through
         // [onDraftChange], and the staged-tile state #872 makes durable.)
         if (hasDraft && draftOwner != null && draftOwner != targetKey) {
-            composerDraftStore.save(draftOwner, _uiState.value.draft)
+            saveComposerDraft(draftOwner, _uiState.value.draft)
             composerDraftStore.saveAttachments(
                 draftOwner,
                 _uiState.value.attachments.toDurableRefs(),
@@ -1667,7 +1735,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Load the incoming session's durable draft + attachments (empty when
         // none) so the in-memory state shows ONLY this session's draft/tiles —
         // no bleed, but also no loss of the other session's draft (#832/#872).
-        val incoming = composerDraftStore.load(targetKey).orEmpty()
+        val incoming = loadComposerDraft(targetKey).orEmpty()
         val incomingAttachments = composerDraftStore.loadAttachments(targetKey)
             .toStagedAttachments()
         if (incoming == _uiState.value.draft &&

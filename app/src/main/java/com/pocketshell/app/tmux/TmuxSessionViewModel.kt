@@ -16123,7 +16123,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
-        return TmuxPaneInputStream(queue)
+        return TmuxPaneInputStream(paneId, queue)
     }
 
     private suspend fun sendDequeuedInputBatch(
@@ -18394,21 +18394,23 @@ public class TmuxSessionViewModel @Inject constructor(
         data class NamedKey(val name: String) : TmuxInputToken
     }
 
-    private class TmuxPaneInputStream(
-        private val queue: TmuxPaneInputQueue,
-    ) : OutputStream() {
-        override fun write(b: Int) {
-            write(byteArrayOf(b.toByte()))
-        }
+    private class TmuxPaneInputStream(private val paneId: String, private val queue: TmuxPaneInputQueue) :
+        OutputStream() {
+        override fun write(b: Int) = write(byteArrayOf(b.toByte()))
 
         override fun write(buffer: ByteArray, offset: Int, length: Int) {
             if (length <= 0) return
-            try { queue.write(buffer, offset, length) } catch (_: IOException) { }
+            try {
+                queue.write(buffer, offset, length)
+            } catch (overflow: TmuxPaneInputQueueOverflowException) {
+                DiagnosticEvents.record(
+                    "connection", "pane_input_write_dropped", "pane" to paneId,
+                    "bytes" to length, "reason" to "queue_full", "message" to overflow.message,
+                )
+            }
         }
 
-        override fun close() {
-            queue.close()
-        }
+        override fun close() = queue.close()
     }
 
     /**
@@ -18890,14 +18892,15 @@ internal class TmuxPaneInputQueue(
     private var maxObservedBatchChunks: Int = 0
     private var sentBatchCount: Long = 0L
     private var maxObservedSendLatencyNs: Long = 0L
+    private var closed: Boolean = false
 
     fun write(buffer: ByteArray, offset: Int, length: Int) {
-        if (length > maxPendingBytes) {
-            throw IOException("tmux pane input queue write exceeds pending byte budget")
+        if (offset < 0 || length < 0 || length > buffer.size - offset) {
+            throw IndexOutOfBoundsException("offset=$offset length=$length size=${buffer.size}")
         }
         var written = 0
         while (written < length) {
-            val chunkLength = minOf(maxPendingBytes, TMUX_INPUT_CHUNK_BYTES, length - written)
+            val chunkLength = minOf(TMUX_INPUT_CHUNK_BYTES, length - written)
             val copy = buffer.copyOfRange(offset + written, offset + written + chunkLength)
             enqueue(copy)
             written += chunkLength
@@ -18981,15 +18984,14 @@ internal class TmuxPaneInputQueue(
         )
     }
 
-    fun close() {
-        signal.close()
-    }
+    fun close() { synchronized(lock) { closed = true }; signal.close() }
 
     private fun enqueue(bytes: ByteArray) {
         val segment = TmuxPaneInputSegment(bytes, System.nanoTime())
         synchronized(lock) {
+            if (closed) throw IOException("tmux pane input queue is closed")
             if (pendingBytes + bytes.size > maxPendingBytes) {
-                throw IOException("tmux pane input queue pending byte budget exceeded")
+                throw TmuxPaneInputQueueOverflowException("tmux pane input queue pending byte budget exceeded")
             }
             pendingBytes += bytes.size
             totalEnqueuedBytes += bytes.size.toLong()
@@ -19015,11 +19017,10 @@ internal class TmuxPaneInputQueue(
         }
     }
 
-    private fun signalIfPending() {
-        val hasPending = synchronized(lock) { pending.isNotEmpty() }
-        if (hasPending) signal.trySend(Unit)
-    }
+    private fun signalIfPending() { if (synchronized(lock) { pending.isNotEmpty() }) signal.trySend(Unit) }
 }
+
+private class TmuxPaneInputQueueOverflowException(message: String) : IOException(message)
 
 /**
  * Issue #243: true when [bytes] contains only complete terminal emulator

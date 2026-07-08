@@ -4351,6 +4351,42 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun foregroundResumeRequeuesStaleUploadingOutboundRows() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val now = 500_000L
+        val staleUpload = OutboundItem(
+            id = "stale-upload",
+            sessionKey = "1/session-a",
+            cleanText = "recover upload",
+            state = OutboundState.Uploading,
+            createdAtMs = 1L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS - 1L,
+            attachments = listOf(DurableAttachmentRef("/tmp/local.png", "local.png", "image/png")),
+        )
+        val freshUpload = staleUpload.copy(
+            id = "fresh-upload",
+            cleanText = "leave upload",
+            createdAtMs = 2L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS + 1L,
+        )
+        queue.enqueueExisting(staleUpload)
+        queue.enqueueExisting(freshUpload)
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            clock = { now },
+        )
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.onForegroundResume()
+        runCurrent()
+
+        assertEquals(OutboundState.Queued, queue.item(staleUpload.id)!!.state)
+        assertEquals(OutboundState.Uploading, queue.item(freshUpload.id)!!.state)
+        assertEquals(listOf(staleUpload.id, freshUpload.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
     fun requestSendWhileRecordingPreservesOriginalSendTargetSnapshot() = runTest {
         // Issue #900: a Send tap during Recording first stops the recorder and
         // transcribes. The eventual request must keep the target captured from

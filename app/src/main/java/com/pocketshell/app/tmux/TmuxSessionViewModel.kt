@@ -14218,13 +14218,13 @@ public class TmuxSessionViewModel @Inject constructor(
 
     public suspend fun uploadQueuedAttachmentSidecars(
         sidecars: List<LocalAttachmentSidecarRef>,
-    ): Result<List<String>> {
+    ): Result<List<String>> = withContext(seedIoDispatcher) {
         DiagnosticEvents.record("action", "tmux_outbound_sidecar_upload_start", "count" to sidecars.size)
-        if (sidecars.isEmpty()) return Result.success(emptyList())
+        if (sidecars.isEmpty()) return@withContext Result.success(emptyList())
         val session = awaitLiveSessionForAttachment()
-            ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
+            ?: return@withContext Result.failure(IllegalStateException("No live SSH session for attachment upload."))
         if (!session.isConnected) {
-            return Result.failure(SshException("SSH session is not connected"))
+            return@withContext Result.failure(SshException("SSH session is not connected"))
         }
         val target = activeTarget
         val scopeKey = when (target) {
@@ -14235,11 +14235,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val remoteDir = "${PromptAttachmentStager.REMOTE_DIRECTORY}/$safeScope"
         val displayDir = "~/$remoteDir"
         val timestamp = ShareUploader.formatTimestamp(sidecars.minOf { it.createdAtMs })
-        return try {
+        try {
             val mkdir = session.exec("mkdir -p \"\$HOME/$remoteDir\"")
             if (mkdir.exitCode != 0) {
                 val detail = mkdir.stderr.ifBlank { mkdir.stdout }.trim()
-                return Result.failure(
+                return@withContext Result.failure(
                     SshException("Could not create attachment directory: ${detail.ifBlank { "mkdir failed" }}"),
                 )
             }

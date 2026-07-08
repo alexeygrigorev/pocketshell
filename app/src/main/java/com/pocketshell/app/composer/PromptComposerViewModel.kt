@@ -274,6 +274,7 @@ public class PromptComposerViewModel @Inject constructor(
     private var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
         null
     private var outboundSidecarDispatchInFlight: Boolean = false
+    internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     /**
      * Issue #971: the [SendRequest] for the prompt currently in flight, captured
@@ -935,7 +936,7 @@ public class PromptComposerViewModel @Inject constructor(
         )
         inFlightSendRequest = handoffRequest
         if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
-            viewModelScope.launch {
+            viewModelScope.launch(outboundQueueDispatcher) {
                 try {
                     enqueueAndDispatchSidecarBackedSend(
                         cleanDraft = draft,
@@ -1693,8 +1694,9 @@ public class PromptComposerViewModel @Inject constructor(
     public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
         if (_uiState.value.sendInFlight) return null
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
-        val next = outboundQueueStore.itemsFor(target)
+        val next = _outboundQueueItems.value
             .firstOrNull { item ->
+                item.sessionKey == target &&
                 item.id !in excludingIds &&
                     (item.state == OutboundState.Queued || item.state == OutboundState.Failed)
             }
@@ -1757,11 +1759,11 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun dispatchOutboundItem(id: String): Boolean {
         if (_uiState.value.sendInFlight) return false
+        if (outboundSidecarDispatchInFlight) return false
         val sidecarStore = outboundAttachmentSidecarStore
         if (sidecarStore != null) {
-            if (outboundSidecarDispatchInFlight) return false
             outboundSidecarDispatchInFlight = true
-            viewModelScope.launch {
+            viewModelScope.launch(outboundQueueDispatcher) {
                 try {
                     val sidecars = sidecarStore.refsFor(id)
                     if (sidecars.isNotEmpty()) {
@@ -1786,7 +1788,22 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return true
         }
-        return claimAndEmitOutboundItem(id)
+        outboundSidecarDispatchInFlight = true
+        viewModelScope.launch(outboundQueueDispatcher) {
+            try {
+                claimAndEmitOutboundItem(id)
+            } catch (cancelled: CancellationException) {
+                clearStrandedSendInFlight()
+                throw cancelled
+            } catch (t: Throwable) {
+                clearStrandedSendInFlight(
+                    error = "Send failed: reconnect, then send again or discard the draft.",
+                )
+            } finally {
+                outboundSidecarDispatchInFlight = false
+            }
+        }
+        return true
     }
 
     private suspend fun dispatchPreparedOutboundItem(id: String): Boolean {

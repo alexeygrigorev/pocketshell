@@ -27,6 +27,18 @@ sealed interface AppDestination {
     /** Add a new host. `hostId` is null. */
     data object AddHost : AppDestination
 
+    /**
+     * Guided first-run add-host flow. Reached from the empty-state primary
+     * action only; the ordinary add-host FAB keeps routing to [AddHost].
+     */
+    data object AddFirstHost : AppDestination
+
+    /** Test the freshly-created first host before dropping the user on the list. */
+    data class FirstHostTestConnect(val hostId: Long) : AppDestination
+
+    /** Edit a first-run host, then return to the guided connection test. */
+    data class EditFirstHost(val hostId: Long) : AppDestination
+
     /** Edit the host identified by [hostId]. */
     data class EditHost(val hostId: Long) : AppDestination
 

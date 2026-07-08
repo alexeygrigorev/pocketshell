@@ -124,6 +124,7 @@ import kotlin.math.sin
 @Composable
 fun HostListScreen(
     onAddHost: () -> Unit,
+    onAddFirstHost: () -> Unit = onAddHost,
     onEditHost: (Long) -> Unit,
     onOpenSettings: () -> Unit = {},
     /**
@@ -586,7 +587,7 @@ fun HostListScreen(
 
                 if (hosts.isEmpty()) {
                     item(key = "hosts:empty") {
-                        EmptyHostList(onAddHost = onAddHost)
+                        EmptyHostList(onAddHost = onAddFirstHost)
                     }
                 } else {
                     items(hosts, key = { "host:" + it.id }) { host ->

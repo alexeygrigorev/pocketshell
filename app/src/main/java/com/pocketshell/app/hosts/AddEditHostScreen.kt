@@ -48,6 +48,8 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -71,6 +73,7 @@ const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
 const val ADD_HOST_DETAILS_TAB_TAG = "add-host-tab-details"
 const val ADD_HOST_MANAGE_KEYS_TAB_TAG = "add-host-tab-manage-keys"
 const val ADD_HOST_SCAN_QR_TAG = "add-host-scan-qr"
+const val FIRST_HOST_WIZARD_STEPS_TAG = "first-host-wizard:steps"
 
 /**
  * Default placeholder shown in the optional "Usage command" field
@@ -116,6 +119,8 @@ fun AddEditHostScreen(
     hostId: Long?,
     onDone: () -> Unit,
     onScanQr: (() -> Unit)? = null,
+    firstRunGuided: Boolean = false,
+    onFirstRunHostSaved: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
     keyManagementViewModel: SshKeysViewModel = hiltViewModel(),
@@ -129,7 +134,14 @@ fun AddEditHostScreen(
         if (hostId != null) viewModel.loadHost(hostId)
     }
     LaunchedEffect(state.saved) {
-        if (state.saved) onDone()
+        if (state.saved) {
+            val savedHostId = state.savedHostId
+            if (firstRunGuided && savedHostId != null) {
+                onFirstRunHostSaved(savedHostId)
+            } else {
+                onDone()
+            }
+        }
     }
 
     // Per-field focus requesters drive the "move focus to the first
@@ -196,7 +208,12 @@ fun AddEditHostScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             FormHeader(
-                title = if (hostId == null) "Add host" else "Edit host",
+                title = when {
+                    firstRunGuided && hostId == null -> "Add first host"
+                    firstRunGuided -> "Edit first host"
+                    hostId == null -> "Add host"
+                    else -> "Edit host"
+                },
                 onScanQr = onScanQr.takeIf { hostId == null },
                 onBack = {
                     if (selectedTab == AddEditHostTab.ManageKeys) {
@@ -208,6 +225,10 @@ fun AddEditHostScreen(
                     }
                 },
             )
+
+            if (firstRunGuided) {
+                FirstHostWizardSteps(activeStep = FirstHostWizardStep.Host)
+            }
 
             AddEditHostTabs(
                 selectedTab = selectedTab,
@@ -333,6 +354,48 @@ fun AddEditHostScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+internal enum class FirstHostWizardStep {
+    Key,
+    Host,
+    Test,
+}
+
+@Composable
+internal fun FirstHostWizardSteps(
+    activeStep: FirstHostWizardStep,
+    modifier: Modifier = Modifier,
+) {
+    val steps = listOf(
+        FirstHostWizardStep.Key to "Key",
+        FirstHostWizardStep.Host to "Host",
+        FirstHostWizardStep.Test to "Test",
+    )
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.sm)
+            .testTag(FIRST_HOST_WIZARD_STEPS_TAG),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        steps.forEachIndexed { index, (step, label) ->
+            val selected = step == activeStep
+            Text(
+                text = "${index + 1}. $label",
+                color = if (selected) PocketShellColors.OnAccent else PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .background(
+                        color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                        shape = PocketShellShapes.small,
+                    )
+                    .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs),
+            )
         }
     }
 }

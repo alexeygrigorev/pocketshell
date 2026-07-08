@@ -48,6 +48,7 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.AddEditHostScreen
+import com.pocketshell.app.hosts.FirstHostTestConnectScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
@@ -1019,6 +1020,7 @@ private fun AppNavigator(
     when (val dest = activeDestination) {
         AppDestination.HostList -> HostListScreen(
             onAddHost = { navigate(AppDestination.AddHost) },
+            onAddFirstHost = { navigate(AppDestination.AddFirstHost) },
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
             onOpenSettings = { navigate(AppDestination.Settings) },
             // Issue #116 (usage-panel Fix B): wire the cross-host usage
@@ -1085,6 +1087,40 @@ private fun AppNavigator(
             hostId = null,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
+        )
+
+        AppDestination.AddFirstHost -> AddEditHostScreen(
+            hostId = null,
+            onDone = ::back,
+            onScanQr = { navigate(AppDestination.Scan) },
+            firstRunGuided = true,
+            onFirstRunHostSaved = { hostId -> replace(AppDestination.FirstHostTestConnect(hostId)) },
+        )
+
+        is AppDestination.FirstHostTestConnect -> FirstHostTestConnectScreen(
+            hostId = dest.hostId,
+            onBack = ::back,
+            onEditHost = { id -> replace(AppDestination.EditFirstHost(id)) },
+            onOpenHost = { host, keyPath, passphrase ->
+                navigate(
+                    AppDestination.FolderList(
+                        hostId = host.id,
+                        hostName = host.name,
+                        hostname = host.hostname,
+                        port = host.port,
+                        username = host.username,
+                        keyPath = keyPath,
+                        passphrase = passphrase,
+                    ),
+                )
+            },
+        )
+
+        is AppDestination.EditFirstHost -> AddEditHostScreen(
+            hostId = dest.hostId,
+            onDone = { replace(AppDestination.FirstHostTestConnect(dest.hostId)) },
+            firstRunGuided = true,
+            onFirstRunHostSaved = { hostId -> replace(AppDestination.FirstHostTestConnect(hostId)) },
         )
 
         is AppDestination.EditHost -> AddEditHostScreen(
@@ -2163,6 +2199,9 @@ internal fun importPayloadFromIntent(intent: Intent?): String? {
 internal fun AppDestination.timingName(): String = when (this) {
     AppDestination.HostList -> "HostList"
     AppDestination.AddHost -> "AddHost"
+    AppDestination.AddFirstHost -> "AddFirstHost"
+    is AppDestination.FirstHostTestConnect -> "FirstHostTestConnect(hostId=$hostId)"
+    is AppDestination.EditFirstHost -> "EditFirstHost(hostId=$hostId)"
     is AppDestination.EditHost -> "EditHost"
     AppDestination.Scan -> "Scan"
     AppDestination.CrashReports -> "CrashReports"
@@ -2185,6 +2224,9 @@ internal fun AppDestination.timingName(): String = when (this) {
 internal fun AppDestination.diagnosticRouteName(): String = when (this) {
     AppDestination.HostList -> "HostList"
     AppDestination.AddHost -> "AddHost"
+    AppDestination.AddFirstHost -> "AddFirstHost"
+    is AppDestination.FirstHostTestConnect -> "FirstHostTestConnect"
+    is AppDestination.EditFirstHost -> "EditFirstHost"
     is AppDestination.EditHost -> "EditHost"
     AppDestination.Scan -> "Scan"
     AppDestination.CrashReports -> "CrashReports"
@@ -2207,6 +2249,15 @@ internal fun AppDestination.diagnosticRouteName(): String = when (this) {
 internal fun AppDestination.crashReportContext(): CrashReportContext = when (this) {
     AppDestination.HostList -> CrashReportContext(screen = "Hosts")
     AppDestination.AddHost -> CrashReportContext(screen = "Add host")
+    AppDestination.AddFirstHost -> CrashReportContext(screen = "Add first host")
+    is AppDestination.FirstHostTestConnect -> CrashReportContext(
+        screen = "First host test connection",
+        action = "hostId=$hostId",
+    )
+    is AppDestination.EditFirstHost -> CrashReportContext(
+        screen = "Edit first host",
+        action = "hostId=$hostId",
+    )
     is AppDestination.EditHost -> CrashReportContext(
         screen = "Edit host",
         action = "hostId=$hostId",

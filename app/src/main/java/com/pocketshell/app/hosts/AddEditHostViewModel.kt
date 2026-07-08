@@ -97,6 +97,7 @@ data class HostFormState(
     val firstInvalidField: HostFormField? = null,
     val error: String? = null,
     val saved: Boolean = false,
+    val savedHostId: Long? = null,
 )
 
 /**
@@ -167,6 +168,8 @@ class AddEditHostViewModel @Inject constructor(
                 fieldErrors = HostFormErrors(),
                 firstInvalidField = null,
                 error = null,
+                saved = false,
+                savedHostId = null,
             )
             _state.value = loaded
             // Capture the loaded form as the dirty-state baseline so a
@@ -259,13 +262,15 @@ class AddEditHostViewModel @Inject constructor(
                     usageCommandOverride = usageOverride,
                 )
             }
-            if (editingId != null) {
+            val savedId = if (editingId != null) {
                 hostDao.update(host)
+                editingId
             } else {
                 hostDao.insert(host)
             }
             _state.value = _state.value.copy(
                 saved = true,
+                savedHostId = savedId,
                 fieldErrors = HostFormErrors(),
                 firstInvalidField = null,
                 error = null,

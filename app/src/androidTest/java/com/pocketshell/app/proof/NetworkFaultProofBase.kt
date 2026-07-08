@@ -281,9 +281,15 @@ abstract class NetworkFaultProofBase {
                 .isNotEmpty()
         }
         recordTiming("${label}_disconnect_visible_ms", SystemClock.elapsedRealtime() - start)
-        compose.onAllNodesWithText("Reconnect", useUnmergedTree = true).fetchSemanticsNodes().let {
-            assertTrue("expected Reconnect button for $label; found ${it.size}", it.isNotEmpty())
-        }
+        val reconnectActions = compose.onAllNodesWithTag(
+            TMUX_SESSION_RECONNECT_TAG,
+            useUnmergedTree = true,
+        )
+            .fetchSemanticsNodes()
+        assertTrue(
+            "expected reconnect affordance for $label; found ${reconnectActions.size}",
+            reconnectActions.isNotEmpty(),
+        )
     }
 
     protected fun tapReconnectAndWait(label: String) {

@@ -9,7 +9,7 @@
 207337 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
 139372 app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt
 190951 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
-383348 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
+371674 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
 1020647 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
 290559 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
 167942 app/src/test/java/com/pocketshell/app/session/AgentConversationRepositoryTest.kt

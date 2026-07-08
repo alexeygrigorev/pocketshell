@@ -1,5 +1,8 @@
 package com.pocketshell.app.tmux
 
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -80,5 +83,35 @@ class AgentQuickReplyTest {
         val replies = agentQuickRepliesForVisibleText("Use yes/no examples in the docs.")
 
         assertTrue(replies.isEmpty())
+    }
+
+    @Test
+    fun visibleTextFlowParsesRepliesAndSuppressesDuplicateRows() = runTest {
+        val emissions = agentQuickRepliesForVisibleTextFlow(
+            visibleText = flowOf(
+                "Proceed with this command? (y/n)",
+                "Proceed with this command? (y/n)",
+                "Done. Press Enter to continue",
+            ),
+            enabled = true,
+        ).toList()
+
+        assertEquals(
+            listOf(
+                listOf(AgentQuickReply("Yes", "y"), AgentQuickReply("No", "n")),
+                listOf(AgentQuickReply("Enter", "\r")),
+            ),
+            emissions,
+        )
+    }
+
+    @Test
+    fun disabledVisibleTextFlowNeverParsesReplies() = runTest {
+        val emissions = agentQuickRepliesForVisibleTextFlow(
+            visibleText = flowOf("Proceed with this command? (y/n)"),
+            enabled = false,
+        ).toList()
+
+        assertEquals(listOf(emptyList<AgentQuickReply>()), emissions)
     }
 }

@@ -1,9 +1,27 @@
 package com.pocketshell.app.tmux
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+
 internal data class AgentQuickReply(
     val label: String,
     val payload: String,
 )
+
+internal fun agentQuickRepliesForVisibleTextFlow(
+    visibleText: Flow<String>,
+    enabled: Boolean,
+): Flow<List<AgentQuickReply>> {
+    if (!enabled) return flowOf(emptyList())
+    return visibleText
+        .map { agentQuickRepliesForVisibleText(it) }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+}
 
 internal fun agentQuickRepliesForVisibleText(visibleText: String): List<AgentQuickReply> {
     val tail = visibleText

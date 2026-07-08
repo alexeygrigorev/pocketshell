@@ -1,5 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <application android:usesCleartextTraffic="true" />
+    <application android:usesCleartextTraffic="true">
+        <!--
+          Issue #1272: a debug-only @AndroidEntryPoint host that mounts the
+          PRODUCTION PromptComposerSheet with no test seams, so
+          PromptComposerUndeliveredRetryHiltWiringTest can exercise the REAL
+          `storeOwner is GeneratedComponentManagerHolder -> hiltViewModel()`
+          guard branch that resolves the activity-scoped InlineDictationViewModel
+          (the exact production link the #1341 reviewer blocked closure on).
+          Debug source set only, so it never ships in a release build.
+        -->
+        <activity
+            android:name="com.pocketshell.app.composer.ComposerHiltHostActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PocketShell" />
+    </application>
 </manifest>

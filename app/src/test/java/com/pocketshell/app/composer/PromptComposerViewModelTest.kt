@@ -3335,6 +3335,39 @@ class PromptComposerViewModelTest {
         assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
     }
 
+    @Test
+    fun requestSendInIdleSchedulesOutboundEnqueueOffCallerThread() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("ship it later")
+        vm.requestSend(withEnter = true, sendTarget = target)
+
+        assertTrue(vm.uiState.value.sendInFlight)
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(sent.isEmpty())
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+
+        advanceUntilIdle()
+
+        val request = sent.single()
+        val queueId = requireNotNull(request.outboundQueueItemId)
+        assertEquals("ship it later", request.cleanDraft)
+        assertEquals(OutboundState.InFlight, queue.item(queueId)!!.state)
+        assertEquals(listOf(queueId), vm.outboundQueueItems.value.map { it.id })
+    }
+
     // -- Issue #971/#987: single-representation + auto-retry on drop -------
     //
     // The maintainer's v0.4.18 dogfood + the #987 refinement: while a send is in

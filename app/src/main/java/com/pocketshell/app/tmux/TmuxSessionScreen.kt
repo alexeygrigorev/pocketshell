@@ -487,7 +487,6 @@ public fun TmuxSessionScreen(
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = rawStatus is ConnectionStatus.Connected
-    val outboundQueueItems by promptComposerViewModel.outboundQueueItems.collectAsState()
     val outboundQueueAutoFlushController = remember(targetSessionId.value) {
         OutboundQueueAutoFlushController()
     }
@@ -511,11 +510,12 @@ public fun TmuxSessionScreen(
             promptComposerViewModel.requeueStaleOutboundInFlight()
         }
     }
-    LaunchedEffect(sessionLive, targetSessionId.value, outboundQueueItems) {
-        outboundQueueAutoFlushController.onQueueSnapshotChanged(sessionLive) { excludingIds ->
-            promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
-        }
-    }
+    TmuxOutboundQueueAutoFlushEffect(
+        sessionLive = sessionLive,
+        targetSessionKey = targetSessionId.value,
+        promptComposerViewModel = promptComposerViewModel,
+        controller = outboundQueueAutoFlushController,
+    )
     val sessionCardsState by viewModel.sessionCards.collectAsState()
     val sessionCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
         if (sessionCardsState.targetKey == activeSessionCardsTargetKey) {
@@ -4277,6 +4277,22 @@ internal fun handleTmuxSessionSelection(
     if (selectedSessionName == currentSessionName) return
     onDismiss()
     onReplace(selectedSessionName)
+}
+
+@Composable
+private fun TmuxOutboundQueueAutoFlushEffect(
+    sessionLive: Boolean,
+    targetSessionKey: String,
+    promptComposerViewModel: PromptComposerViewModel,
+    controller: OutboundQueueAutoFlushController,
+) {
+    LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
+        promptComposerViewModel.outboundQueueItems.collect {
+            controller.onQueueSnapshotChanged(sessionLive) { excludingIds ->
+                promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
+            }
+        }
+    }
 }
 
 /**

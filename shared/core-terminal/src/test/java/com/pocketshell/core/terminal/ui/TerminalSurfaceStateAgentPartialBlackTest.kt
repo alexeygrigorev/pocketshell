@@ -76,6 +76,12 @@ class TerminalSurfaceStateAgentPartialBlackTest {
     /** ESC, so the test feeds real control sequences. */
     private val esc = ""
 
+    /** The default emulator pane width (SshTerminalBridge.INITIAL_COLUMNS) the JVM harness runs at. */
+    private val WRAP_COLUMNS = 80
+
+    /** A wide frame line length so each line WRAPS at [WRAP_COLUMNS] (80 + a 20-char continuation). */
+    private val WIDE_LINE_LEN = 100
+
     /**
      * The full alt-screen agent frame tmux's grid holds while "Working": a header, a couple
      * of conversation lines, a large BLANK conversation area (padding — the sparse part), an
@@ -260,6 +266,83 @@ class TerminalSurfaceStateAgentPartialBlackTest {
             "#807: when tmux's alt-screen is ALSO near-empty (agent's own clear) the union " +
                 "must NOT heal — there is no lost frame to restore",
             state.visibleRenderLostFrameVsCapture(voidCapture),
+        )
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Issue #1153 REOPEN — the STRICT cross-capture oracle at a WRAPPING width (the coverage gap
+    // that let #1153 come back). The prior #1153 JVM tests all run at a fixed NON-wrapping width
+    // (short lines) and read the render through the cheap local pre-gate — they never exercise the
+    // per-line-hash oracle against an independently-captured `capture-pane` snapshot when a frame
+    // line is WIDER than the pane. On the CI emulator (~62 cols) the send-with-attachment frame row
+    // (~68 chars) wraps: the render folds the soft-wrap back to a logical line while `capture-pane
+    // -p` (no `-J`) emits it as two PHYSICAL rows, so the #1300 physical-row hash counted every
+    // wrapped-but-fully-restored frame line as ≥2 "lost" rows and the E2E stayed chronically RED
+    // even though the heal restored the frame. These pin the wrap-tolerant contract.
+
+    /** A wide LOGICAL frame line (100 chars, NO spaces) that wraps at the 80-col pane width. */
+    private fun wideFrameLine(row: Int): String {
+        val head = "WRAP-frame-row-$row-"
+        return head + ".".repeat(WIDE_LINE_LEN - head.length)
+    }
+
+    /**
+     * Mirror `tmux capture-pane -p` (no `-J`): emit each wide logical line as the PHYSICAL grid rows
+     * tmux splits it into at the pane width — the exact shape that mismatched the folded render.
+     */
+    private fun captureAsPhysicalRows(logical: List<String>, columns: Int): String =
+        logical.joinToString("\n") { line -> line.chunked(columns).joinToString("\n") } + "\n"
+
+    /**
+     * Issue #1153 (reopen) RED→GREEN at a WRAPPING width: a fully-restored frame that merely
+     * REFLOWED — the render folds each wide line's soft-wrap into a logical line, while tmux's
+     * `capture-pane -p` holds it as two physical rows — must score HEALTHY. On base (the #1300
+     * physical-row hash) this scored "lost" (each wrapped line = ≥2 missing rows), which is the
+     * chronic CI RED. The load-bearing assertion is the STRICT oracle itself, not the local pre-gate.
+     */
+    @Test
+    fun reflowedFullFrameScoresHealthyAtWrappingWidth() = withAttachedSurface { state ->
+        val logical = (0 until 10).map { wideFrameLine(it) }
+        // Render: feed the wide frame with hard newlines → each line soft-wraps at col 80, so the
+        // render holds physical rows the model folds back to logical lines.
+        val render = buildString {
+            append("$esc[2J$esc[H")
+            for (line in logical) append("$line\r\n")
+        }
+        state.appendRemoteOutput(render.toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        // tmux's authoritative capture of the SAME content, but as `capture-pane -p` PHYSICAL rows.
+        val capture = captureAsPhysicalRows(logical, WRAP_COLUMNS)
+        assertFalse(
+            "GREEN (#1153 reopen): a correctly-restored frame that merely REFLOWED (render folds " +
+                "soft-wrap, capture-pane emits physical rows) must score HEALTHY via the strict " +
+                "cross-capture oracle — not falsely lost the way the #1300 physical-row hash did",
+            state.visibleRenderLostFrameVsCapture(capture),
+        )
+    }
+
+    /**
+     * Issue #1153 (reopen) non-masking guard: at the SAME wrapping width, a GENUINELY lost/black
+     * render (only a couple of short survivors over black) must STILL score LOST. Proves the
+     * wrap-tolerance forgives REFLOW only — it never conjures missing content back (G6: the fix
+     * did not weaken real black-frame detection into always-healthy).
+     */
+    @Test
+    fun genuinelyLostFrameStillScoresLostAtWrappingWidth() = withAttachedSurface { state ->
+        val render = buildString {
+            append("$esc[2J$esc[H")
+            append("only-one-surviving-live-line\r\n")
+            append("and-one-more-survivor\r\n")
+        }
+        state.appendRemoteOutput(render.toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        // tmux holds the FULL wide frame (10 wide logical lines → 20 physical capture rows).
+        val logical = (0 until 10).map { wideFrameLine(it) }
+        val capture = captureAsPhysicalRows(logical, WRAP_COLUMNS)
+        assertTrue(
+            "non-masking (#1153 reopen): a genuinely lost/black render must STILL score LOST at a " +
+                "wrapping width — the wrap-tolerance forgives reflow, never missing content",
+            state.visibleRenderLostFrameVsCapture(capture),
         )
     }
 

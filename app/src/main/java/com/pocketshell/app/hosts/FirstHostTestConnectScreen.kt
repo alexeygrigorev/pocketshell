@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -24,6 +26,9 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.bootstrap.BootstrapTool
+import com.pocketshell.app.bootstrap.HostBootstrapSheet
+import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -63,12 +68,58 @@ fun FirstHostTestConnectScreen(
     onOpenHost: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FirstHostTestConnectViewModel = hiltViewModel(),
+    bootstrapViewModel: HostListViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
+    val bootstrapState by bootstrapViewModel.bootstrapState.collectAsState()
+    val bootstrapHostName by bootstrapViewModel.bootstrapHostName.collectAsState()
+    val pendingNavigation by bootstrapViewModel.pendingNavigation.collectAsState()
+    val currentOnOpenHost by rememberUpdatedState(onOpenHost)
     LaunchedEffect(hostId) {
         viewModel.start(hostId)
     }
+    LaunchedEffect(pendingNavigation) {
+        val pending = pendingNavigation
+        if (pending != null && pending.ready) {
+            currentOnOpenHost(pending.host, pending.keyPath, pending.passphrase)
+            bootstrapViewModel.consumePendingNavigation()
+        }
+    }
 
+    FirstHostTestConnectContent(
+        state = state,
+        hostId = hostId,
+        onBack = onBack,
+        onEditHost = onEditHost,
+        onRetry = { viewModel.start(hostId, force = true) },
+        onStartSetup = { host, keyPath -> bootstrapViewModel.bootstrapHost(host, keyPath, null) },
+        bootstrapState = bootstrapState,
+        bootstrapHostName = bootstrapHostName,
+        onInstall = { bootstrapViewModel.installTmuxOnPendingHost() },
+        onInstallTool = { tool -> bootstrapViewModel.installBootstrapTool(tool) },
+        onEnableNotifications = { bootstrapViewModel.installTmuxOnPendingHost() },
+        onDismissSetup = { bootstrapViewModel.dismissBootstrapAndOpen() },
+        modifier = modifier,
+    )
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun FirstHostTestConnectContent(
+    state: FirstHostTestConnectState,
+    hostId: Long,
+    onBack: () -> Unit,
+    onEditHost: (Long) -> Unit,
+    onRetry: () -> Unit,
+    onStartSetup: (HostEntity, keyPath: String) -> Unit,
+    bootstrapState: HostBootstrapSheetState?,
+    bootstrapHostName: String,
+    onInstall: () -> Unit,
+    onInstallTool: (BootstrapTool) -> Unit,
+    onEnableNotifications: () -> Unit,
+    onDismissSetup: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -92,7 +143,13 @@ fun FirstHostTestConnectScreen(
                 }
             },
         )
-        FirstHostWizardSteps(activeStep = FirstHostWizardStep.Test)
+        FirstHostWizardSteps(
+            activeStep = if (state.status == FirstHostTestStatus.Success) {
+                FirstHostWizardStep.Setup
+            } else {
+                FirstHostWizardStep.Test
+            },
+        )
 
         Column(
             modifier = Modifier
@@ -117,11 +174,11 @@ fun FirstHostTestConnectScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     PocketShellButton(
-                        text = "Open host",
+                        text = "Finish setup",
                         onClick = {
                             val host = state.host ?: return@PocketShellButton
                             val key = state.key ?: return@PocketShellButton
-                            onOpenHost(host, key.privateKeyPath, null)
+                            onStartSetup(host, key.privateKeyPath)
                         },
                         variant = ButtonVariant.Primary,
                         modifier = Modifier
@@ -158,7 +215,7 @@ fun FirstHostTestConnectScreen(
                     ) {
                         PocketShellButton(
                             text = "Retry",
-                            onClick = { viewModel.start(hostId, force = true) },
+                            onClick = onRetry,
                             variant = ButtonVariant.Primary,
                             modifier = Modifier
                                 .weight(1f)
@@ -176,6 +233,18 @@ fun FirstHostTestConnectScreen(
                 }
             }
         }
+    }
+
+    bootstrapState?.let { setupState ->
+        HostBootstrapSheet(
+            state = setupState,
+            hostName = bootstrapHostName,
+            onInstall = onInstall,
+            onInstallTool = onInstallTool,
+            onEnableNotifications = onEnableNotifications,
+            onSkip = onDismissSetup,
+            onDismiss = onDismissSetup,
+        )
     }
 }
 

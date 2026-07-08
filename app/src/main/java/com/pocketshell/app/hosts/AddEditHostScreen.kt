@@ -362,6 +362,7 @@ internal enum class FirstHostWizardStep {
     Key,
     Host,
     Test,
+    Setup,
 }
 
 @Composable
@@ -373,6 +374,7 @@ internal fun FirstHostWizardSteps(
         FirstHostWizardStep.Key to "Key",
         FirstHostWizardStep.Host to "Host",
         FirstHostWizardStep.Test to "Test",
+        FirstHostWizardStep.Setup to "Setup",
     )
     Row(
         modifier = modifier

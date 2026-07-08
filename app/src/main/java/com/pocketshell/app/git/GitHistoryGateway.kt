@@ -67,6 +67,69 @@ class GitHistoryGateway(private val session: SshSession) {
     }
 
     /**
+     * Fetch the unified diff for a single commit [ref] in [dir] over the warm
+     * session — issue #1242.
+     *
+     * Runs `git -C <dir> show --no-color <ref>` and, crucially, pipes it through
+     * `head -c <cap+1>` so the number of bytes pulled over SSH is HARD-bounded on
+     * the server side — a giant commit can never trigger an unbounded read (the
+     * transcript byte-cap lesson). We ask for one byte past the cap so the
+     * over-cap case is detectable: if the returned payload exceeds [maxBytes] the
+     * diff was truncated, and [parseDiff] marks it so the UI shows a visible
+     * marker. The render list is additionally capped at [maxLines] lines.
+     *
+     * [ref] is single-quoted for shell safety even though it originates from our
+     * own parsed log; a stray value can never break out of its argument. Returns
+     * a [NotAGitRepoException] failure when [dir] isn't a working tree (mirroring
+     * [recentCommits]) and a [GitCommandException] when the ref doesn't resolve
+     * to a commit or the show otherwise fails.
+     */
+    suspend fun commitDiff(
+        dir: String,
+        ref: String,
+        maxBytes: Int = DEFAULT_DIFF_BYTE_CAP,
+        maxLines: Int = DEFAULT_DIFF_MAX_LINES,
+    ): Result<GitCommitDiff> {
+        val quoted = quoteSingle(dir)
+        val probe = runCatching {
+            session.exec("git -C $quoted rev-parse --is-inside-work-tree 2>/dev/null")
+        }.getOrElse { return Result.failure(it) }
+        if (probe.exitCode != 0 || probe.stdout.trim() != "true") {
+            return Result.failure(NotAGitRepoException(dir))
+        }
+
+        // Verify the ref resolves to a commit BEFORE the (byte-capped) show, so a
+        // bad ref gives a precise error instead of an empty/garbled payload.
+        val refQuoted = quoteSingle(ref)
+        val verify = runCatching {
+            session.exec("git -C $quoted rev-parse --verify --quiet $refQuoted^{commit} 2>/dev/null")
+        }.getOrElse { return Result.failure(it) }
+        if (verify.exitCode != 0 || verify.stdout.isBlank()) {
+            return Result.failure(GitCommandException("Unknown commit: $ref"))
+        }
+
+        val cap = maxBytes.coerceAtLeast(1)
+        // 2>/dev/null keeps git's stderr out of the parsed patch; the pipe to
+        // `head -c` bounds the transferred bytes at cap+1 so over-cap is
+        // detectable without ever pulling the whole diff.
+        val showCmd =
+            "git -C $quoted show --no-color $refQuoted 2>/dev/null | head -c ${cap + 1}"
+        val result = runCatching { session.exec(showCmd) }
+            .getOrElse { return Result.failure(it) }
+        // The pipeline exit is head's, which is 0 even when git failed; an empty
+        // payload for a ref that resolved above means the show produced nothing.
+        if (result.stdout.isEmpty()) {
+            return Result.failure(
+                GitCommandException(
+                    result.stderr.trim().ifBlank { "git show produced no output for $ref" },
+                ),
+            )
+        }
+        val byteCapExceeded = result.stdout.toByteArray(Charsets.UTF_8).size > cap
+        return Result.success(parseDiff(ref, result.stdout, byteCapExceeded, maxLines))
+    }
+
+    /**
      * Fetch the read-only repository overview for [dir] — issue #647: branches,
      * linked worktrees, and a working-tree status summary (current branch,
      * ahead/behind vs upstream, dirty/clean, last commit).
@@ -258,6 +321,23 @@ class GitHistoryGateway(private val session: SshSession) {
     companion object {
         const val DEFAULT_LIMIT: Int = 100
 
+        /**
+         * Server-side byte cap on a single `git show` (issue #1242). Bounds the
+         * bytes pulled over SSH so a giant commit can't trigger an unbounded
+         * read; 256 KiB comfortably covers a normal review diff while staying
+         * cheap. The show is piped through `head -c cap+1` so over-cap is
+         * detectable.
+         */
+        const val DEFAULT_DIFF_BYTE_CAP: Int = 256 * 1024
+
+        /**
+         * Render cap on the number of diff lines the UI list holds (issue
+         * #1242). A second bound below the byte cap so even a byte-small diff of
+         * very short lines can't produce an unbounded list; when tripped the
+         * diff is marked truncated.
+         */
+        const val DEFAULT_DIFF_MAX_LINES: Int = 2_000
+
         /** Default issue listing cap — keeps a giant project's list manageable. */
         const val DEFAULT_ISSUE_LIMIT: Int = 50
 
@@ -304,6 +384,91 @@ class GitHistoryGateway(private val session: SshSession) {
                     )
                 }
                 .toList()
+        }
+
+        /**
+         * Parse raw `git show --no-color` output into classified [DiffLine]s —
+         * issue #1242. Pure — unit-tested without a live session.
+         *
+         * Splits on newlines, classifies each line for the `+`/`-` gutter and
+         * syntax-neutral color, and enforces the render [maxLines] cap. The
+         * result is marked [GitCommitDiff.truncated] when either the server-side
+         * byte cap was exceeded ([byteCapExceeded]) or the line count hit
+         * [maxLines], so the UI shows a visible truncation marker.
+         */
+        internal fun parseDiff(
+            ref: String,
+            raw: String,
+            byteCapExceeded: Boolean,
+            maxLines: Int = DEFAULT_DIFF_MAX_LINES,
+        ): GitCommitDiff {
+            val cap = maxLines.coerceAtLeast(1)
+            // Drop a single trailing empty element from a final newline, but keep
+            // interior blank lines (a blank context line is meaningful).
+            val rawLines = raw.split('\n').let {
+                if (it.isNotEmpty() && it.last().isEmpty()) it.dropLast(1) else it
+            }
+            val overLineCap = rawLines.size > cap
+            // `git show` prints the commit message body indented with spaces
+            // BEFORE the first `diff --git`; those look like context lines, so we
+            // only treat `+`/`-`/space as add/remove/context once we're inside the
+            // patch (a `diff --git` has been seen). Track that state as we go.
+            var inPatch = false
+            val lines = rawLines.asSequence()
+                .take(cap)
+                .map { line ->
+                    if (line.startsWith("diff --git") || line.startsWith("@@")) inPatch = true
+                    classifyDiffLine(line, inPatch)
+                }
+                .toList()
+            return GitCommitDiff(
+                ref = ref,
+                lines = lines,
+                truncated = byteCapExceeded || overLineCap,
+            )
+        }
+
+        /**
+         * Classify a single raw diff line into a [DiffLine] with a `+`/`-`/space
+         * gutter and a [DiffLineKind]. Pure — unit-tested. [inPatch] is true once
+         * the first `diff --git` has been seen; before that (the commit-message
+         * header git show prints) an indented or `+`/`-` line is metadata, NOT a
+         * diff line. The leading diff prefix is moved into the gutter for
+         * add/remove/context lines so [DiffLine.content] is the bare code;
+         * header/metadata lines keep an empty gutter and their full text.
+         */
+        internal fun classifyDiffLine(line: String, inPatch: Boolean): DiffLine = when {
+            line.startsWith("@@") ->
+                DiffLine(gutter = "", content = line, kind = DiffLineKind.HunkHeader)
+            line.startsWith("diff --git") ||
+                line.startsWith("index ") ||
+                line.startsWith("--- ") ||
+                line.startsWith("+++ ") ||
+                line.startsWith("new file") ||
+                line.startsWith("deleted file") ||
+                line.startsWith("old mode") ||
+                line.startsWith("new mode") ||
+                line.startsWith("similarity index") ||
+                line.startsWith("dissimilarity index") ||
+                line.startsWith("rename ") ||
+                line.startsWith("copy ") ||
+                line.startsWith("Binary files") ->
+                DiffLine(gutter = "", content = line, kind = DiffLineKind.FileHeader)
+            // Everything before the first `diff --git` (commit hash, Author/Date,
+            // the indented subject/body, blank separators) is commit metadata.
+            !inPatch ->
+                DiffLine(gutter = "", content = line, kind = DiffLineKind.CommitMeta)
+            // A real added/removed line — but NOT the `+++`/`---` file headers,
+            // which are matched above.
+            line.startsWith("+") ->
+                DiffLine(gutter = "+", content = line.substring(1), kind = DiffLineKind.Added)
+            line.startsWith("-") ->
+                DiffLine(gutter = "-", content = line.substring(1), kind = DiffLineKind.Removed)
+            line.startsWith(" ") ->
+                DiffLine(gutter = " ", content = line.substring(1), kind = DiffLineKind.Context)
+            // The `\ No newline at end of file` marker inside a hunk — neutral.
+            else ->
+                DiffLine(gutter = "", content = line, kind = DiffLineKind.CommitMeta)
         }
 
         /**

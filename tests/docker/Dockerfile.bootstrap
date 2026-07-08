@@ -5,7 +5,7 @@ ARG INSTALL_FISH=false
 ARG LOGIN_SHELL=/bin/sh
 ENV POCKETSHELL_BOOTSTRAP_SCENARIO=${SCENARIO}
 
-RUN packages="openssh-server openssh-client tmux procps" \
+RUN packages="openssh-server openssh-client tmux procps python3" \
     && if [ "$INSTALL_FISH" = "true" ]; then packages="$packages fish"; fi \
     && apk add --no-cache $packages \
     && ssh-keygen -A \

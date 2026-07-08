@@ -1512,6 +1512,18 @@ JOURNEY_CLASSES=(
   # its fully-qualified name directly (not under the proof prefix).
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"
 
+  # ADDED (#1236, D26 / D32 G9): per-host notification readiness + the "enable
+  # notifications" upgrade affordance on the REAL HostBootstrapSheet. A host
+  # with the CLI but no D26 stop/idle hooks is a SILENT host under D21 (server
+  # push is the only "agent needs input" path); this HARD-asserts the actionable
+  # "Agent notifications · Off · Enable" row fires the enable path and that the
+  # success sheet surfaces "Notifications: on/off". PURE Compose
+  # (createComposeRule, no Docker / SSH / tmux / port — runs on the already-booted
+  # AVD), no self-skip. Carries its fully-qualified name directly. The live
+  # Docker non-destructive-merge journey is HostBootstrapScenarioSuiteTest
+  # #notifications (nightly-extensive bootstrap matrix).
+  "com.pocketshell.app.bootstrap.HostNotificationsReadinessTest"
+
   # ===========================================================================
   # Issue #933 (#928 D9 — detection net). Kept in its OWN block to minimize
   # merge friction with the sibling #931 edits to this file.

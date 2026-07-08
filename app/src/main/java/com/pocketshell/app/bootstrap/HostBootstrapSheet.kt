@@ -66,7 +66,15 @@ public sealed interface HostBootstrapSheetState {
         val report: HostBootstrapReport? = null,
     ) : HostBootstrapSheetState
     public data object Installing : HostBootstrapSheetState
-    public data object Success : HostBootstrapSheetState
+
+    /**
+     * Install/update succeeded. [notificationsReady] (issue #1236) drives the
+     * per-host "notifications: on/off" line so a silent host is visible on the
+     * bootstrap result.
+     */
+    public data class Success(
+        val notificationsReady: Boolean = false,
+    ) : HostBootstrapSheetState
     public data class Failed(val message: String) : HostBootstrapSheetState
 }
 
@@ -77,6 +85,12 @@ public const val HOST_BOOTSTRAP_CONTINUE_TAG: String = "host-bootstrap-continue"
 public const val HOST_BOOTSTRAP_CLOSE_TAG: String = "host-bootstrap-close"
 public const val HOST_BOOTSTRAP_INSTALLING_TAG: String = "host-bootstrap-installing"
 public const val HOST_BOOTSTRAP_ROW_TAG_PREFIX: String = "host-bootstrap-row-"
+
+// Issue #1236: per-host notification readiness surface + the "enable
+// notifications" affordance (D26 stop/idle hooks).
+public const val HOST_BOOTSTRAP_NOTIFICATIONS_STATUS_TAG: String = "host-bootstrap-notifications-status"
+public const val HOST_BOOTSTRAP_ENABLE_NOTIFICATIONS_TAG: String = "host-bootstrap-enable-notifications"
+public const val HOST_BOOTSTRAP_NOTIFICATIONS_ROW_TITLE: String = "Agent notifications"
 
 /**
  * Compose modal that surfaces on host connect when `tmux` is missing.
@@ -109,6 +123,10 @@ public fun HostBootstrapSheet(
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #1236: enable the D26 stop/idle notification hooks. Defaults to the
+    // full install path so a caller that only wires `onInstall` still enables
+    // notifications.
+    onEnableNotifications: () -> Unit = onInstall,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     ModalBottomSheet(
@@ -125,13 +143,15 @@ public fun HostBootstrapSheet(
                 state = state,
                 onInstall = onInstall,
                 onInstallTool = onInstallTool,
+                onEnableNotifications = onEnableNotifications,
                 onSkip = onSkip,
             )
 
             HostBootstrapSheetState.Installing -> InstallingContent(hostName = hostName)
 
-            HostBootstrapSheetState.Success -> SuccessContent(
+            is HostBootstrapSheetState.Success -> SuccessContent(
                 hostName = hostName,
+                notificationsReady = state.notificationsReady,
                 onContinue = onDismiss,
             )
 
@@ -150,6 +170,7 @@ private fun PromptContent(
     state: HostBootstrapSheetState.Prompt,
     onInstall: () -> Unit,
     onInstallTool: (BootstrapTool) -> Unit,
+    onEnableNotifications: () -> Unit,
     onSkip: () -> Unit,
 ) {
     SheetColumn {
@@ -160,6 +181,7 @@ private fun PromptContent(
         SetupActions(
             state = state,
             onInstallTool = onInstallTool,
+            onEnableNotifications = onEnableNotifications,
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         if (state.hasActionableSetup()) {
@@ -202,15 +224,18 @@ private fun PromptContent(
 private fun SetupActions(
     state: HostBootstrapSheetState.Prompt,
     onInstallTool: (BootstrapTool) -> Unit,
+    onEnableNotifications: () -> Unit,
 ) {
     val report = state.report ?: return
     val missingTools = report.missingTools
     if (!report.hasBootstrapSheetRows()) return
 
+    val notificationsActionable = report.notificationsActionable
     Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
     SectionHeader(
         label = "Setup actions",
-        count = missingTools.size + report.versionMismatchedTools.size,
+        count = missingTools.size + report.versionMismatchedTools.size +
+            (if (notificationsActionable) 1 else 0),
     )
     Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm)) {
         missingTools.forEach { tool ->
@@ -236,6 +261,20 @@ private fun SetupActions(
                 onClick = { onInstallTool(BootstrapTool.Pocketshell) },
             )
         }
+        // Issue #1236 (D26): the "agent needs input" notification hooks. A host
+        // with the CLI but no hooks is a SILENT host under D21 (server-side
+        // push is the only path), so surface it as an actionable row with a
+        // one-tap "Enable" that runs the non-destructive `hooks install`.
+        if (notificationsActionable) {
+            SetupActionRow(
+                title = HOST_BOOTSTRAP_NOTIFICATIONS_ROW_TITLE,
+                detail = "Off — install the stop/idle hooks so \"agent needs input\" pushes work.",
+                statusLabel = "Off",
+                actionLabel = "Enable",
+                actionTestTag = HOST_BOOTSTRAP_ENABLE_NOTIFICATIONS_TAG,
+                onClick = onEnableNotifications,
+            )
+        }
         // Mosh row intentionally not rendered. Spike #159 returned NO-GO
         // for Mosh + tmux -CC, so surfacing a permanent "unsupported" row
         // would only draw attention to a feature we do not ship. The
@@ -246,12 +285,14 @@ private fun SetupActions(
 
 internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
     missingTools.isNotEmpty() ||
-        versionMismatchedTools.isNotEmpty()
+        versionMismatchedTools.isNotEmpty() ||
+        notificationsActionable
 
 internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
     needsTmux ||
         report?.missingTools?.isNotEmpty() == true ||
-        report?.versionMismatchedTools?.isNotEmpty() == true
+        report?.versionMismatchedTools?.isNotEmpty() == true ||
+        report?.notificationsActionable == true
 
 internal fun HostBootstrapReport.needsPocketshellDaemonSetup(): Boolean {
     val daemonStatus = daemon
@@ -272,6 +313,7 @@ private fun SetupActionRow(
     statusLabel: String,
     actionLabel: String,
     onClick: () -> Unit,
+    actionTestTag: String? = null,
 ) {
     ListRow(
         title = title,
@@ -289,16 +331,21 @@ private fun SetupActionRow(
                 text = actionLabel,
                 onClick = onClick,
                 variant = ButtonVariant.Secondary,
+                modifier = if (actionTestTag != null) Modifier.testTag(actionTestTag) else Modifier,
             )
         },
     )
 }
 
 @Composable
-private fun SetupInfoRow(title: String, detail: String) {
+private fun SetupInfoRow(
+    title: String,
+    detail: String,
+    testTag: String = HOST_BOOTSTRAP_ROW_TAG_PREFIX + title,
+) {
     Column(
         modifier = Modifier
-            .testTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + title)
+            .testTag(testTag)
             .fillMaxWidth()
             .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
             .border(1.dp, PocketShellColors.Border, PocketShellShapes.small)
@@ -351,12 +398,22 @@ private fun InstallingContent(hostName: String) {
 @Composable
 private fun SuccessContent(
     hostName: String,
+    notificationsReady: Boolean,
     onContinue: () -> Unit,
 ) {
     SheetColumn {
         SheetHeader(
             title = "Host ready",
             subtitle = hostBootstrapSuccessSubtitle(hostName),
+        )
+        Spacer(modifier = Modifier.height(PocketShellSpacing.md))
+        // Issue #1236: per-host notification readiness. A silent host (hooks
+        // not installed) is visible here instead of the user only finding out
+        // when an agent finishes unheard.
+        SetupInfoRow(
+            title = HOST_BOOTSTRAP_NOTIFICATIONS_ROW_TITLE,
+            detail = hostBootstrapNotificationsStatusText(notificationsReady),
+            testTag = HOST_BOOTSTRAP_NOTIFICATIONS_STATUS_TAG,
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.lg + PocketShellSpacing.xs))
         // Issue #885 (hard cut, D22): after a successful install/update the
@@ -379,6 +436,18 @@ private fun SuccessContent(
 
 internal fun hostBootstrapSuccessSubtitle(hostName: String): String =
     "$hostName · tmux and the pocketshell CLI are ready."
+
+/**
+ * Issue #1236: the per-host notification-readiness line. "On" means the D26
+ * stop/idle hooks are installed so "agent needs input" pushes will fire; "Off"
+ * makes a silent host visible (and points at the re-check upgrade path).
+ */
+internal fun hostBootstrapNotificationsStatusText(notificationsReady: Boolean): String =
+    if (notificationsReady) {
+        "Notifications: on — this host will push when an agent needs input."
+    } else {
+        "Notifications: off — re-check setup to enable \"agent needs input\" pushes."
+    }
 
 @Composable
 private fun FailedContent(hostName: String, message: String, onClose: () -> Unit) {

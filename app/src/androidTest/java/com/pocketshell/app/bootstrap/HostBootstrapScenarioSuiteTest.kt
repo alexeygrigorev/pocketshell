@@ -291,6 +291,53 @@ class HostBootstrapScenarioSuiteTest {
         }
     } }
 
+    @Test
+    fun notifications() { scenario("notifications") {
+        // Issue #1236 (D26): the CLI + tmux are ready, but the agent stop/idle
+        // notification hooks are OFF — a SILENT host under D21 (server-side push
+        // is the only "agent needs input" path). Bootstrap must surface the
+        // silent host and offer a one-tap enable that folds in a NON-DESTRUCTIVE
+        // `pocketshell hooks install`.
+        launchSeededHost()
+        tapSeededHost()
+
+        // Precondition: the pre-existing foreign Claude Stop hook is present and
+        // our hook is NOT yet installed (silent host).
+        assertRemote("fixture must start with a pre-existing foreign hook and NO pocketshell hook") {
+            "/bin/sh -lc 'grep -q my-preexisting-stop-hook ~/.claude/settings.json && " +
+                "! grep -q claude_stop.py ~/.claude/settings.json'"
+        }
+
+        // A ready host with notifications off is diverted to the setup sheet
+        // instead of navigating past it — the silent host is VISIBLE.
+        waitForBootstrapSheet()
+        compose.onNodeWithText("Host setup needed").assertExists()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + HOST_BOOTSTRAP_NOTIFICATIONS_ROW_TITLE)
+            .assertExists()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_ENABLE_NOTIFICATIONS_TAG).assertExists()
+        capture("02-notifications-off")
+
+        // Tap "Enable": runs the server setup path, which folds in the
+        // non-destructive hooks install.
+        compose.onNodeWithTag(HOST_BOOTSTRAP_ENABLE_NOTIFICATIONS_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithText("Host ready").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Host ready").assertExists()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_NOTIFICATIONS_STATUS_TAG).assertExists()
+        compose.onNodeWithText("Notifications: on", substring = true).assertExists()
+        capture("03-notifications-on")
+
+        // AC3 (G2 class-coverage): the hook files are present AND the install
+        // MERGED non-destructively — BOTH our hook AND the pre-existing foreign
+        // hook survive in ~/.claude/settings.json.
+        assertRemote("hooks install must merge non-destructively into the existing Claude config") {
+            "/bin/sh -lc 'grep -q claude_stop.py ~/.claude/settings.json && " +
+                "grep -q my-preexisting-stop-hook ~/.claude/settings.json && " +
+                "test -f ~/.cache/pocketshell/hooks/.installed'"
+        }
+    } }
+
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
         assumeScenariosEnabled()
         val definition = requireNotNull(SCENARIOS[name]) { "unknown bootstrap scenario: $name" }
@@ -651,7 +698,31 @@ class HostBootstrapScenarioSuiteTest {
                         "printf 'active enabled\\n' > $STATE_FILE"
                 },
             ),
+            // Issue #1236 (D26): CLI + tmux ready, but the agent stop/idle
+            // notification hooks are OFF (a silent host). A pre-existing foreign
+            // Claude hook is seeded so the bootstrap install can be asserted to
+            // MERGE non-destructively.
+            "notifications" to ScenarioDefinition(
+                label = "notifications",
+                port = 2241,
+                resetCommand = { targetAppVersion ->
+                    "mkdir -p ~/.claude ~/.cache/pocketshell/hooks; " +
+                        "printf '%s' " +
+                        shellQuote(PREEXISTING_CLAUDE_SETTINGS) +
+                        " > ~/.claude/settings.json; " +
+                        "rm -f ~/.cache/pocketshell/hooks/.installed; " +
+                        "touch ~/.pocketshell-fixture-hooks-enabled; " +
+                        versionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
+            ),
         )
+
+        // A user's PRE-EXISTING Claude config with a foreign Stop hook. The
+        // D26 `hooks install` merge must preserve this entry (non-destructive).
+        const val PREEXISTING_CLAUDE_SETTINGS: String =
+            "{\"model\":\"sonnet\",\"hooks\":{\"Stop\":[{\"hooks\":" +
+                "[{\"type\":\"command\",\"command\":\"my-preexisting-stop-hook\"}]}]}}"
     }
 }
 

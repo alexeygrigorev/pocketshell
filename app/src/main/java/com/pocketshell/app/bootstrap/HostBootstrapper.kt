@@ -117,6 +117,33 @@ public sealed interface ToolStatus {
 }
 
 /**
+ * Whether the agent stop/idle notification hooks (D26, `pocketshell hooks
+ * install`) are present on the host.
+ *
+ * Under D21 the app never background-polls, so a server-side stop/idle hook
+ * feeding FCM is the ONLY path to an "agent needs input" push. A host with
+ * the `pocketshell` CLI but no hooks is therefore a **silent host** — the
+ * user never hears that an agent finished. Issue #1236 folds the hook
+ * install into host bootstrap and surfaces this state so a silent host is
+ * visible.
+ *
+ * - [Installed] — every engine reported by `pocketshell hooks status --json`
+ *   has our stop/idle hook installed. Notifications are ready.
+ * - [NotInstalled] — the CLI is present and `hooks status` ran, but at least
+ *   one engine is missing our hook. This is the actionable "enable
+ *   notifications" state.
+ * - [Unknown] — we could not determine the state: the CLI is absent, the
+ *   `hooks` subcommand failed, or the transport errored. Treated as "don't
+ *   pester" (mirrors [TmuxStatus.Unknown]) — we never nudge on Unknown
+ *   because we cannot prove notifications are actually off.
+ */
+public sealed interface HooksStatus {
+    public data object Installed : HooksStatus
+    public data object NotInstalled : HooksStatus
+    public data class Unknown(val reason: String) : HooksStatus
+}
+
+/**
  * Compare two dotted-numeric versions (`MAJOR.MINOR.PATCH`, any number of
  * components) numerically. Returns a negative number when [a] < [b], zero
  * when equal, a positive number when [a] > [b], or `null` when either side
@@ -188,6 +215,10 @@ public data class HostBootstrapReport(
     val installerPath: String? = null,
     val daemon: PocketshellDaemonStatus,
     val mosh: MoshStatus = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+    // Issue #1236 (D26): agent stop/idle notification hooks on the host.
+    // Defaults to Unknown so a report constructed before a hooks probe
+    // (or on a host without the CLI) never falsely claims notifications on.
+    val hooks: HooksStatus = HooksStatus.Unknown("hooks not probed"),
 ) {
     public val missingTools: List<BootstrapTool>
         get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Missing }
@@ -217,6 +248,36 @@ public data class HostBootstrapReport(
 
     public val isReady: Boolean
         get() = isRequiredReady
+
+    /**
+     * Issue #1236: the `pocketshell` CLI is present AND app-compatible
+     * (a plain [ToolStatus.Installed], NOT [ToolStatus.AppUpdateRequired]).
+     * Hooks can only be installed / read through the CLI, so this gates
+     * every notifications affordance. AppUpdateRequired hosts are handled by
+     * the soft "update the app" banner path and are intentionally excluded
+     * so they never get diverted into a setup sheet.
+     */
+    public val pocketshellCompatible: Boolean
+        get() = tools[BootstrapTool.Pocketshell] is ToolStatus.Installed
+
+    /**
+     * Issue #1236: notifications are ready when the D26 stop/idle hooks are
+     * installed on the host. This is the "notifications: on" signal surfaced
+     * per-host so a silent host is visible.
+     */
+    public val notificationsReady: Boolean
+        get() = hooks is HooksStatus.Installed
+
+    /**
+     * Issue #1236: the host has a compatible CLI but the hooks are
+     * *definitively* not installed — the actionable "enable notifications"
+     * state. We deliberately do NOT treat [HooksStatus.Unknown] as
+     * actionable: if we cannot prove notifications are off (old CLI without
+     * the `hooks` subcommand, transport error) we never pester the user,
+     * mirroring the [TmuxStatus.Unknown] policy.
+     */
+    public val notificationsActionable: Boolean
+        get() = pocketshellCompatible && hooks is HooksStatus.NotInstalled
 }
 
 /**
@@ -296,12 +357,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         } else {
             PocketshellDaemonStatus.Missing
         }
+        val hooks = probeHooks(session, tools[BootstrapTool.Pocketshell], bootstrapPath)
         return HostBootstrapReport(
             tools = tools,
             installer = installer?.installer,
             installerPath = installer?.path,
             daemon = daemon,
             mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+            hooks = hooks,
         )
     }
 
@@ -356,7 +419,88 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 reason = "Required host tools are still missing after setup: $missing.",
             )
         }
+
+        // Issue #1236 (D26): once the required tools are present, fold in the
+        // agent stop/idle notification hooks in the SAME one-tap flow so a
+        // freshly-bootstrapped host is not silently non-notifying. The install
+        // is a NON-DESTRUCTIVE merge (the CLI preserves the user's existing
+        // Claude/Codex/OpenCode config). Best-effort: a hooks-install failure
+        // must NOT fail the whole setup — tmux + the CLI are already usable, so
+        // the readiness probe (via checkServerSetup) reflects whether
+        // notifications ended up on, and the sheet still offers "enable
+        // notifications" rather than reporting a hard install failure.
+        val pocketshellPath = (afterTools.tools[BootstrapTool.Pocketshell] as? ToolStatus.Installed)?.path
+        if (pocketshellPath != null && afterTools.hooks !is HooksStatus.Installed) {
+            installHooks(session, pocketshellPath, bootstrapPath)
+        }
         return InstallResult.Success
+    }
+
+    /**
+     * Issue #1236: probe whether the D26 stop/idle notification hooks are
+     * installed. Only runs against a compatible ([ToolStatus.Installed])
+     * `pocketshell` — hooks live behind the CLI, so without it (or on an
+     * AppUpdateRequired host handled by the app-update banner) the state is
+     * [HooksStatus.Unknown].
+     */
+    private suspend fun probeHooks(
+        session: SshSession,
+        pocketshellStatus: ToolStatus?,
+        bootstrapPath: String?,
+    ): HooksStatus {
+        val path = (pocketshellStatus as? ToolStatus.Installed)?.path
+            ?: return HooksStatus.Unknown("pocketshell CLI not installed")
+        return checkHooks(session, path, bootstrapPath)
+    }
+
+    /**
+     * Run `pocketshell hooks status --json` and classify the result. The CLI
+     * emits `{"engines": [{"engine": "...", "installed": true|false}, ...]}`;
+     * we treat "every engine installed" as [HooksStatus.Installed], any engine
+     * missing as [HooksStatus.NotInstalled], and any failure/unparseable output
+     * as [HooksStatus.Unknown].
+     */
+    internal suspend fun checkHooks(
+        session: SshSession,
+        pocketshellPath: String,
+        bootstrapPath: String?,
+    ): HooksStatus = try {
+        val result = session.exec(
+            pathAwareCommand("${shellQuote(pocketshellPath)} hooks status --json", bootstrapPath),
+        )
+        if (result.exitCode != 0) {
+            HooksStatus.Unknown(
+                "hooks status failed: ${result.stderr.ifBlank { "exit ${result.exitCode}" }}",
+            )
+        } else {
+            parseHooksStatus(result.stdout)
+        }
+    } catch (e: SshException) {
+        HooksStatus.Unknown(e.message ?: e.javaClass.simpleName)
+    } catch (t: Throwable) {
+        HooksStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+    }
+
+    /**
+     * Install the D26 stop/idle hooks for every engine. The server-side
+     * `pocketshell hooks install` merges NON-DESTRUCTIVELY into each engine's
+     * existing config (see `tools/pocketshell/src/pocketshell/hooks.py` and
+     * D26). Returns [InstallResult.Success] on exit 0, else Failed/Error so
+     * callers can surface the reason.
+     */
+    public suspend fun installHooks(
+        session: SshSession,
+        pocketshellPath: String,
+        bootstrapPath: String? = null,
+    ): InstallResult = runInstall(
+        session,
+        pathAwareCommand("${shellQuote(pocketshellPath)} hooks install --engine all", bootstrapPath),
+    )
+
+    internal fun parseHooksStatus(output: String): HooksStatus {
+        val states = HOOKS_INSTALLED_PATTERN.findAll(output).map { it.groupValues[1] }.toList()
+        if (states.isEmpty()) return HooksStatus.Unknown("hooks status returned no engine state")
+        return if (states.all { it == "true" }) HooksStatus.Installed else HooksStatus.NotInstalled
     }
 
     private suspend fun freshenReport(
@@ -379,12 +523,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             } else {
                 PocketshellDaemonStatus.Missing
             }
+            val hooks = probeHooks(session, tools[BootstrapTool.Pocketshell], bootstrapPath)
             return HostBootstrapReport(
                 tools = tools,
                 installer = installer?.installer,
                 installerPath = installer?.path,
                 daemon = daemon,
                 mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+                hooks = hooks,
             )
         }
         return report
@@ -892,6 +1038,12 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
     public companion object {
         private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
+
+        // Issue #1236: extract every `"installed": true|false` from
+        // `pocketshell hooks status --json`. A tolerant regex avoids pulling
+        // in a JSON library for a shape the CLI fully controls.
+        private val HOOKS_INSTALLED_PATTERN: Regex =
+            Regex("\"installed\"\\s*:\\s*(true|false)")
         private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
         private const val PATH_END: String = "__POCKETSHELL_PATH_END__"
         private val COMMON_TOOL_DIRS: List<String> = listOf(

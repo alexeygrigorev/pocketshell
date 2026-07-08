@@ -220,6 +220,7 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
             agents flaky-agent tmux network-fault-proxy packet-loss-proxy \
             bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade \
+            bootstrap-notifications \
             agents-old-cli agents-daemon
 
       - name: Wait for fixture containers to report healthy
@@ -238,6 +239,9 @@ jobs:
           cat /tmp/bootstrap-uv-install-health.log
           wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-uv-upgrade /tmp/bootstrap-uv-upgrade-health.log 60
           cat /tmp/bootstrap-uv-upgrade-health.log
+          # Issue #1236 (D26): the silent-host notifications fixture (2241).
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-notifications /tmp/bootstrap-notifications-health.log 60
+          cat /tmp/bootstrap-notifications-health.log
           # Old-CLI (2238, #849) + daemon (2239, #839) fixtures: the phase-1
           # FolderList*DockerTest journeys target these by host port and fail
           # hard when the port is unforwarded, so wait on them before handing off
@@ -353,6 +357,7 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-ready > artifacts/docker/bootstrap-ready.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-install > artifacts/docker/bootstrap-uv-install.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-upgrade > artifacts/docker/bootstrap-uv-upgrade.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-notifications > artifacts/docker/bootstrap-notifications.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-daemon > artifacts/docker/agents-daemon.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true

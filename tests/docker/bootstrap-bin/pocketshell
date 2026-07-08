@@ -32,5 +32,77 @@ if [ "${1:-}" = "jobs" ] && [ "${2:-}" = "list" ]; then
   exit 0
 fi
 
-printf 'pocketshell bootstrap fixture supports --version, jobs daemon, and jobs list\n' >&2
+# Issue #1236 (D26): agent stop/idle notification hooks. Gated behind a marker
+# file so ONLY the dedicated "notifications" scenario reports a real hooks
+# state; every other bootstrap scenario keeps the old behaviour (`hooks` exits
+# 64 → the app reads HooksStatus.Unknown → navigates unchanged, no nudge).
+hooks_enable_marker="${HOME}/.pocketshell-fixture-hooks-enabled"
+hooks_installed_marker="${HOME}/.cache/pocketshell/hooks/.installed"
+claude_settings="${HOME}/.claude/settings.json"
+our_hook_cmd="python3 ${HOME}/.cache/pocketshell/hooks/claude_stop.py"
+
+if [ "${1:-}" = "hooks" ]; then
+  if [ ! -f "$hooks_enable_marker" ]; then
+    printf 'pocketshell bootstrap fixture: hooks not supported in this scenario\n' >&2
+    exit 64
+  fi
+
+  if [ "${2:-}" = "install" ]; then
+    mkdir -p "${HOME}/.cache/pocketshell/hooks" "${HOME}/.claude"
+    : > "${HOME}/.cache/pocketshell/hooks/claude_stop.py"
+    # NON-DESTRUCTIVE merge into ~/.claude/settings.json (D26): add our
+    # Stop/SubagentStop/Notification command group only when absent, preserving
+    # every other key and any pre-existing hook the user already has.
+    python3 - "$claude_settings" "$our_hook_cmd" <<'PY'
+import json, sys
+path, cmd = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+hooks = data.setdefault("hooks", {})
+group = {"hooks": [{"type": "command", "command": cmd}]}
+for event in ("Stop", "SubagentStop", "Notification"):
+    lst = hooks.setdefault(event, [])
+    if not any(
+        any(h.get("command") == cmd for h in g.get("hooks", []) if isinstance(h, dict))
+        for g in lst if isinstance(g, dict)
+    ):
+        lst.append(group)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+    mkdir -p "$(dirname "$hooks_installed_marker")"
+    : > "$hooks_installed_marker"
+    printf 'claude: installed\ncodex: installed\nopencode: installed\n'
+    exit 0
+  fi
+
+  if [ "${2:-}" = "status" ]; then
+    if [ -f "$hooks_installed_marker" ]; then
+      installed=true
+    else
+      installed=false
+    fi
+    # Match `pocketshell hooks status --json` shape (see hooks.py).
+    printf '{\n'
+    printf '  "bus_path": "%s/.cache/pocketshell/hooks/events.jsonl",\n' "$HOME"
+    printf '  "engines": [\n'
+    printf '    {"engine": "claude", "installed": %s},\n' "$installed"
+    printf '    {"engine": "codex", "installed": %s},\n' "$installed"
+    printf '    {"engine": "opencode", "installed": %s}\n' "$installed"
+    printf '  ],\n'
+    printf '  "recent_events": []\n'
+    printf '}\n'
+    exit 0
+  fi
+
+  printf 'pocketshell bootstrap fixture hooks supports install and status\n' >&2
+  exit 64
+fi
+
+printf 'pocketshell bootstrap fixture supports --version, jobs daemon, jobs list, and hooks\n' >&2
 exit 64

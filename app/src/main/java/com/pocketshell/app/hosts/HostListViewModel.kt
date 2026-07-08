@@ -1169,7 +1169,16 @@ class HostListViewModel internal constructor(
                 // note is surfaced as a small dismissible banner on the host
                 // list (see [pocketshellAppUpdateWarning]), NOT a takeover
                 // sheet. No installer, no "setup needed" framing, no loop.
-                if (report.isReady) {
+                //
+                // Issue #1236: a host with the CLI but no D26 notification
+                // hooks is a SILENT host (server-side push is the only "agent
+                // needs input" path under D21). When that is *definitively*
+                // the case (notificationsActionable — a compatible CLI whose
+                // `hooks status` proved hooks off), surface the one-tap
+                // "enable notifications" upgrade instead of navigating past it.
+                // Unknown hooks state (old CLI without the subcommand) is never
+                // actionable, so those hosts navigate unchanged.
+                if (report.isReady && !report.notificationsActionable) {
                     maybeRaiseAppUpdateWarning(host, report)
                     closeBootstrapSession()
                     setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
@@ -1346,7 +1355,9 @@ class HostListViewModel internal constructor(
                     // sheet.
                     maybeRaiseAppUpdateWarning(host, finalReport)
                     _bootstrapState.value = if (finalReport.isReady) {
-                        HostBootstrapSheetState.Success
+                        HostBootstrapSheetState.Success(
+                            notificationsReady = finalReport.notificationsReady,
+                        )
                     } else {
                         HostBootstrapSheetState.Prompt(
                             needsTmux = false,
@@ -1503,8 +1514,8 @@ class HostListViewModel internal constructor(
             // via the banner, never the sheet.
             maybeRaiseAppUpdateWarning(it, report)
         }
-        _bootstrapState.value = if (!needsTmux && report.isRequiredReady) {
-            HostBootstrapSheetState.Success
+        _bootstrapState.value = if (!needsTmux && report.isRequiredReady && !report.notificationsActionable) {
+            HostBootstrapSheetState.Success(notificationsReady = report.notificationsReady)
         } else {
             HostBootstrapSheetState.Prompt(needsTmux = needsTmux, report = report)
         }

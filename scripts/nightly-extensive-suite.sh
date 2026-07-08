@@ -156,6 +156,11 @@ BOOTSTRAP_METHODS=(
   "ready"
   "uvInstall"
   "appUpdateRequired"
+  # Issue #1236 (D26): the silent-host notifications journey — CLI + tmux ready
+  # but the agent stop/idle hooks off; asserts the one-tap enable folds in a
+  # NON-DESTRUCTIVE `pocketshell hooks install` (pre-existing foreign hook
+  # survives). Needs the bootstrap-notifications:2241 fixture (brought up below).
+  "notifications"
 )
 BOOTSTRAP_CLASS_ARG="$(printf "%s\n" "${BOOTSTRAP_METHODS[@]}" \
   | sed "s|^|$BOOTSTRAP_TEST_CLASS#|" | paste -sd, -)"

@@ -778,6 +778,10 @@ fun HostListScreen(
                 hostName = bootstrapHostName,
                 onInstall = { viewModel.installTmuxOnPendingHost() },
                 onInstallTool = { tool -> viewModel.installBootstrapTool(tool) },
+                // Issue #1236: "Enable notifications" runs the same server
+                // setup path, which folds in the non-destructive D26 hooks
+                // install once the CLI is present.
+                onEnableNotifications = { viewModel.installTmuxOnPendingHost() },
                 onSkip = { viewModel.dismissBootstrapAndOpen() },
                 onDismiss = { viewModel.dismissBootstrapAndOpen() },
             )

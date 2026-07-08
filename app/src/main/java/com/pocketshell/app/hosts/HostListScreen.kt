@@ -25,6 +25,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedTextField
@@ -64,10 +66,10 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.Banner
 import com.pocketshell.uikit.components.BannerRole
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.EmptyState
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
-import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.Pill
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -102,7 +104,8 @@ import kotlin.math.sin
  *   `onOpenSession` callback with the resolved key path.
  * - **FAB** — bottom-right `+` opening `AddEditHostScreen`.
  *
- * Empty-state copy is intentionally terse — the FAB carries the action.
+ * Empty-state copy is intentionally terse; first-run also exposes a labelled
+ * primary add action while the FAB remains available.
  *
  * The screen does not own a connection — it resolves the host's key on
  * tap and hands the tuple to the caller, which routes to the session
@@ -583,7 +586,7 @@ fun HostListScreen(
 
                 if (hosts.isEmpty()) {
                     item(key = "hosts:empty") {
-                        EmptyHostList()
+                        EmptyHostList(onAddHost = onAddHost)
                     }
                 } else {
                     items(hosts, key = { "host:" + it.id }) { host ->
@@ -1007,10 +1010,7 @@ internal const val HOST_LIST_UPDATE_CHECK_RETRY_TAG = "host-list:update-check-fa
 
 /**
  * Issue #144: stable test tag for the bottom-right "+" FloatingActionButton
- * that opens the Add Host form. The FAB carries the only primary tap target
- * for "add a host" — the empty-state copy intentionally has no button — so
- * the cold-install E2E test depends on this tag rather than locating the
- * button by its `+` glyph.
+ * that opens the Add Host form.
  */
 internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
 
@@ -1020,6 +1020,12 @@ internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
  * (no hosts in the DB) before tapping the FAB.
  */
 internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
+
+/**
+ * Issue #1243: stable test tag for the first-run primary action inside the
+ * empty host-list state. This is additive to [HOST_LIST_ADD_FAB_TAG].
+ */
+internal const val HOST_LIST_EMPTY_ADD_HOST_TAG = "host-list:empty-state:add-host"
 
 /**
  * Issue #483: stable test-tag prefix for the kebab "Usage" item that
@@ -1832,13 +1838,18 @@ private fun SshPassphraseDialog(
 }
 
 /**
- * Empty-state when no hosts are saved. Single line + a hint to use the FAB.
+ * Empty-state when no hosts are saved. The labelled primary action is first-run
+ * guidance; the bottom-right FAB remains present and routes to the same form.
  */
 @Composable
-private fun EmptyHostList(modifier: Modifier = Modifier) {
-    Column(
+internal fun EmptyHostList(
+    onAddHost: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
         modifier = modifier
             .fillMaxWidth()
+            .height(228.dp)
             .padding(horizontal = PocketShellSpacing.lg)
             .background(
                 color = PocketShellColors.Surface,
@@ -1851,9 +1862,18 @@ private fun EmptyHostList(modifier: Modifier = Modifier) {
             )
             .testTag(HOST_LIST_EMPTY_STATE_TAG),
     ) {
-        ListRow(
+        EmptyState(
             title = "No hosts yet",
-            subtitle = "Use + to add an SSH host",
+            description = "Add an SSH host to start a session.",
+            icon = Icons.Filled.Add,
+            action = {
+                PocketShellButton(
+                    text = "Add your first host",
+                    onClick = onAddHost,
+                    variant = ButtonVariant.Primary,
+                    modifier = Modifier.testTag(HOST_LIST_EMPTY_ADD_HOST_TAG),
+                )
+            },
         )
     }
 }

@@ -585,6 +585,20 @@ class TerminalSurfaceState(
         .distinctUntilChanged()
 
     /**
+     * Debounced visible-screen text snapshots for lightweight UI affordances
+     * that need to react to terminal prompts without adding a new SSH/tmux read.
+     *
+     * This uses the same output-driven tick as [flowOfMatches]: no collector means
+     * no work, and active collectors coalesce bursty `%output` before reading the
+     * emulator grid.
+     */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    val flowOfVisibleScreenText: Flow<String> = bufferTick
+        .debounce(MATCH_DEBOUNCE_MS)
+        .map { visibleScreenTextSnapshot() }
+        .distinctUntilChanged()
+
+    /**
      * Replace the active [TerminalMatcher]. The next [flowOfMatches] emission
      * uses the new matcher; in-flight emissions complete with the matcher
      * that was active when the debounce window closed (a benign race that
@@ -1190,6 +1204,19 @@ class TerminalSurfaceState(
             return emptyList()
         }
         return matcher.matches(text)
+    }
+
+    /**
+     * Current visible viewport text, defensively empty when no emulator is
+     * attached or the vendored screen throws during a resize.
+     */
+    fun visibleScreenTextSnapshot(): String {
+        val emulator = bridge?.emulator ?: _session?.emulator ?: return ""
+        return try {
+            emulator.screen.visibleScreenText
+        } catch (_: Throwable) {
+            ""
+        }
     }
 
     /**

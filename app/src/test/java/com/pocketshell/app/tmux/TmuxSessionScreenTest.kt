@@ -993,6 +993,38 @@ class TmuxSessionScreenTest {
         assertTrue(!tmuxSessionIsAgentPane(hasLiveDetection = false, presumedAgent = false))
     }
 
+    @Test
+    fun quickReplyGateRequiresPositiveAgentEvidence() {
+        assertTrue(
+            tmuxSessionHasPositiveAgentEvidence(
+                hasLiveDetection = true,
+                hasStickyAgent = false,
+                recordedAgentKind = false,
+            ),
+        )
+        assertTrue(
+            tmuxSessionHasPositiveAgentEvidence(
+                hasLiveDetection = false,
+                hasStickyAgent = true,
+                recordedAgentKind = false,
+            ),
+        )
+        assertTrue(
+            tmuxSessionHasPositiveAgentEvidence(
+                hasLiveDetection = false,
+                hasStickyAgent = false,
+                recordedAgentKind = true,
+            ),
+        )
+        assertTrue(
+            !tmuxSessionHasPositiveAgentEvidence(
+                hasLiveDetection = false,
+                hasStickyAgent = false,
+                recordedAgentKind = false,
+            ),
+        )
+    }
+
     // ─── Issue #805 (regression of #744/#716): the bottom-bar chrome follows ──
     // the Conversation TAB (detecting OR loaded), not the detection-gated ──────
     // transcript — so the composer launcher is never pushed off-screen by the ──

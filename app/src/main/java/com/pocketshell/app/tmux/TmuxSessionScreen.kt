@@ -1821,21 +1821,27 @@ public fun TmuxSessionScreen(
             // sentence — never a raw exception string. The test tags
             // [TMUX_SESSION_ERROR_TAG] and [TMUX_SESSION_RECONNECT_TAG] make the
             // elements grep-able from connected disconnect+reconnect tests.
-            (surfaceState as? SessionSurfaceState.Failed)?.let { failed ->
-                FailedConnectionRow(
-                    // Issue #1344: host-qualify the generic disconnect so the band reads
-                    // the unified #145 "Disconnected from <user>@<host>:<port>." wording
-                    // (the maintainer's clear disconnected indicator) — restored after the
-                    // S3 fuse dropped it. The endpoint comes from this screen's target
-                    // coordinates, matching the VM's historical message exactly.
-                    message = failureReasonSentence(
-                        failed.reason,
-                        endpoint = disconnectEndpointLabel(user = user, host = host, port = port),
-                    ),
-                    onReconnect = { viewModel.reconnect() },
-                    canReconnect = canReconnect,
-                )
-            }
+            //
+            // Issue #1362 (v0.4.25 release blocker): the band is rendered by the
+            // dedicated [SessionFailureBand] sub-composable rather than inline here.
+            // The #1344 endpoint/message computation (the nested
+            // `disconnectEndpointLabel(user, host, port)` -> `failureReasonSentence`
+            // call) used to live inline in THIS mega-composable, which tipped
+            // TmuxSessionScreen's dex register frame into the API-33 ART verifier's
+            // v256+ wide-operand danger zone — a `move-object/16` of a MutableState
+            // from a v256+ register that the verifier rejected (VerifyError, crashing
+            // AppNavigator on every session-screen open). Hoisting the computation into
+            // its own composable frame keeps the #1344 "Disconnected from <endpoint>"
+            // wording verbatim while dropping the mega-method's register pressure. See
+            // [SessionFailureBand].
+            SessionFailureBand(
+                surfaceState = surfaceState,
+                user = user,
+                host = host,
+                port = port,
+                canReconnect = canReconnect,
+                onReconnect = { viewModel.reconnect() },
+            )
             // Per [D6]: render exactly one pane at a time. The
             // HorizontalPager renders only the visible page eagerly by
             // default; sibling panes are pre-loaded into the off-screen
@@ -5330,6 +5336,58 @@ internal fun FailedConnectionRow(
             }
         }
     }
+}
+
+/**
+ * Issue #1362 (v0.4.25 release blocker): the settled-failure band, hoisted out of
+ * the [TmuxSessionScreen] mega-composable into its OWN composable frame.
+ *
+ * This renders exactly what the inline `(surfaceState as? SessionSurfaceState.Failed)`
+ * block used to: the calm [FailedConnectionRow] with the #145/#1344 "Disconnected from
+ * <user>@<host>:<port>." wording (via [disconnectEndpointLabel] + [failureReasonSentence])
+ * and the #1322 Error/Gone-distinct curated text for the config-level reasons. Nothing
+ * about the produced UI changes — same band, same text, same tags.
+ *
+ * WHY it is a separate composable and not inline: the #1344 fix added the nested
+ * `disconnectEndpointLabel(user, host, port)` -> `failureReasonSentence(...)` computation
+ * INSIDE the ~2800-line `TmuxSessionScreen` method. `TmuxSessionScreen` dexes to a method
+ * that already uses >256 registers, so D8 must address some locals with wide (v256+)
+ * operands; the #1344 inline computation shifted D8's register allocation so that a
+ * `MutableState` reference landed in a wide register with a `move-object/from16 v19<-v300`
+ * that the API-33 ART bytecode verifier REJECTS (`VerifyError [0x39D8] copy1 v19<-v300
+ * type=Reference: androidx.compose.runtime.MutableState`), crashing `AppNavigator` the
+ * instant any journey opened a session screen (emulator tag-gate hard-red on all shards).
+ * The register COUNT is not itself the trigger — the pre-#1344 method verified fine at an
+ * even higher count — but the #1344 inline locals produced the fatal wide-register
+ * MutableState move. Giving the computation its own composable frame removes those locals
+ * from the giant method and restores an allocation the verifier accepts.
+ * [com.pocketshell.app.proof.TmuxSessionScreenArtVerifyE2eTest] pins this: it resolves +
+ * verifies this exact production class on an API-33 device and goes RED (VerifyError) on
+ * the broken build, GREEN with this hoist.
+ */
+@Composable
+internal fun SessionFailureBand(
+    surfaceState: SessionSurfaceState,
+    user: String,
+    host: String,
+    port: Int,
+    canReconnect: Boolean,
+    onReconnect: () -> Unit,
+) {
+    val failed = surfaceState as? SessionSurfaceState.Failed ?: return
+    FailedConnectionRow(
+        // Issue #1344: host-qualify the generic disconnect so the band reads the
+        // unified #145 "Disconnected from <user>@<host>:<port>." wording (the
+        // maintainer's clear disconnected indicator) — restored after the S3 fuse
+        // dropped it. The endpoint comes from this screen's target coordinates,
+        // matching the VM's historical message exactly.
+        message = failureReasonSentence(
+            failed.reason,
+            endpoint = disconnectEndpointLabel(user = user, host = host, port = port),
+        ),
+        onReconnect = onReconnect,
+        canReconnect = canReconnect,
+    )
 }
 
 /**

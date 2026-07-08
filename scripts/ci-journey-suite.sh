@@ -114,6 +114,18 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 # CI-AVD wedge. The per-test `timeout_msec` backstop below stays as defense in
 # depth so ANY future wedge fails fast (~5 min) instead of hanging the job.
 JOURNEY_CLASSES=(
+  # Issue #1362 (v0.4.25 RELEASE BLOCKER): the ART dex-verification guard for the
+  # TmuxSessionScreen composable. The #1344 band-wording fix tipped the mega-
+  # composable's D8 register allocation into a wide (v256+) MutableState move-object
+  # that the API-33 ART verifier REJECTS (`VerifyError [0x39D8] copy1 v19<-v300`),
+  # crashing AppNavigator on EVERY session-screen open (all 3 emulator shards hard-
+  # red). This test resolves+verifies the exact production class on-device: RED
+  # (VerifyError) on the broken build, GREEN with the #1362 SessionFailureBand
+  # hoist. Fast + deterministic (no Docker/SSH — the crash is at class resolution,
+  # before any connection), so it belongs at the head of the per-push subset as the
+  # cheapest early-fail for a regression that would otherwise fail every journey
+  # below with the same VerifyError.
+  "$FQCN_PREFIX.TmuxSessionScreenArtVerifyE2eTest"
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
   # RE-ADDED (#710): the CI-AVD wedge was the unbounded VM-clear park teardown,
   # now bounded at SYNC_DETACH_TIMEOUT_MS. See the block comment above.

@@ -846,6 +846,36 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `capturePaneTextViaExec runs plain visible capture on the exec lane`() = runBlocking {
+        // Submit-ack probes only need visible text. They must not use the shared
+        // `-CC` best-effort capture lane, because a busy agent can wedge that
+        // mutex while Send is waiting to press Enter.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = {
+                ExecResult(stdout = "first\nsecond\n", stderr = "", exitCode = 0)
+            },
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.capturePaneTextViaExec("%3", timeoutMs = 2_500L)
+            }
+
+            assertFalse(response.isError)
+            assertEquals(listOf("first", "second"), response.output)
+            assertEquals(
+                "tmux capture-pane -p -t '%3'",
+                session.execCommands.single { it.contains("capture-pane") },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `captureWithCursor exec lane times out on a wedged transport within the short ceiling`() = runBlocking {
         // Issue #926/#1297: a genuinely wedged/half-open transport (the exec never
         // returns) must surface a TmuxClientException within the SHORT seed

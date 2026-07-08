@@ -173,6 +173,18 @@ public interface TmuxClient : AutoCloseable {
     }
 
     /**
+     * Capture the pane's visible text on the independent exec lane. This is for
+     * acknowledgement probes that only need `capture-pane -p`, not cursor or
+     * scrollback state. The default keeps test doubles compatible by falling
+     * back to the existing best-effort control-mode path.
+     */
+    public suspend fun capturePaneTextViaExec(
+        paneId: String,
+        timeoutMs: Long? = null,
+    ): CommandResponse =
+        sendBestEffortCommand("capture-pane -p -t $paneId")
+
+    /**
      * Issue #692: send several tmux control-mode commands as ONE chained
      * `cmd1 ; cmd2 ; …` request and drain ALL of their `%begin` / (`%end` |
      * `%error`) response blocks under a SINGLE single-flight acquisition,
@@ -1291,6 +1303,42 @@ internal class RealTmuxClient(
             capture = CommandResponse(number = -1L, output = outputLines, isError = isError),
             cursorReply = cursorReply,
         )
+    }
+
+    override suspend fun capturePaneTextViaExec(
+        paneId: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
+        val quotedPane = "'${escapeSingleQuoted(paneId)}'"
+        val command = "tmux capture-pane -p -t $quotedPane"
+        val execResult =
+            try {
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux text capture exec failed for pane $paneId: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
+            throw TmuxClientException(
+                "tmux capture-pane (exec text lane) timed out after ${effectiveTimeoutMs}ms",
+            )
+        }
+        val lines = splitCaptureLines(execResult.stdout)
+        val isError = execResult.exitCode != 0
+        val output =
+            if (isError && lines.isEmpty()) {
+                execResult.stderr.trim().let { if (it.isEmpty()) emptyList() else it.split("\n") }
+            } else {
+                lines
+            }
+        return CommandResponse(number = -1L, output = output, isError = isError)
     }
 
     /**

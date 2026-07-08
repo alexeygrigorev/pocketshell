@@ -11865,6 +11865,45 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    @Test
+    fun sendToAgentPaneAckCaptureBypassesWedgedBestEffortControlLane() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(1_000L)
+        client.suspendForeverOnBestEffortCommandPrefix = "capture-pane"
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("> fast ack prompt"), isError = false),
+        )
+
+        var enterSentAtMs = -1L
+        client.onCommandSent = { cmd ->
+            if (cmd == "send-keys -t %0 Enter" && enterSentAtMs < 0L) {
+                enterSentAtMs = scheduler.currentTime
+            }
+        }
+
+        val send = async { vm.sendToAgentPaneResult("%0", "fast ack prompt") }
+        advanceUntilIdle()
+
+        assertTrue("agent submit should succeed", send.await().isSuccess)
+        assertEquals(listOf("%0"), client.capturePaneTextViaExecCalls)
+        assertTrue(
+            "submit ack capture must not wait for the wedged best-effort control lane",
+            enterSentAtMs in 0 until 1_000L,
+        )
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'fast ack prompt'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
     /**
      * Issue #869: when the agent's input rendering can never be recognised (the
      * payload never shows up in `capture-pane`), Send must NOT hang — it falls
@@ -11924,7 +11963,7 @@ class TmuxSessionViewModelTest {
         vm.startAgentConversationForTest("%0", newClaudeDetection())
         vm.setAgentSubmitEnterDelayForTest(0)
         vm.setAgentSubmitAckTimeoutForTest(80L)
-        client.suspendForeverOnCommandPrefix = "capture-pane"
+        client.suspendForeverOnCapturePaneTextViaExec = true
 
         val send = async { vm.sendToAgentPaneResult("%0", "blocked capture prompt") }
 
@@ -11940,7 +11979,7 @@ class TmuxSessionViewModelTest {
         assertEquals(
             "a stuck ack capture should be tried once, then cancelled by the wall-clock timeout",
             1,
-            client.sentCommands.count { it.startsWith("capture-pane") },
+            client.capturePaneTextViaExecCalls.size,
         )
         assertEquals(
             listOf(

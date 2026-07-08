@@ -186,6 +186,8 @@ internal class FakeTmuxClient(
 
     var suspendForeverOnCommandPrefix: String? = null
 
+    var suspendForeverOnBestEffortCommandPrefix: String? = null
+
     var sendCommandDelayMs: Long = 0L
 
     /**
@@ -196,6 +198,10 @@ internal class FakeTmuxClient(
      * `FALLBACK_FLOOR + injectedRtt` before pressing Enter.
      */
     var captureCommandDelayMs: Long = 0L
+
+    val capturePaneTextViaExecCalls: MutableList<String> = mutableListOf()
+
+    var suspendForeverOnCapturePaneTextViaExec: Boolean = false
 
     var sendCommandGatePrefix: String? = null
 
@@ -318,6 +324,14 @@ internal class FakeTmuxClient(
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         handleCommand(cmd, bestEffort = true)
 
+    override suspend fun capturePaneTextViaExec(paneId: String, timeoutMs: Long?): CommandResponse {
+        capturePaneTextViaExecCalls += paneId
+        if (suspendForeverOnCapturePaneTextViaExec) {
+            CompletableDeferred<Unit>().await()
+        }
+        return handleCommand("capture-pane -p -t $paneId", bestEffort = false)
+    }
+
     private suspend fun handleCommand(cmd: String, bestEffort: Boolean): CommandResponse {
         sentCommands += cmd
         onCommandSent?.invoke(cmd)
@@ -356,6 +370,11 @@ internal class FakeTmuxClient(
             }
         }
         if (bestEffort) {
+            suspendForeverOnBestEffortCommandPrefix?.let { prefix ->
+                if (cmd.startsWith(prefix)) {
+                    CompletableDeferred<Unit>().await()
+                }
+            }
             failBestEffortOnCommandPrefix?.let { prefix ->
                 if (cmd.startsWith(prefix)) {
                     throw bestEffortException

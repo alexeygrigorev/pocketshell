@@ -14901,7 +14901,7 @@ public class TmuxSessionViewModel @Inject constructor(
         needle: String,
     ): Boolean {
         val response = runCatching {
-            client.sendBestEffortCommand("capture-pane -p -t $paneId")
+            client.capturePaneTextViaExec(paneId)
         }.getOrNull() ?: return false
         if (response.isError) return false
         val visible = response.output.joinToString(separator = "")

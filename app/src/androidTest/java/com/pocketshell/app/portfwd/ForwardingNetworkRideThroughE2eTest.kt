@@ -92,6 +92,10 @@ class ForwardingNetworkRideThroughE2eTest {
 
     @After
     fun teardown() {
+        // Issue #1356: re-enable real network callbacks for any sibling test
+        // sharing this singleton observer in the same instrumentation process
+        // (mirrors BareNetworkLossRestoreReconnectE2eTest#tearDown, #1098 item 5).
+        runCatching { observer().ignoreRealNetworkCallbacksForTest = false }
         runCatching { controller().forceTransportProvenAliveForTest = null }
         runCatching { controller().stopAllForwarding() }
         diagnostics?.close()
@@ -159,6 +163,16 @@ class ForwardingNetworkRideThroughE2eTest {
         diagnostics = sink
 
         val observer = observer()
+        // Issue #1356: isolate the synthetic loss/restore/handoff sequence from the
+        // AVD's own real ConnectivityManager callbacks, which feed the SAME detector
+        // and would otherwise re-validate AVD Wi-Fi inside the 2s watchNoRedial window
+        // — read as a spurious RESTORE and recorded as a `network_redial`, failing
+        // arm (a)/(b) non-deterministically. Production always processes real
+        // callbacks; this only quiets them for the deterministic injection, exactly
+        // like BareNetworkLossRestoreReconnectE2eTest (#1098 item 5). The synthetic
+        // emitSyntheticSnapshotForTest path bypasses this seam, so every drive below
+        // still reaches the controller.
+        observer.ignoreRealNetworkCallbacksForTest = true
         // Seed a known validated baseline so the subsequent loss reliably emits a
         // NetworkLost (the detector's loss arm is idempotent if already lost).
         observer.emitSyntheticSnapshotForTest(

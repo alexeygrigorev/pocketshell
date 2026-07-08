@@ -4583,6 +4583,72 @@ public class TmuxSessionViewModel @Inject constructor(
         onCleared()
     }
 
+    /**
+     * Issue #1355 test seam — the STRUCTURAL fix for the recurring
+     * `TmuxSessionViewModelTest` coroutine-leak-across-test-boundary flake
+     * (`IllegalStateException` at `TestMainDispatcher.kt:72`,
+     * "Dispatchers.Main is used concurrently with setting it").
+     *
+     * ## Why the prior four point-fixes kept whack-a-moling
+     *
+     * The suite's `@After` drains three INJECTED collaborator scopes to
+     * quiescence before the rule's `resetMain()` — `factoryScope` (#708),
+     * `defaultTeardownScope` (#1085), and `agentTailScope` (#1168) — but it
+     * never drained the VM's OWN coroutine roots. `viewModelScope` is cancelled
+     * only by the framework's `ViewModel.clear()`; the test seam [clearForTest]
+     * calls [onCleared] DIRECTLY, so `viewModelScope` and its child
+     * [bridgeScope] are NOT cancelled by teardown. Any
+     * `viewModelScope`/`bridgeScope` launch that hops to a REAL background
+     * dispatcher (e.g. the IO-dispatcher `withContext{ dao.getById(...) }`
+     * create-session / profiles fetches, or a `NonCancellable`
+     * teardown/detach/lease-release launch routed through
+     * [launchContainedTeardown]) therefore survives `@After` and, on
+     * completion, re-dispatches its continuation onto `Dispatchers.Main` —
+     * touching the test Main dispatcher — during the NEXT test's `setMain`.
+     * That inter-test race is the flake; each prior fix chased ONE leaking
+     * test's dispatcher instead of the shared root.
+     *
+     * ## What these two seams do
+     *
+     * The drain runs test-side (the test owns the shared
+     * `TestCoroutineScheduler`). [cancelOwnScopesForTest] cancels every
+     * `viewModelScope` child (which transitively cancels [bridgeScope]'s
+     * `SupervisorJob`, itself a `viewModelScope` child, and every job under it);
+     * [activeOwnScopeChildCountForTest] reports how many are not yet complete.
+     *
+     * The test's `@After` alternates `cancel → scheduler.runCurrent() →
+     * Thread.sleep(1)` to a bounded deadline: `runCurrent()` (NEVER
+     * `advanceUntilIdle` — the #1110 lesson: advancing the clock trips the #793
+     * re-seed watchdog) drives the cancellation of the virtual-clock children
+     * AND the Main re-dispatch of any child that hopped to a REAL background
+     * dispatcher, while the `Thread.sleep(1)` yields wall-clock time for the
+     * real IO thread to finish before the next drain. It HARD-FAILS if the count
+     * never reaches zero — so a FUTURE leak (a new un-drained VM launch) is a
+     * DETERMINISTIC red instead of an intermittent inter-class Main-set race.
+     *
+     * `viewModelScope`'s children are on the test Main dispatcher, so a plain
+     * a plain blocking `join()` would deadlock (it never pumps the test
+     * scheduler); the `runCurrent` pump is why the drain must be test-side.
+     *
+     * Test-only: production teardown runs through [onCleared] + the framework's
+     * `viewModelScope` cancellation. Never called in production.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun cancelOwnScopesForTest() {
+        viewModelScope.coroutineContext[Job]?.children?.forEach { it.cancel() }
+    }
+
+    /**
+     * Issue #1355 test seam — count of this VM's `viewModelScope`/[bridgeScope]
+     * children that are NOT yet complete (a cancelled child still running its
+     * IO-dispatcher `withContext` / `NonCancellable` block reports
+     * `!isCompleted`, so it is counted until the real hop finishes and its Main
+     * re-dispatch has run). The `@After` drain loops until this is zero.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun activeOwnScopeChildCountForTest(): Int =
+        viewModelScope.coroutineContext[Job]?.children?.count { !it.isCompleted } ?: 0
+
     internal fun hasPendingReattachForTest(): Boolean = pendingReattach != null
 
     internal fun connectingSessionNameForTest(): String? = connectingTarget?.sessionName

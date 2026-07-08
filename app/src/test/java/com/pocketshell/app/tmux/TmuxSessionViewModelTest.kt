@@ -387,6 +387,10 @@ class TmuxSessionViewModelTest {
 
     @After
     fun tearDown() {
+        // Issue #1355: snapshot the VMs BEFORE clearing the list so the
+        // structural own-scope drain below (inside `runBlocking`, before the
+        // rule's `resetMain()`) still has the handles.
+        val vmsToDrain = createdViewModels.toList()
         createdViewModels.asReversed().forEach { vm ->
             runCatching { vm.clearForTest() }
         }
@@ -442,6 +446,50 @@ class TmuxSessionViewModelTest {
             withTimeoutOrNull(SLOW_FEED_DRAIN_TIMEOUT_MS) {
                 agentTailScope.coroutineContext.job.children.forEach { it.join() }
             }
+        }
+        // Issue #1355: the STRUCTURAL fix. The three drains above only cover the
+        // INJECTED collaborator scopes (factory/teardown/agent-tail); they never
+        // drained the VM's OWN coroutine roots. `clearForTest()` calls
+        // `onCleared()` directly, which does NOT cancel `viewModelScope` (only
+        // the framework's `ViewModel.clear()` does that), so any
+        // `viewModelScope`/`bridgeScope` launch that hopped to a REAL background
+        // dispatcher (`withContext(Dispatchers.IO){ dao.getById }`, the
+        // `NonCancellable` teardown/detach launches) survives `@After` and
+        // re-dispatches its continuation onto `Dispatchers.Main` during the NEXT
+        // test's `setMain` — the inter-test leak (TestMainDispatcher:72) the
+        // prior four point-fixes (#708/#1085/#1168/#1289) kept chasing one test
+        // at a time. Draining each VM's OWN scopes here closes the whole CLASS.
+        //
+        // These children run on the test Main dispatcher (the shared virtual
+        // scheduler), so a `runBlocking { join() }` would deadlock (it never
+        // pumps that scheduler — that is why the prior drains work: their scopes
+        // are REAL `Dispatchers.IO`). Instead alternate `cancel → runCurrent →
+        // Thread.sleep(1)` to a bounded deadline: `runCurrent()` (NEVER
+        // `advanceUntilIdle` — advancing the clock trips the #793/#1110 re-seed
+        // watchdog) drives both the cancellations of the virtual-clock children
+        // AND the Main re-dispatch of any child that hopped to a real dispatcher,
+        // while the sleep yields wall-clock time for the real IO thread to
+        // finish before the next drain. Re-cancel each pass so a completion
+        // handler that re-spawns a `bridgeScope` child (the #1168 hand-back
+        // shape) is cancelled too. Runs while the rule's Main is still installed
+        // (before its `resetMain()`), so every real-thread Main touch happens now
+        // against a stable Main. HARD-FAIL if a VM never quiesces: a future real
+        // leak is then a DETERMINISTIC red, not an inter-class flake.
+        val issue1355Deadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
+        while (true) {
+            vmsToDrain.forEach { it.cancelOwnScopesForTest() }
+            scheduler.runCurrent()
+            val active = vmsToDrain.sumOf { it.activeOwnScopeChildCountForTest() }
+            if (active == 0) break
+            assertTrue(
+                "Issue #1355: $active TmuxSessionViewModel coroutine(s) did not quiesce within " +
+                    "${SLOW_FEED_DRAIN_TIMEOUT_MS}ms of @After — one would survive into the next " +
+                    "test's Dispatchers.setMain and race it (TestMainDispatcher:72, the " +
+                    "leak-across-test-boundary flake). Root-cause the new un-drained " +
+                    "viewModelScope/bridgeScope launch rather than adding another point-fix.",
+                System.currentTimeMillis() < issue1355Deadline,
+            )
+            Thread.sleep(1)
         }
         defaultTeardownScope.cancel()
     }

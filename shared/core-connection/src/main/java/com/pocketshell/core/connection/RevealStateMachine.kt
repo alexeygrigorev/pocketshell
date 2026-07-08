@@ -174,7 +174,16 @@ class RevealStateMachine {
                 RevealState.Gone(target, targetName)
 
             is ConnectionState.Unreachable ->
-                RevealState.Error(target, targetName, retrying = false)
+                // The controller-driven exhaust ladder carries no cause here (core
+                // [ConnectionState.Unreachable] is opaque host/id), so the reason is
+                // the generic non-retryable Unreachable. A cause-typed reason arrives
+                // through [onTerminalError] instead (#1185 direct-drive path).
+                RevealState.Error(
+                    target,
+                    targetName,
+                    retrying = false,
+                    reason = FailureReason.Unreachable(retryable = false),
+                )
         }
         if (next != _state.value) {
             _state.value = next
@@ -235,13 +244,16 @@ class RevealStateMachine {
      * now moves BOTH holders to an honest error in lockstep — never a red pill
      * over a live "Attaching…" spinner.
      */
-    fun onTerminalError(targetId: SessionId) {
+    fun onTerminalError(
+        targetId: SessionId,
+        reason: FailureReason = FailureReason.Unreachable(retryable = false),
+    ) {
         val target = currentTargetId ?: return
         if (targetId != target) {
             return
         }
         val targetName = _state.value.targetNameOrNull() ?: return
-        val next = RevealState.Error(target, targetName, retrying = false)
+        val next = RevealState.Error(target, targetName, retrying = false, reason = reason)
         if (next != _state.value) {
             _state.value = next
         }
@@ -311,6 +323,12 @@ sealed interface RevealState {
         val targetId: SessionId,
         val targetName: String,
         val retrying: Boolean,
+        /**
+         * Issue #1326 (S3): the TYPED failure reason the view state carries — never
+         * a raw exception string. Only meaningful for the settled honest error
+         * ([retrying] == false); the calm heal window ([retrying] == true) ignores it.
+         */
+        val reason: FailureReason = FailureReason.Unreachable(retryable = false),
     ) : RevealState
 }
 

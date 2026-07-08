@@ -34,7 +34,7 @@ import org.junit.runner.RunWith
  * the #754 driver-owned RESEED-ONLY path.
  *
  * #754 hard-cut DELETED the inline `probeCurrentRuntimeOnForegroundIfNeeded →
- * connect(LifecycleReattach)` path that raised `_switchHidesTerminal` (the
+ * connect(LifecycleReattach)` path that raised the reveal-machine hold (the
  * "Attaching…" overlay) on a confirmed-dead probe verdict even inside grace. The
  * within-grace foreground is now a driver/controller-owned reseed-only effect: it
  * re-promotes Live + heals blank panes over the still-warm `-CC` lease — NO
@@ -193,7 +193,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
      *
      * On the OLD inline path this is exactly when `probeCurrentRuntimeOnForegroundIfNeeded`
      * saw a dead channel inside grace and fired `connect(LifecycleReattach)` →
-     * `_switchHidesTerminal=true` → the "Attaching…" (`TMUX_SWITCHING_LOADING_TAG`)
+     * the reveal-machine hold (RevealState.Seeding) → the "Attaching…" (`TMUX_SWITCHING_LOADING_TAG`)
      * overlay — the D21 violation. The #754 hard-cut DELETED that inline probe path, so a
      * confirmed-dead within-grace foreground NEVER paints "Attaching…" and NEVER runs the
      * inline probe.

@@ -21,6 +21,9 @@ import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.SessionId
+import com.pocketshell.core.connection.sessionSurfaceState
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.MessageSendState
@@ -6806,15 +6809,23 @@ class TmuxSessionViewModelTest {
                     "observed=$emittedConnectionStatuses",
                 connectionFailureStatuses.isEmpty(),
             )
+            // Issue #1326 (S3): the pill now derives from the fused
+            // [SessionSurfaceState]. Map each emitted status through the SAME fusion
+            // the screen uses (a held reveal takes the status's pill flavor) to prove
+            // the breadcrumb never flips to Reconnecting/Disconnected on overflow.
+            val pillSid = SessionId("codex/overflow")
+            fun TmuxSessionViewModel.ConnectionStatus.toPillUi() =
+                sessionSurfaceState(RevealState.Seeding(pillSid, "s"), connectionPhaseOf(this), pillSid)
+                    .toUiStatus()
             val disconnectUiStatuses = emittedConnectionStatuses
-                .map { it.toUiStatus() }
+                .map { it.toPillUi() }
                 .filter { uiStatus ->
                     uiStatus == com.pocketshell.uikit.model.ConnectionStatus.Connecting ||
                         uiStatus == com.pocketshell.uikit.model.ConnectionStatus.Error
                 }
             assertTrue(
                 "Codex-like output overflow must not map to the breadcrumb Reconnecting/Disconnected UI; " +
-                    "observed=${emittedConnectionStatuses.map { it.toUiStatus() }}",
+                    "observed=${emittedConnectionStatuses.map { it.toPillUi() }}",
                 disconnectUiStatuses.isEmpty(),
             )
             assertTrue(
@@ -15410,16 +15421,16 @@ class TmuxSessionViewModelTest {
             "same-host switch must never show the blanking Connecting overlay",
             midStatus is TmuxSessionViewModel.ConnectionStatus.Connecting,
         )
-        // Issue #661: a CROSS-session switch must NOT paint the previous
+        // Issue #661/#1326: a CROSS-session switch must NOT paint the previous
         // session's frame — not even one frame. #634's keep-frame is reversed
-        // for the cross-session case: the surface is HIDDEN
-        // ([switchHidesTerminal] = true) and the rendered panes are blanked,
-        // so the screen shows the "Attaching" loading state instead of the
-        // leaving session's content.
+        // for the cross-session case: the id-keyed reveal machine HOLDS the surface
+        // (revealState is not Live) and the rendered panes are blanked, so the
+        // screen shows the "Attaching" loading state instead of the leaving
+        // session's content.
         assertTrue(
-            "cross-session switch must hide the terminal surface (loading state) " +
+            "cross-session switch must hold the terminal surface (loading state) " +
                 "so the previous session's frame is never painted",
-            vm.switchHidesTerminal.value,
+            vm.revealState.value !is RevealState.Live,
         )
         assertEquals(
             "previous session's frame must NOT stay painted during a cross-session " +
@@ -15446,9 +15457,9 @@ class TmuxSessionViewModelTest {
         // Issue #661: the terminal surface is revealed only AFTER the new
         // session's panes are seeded — and it is the NEW session's content.
         assertFalse(
-            "the terminal surface must be revealed (switchHidesTerminal=false) " +
+            "the terminal surface must be revealed (revealState Live) " +
                 "once the new session's panes are seeded",
-            vm.switchHidesTerminal.value,
+            vm.revealState.value !is RevealState.Live,
         )
         assertEquals(
             "viewport must swap to the new session's panes after attach",
@@ -15808,8 +15819,8 @@ class TmuxSessionViewModelTest {
         // Issue #661 (reverses #437 slice A / #634 keep-frame for the
         // cross-session case): a same-host fast switch to a DIFFERENT session
         // must NEVER paint the leaving session's frame — not even one frame.
-        // The previous frame is BLANKED and the terminal surface is HIDDEN
-        // ([switchHidesTerminal] = true, the screen shows the "Attaching"
+        // The previous frame is BLANKED and the reveal machine HOLDS the terminal
+        // surface (revealState not Live, the screen shows the "Attaching"
         // loading state) until the new session's panes reconcile and reveal.
         // This is the maintainer's refined preference (hard-cut, per D22):
         // we no longer keep the previous frame painted on a cross-session

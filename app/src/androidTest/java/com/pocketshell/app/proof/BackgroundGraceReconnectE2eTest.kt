@@ -675,7 +675,7 @@ class BackgroundGraceReconnectE2eTest {
         )
         // Issue #754: the "Attaching…" SwitchingLoadingPlaceholder overlay is the
         // EXACT surface the maintainer reported on a within-grace return. The old
-        // inline foreground probe→connect raised `_switchHidesTerminal` (this tag) on
+        // inline foreground probe→connect raised the reveal-machine hold (this tag) on
         // any confirmed-dead probe verdict even inside grace — the D21 violation #754
         // deletes. A within-grace foreground must NEVER paint it.
         assertEquals(

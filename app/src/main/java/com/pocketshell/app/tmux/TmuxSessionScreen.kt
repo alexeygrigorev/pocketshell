@@ -1823,7 +1823,15 @@ public fun TmuxSessionScreen(
             // elements grep-able from connected disconnect+reconnect tests.
             (surfaceState as? SessionSurfaceState.Failed)?.let { failed ->
                 FailedConnectionRow(
-                    message = failureReasonSentence(failed.reason),
+                    // Issue #1344: host-qualify the generic disconnect so the band reads
+                    // the unified #145 "Disconnected from <user>@<host>:<port>." wording
+                    // (the maintainer's clear disconnected indicator) — restored after the
+                    // S3 fuse dropped it. The endpoint comes from this screen's target
+                    // coordinates, matching the VM's historical message exactly.
+                    message = failureReasonSentence(
+                        failed.reason,
+                        endpoint = disconnectEndpointLabel(user = user, host = host, port = port),
+                    ),
                     onReconnect = { viewModel.reconnect() },
                     canReconnect = canReconnect,
                 )
@@ -7380,16 +7388,47 @@ internal fun SessionSurfaceState.toUiStatus(): com.pocketshell.uikit.model.Conne
  * (it stays in the diagnostic logs); every failure surfaces as a recoverable "Tap
  * Reconnect" prompt, in the calm #720/#1322 tone. This is the ONLY place a failure
  * reason becomes display text.
+ *
+ * Issue #1344 (v0.4.25 regression): the generic connection-lost / socket-death /
+ * ladder-exhaust case ([FailureReason.Unreachable]) renders the UNIFIED #145
+ * "Disconnected from <user>@<host>:<port>. Tap Reconnect to retry." wording — the
+ * clear, actionable disconnected indicator the maintainer relies on. The S3 fuse
+ * dropped that phrase to a bare "Connection lost." here; this restores it while
+ * keeping the fused [SessionSurfaceState] the single source (D22 hard-cut — no
+ * legacy dual-read of the old `ConnectionStatus.Failed.message`). [endpoint] is the
+ * `<user>@<host>:<port>` label built at the call site from the screen's target
+ * coordinates (see [disconnectEndpointLabel]); when it is unknown (blank host in a
+ * standalone render) the phrase degrades to a host-less "Disconnected. …" but the
+ * #145 "Disconnected from"/"Disconnected" marker is always present. The config-level
+ * reasons (auth/host/key) and the [FailureReason.ServerRestarted] / [FailureReason.SessionEnded]
+ * cases keep their DISTINCT curated wording — the coherent #1322 Error/Gone
+ * distinction is preserved, only the generic Unreachable disconnect is host-qualified.
  */
-internal fun failureReasonSentence(reason: FailureReason): String =
+internal fun failureReasonSentence(reason: FailureReason, endpoint: String? = null): String =
     when (reason) {
         FailureReason.AuthFailed -> "Authentication failed — check your key. Tap Reconnect to retry."
         FailureReason.HostUnresolved -> "Host could not be resolved. Tap Reconnect to retry."
         FailureReason.ServerRestarted -> "The tmux server restarted — all sessions ended. Tap Reconnect."
         FailureReason.SessionEnded -> "This session ended. Tap Reconnect."
         FailureReason.KeyMissing -> "Private key file not found. Tap Reconnect to retry."
-        is FailureReason.Unreachable -> "Connection lost. Tap Reconnect to retry."
+        is FailureReason.Unreachable ->
+            if (endpoint.isNullOrBlank()) {
+                "Disconnected. Tap Reconnect to retry."
+            } else {
+                "Disconnected from $endpoint. Tap Reconnect to retry."
+            }
     }
+
+/**
+ * Issue #1344: build the `<user>@<host>:<port>` endpoint label for the unified #145
+ * disconnect band wording ([failureReasonSentence]) from the session screen's target
+ * coordinates. Returns null when the host is unknown/blank (a standalone render with
+ * no target) so the band degrades to the host-less "Disconnected." rather than an
+ * empty "Disconnected from ." — matching the historical VM-composed
+ * "Disconnected from ${target.user}@${target.host}:${target.port}" wording exactly.
+ */
+internal fun disconnectEndpointLabel(user: String, host: String, port: Int): String? =
+    if (host.isBlank()) null else "$user@$host:$port"
 
 internal fun recordTmuxReconnectUiStateRendered(
     status: ConnectionStatus,

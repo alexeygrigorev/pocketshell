@@ -2122,22 +2122,121 @@ class TmuxSessionScreenTest {
         // AC-3: the failed state carries a TYPED FailureReason (no raw string field),
         // and the screen maps it to ONE calm curated sentence — never raw exception
         // text. Class coverage over every reason.
+        // Issue #1344: the generic Unreachable disconnect renders the unified #145
+        // host-qualified "Disconnected from <user>@<host>:<port>." wording; the config
+        // reasons keep their DISTINCT curated sentences (#1322 Error/Gone distinction).
+        val endpoint = "testuser@dev.box:22"
         val cases = mapOf(
             FailureReason.AuthFailed to "Authentication failed — check your key. Tap Reconnect to retry.",
             FailureReason.HostUnresolved to "Host could not be resolved. Tap Reconnect to retry.",
             FailureReason.ServerRestarted to "The tmux server restarted — all sessions ended. Tap Reconnect.",
             FailureReason.SessionEnded to "This session ended. Tap Reconnect.",
             FailureReason.KeyMissing to "Private key file not found. Tap Reconnect to retry.",
-            FailureReason.Unreachable(retryable = true) to "Connection lost. Tap Reconnect to retry.",
+            FailureReason.Unreachable(retryable = true) to "Disconnected from $endpoint. Tap Reconnect to retry.",
+            FailureReason.Unreachable(retryable = false) to "Disconnected from $endpoint. Tap Reconnect to retry.",
         )
         cases.forEach { (reason, expected) ->
             val state = SessionSurfaceState.Failed(sid, "work", reason)
-            assertEquals("curated sentence for $reason", expected, failureReasonSentence(state.reason))
-            val sentence = failureReasonSentence(state.reason)
+            assertEquals("curated sentence for $reason", expected, failureReasonSentence(state.reason, endpoint))
+            val sentence = failureReasonSentence(state.reason, endpoint)
             assertFalse("no raw error: prefix", sentence.startsWith("error:"))
             assertFalse("no exception class name", sentence.contains("Exception"))
             assertTrue("stays a calm reconnect prompt", sentence.contains("Reconnect"))
         }
+    }
+
+    // ─── Issue #1344 (v0.4.25 regression, release-blocker) ──────────────────────
+    // The S1+S3 connection-state-machine consolidation fused the disconnect band to
+    // render from the typed [FailureReason] via [failureReasonSentence]; the generic
+    // [FailureReason.Unreachable] arm regressed to a bare "Connection lost." that no
+    // longer contained the unified #145 "Disconnected from <user>@<host>:<port>."
+    // wording. `BackgroundResumeSocketDeathE2eTest` (which asserts the band contains
+    // "Disconnected from") went RED on the v0.4.25 train. These JVM class-cover tests
+    // pin the mapping so it cannot silently regress again (D31/D33, wired into the
+    // `Unit tests` gate).
+
+    @Test
+    fun failureReasonSentence_unreachable_containsUnified145DisconnectedFromWording() {
+        // The load-bearing #1344 assertion: the disconnect/socket-death class
+        // ([FailureReason.Unreachable], BOTH retryable values — the reveal-driven
+        // exhaustion path and the phase-driven Failed hold) renders the unified #145
+        // "Disconnected from <user>@<host>:<port>." band the socket-death journey
+        // greps for. This FAILS on the pre-fix "Connection lost." mapping.
+        val endpoint = disconnectEndpointLabel(user = "testuser", host = "dev.box", port = 2222)
+        assertEquals("testuser@dev.box:2222", endpoint)
+        for (retryable in listOf(true, false)) {
+            val sentence = failureReasonSentence(FailureReason.Unreachable(retryable), endpoint)
+            assertTrue(
+                "Unreachable(retryable=$retryable) band must contain the #145 `Disconnected from` " +
+                    "wording (was `$sentence`)",
+                sentence.contains("Disconnected from"),
+            )
+            assertTrue(
+                "Unreachable(retryable=$retryable) band must name the endpoint (was `$sentence`)",
+                sentence.contains("testuser@dev.box:2222"),
+            )
+            assertTrue("stays a calm reconnect prompt", sentence.contains("Tap Reconnect"))
+        }
+    }
+
+    @Test
+    fun failureReasonSentence_unreachable_withoutEndpoint_stillShowsDisconnectedMarker() {
+        // A standalone render with no known host (blank host → null endpoint) must NOT
+        // print an empty "Disconnected from ." — it degrades to a host-less
+        // "Disconnected." that still carries the clear disconnected indicator.
+        assertNull(disconnectEndpointLabel(user = "u", host = "", port = 22))
+        for (retryable in listOf(true, false)) {
+            val sentence = failureReasonSentence(FailureReason.Unreachable(retryable), endpoint = null)
+            assertTrue("host-less band still says Disconnected (was `$sentence`)", sentence.contains("Disconnected"))
+            assertFalse("no dangling `Disconnected from .` (was `$sentence`)", sentence.contains("Disconnected from ."))
+            assertTrue("stays a calm reconnect prompt", sentence.contains("Tap Reconnect"))
+        }
+    }
+
+    @Test
+    fun failureReasonSentence_configReasons_keepDistinctWording_notDisconnectedFrom() {
+        // Adjacency guard (#1322 Error/Gone distinction preserved): the config-level
+        // reasons must NOT be swept into the generic "Disconnected from" wording — each
+        // keeps its own actionable sentence so the user knows WHAT to fix.
+        val endpoint = "u@h:22"
+        val distinct = mapOf(
+            FailureReason.AuthFailed to "Authentication failed",
+            FailureReason.HostUnresolved to "Host could not be resolved",
+            FailureReason.ServerRestarted to "tmux server restarted",
+            FailureReason.SessionEnded to "This session ended",
+            FailureReason.KeyMissing to "Private key file not found",
+        )
+        distinct.forEach { (reason, marker) ->
+            val sentence = failureReasonSentence(reason, endpoint)
+            assertTrue("$reason keeps its distinct wording (was `$sentence`)", sentence.contains(marker))
+            assertFalse("$reason must NOT read as a generic disconnect (was `$sentence`)", sentence.contains("Disconnected from"))
+        }
+    }
+
+    @Test
+    fun failedSurface_fromRevealError_rendersDisconnectedFromBand() {
+        // End-to-end of the mapping the socket-death journey exercises: a reveal-driven
+        // honest error ([RevealState.Error] retrying=false, Unreachable) fuses to
+        // [SessionSurfaceState.Failed] and the band (endpoint from the screen's target)
+        // reads the unified #145 wording. Drives the SAME fusion + sentence helpers the
+        // production screen wires, in the reported exhaustion state.
+        val target = SessionId("2222/claude-main")
+        val fused = sessionSurfaceState(
+            reveal = RevealState.Error(
+                target,
+                "claude-main",
+                retrying = false,
+                reason = FailureReason.Unreachable(retryable = false),
+            ),
+            phase = ConnectionPhase.Failed,
+            targetId = target,
+        )
+        assertTrue("fusion must settle to Failed", fused is SessionSurfaceState.Failed)
+        val band = failureReasonSentence(
+            (fused as SessionSurfaceState.Failed).reason,
+            endpoint = disconnectEndpointLabel(user = "testuser", host = "dev.box", port = 2222),
+        )
+        assertTrue("socket-death band must contain #145 `Disconnected from` (was `$band`)", band.contains("Disconnected from testuser@dev.box:2222"))
     }
 
     @Test

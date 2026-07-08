@@ -18,7 +18,8 @@ app/src/main/java/com/pocketshell/app/projects/WatchedFoldersScreen.kt 1
 app/src/main/java/com/pocketshell/app/settings/SettingsScreen.kt 3
 app/src/main/java/com/pocketshell/app/share/HostPickerScreen.kt 2
 app/src/main/java/com/pocketshell/app/snippets/SnippetPickerSheet.kt 1
-app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 20
+app/src/main/java/com/pocketshell/app/tmux/TmuxSessionAuxiliaryModals.kt 6
+app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 14
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/ConfirmDialog.kt 1
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/FormDialog.kt 1
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/HostCard.kt 2

@@ -117,6 +117,50 @@ class PromptComposerOutboundQueueTest {
     }
 
     @Test
+    fun outboundQueueCollapsedRetryInvokesOldestQueuedOrFailedRow() {
+        val failed = OutboundItem(
+            id = "failed-collapsed",
+            sessionKey = "1/a",
+            cleanText = "send after reconnect",
+            state = OutboundState.Failed,
+            lastError = "connection lost",
+            createdAtMs = 1L,
+        )
+        val queued = OutboundItem(
+            id = "queued-collapsed",
+            sessionKey = "1/a",
+            cleanText = "queued behind it",
+            state = OutboundState.Queued,
+            createdAtMs = 2L,
+        )
+        val retriedIds = mutableListOf<String>()
+
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                    outboundQueueItems = listOf(failed, queued),
+                    outboundQueueExpanded = false,
+                    onRetryOutboundItem = { retriedIds += it },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(failed.id)).assertDoesNotExist()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(failed.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(queued.id)).assertDoesNotExist()
+
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(failed.id)).performClick()
+        compose.waitForIdle()
+        assertEquals(listOf(failed.id), retriedIds)
+    }
+
+    @Test
     fun outboundQueueActiveRowsStayVisibleWithoutRetryOrDeleteControls() {
         val inFlight = OutboundItem(
             id = "in-flight-1",

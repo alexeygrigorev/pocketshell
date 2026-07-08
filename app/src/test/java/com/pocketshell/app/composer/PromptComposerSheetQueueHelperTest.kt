@@ -28,6 +28,17 @@ class PromptComposerSheetQueueHelperTest {
         )
     }
 
+    @Test
+    fun retryableOutboundQueueItemTreatsRecoveredUploadingRowAsRetryableAfterRequeue() {
+        val recoveredUpload = item("recovered-upload", OutboundState.Queued, createdAtMs = 1L)
+        val freshUpload = item("fresh-upload", OutboundState.Uploading, createdAtMs = 2L)
+
+        assertEquals(
+            recoveredUpload,
+            retryableOutboundQueueItem(listOf(recoveredUpload, freshUpload)),
+        )
+    }
+
     private fun item(id: String, state: OutboundState, createdAtMs: Long): OutboundItem =
         OutboundItem(
             id = id,

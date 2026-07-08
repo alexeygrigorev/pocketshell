@@ -5307,6 +5307,54 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun sharedPrefsDraftWritesAreScheduledOffCallerThreadButVisibleToSessionSwitches() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val store = SharedPrefsComposerDraftStore(ApplicationProvider.getApplicationContext())
+        val target = "test/off-main-${System.nanoTime()}"
+        val vm = newVm(
+            samplerDispatcher = dispatcher,
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged(target)
+
+        vm.onDraftChange("first")
+        vm.onDraftChange("second")
+
+        assertEquals("second", vm.uiState.value.draft)
+        assertNull(store.load(target))
+
+        vm.onComposerTargetChanged("$target/other")
+        vm.onComposerTargetChanged(target)
+
+        assertEquals("second", vm.uiState.value.draft)
+        assertNull(store.load(target))
+
+        advanceUntilIdle()
+
+        assertEquals("second", store.load(target))
+    }
+
+    @Test
+    fun clearDraftWinsOverPendingSharedPrefsDraftSave() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val store = SharedPrefsComposerDraftStore(ApplicationProvider.getApplicationContext())
+        val target = "test/clear-wins-${System.nanoTime()}"
+        val vm = newVm(
+            samplerDispatcher = dispatcher,
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged(target)
+
+        vm.onDraftChange("stale draft")
+        vm.discardDraft()
+
+        assertEquals("", vm.uiState.value.draft)
+        advanceUntilIdle()
+
+        assertNull(store.load(target))
+    }
+
+    @Test
     fun discardClearsTheDurableSlotSoSwitchBackIsEmpty() = runTest {
         // Issue #832: Discard is the explicit "throw it away" control — it must
         // drop the durable slot too, otherwise a switch back resurrects the

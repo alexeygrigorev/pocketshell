@@ -12312,6 +12312,73 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun tmuxInputStreamLargeSingleWriteEnqueuesBoundedPrefixInsteadOfDroppingWholePaste() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            sendCommandGatePrefix = "send-keys -l -t %0"
+            sendCommandGate = CompletableDeferred()
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+        val capacity = vm.tmuxInputCapacityBytesForTest()
+        val payload = ByteArray(capacity + TMUX_INPUT_CHUNK_BYTES) { index ->
+            if (index < capacity) 'a'.code.toByte() else 'z'.code.toByte()
+        }
+
+        val write = runCatching { sink.write(payload) }
+        assertTrue(
+            "a single paste larger than the queue capacity must not be rejected before any bytes are enqueued",
+            write.isSuccess,
+        )
+        val beforeDrain = vm.tmuxInputMetricsForTest("%0")
+            ?: error("input metrics should be recorded")
+        assertEquals(
+            "the bounded queue should retain the prefix it can send instead of dropping the whole paste",
+            capacity.toLong(),
+            beforeDrain.totalEnqueuedBytes,
+        )
+
+        runCurrent()
+        client.sendCommandGate?.complete(Unit)
+        advanceUntilIdle()
+
+        val sentText = client.sentCommands
+            .filter { it.startsWith("send-keys -l -t %0 -- '") }
+            .joinToString(separator = "") { command ->
+                command.substringAfter("-- '").removeSuffix("'")
+            }
+        assertEquals(
+            "only the bounded prefix should be sent after the overflow tail is dropped",
+            capacity,
+            sentText.length,
+        )
+        assertTrue("the retained prefix should reach tmux", sentText.all { it == 'a' })
+        assertFalse("overflow tail bytes must not be replayed later", sentText.any { it == 'z' })
+    }
+
+    @Test
+    fun tmuxInputStreamWriteAfterCloseThrowsInsteadOfSilentlyDroppingBytes() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+
+        sink.close()
+        val write = runCatching { sink.write("after-close".toByteArray(Charsets.US_ASCII)) }
+
+        assertTrue(
+            "writes after close must be observable failures, not silent successful drops",
+            write.isFailure,
+        )
+        assertTrue(
+            "closed queue writes should fail with IOException",
+            write.exceptionOrNull() is IOException,
+        )
+        advanceUntilIdle()
+        assertTrue(client.sentCommands.none { it.startsWith("send-keys") })
+    }
+
+    @Test
     fun sendToAgentPaneLongSingleLineUsesBoundedBracketedChunksThenEnter() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()

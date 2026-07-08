@@ -40,6 +40,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -84,8 +85,10 @@ import java.io.FileOutputStream
  *    viewport goes (near-)black — exactly the maintainer's screenshot. The REMOTE tmux grid is
  *    never touched, so a fresh `capture-pane` still holds the full banner.
  *  - Background PAST a short injected grace (the pin holds — assert `background_grace_held_by_
- *    port_forward` fired and NO `terminal_background_teardown`), then deliver the REAL session
- *    notification `contentIntent` (`SINGLE_TOP|CLEAR_TOP`, no extra) and foreground.
+ *    port_forward` fired and NO `terminal_background_teardown`). While pinned the SESSION FGS is
+ *    SUPPRESSED (#1159 Part 3 / #1202: the ForwardingService FGS is the single tray owner), so we
+ *    assert the "Session connected" notification is absent and the "Port forwarding running"
+ *    notification is the posted tray control, then foreground back onto the terminal.
  *
  * ## Why the LOAD-BEARING assertion is the capture-pane round-trip (recompose-immune)
  *
@@ -227,18 +230,33 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
             0,
             diagnostics!!.eventsNamed("terminal_background_teardown").size,
         )
-        // The FGS session notification is held while backgrounded+pinned — the tappable target.
-        val notification = pollForSessionNotification(NOTIFICATION_TIMEOUT_MS)
-        assertNotNull("$namePrefix session foreground notification must be posted while pinned", notification)
+        // Issue #1159 Part 3 / #1202 (hard-cut, D22): while a port-forward PINS the connection
+        // the SESSION FGS is SUPPRESSED — the ForwardingService FGS is the SINGLE owner of the
+        // tray notification (its Stop actually tears down the tunnels). So the "Session connected"
+        // notification must be ABSENT while pinned, and the "Port forwarding running" notification
+        // is the real tappable target that foregrounds the app (its contentIntent opens MainActivity).
+        assertNull(
+            "$namePrefix the session FGS notification must be SUPPRESSED while a port-forward pins " +
+                "the connection (#1159 Part 3 / #1202); the ForwardingService FGS owns the tray",
+            sessionNotification(),
+        )
+        val notification = pollForNotification("Port forwarding running", NOTIFICATION_TIMEOUT_MS)
+        assertNotNull(
+            "$namePrefix the ForwardingService notification (the tappable target while pinned) " +
+                "must be posted",
+            notification,
+        )
 
         // ============================================================
-        // Deliver the REAL notification contentIntent, then foreground.
+        // Foreground the app back onto the live terminal, then resume.
         // ============================================================
         val capturesBeforeResume = capturePaneCount(activePaneId)
-        // Fire the actual `SINGLE_TOP|CLEAR_TOP` no-extra content intent (the real tap path →
-        // onNewIntent) if present; the ProcessLifecycle ON_START below is what drives
-        // onAppForegrounded(false) either way.
-        runCatching { notification?.notification?.contentIntent?.send() }
+        // The maintainer's #1181 return path is back onto the TERMINAL (recents / app-switch)
+        // of the still-live pinned connection. We do NOT fire the pinned "Port forwarding
+        // running" notification's contentIntent — it carries EXTRA_OPEN_PORT_FORWARDING and
+        // routes to the port-forward chooser, not the terminal. The ProcessLifecycle ON_START
+        // driven by moveToState(RESUMED) is what fires onAppForegrounded(false) — the exact
+        // live-no-pending foreground-resume branch that must reseed the black pane.
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         waitForDiagnostic("background_grace_foreground", "$namePrefix foreground") {
             it.fields["withinGrace"] == false
@@ -589,19 +607,24 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
         error("timed out waiting for diagnostic '$name' during $label; events=${diagnostics!!.events}")
     }
 
-    private fun pollForSessionNotification(timeoutMs: Long): android.service.notification.StatusBarNotification? {
+    private fun pollForNotification(
+        title: String,
+        timeoutMs: Long,
+    ): android.service.notification.StatusBarNotification? {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var posted = sessionNotification()
+        var posted = notificationWithTitle(title)
         while (posted == null && SystemClock.elapsedRealtime() < deadline) {
             SystemClock.sleep(100)
-            posted = sessionNotification()
+            posted = notificationWithTitle(title)
         }
         return posted
     }
 
-    private fun sessionNotification() =
+    private fun sessionNotification() = notificationWithTitle("Session connected")
+
+    private fun notificationWithTitle(title: String) =
         notificationManager.activeNotifications.firstOrNull {
-            it.notification.extras.getCharSequence("android.title")?.toString() == "Session connected"
+            it.notification.extras.getCharSequence("android.title")?.toString() == title
         }
 
     private fun readFixtureKey(): String =

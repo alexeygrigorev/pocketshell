@@ -42,6 +42,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -139,7 +140,11 @@ class BoundedGraceSessionHoldJourneyE2eTest {
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
         waitForClientCountAtLeast(1, "initial attach")
-        waitForSessionNotification("initial attach")
+        // Issue #1159 Part 1: the session FGS runs ONLY while backgrounded — in the
+        // FOREGROUND the Activity itself holds the connection, so NO "Session connected"
+        // notification (and no Stop-action footgun) is posted at attach. The real FGS
+        // notification coverage is asserted below in PHASE 1, once backgrounded.
+        awaitNoSessionNotification("initial attach (foreground)")
         recordTiming("attach_ms", SystemClock.elapsedRealtime() - attachStart)
         captureViewport("issue1123-01-attached")
 
@@ -166,7 +171,10 @@ class BoundedGraceSessionHoldJourneyE2eTest {
         watchNoVisibleReconnect("within-grace settle", WATCH_NO_RECONNECT_MS)
         waitForVisibleTerminal("within-grace marker") { it.contains(READY_MARKER) }
         waitForClientCountAtLeast(1, "within-grace after foreground")
-        assertSessionNotificationOngoing("within-grace after foreground")
+        // Issue #1159 Part 1: returning to the FOREGROUND stops the FGS — the Activity holds
+        // the connection again, so the "Session connected" notification must CLEAR (no lingering
+        // tray control whose Stop could kill the live foreground connection).
+        awaitNoSessionNotification("within-grace after foreground")
         captureViewport("issue1123-02-within-grace")
 
         val tmuxConnectBeforeBeyondGrace = TMUX_CONNECT_ATTEMPTS.get()
@@ -469,10 +477,22 @@ class BoundedGraceSessionHoldJourneyE2eTest {
         }
     }
 
-    private fun waitForSessionNotification(label: String) {
-        val posted = pollForSessionNotification(timeoutMs = NOTIFICATION_TIMEOUT_MS)
-        assertNotNull("session foreground notification must be posted for $label", posted)
-        assertSessionNotificationOngoing(label)
+    /**
+     * Issue #1159 Part 1: the session FGS + its "Session connected" notification exist ONLY
+     * while the app is BACKGROUNDED. This asserts the notification is ABSENT in a foreground
+     * state (initial attach, and after a within-grace foreground return), polling briefly so
+     * an async foreground-stop has time to clear a previously-posted notification.
+     */
+    private fun awaitNoSessionNotification(label: String) {
+        val deadline = SystemClock.elapsedRealtime() + NOTIFICATION_TIMEOUT_MS
+        while (sessionNotification() != null && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(100)
+        }
+        assertNull(
+            "no session foreground notification must be posted in the foreground for $label " +
+                "(#1159 Part 1: the Activity holds the connection; the FGS runs only backgrounded)",
+            sessionNotification(),
+        )
     }
 
     private fun assertSessionNotificationOngoing(label: String) {
@@ -535,16 +555,6 @@ class BoundedGraceSessionHoldJourneyE2eTest {
             null,
             sessionNotification(),
         )
-    }
-
-    private fun pollForSessionNotification(timeoutMs: Long): android.service.notification.StatusBarNotification? {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var posted = sessionNotification()
-        while (posted == null && SystemClock.elapsedRealtime() < deadline) {
-            SystemClock.sleep(100)
-            posted = sessionNotification()
-        }
-        return posted
     }
 
     private fun sessionNotification() =

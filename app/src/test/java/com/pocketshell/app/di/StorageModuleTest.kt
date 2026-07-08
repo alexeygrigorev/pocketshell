@@ -43,11 +43,11 @@ class StorageModuleTest {
     }
 
     @Test
-    fun provideAppDatabase_doesNotRebuildUnsupportedLegacyVersionFiveDatabase() {
+    fun provideAppDatabase_doesNotDestructivelyRebuildMalformedVersionFiveDatabase() {
         seedStaleIdentityDatabase(version = LEGACY_026_SCHEMA_VERSION)
 
         val db = StorageModule.provideAppDatabase(context)
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(RuntimeException::class.java) {
             try {
                 db.openHelper.writableDatabase.query("SELECT 1").close()
             } finally {

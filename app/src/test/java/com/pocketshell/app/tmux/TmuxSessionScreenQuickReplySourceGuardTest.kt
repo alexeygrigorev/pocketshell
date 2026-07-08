@@ -30,6 +30,27 @@ class TmuxSessionScreenQuickReplySourceGuardTest {
         assertTrue(src.contains("private fun AgentQuickReplyBand("))
     }
 
+    @Test
+    fun quickReplyTapRoutesThroughSurfacePaneId() {
+        val src = locate("TmuxSessionScreen.kt")
+        val quickReplyMount = src.substringBetween(
+            start = "AgentQuickReplyBand(\n                    terminalState = pane.terminalState,",
+            end = "// Issue #810",
+        )
+
+        assertTrue(
+            "Quick-reply taps must route to the surface pane, so cached/session-switch " +
+                "surfaces do not send replies to a stale active pane.",
+            quickReplyMount.contains("AgentQuickReplyBand(") &&
+                quickReplyMount.contains("viewModel.writeInputToPane(") &&
+                quickReplyMount.contains("pane.paneId,"),
+        )
+        assertFalse(
+            "The quick-reply callback must not route through currentPane/currentPaneId.",
+            quickReplyMount.contains("currentPane") || quickReplyMount.contains("currentPaneId"),
+        )
+    }
+
     private fun String.substringBetween(start: String, end: String): String {
         val startIndex = indexOf(start)
         check(startIndex >= 0) { "$start not found" }

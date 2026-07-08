@@ -1009,6 +1009,78 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun bootstrapHost_divertsToSetupSheet_whenReadyButNotificationsOff() = runTest {
+        // Issue #1236 (D26): a host with the CLI + tmux ready but the agent
+        // stop/idle notification hooks OFF is a SILENT host under D21. Instead
+        // of navigating past it, bootstrap must surface the one-tap "enable
+        // notifications" upgrade (the AC4 upgrade path). notificationsActionable
+        // is true only when the CLI is compatible AND hooks are DEFINITIVELY
+        // off, so this must NOT navigate.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "silent-host", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(hooksInstalled = false)
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        val state = viewModel.bootstrapState.value
+        assertTrue(
+            "ready-but-silent host must show the setup sheet, got $state",
+            state is HostBootstrapSheetState.Prompt,
+        )
+        val prompt = state as HostBootstrapSheetState.Prompt
+        assertEquals(true, prompt.report?.notificationsActionable)
+        assertEquals(false, viewModel.pendingNavigation.value!!.ready)
+    }
+
+    @Test
+    fun bootstrapHost_navigates_whenReadyAndHooksUnknown() = runTest {
+        // A CLI without the `hooks` subcommand (old CLI) reads as Unknown. We
+        // must NEVER pester on Unknown — the host navigates normally.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "unknown-hooks", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(hooksInstalled = null)
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        assertEquals(true, viewModel.pendingNavigation.value!!.ready)
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
+    fun bootstrapHost_navigates_whenReadyAndNotificationsOn() = runTest {
+        // Hooks installed → notifications on → navigate normally, no nudge.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "notifying-host", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(hooksInstalled = true)
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        assertEquals(true, viewModel.pendingNavigation.value!!.ready)
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
     fun installBootstrapTool_surfacesNoChangeMessage_whenUpgradeExitsZeroButVersionUnchanged() = runTest {
         // Issue #779: the user taps "Update" on the outdated-CLI row. The
         // host's `uv tool install --upgrade …` exits 0 but installs nothing
@@ -2599,6 +2671,10 @@ class HostListViewModelTest {
         // no-op upgrade (the exclude-newer-style "Nothing to upgrade" dead
         // end). Lets a test drive the "update ran but did nothing" branch.
         private val upgradeIsNoOp: Boolean = false,
+        // Issue #1236: model the D26 notification hooks state. `null` = the CLI
+        // does not support the `hooks` subcommand (exit non-zero → the app
+        // reads HooksStatus.Unknown); `true`/`false` = a real `hooks status`.
+        private val hooksInstalled: Boolean? = null,
     ) : SshSession {
         val recorded = mutableListOf<String>()
         var closeCount: Int = 0
@@ -2631,6 +2707,24 @@ class HostListViewModelTest {
                 // `pocketshell`.
                 upgradeIsNoOp && command.contains("tool install") && command.contains("--upgrade") ->
                     ExecResult("Nothing to upgrade\n", "", 0)
+                // Issue #1236: model `pocketshell hooks status/install`. Match
+                // BEFORE the generic `command -v pocketshell` / `--version`
+                // rules since the hooks command line also mentions pocketshell.
+                command.contains("hooks status --json") ->
+                    if (hooksInstalled == null) {
+                        ExecResult("", "no such command 'hooks'", 2)
+                    } else {
+                        ExecResult(
+                            "{\"engines\":[" +
+                                "{\"engine\":\"claude\",\"installed\":$hooksInstalled}," +
+                                "{\"engine\":\"codex\",\"installed\":$hooksInstalled}," +
+                                "{\"engine\":\"opencode\",\"installed\":$hooksInstalled}]}",
+                            "",
+                            0,
+                        )
+                    }
+                command.contains("hooks install --engine all") ->
+                    ExecResult("claude: installed\n", "", 0)
                 command.contains("command -v") && command.contains("pocketshell") ->
                     ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
                 command.contains("pocketshell") && command.contains("--version") ->

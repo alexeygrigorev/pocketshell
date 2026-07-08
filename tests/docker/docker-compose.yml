@@ -239,6 +239,23 @@ services:
       - "2235:22"
     healthcheck: *ssh-healthcheck
 
+  # Issue #1236 (D26): a host with tmux + the pocketshell CLI ready but the
+  # agent stop/idle notification hooks NOT installed — a SILENT host under D21.
+  # Seeds a pre-existing foreign Claude hook so the bootstrap `hooks install`
+  # can be asserted to MERGE non-destructively. Bound on host port 2241
+  # (distinct from the other bootstrap variants 2230-2236, old-cli 2238,
+  # daemon 2239, real-agent 2240).
+  bootstrap-notifications:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: notifications
+    image: pocketshell-test:bootstrap-notifications
+    ports:
+      - "2241:22"
+    healthcheck: *ssh-healthcheck
+
   # Issue #145: deterministic mid-session disconnect fixture. Every
   # accepted interactive SSH session (TmuxClient shell channel) is
   # wrapped in a ForceCommand watcher that kills the SSH child after

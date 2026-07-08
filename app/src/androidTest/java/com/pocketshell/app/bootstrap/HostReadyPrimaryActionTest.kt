@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -67,7 +68,7 @@ class HostReadyPrimaryActionTest {
                         .background(PocketShellColors.Background),
                 ) {
                     HostBootstrapSheet(
-                        state = HostBootstrapSheetState.Success,
+                        state = HostBootstrapSheetState.Success(notificationsReady = true),
                         hostName = "hetzner",
                         onInstall = {},
                         onInstallTool = {},
@@ -85,6 +86,10 @@ class HostReadyPrimaryActionTest {
         compose.onNodeWithTag(HOST_BOOTSTRAP_CONTINUE_TAG).assertExists()
         // Issue #885: the "Open Usage" CTA must NOT exist on the success sheet.
         compose.onNodeWithTag("host-bootstrap-open-usage").assertDoesNotExist()
+        // Issue #1236: the success sheet surfaces per-host notification
+        // readiness so a silent host is visible. notificationsReady = true here.
+        compose.onNodeWithTag(HOST_BOOTSTRAP_NOTIFICATIONS_STATUS_TAG).assertExists()
+        compose.onNodeWithText("Notifications: on", substring = true).assertExists()
 
         capture("issue-885-host-ready.png")
 

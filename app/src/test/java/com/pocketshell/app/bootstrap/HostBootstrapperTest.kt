@@ -268,6 +268,193 @@ class HostBootstrapperTest {
         assertTrue(session.recorded.none { it.contains("mosh", ignoreCase = true) })
     }
 
+    // ---------------------------------------------------------------------
+    // Issue #1236 (D26): agent stop/idle notification hooks folded into
+    // bootstrap. checkServerSetup probes `pocketshell hooks status --json`;
+    // installServerSetup runs `pocketshell hooks install --engine all` once
+    // the tools are ready.
+    // ---------------------------------------------------------------------
+
+    private fun hooksStatusJson(
+        claude: Boolean = true,
+        codex: Boolean = true,
+        opencode: Boolean = true,
+    ): String =
+        """
+        {"bus_path":"/home/u/.cache/pocketshell/hooks/events.jsonl","engines":[
+          {"engine":"claude","installed":$claude},
+          {"engine":"codex","installed":$codex},
+          {"engine":"opencode","installed":$opencode}
+        ]}
+        """.trimIndent()
+
+    private fun readyToolsWithHooks(hooksStatus: ExecResult): Map<String, ExecResult> = mapOf(
+        pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+        pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+        pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+        systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+        systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+        pathAware("'/home/u/.local/bin/pocketshell' hooks status --json") to hooksStatus,
+    )
+
+    @Test
+    fun checkServerSetup_reportsNotificationsReady_whenAllHookEnginesInstalled() = runTest {
+        val session = FakeSshSession(
+            readyToolsWithHooks(ExecResult(hooksStatusJson(), "", 0)),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertEquals(HooksStatus.Installed, report.hooks)
+        assertTrue(report.notificationsReady)
+        assertTrue(!report.notificationsActionable)
+        assertTrue(
+            "checkServerSetup must probe `pocketshell hooks status --json`",
+            session.recorded.any { it.contains("hooks status --json") },
+        )
+    }
+
+    @Test
+    fun checkServerSetup_reportsNotificationsActionable_whenAnEngineMissesTheHook() = runTest {
+        val session = FakeSshSession(
+            readyToolsWithHooks(ExecResult(hooksStatusJson(claude = false), "", 0)),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertEquals(HooksStatus.NotInstalled, report.hooks)
+        assertTrue(!report.notificationsReady)
+        // CLI is compatible + hooks definitively off → the actionable "enable
+        // notifications" state (a silent host under D21).
+        assertTrue(report.notificationsActionable)
+    }
+
+    @Test
+    fun checkServerSetup_reportsHooksUnknown_neverActionable_whenHooksStatusFails() = runTest {
+        // An OLD CLI without the `hooks` subcommand exits non-zero. We must NOT
+        // pester the user on Unknown (mirrors TmuxStatus.Unknown).
+        val session = FakeSshSession(
+            readyToolsWithHooks(ExecResult("", "no such command 'hooks'", 2)),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.hooks is HooksStatus.Unknown)
+        assertTrue(!report.notificationsReady)
+        assertTrue(!report.notificationsActionable)
+    }
+
+    @Test
+    fun checkServerSetup_reportsHooksUnknown_whenPocketshellMissing() = runTest {
+        // No CLI → cannot probe hooks. Unknown, never actionable.
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("", "", 1),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.hooks is HooksStatus.Unknown)
+        assertTrue(!report.notificationsActionable)
+        assertTrue(
+            "no hooks probe should run without a pocketshell CLI",
+            session.recorded.none { it.contains("hooks status") },
+        )
+    }
+
+    @Test
+    fun installServerSetup_installsHooks_afterToolsReady() = runTest {
+        // Tools already present but hooks off → installServerSetup must fold in
+        // `hooks install --engine all` and report Success with notifications on.
+        var installed = false
+        val session = FakeSshSession(
+            dynamic = { command ->
+                when {
+                    command == pathAware("'/home/u/.local/bin/pocketshell' hooks install --engine all") -> {
+                        installed = true
+                        ExecResult("claude: installed\ncodex: installed\nopencode: installed\n", "", 0)
+                    }
+                    command == pathAware("'/home/u/.local/bin/pocketshell' hooks status --json") ->
+                        ExecResult(hooksStatusJson(claude = installed, codex = installed, opencode = installed), "", 0)
+                    command == pathAware("command -v 'pocketshell'") -> ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
+                    command == pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                    command == pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    command == systemdAware("systemctl --user is-active pocketshell-jobs.service") -> ExecResult("active\n", "", 0)
+                    command == systemdAware("systemctl --user is-enabled pocketshell-jobs.service") -> ExecResult("enabled\n", "", 0)
+                    else -> null
+                }
+            },
+        )
+
+        val result = bootstrapper.installServerSetup(session)
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(
+            "installServerSetup must run `pocketshell hooks install --engine all`",
+            session.recorded.any { it.contains("hooks install --engine all") },
+        )
+    }
+
+    @Test
+    fun installServerSetup_stillSucceeds_whenHooksInstallFails() = runTest {
+        // Best-effort: a hooks-install failure must NOT fail the whole setup —
+        // tmux + CLI are already usable. The readiness surface will just show
+        // notifications off.
+        val session = FakeSshSession(
+            dynamic = { command ->
+                when {
+                    command == pathAware("'/home/u/.local/bin/pocketshell' hooks install --engine all") ->
+                        ExecResult("", "permission denied", 1)
+                    command == pathAware("'/home/u/.local/bin/pocketshell' hooks status --json") ->
+                        ExecResult(hooksStatusJson(claude = false), "", 0)
+                    command == pathAware("command -v 'pocketshell'") -> ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
+                    command == pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                    command == pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    command == systemdAware("systemctl --user is-active pocketshell-jobs.service") -> ExecResult("active\n", "", 0)
+                    command == systemdAware("systemctl --user is-enabled pocketshell-jobs.service") -> ExecResult("enabled\n", "", 0)
+                    else -> null
+                }
+            },
+        )
+
+        val result = bootstrapper.installServerSetup(session)
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(session.recorded.any { it.contains("hooks install --engine all") })
+    }
+
+    @Test
+    fun installHooks_runsInstallForAllEngines() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("'/home/u/.local/bin/pocketshell' hooks install --engine all")
+                    to ExecResult("claude: installed\n", "", 0),
+            ),
+        )
+
+        val result = bootstrapper.installHooks(session, "/home/u/.local/bin/pocketshell", DEFAULT_BOOTSTRAP_PATH)
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(session.recorded.any { it.contains("hooks install --engine all") })
+    }
+
+    @Test
+    fun parseHooksStatus_classifiesInstalledNotInstalledAndUnknown() {
+        assertEquals(HooksStatus.Installed, bootstrapper.parseHooksStatus(hooksStatusJson()))
+        assertEquals(HooksStatus.NotInstalled, bootstrapper.parseHooksStatus(hooksStatusJson(codex = false)))
+        assertTrue(bootstrapper.parseHooksStatus("not json at all") is HooksStatus.Unknown)
+        assertTrue(bootstrapper.parseHooksStatus("") is HooksStatus.Unknown)
+    }
+
+    @Test
+    fun notificationsStatusText_reflectsReadiness() {
+        assertTrue(hostBootstrapNotificationsStatusText(true).startsWith("Notifications: on"))
+        assertTrue(hostBootstrapNotificationsStatusText(false).startsWith("Notifications: off"))
+    }
+
     @Test
     fun checkServerSetup_usesUserLocalPathForToolDetection() = runTest {
         val session = FakeSshSession(

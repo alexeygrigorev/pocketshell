@@ -213,6 +213,7 @@ import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -921,6 +922,15 @@ public fun TmuxSessionScreen(
     // agent pane in the current attach.
     val paletteAgent: AgentKind? = liveAgentForPane
         ?: currentPaneId?.let { stickyAgentForPane[it] }
+    val surfaceTerminalState = surfacePane?.terminalState
+    val visibleTerminalText by remember(currentPaneId, surfaceTerminalState) {
+        surfaceTerminalState?.flowOfVisibleScreenText ?: flowOf("")
+    }.collectAsState(
+        initial = surfaceTerminalState?.visibleScreenTextSnapshot().orEmpty(),
+    )
+    val agentQuickReplies = remember(visibleTerminalText) {
+        agentQuickRepliesForVisibleText(visibleTerminalText)
+    }
 
     // Issue #770: the set of engine slash-commands the terminal should make
     // tappable for the visible pane. Sourced verbatim from [AgentCommandCatalog]
@@ -2360,6 +2370,30 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
+            run {
+                val pane = surfacePane
+                val quickReplyInputEnabled = sessionLive &&
+                    pane != null &&
+                    !showMicSheet &&
+                    !showConversation &&
+                    tmuxSessionHasPositiveAgentEvidence(
+                        hasLiveDetection = currentDetection != null,
+                        hasStickyAgent = paletteAgent != null,
+                        recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind),
+                    )
+                if (quickReplyInputEnabled && agentQuickReplies.isNotEmpty()) {
+                    AgentQuickReplyRow(
+                        replies = agentQuickReplies,
+                        onReply = { reply ->
+                            viewModel.writeInputToPane(
+                                pane.paneId,
+                                reply.payload.toByteArray(Charsets.UTF_8),
+                            )
+                        },
+                    )
+                }
+            }
+
             // Issue #810 (hard-cut, D22) — the prompt composer affordance is
             // ALWAYS present on every live session, structurally independent of
             // agent-detection state, pane-cache state (`surfacePane == null` /
@@ -3056,6 +3090,40 @@ internal fun detectedPortForwardNavigation(remotePort: Int): PortForwardNavigati
     )
 
 /**
+ * Issue #1235: one-tap agent approval replies. This is a regular bottom band,
+ * not an overlay, so it reserves its own height above the composer/bottom
+ * controls and never covers terminal content or the input controls.
+ */
+@Composable
+internal fun AgentQuickReplyRow(
+    replies: List<AgentQuickReply>,
+    onReply: (AgentQuickReply) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (replies.isEmpty()) return
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.Border)
+            .horizontalScroll(scrollState)
+            .padding(horizontal = PocketShellSpacing.sm, vertical = PocketShellSpacing.xs)
+            .testTag(TMUX_AGENT_QUICK_REPLY_ROW_TAG),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        replies.forEachIndexed { index, reply ->
+            CommandChip(
+                label = reply.label,
+                onClick = { onReply(reply) },
+                modifier = Modifier.testTag(TMUX_AGENT_QUICK_REPLY_CHIP_TAG_PREFIX + index),
+            )
+        }
+    }
+}
+
+/**
  * Issue #448 (epic #432 slice C): the non-blocking "forward this newly
  * detected port?" overlay. Rendered as a bottom banner that floats over
  * the terminal — it deliberately does not cover the terminal viewport or
@@ -3664,6 +3732,19 @@ internal fun tmuxSessionIsAgentPane(
     hasLiveDetection: Boolean,
     presumedAgent: Boolean,
 ): Boolean = hasLiveDetection || presumedAgent
+
+/**
+ * Issue #1235: quick-reply chips must require positive agent evidence. The
+ * broader [tmuxSessionIsAgentPane] predicate intentionally includes the
+ * optimistic presumed-agent default, which is useful for keeping agent chrome
+ * reachable during detection but too broad for injecting reply chips over an
+ * unknown shell.
+ */
+internal fun tmuxSessionHasPositiveAgentEvidence(
+    hasLiveDetection: Boolean,
+    hasStickyAgent: Boolean,
+    recordedAgentKind: Boolean,
+): Boolean = hasLiveDetection || hasStickyAgent || recordedAgentKind
 
 /**
  * Issue #805 (regression of #744/#716): whether the bottom-bar chrome wears its
@@ -4914,6 +4995,8 @@ internal const val TMUX_CHANGE_KIND_BUTTON_TAG = "tmux:session:change-kind-butto
 internal const val TMUX_DETECTED_PORT_OVERLAY_TAG = "tmux:session:detected-port-overlay"
 internal const val TMUX_DETECTED_PORT_FORWARD_TAG = "tmux:session:detected-port-forward"
 internal const val TMUX_DETECTED_PORT_DISMISS_TAG = "tmux:session:detected-port-dismiss"
+internal const val TMUX_AGENT_QUICK_REPLY_ROW_TAG = "tmux:agent-quick-replies"
+internal const val TMUX_AGENT_QUICK_REPLY_CHIP_TAG_PREFIX = "tmux:agent-quick-reply:"
 /**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * rendered while [TmuxSessionViewModel.ConnectionStatus] is Connecting.

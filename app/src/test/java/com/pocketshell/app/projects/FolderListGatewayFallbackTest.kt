@@ -342,6 +342,77 @@ class FolderListGatewayFallbackTest {
     }
 
     @Test
+    fun freshNameAgentLaunchOnOutdatedHostReachesVersionHintNotCollisionGuard() = runTest {
+        // Regression lock for the chronic-red #759 emulator journey. The #976
+        // launch-collision guard probes `tmux has-session` and REFUSES the
+        // launch when the target already exists — and it runs BEFORE the #759
+        // version pre-flight. For a FRESH target name the session is ABSENT
+        // (has-session exits non-zero), so the guard must NOT fire and the
+        // launch MUST reach the version-mismatch pre-flight and surface the
+        // update hint — NOT the "already open" collision message.
+        //
+        // The on-device fake (FakeOldHostSshSession) had regressed to answer
+        // has-session with exit 0 (a never-created session reported as already
+        // open), which short-circuited the version hint and kept
+        // AgentLaunchVersionMismatchHintE2eTest red for days. This per-push JVM
+        // test locks the coexistence so the ordering can't silently rot again.
+        val session = CreateSessionFake(
+            results = listOf(
+                // Fresh name → has-session reports the session absent.
+                CreateSessionFake.Rule(
+                    match = "has-session",
+                    result = ExecResult(stdout = "", stderr = "can't find session", exitCode = 1),
+                ),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(
+                    match = "pocketshell agent --help",
+                    result = ExecResult(
+                        stdout = "",
+                        stderr = "Error: No such command 'agent'. " +
+                            "(Did you mean one of: 'agent-log', 'usage'?)",
+                        exitCode = 2,
+                    ),
+                ),
+                CreateSessionFake.Rule(
+                    match = "pocketshell --version",
+                    result = ExecResult(stdout = "pocketshell, version 0.3.33", stderr = "", exitCode = 0),
+                ),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val ex = runCatching {
+            gateway.createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+            )
+        }.exceptionOrNull()
+
+        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
+        val message = ex?.message.orEmpty()
+        // Reached the version pre-flight: the hint names the installed version.
+        assertTrue("must reach the version hint (installed version): $message", message.contains("0.3.33"))
+        // The collision guard must NOT have short-circuited the launch.
+        assertFalse(
+            "collision guard must not short-circuit the version pre-flight: $message",
+            message.contains("already open"),
+        )
+        // The pre-flight probe genuinely ran (this is what caught the mismatch).
+        assertTrue(
+            "must have pre-flighted `pocketshell agent --help`: ${session.execCommands}",
+            session.execCommands.any { it.contains("pocketshell agent --help") },
+        )
+        // A doomed launch must never leak keystrokes.
+        assertFalse(
+            "must not send-keys a launch that will fail",
+            session.execCommands.any { it.contains("send-keys") },
+        )
+    }
+
+    @Test
     fun outdatedHostHintStaysGenericWhenVersionProbeFails() = runTest {
         // The `--help` probe shows the mismatch but the version probe itself
         // errors out: the hint still fires, just with generic "too old"

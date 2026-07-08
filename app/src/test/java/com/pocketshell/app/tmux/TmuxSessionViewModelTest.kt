@@ -7348,7 +7348,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun tmuxInputEnqueueRejectsWhenPendingByteBudgetIsFull() = runTest(scheduler) {
+    fun tmuxInputStreamDropsOverflowAndAcceptsLaterBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             sendCommandGatePrefix = "send-keys -l -t %0"
@@ -7363,14 +7363,26 @@ class TmuxSessionViewModelTest {
         }
         runCurrent()
 
-        val thrown = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
-            .exceptionOrNull()
+        val overflow = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
         assertTrue(
-            "enqueue must fail fast instead of blocking when the pending-byte budget is full",
-            thrown is IOException,
+            "the bridge-facing input stream must drop overflow instead of killing the input drainer",
+            overflow.isSuccess,
         )
         client.sendCommandGate?.complete(Unit)
         advanceUntilIdle()
+
+        sink.write("after".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
+        val literalSends = client.sentCommands.filter { it.startsWith("send-keys -l -t %0") }
+        assertTrue(
+            "later input must still reach tmux after a transient full-queue drop",
+            literalSends.any { it.contains("'after'") },
+        )
+        assertTrue(
+            "overflow bytes should be dropped rather than replayed after the backlog drains",
+            literalSends.none { it.contains("overflow") },
+        )
     }
 
     @Test

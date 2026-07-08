@@ -18403,7 +18403,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
         override fun write(buffer: ByteArray, offset: Int, length: Int) {
             if (length <= 0) return
-            queue.write(buffer, offset, length)
+            try { queue.write(buffer, offset, length) } catch (_: IOException) { }
         }
 
         override fun close() {

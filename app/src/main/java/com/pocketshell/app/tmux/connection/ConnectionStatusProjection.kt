@@ -132,7 +132,9 @@ internal object ConnectionStatusProjection {
             // anyway — so we follow the inline state to keep the backgrounded surface
             // byte-identical. The controller's grace deadline still governs the next
             // foreground reattach-vs-reconnect decision.
-            is ConnectionState.Backgrounded -> inlineStatus
+            is ConnectionState.Backgrounded,
+            is ConnectionState.NetworkLossSuspended,
+            -> inlineStatus
             // APPROVED #685 divergence #1 (silent recovery): a recoverable drop leaves
             // the controller Reattaching/Reconnecting → a CALM Reconnecting band, NOT
             // the scary Failed. The display payload (attempt/reason) is the inline

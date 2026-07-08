@@ -30,3 +30,17 @@ class FakeTransportPort : TransportPort {
 
     override fun isWarm(host: HostKey): Boolean = host in warmHosts
 }
+
+class FakeLivenessPort(private var provenAlive: Boolean = false) : LivenessPort {
+    var queryCount: Int = 0
+        private set
+
+    fun setProvenAlive(value: Boolean) {
+        provenAlive = value
+    }
+
+    override fun transportProvenAliveRecently(): Boolean {
+        queryCount++
+        return provenAlive
+    }
+}

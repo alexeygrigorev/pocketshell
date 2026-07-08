@@ -114,6 +114,25 @@ sealed interface ConnectionEvent {
      */
     data class NetworkChanged(val validatedHandoff: Boolean) : ConnectionEvent
 
+    /**
+     * Device network connectivity was lost entirely. This is distinct from
+     * [NetworkChanged]: there is no validated replacement network to redial onto,
+     * so Slice S4 holds the existing lease/content in [ConnectionState.NetworkLossSuspended].
+     *
+     * In this prep slice the event is vocabulary only: [ConnectionController.submit]
+     * treats it as a no-op until VM/app wiring migrates the network reducer.
+     */
+    data object NetworkLost : ConnectionEvent
+
+    /**
+     * Device network connectivity was restored after [NetworkLost]. Slice S4 will
+     * decide between ride-through and silent reconnect with an injected [LivenessPort].
+     *
+     * In this prep slice the event is vocabulary only: [ConnectionController.submit]
+     * treats it as a no-op until VM/app wiring migrates the network reducer.
+     */
+    data object NetworkRestored : ConnectionEvent
+
     /** Target session was deleted elsewhere (#666). Must NOT resurrect it. */
     data class TargetGone(val targetId: SessionId) : ConnectionEvent
 
@@ -150,6 +169,20 @@ sealed interface ConnectionState {
      * deadline is a stored value compared on the next [ConnectionEvent.Foreground].
      */
     data class Backgrounded(
+        val host: HostKey,
+        val targetId: SessionId,
+        val sinceMs: Long,
+    ) : ConnectionState
+
+    /**
+     * The device network is down while a session was live. Hold the lease/content
+     * without redialing or surfacing an honest error; probes/effects can suspend
+     * until [ConnectionEvent.NetworkRestored] resolves the state.
+     *
+     * This state is inert in this prep slice: [ConnectionController.submit] never
+     * transitions into it. The pure network-loss reducer owns the future contract.
+     */
+    data class NetworkLossSuspended(
         val host: HostKey,
         val targetId: SessionId,
         val sinceMs: Long,

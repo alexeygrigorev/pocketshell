@@ -127,6 +127,8 @@ class RevealStateMachine {
      *    (honest error only when exhausted).
      *  - [ConnectionState.Backgrounded] -> keep the current state (no reveal change
      *    while backgrounded; the next foreground re-drives this).
+     *  - [ConnectionState.NetworkLossSuspended] -> keep the current state (calm
+     *    network hold; the restored edge re-drives this).
      *  - [ConnectionState.Idle] -> ignored (a [navigate] drives the target, not Idle).
      */
     fun onConnectionState(connectionState: ConnectionState) {
@@ -142,6 +144,7 @@ class RevealStateMachine {
         val next = when (connectionState) {
             is ConnectionState.Idle,
             is ConnectionState.Backgrounded,
+            is ConnectionState.NetworkLossSuspended,
             -> _state.value // no reveal change
 
             is ConnectionState.Connecting,

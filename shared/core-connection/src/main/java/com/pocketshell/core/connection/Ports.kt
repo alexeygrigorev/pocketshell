@@ -33,7 +33,7 @@ sealed interface TransportUpDown {
  */
 interface TransportPort {
     /** `liveLeaseKeys` / `hasLiveOrConnectingLease` — the warm-lease predicate
-     *  that the single 60s grace check ANDs against. */
+     *  that the single controller grace check ANDs against. */
     fun isWarm(host: HostKey): Boolean
 
     /** == `SshLeaseManager.stateEvents` shape; the controller treats Up/Down as

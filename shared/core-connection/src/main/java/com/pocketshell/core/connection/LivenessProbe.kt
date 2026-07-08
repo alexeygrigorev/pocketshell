@@ -93,8 +93,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  *     missed probes on a flaky-but-alive link are absorbed (the #927 fix — a
  *     conservative SSH client's `ServerAliveCountMax` of 3–6). See the companion
  *     constants for the exact worst-case detection budget and why it must stay
- *     well under the three coupled 60s windows (lease idle TTL, passive grace,
- *     controller grace).
+ *     well under the two 60s transport-liveness windows (lease idle TTL,
+ *     passive grace), and below the controller's 90s foreground grace.
  *
  * ## Determinism (the test seam)
  * The loop's cadence is driven entirely by [delay] on the [CoroutineScope]'s
@@ -365,14 +365,14 @@ class LivenessProbe(
          * [ProbeIo.transportProvenAliveRecently]) and lets the keepalive's ~90s
          * ride-through be the death authority, so it never force-redials a
          * slow-but-live link. The raw budget still lands with a real margin BELOW the
-         * three coupled 60s windows it would otherwise race when it IS the acting
+         * transport-liveness windows it would otherwise race when it IS the acting
          * detector:
          *   - lease idle TTL (`SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS = 60_000`),
          *   - passive disconnect grace (`PASSIVE_DISCONNECT_GRACE_MS = 60_000`).
-         * (The controller grace `ConnectionController.DEFAULT_GRACE_MS` was raised to
-         * 5 min in #1123 — the bounded-grace D21 update — so it is no longer one of the
-         * 60 s windows the probe races; the probe still sits well below the two
-         * transport-liveness 60 s windows above.)
+         * (The controller grace `ConnectionController.DEFAULT_GRACE_MS` is 90 s
+         * after the #1159 bounded-grace update, so it is no longer one of the
+         * 60 s windows the probe races; the probe still sits well below all three
+         * current grace/lease budgets.)
          *
          * 48s is **under the D3-mandated hard ceiling of < 55s** with a ~12s margin
          * below the 60s floor. The `< 50_000` ceiling is enforced by
@@ -418,7 +418,7 @@ class LivenessProbe(
          *
          * Worst-case dead-peer detection = `threshold × (interval + per-probe
          * timeout)` = `4 × (7s + 5s)` = **48s** — under the D3 < 55s ceiling with a
-         * ~12s margin below the three coupled 60s windows (#822 not regressed),
+         * ~12s margin below the two 60s transport-liveness windows (#822 not regressed),
          * while no longer false-positiving on a flaky-but-alive link. The tolerance
          * is raised WITHOUT inflating the raw budget toward the floor because the
          * busy-vs-dead reader-activity guard handles `%output`-burst parking.

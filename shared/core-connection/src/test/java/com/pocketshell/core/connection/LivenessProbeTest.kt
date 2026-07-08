@@ -291,7 +291,7 @@ class LivenessProbeTest {
     //     the documented worst-case budget (#822 not regressed).
     //   * the RAW budget must stay strictly under the D3 < 55s ceiling so when the
     //     probe IS the acting detector (no keepalive signal to defer to) it does
-    //     not race the three coupled 60s grace/lease windows. (Post-#945/#964 the
+    //     not race the two 60s transport-liveness grace/lease windows. (Post-#945/#964 the
     //     probe also DEFERS to the transport keepalive's ~90s ride-through while
     //     the link is provably alive — see the #964 cases below — but the raw
     //     budget still bounds the no-keepalive-signal tmux-control-wedge case.)
@@ -338,8 +338,9 @@ class LivenessProbeTest {
      *
      * The probe's RAW worst-case budget is its bound when it IS the acting detector
      * (a tmux-control-wedge with no transport-keepalive liveness to defer to), so it
-     * MUST stay comfortably below the three coupled 60s windows (lease idle TTL,
-     * passive grace, controller grace). The D3 research set a hard ceiling of
+     * MUST stay comfortably below the two 60s transport-liveness windows (lease
+     * idle TTL, passive grace) and the controller's 90s foreground grace. The D3
+     * research set a hard ceiling of
      * strictly `< 55s`; this asserts an even tighter `< 50s` (the shipping budget is
      * 48s) so ANY future bump that raises the threshold / interval / timeout toward
      * the 60s floor FAILS at PR time instead of silently regressing #822. (Post-#964
@@ -361,8 +362,8 @@ class LivenessProbeTest {
         assertTrue(
             "the probe's RAW worst-case budget (its bound when no keepalive signal " +
                 "is available to defer to, post-#964) must stay strictly under the " +
-                "< 55s D3 ceiling (asserted < 50s for margin below the three coupled " +
-                "60s grace/lease windows) so #927's threshold raise cannot regress " +
+                "< 55s D3 ceiling (asserted < 50s for margin below the 60s " +
+                "transport-liveness windows) so #927's threshold raise cannot regress " +
                 "#822. worstCase=${worstCaseMs}ms",
             worstCaseMs < 50_000L,
         )

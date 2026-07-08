@@ -68,7 +68,7 @@ import javax.inject.Inject
  *
  * Issue #450 (maintainer-sanctioned relaxation of D21): the terminal
  * teardown on `ON_STOP` is now **delayed by a bounded grace window**
- * ([BACKGROUND_GRACE_MILLIS], default 60 s) instead of firing immediately. A
+ * ([BACKGROUND_GRACE_MILLIS], default 90 s) instead of firing immediately. A
  * quick app-switch — to copy a snippet, glance at another app —
  * returns to PocketShell within the grace window, the pending teardown
  * is cancelled on `ON_START`, and the live SSH/tmux connection is never
@@ -278,7 +278,7 @@ class App : Application() {
         // beyond-grace decision (`resumedWithinGrace`, `backgroundDeadlineAtMs`,
         // background elapsed) counts time spent in deep sleep. On System.nanoTime
         // (CLOCK_MONOTONIC, frozen in deep Doze) a Doze gap that began within the
-        // ~60s grace window made the frozen clock under-count elapsed time and
+        // ~90s grace window made the frozen clock under-count elapsed time and
         // `resumedWithinGrace` could wrongly evaluate true — routing the resume
         // into the within-grace reseed-only fast path that does ZERO liveness
         // check over a now-dead socket. The boot clock makes the window math

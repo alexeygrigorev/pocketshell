@@ -94,9 +94,9 @@ state machines on the same edges. 3 CRITICAL / 4 HIGH / 5 MED:
 - **S2 (HIGH)** — a bare network LOSS (airplane / Wi-Fi-off / dead-zone, and
   same-SSID sleep/wake) emits NO signal because `TerminalNetworkChangeDetector`
   returns null on `NoValidatedNetwork`. Major "feels slow to recover" cause.
-- **S3 (MED-HIGH)** — 2–3 competing grace owners coexist (controller 60s vs inline
-  `passiveDisconnectGraceMs` vs `pausedAutoReconnect`) — the #766 tail; the #635
-  dual-clock seam persists.
+- **S3 (MED-HIGH, historical)** — 2–3 competing grace owners coexisted
+  (controller grace vs inline `passiveDisconnectGraceMs` vs `pausedAutoReconnect`)
+  before the #766/#1164 cleanup; the controller grace is now 90 s by default.
 - **S4 (MED)** — idle-TTL reaper closes the warm lease on background → `isWarm`
   false on quick foreground → visible reconnect instead of silent reattach.
 - **S5 (MED)** — probe ~10s post-attach blind spot; real worst-case detection

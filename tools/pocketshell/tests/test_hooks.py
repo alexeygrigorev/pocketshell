@@ -24,6 +24,7 @@ with a tmp ``home=`` so the real ``~/.claude`` / ``~/.codex`` /
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -299,6 +300,17 @@ def test_install_opencode_preserves_other_plugins(tmp_path):
     assert paths.opencode_plugin.exists()
 
 
+def test_install_opencode_plugin_can_record_tmux_state(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["opencode"], paths)
+
+    source = paths.opencode_plugin.read_text()
+
+    assert "recordTmuxAgentState" in source
+    assert "@ps_agent_state" in source
+    assert '"waiting_for_input"' in source
+
+
 def test_full_roundtrip_restores_prepopulated_claude(tmp_path):
     paths = make_paths(tmp_path)
     paths.claude_settings.parent.mkdir(parents=True)
@@ -349,21 +361,54 @@ def test_uninstall_idempotent_on_disk(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _fire_claude_handler(paths: HooksPaths, payload: dict) -> None:
+def _fire_claude_handler(paths: HooksPaths, payload: dict, *, env: dict[str, str] | None = None) -> None:
     subprocess.run(
         [sys.executable, str(paths.claude_handler)],
         input=json.dumps(payload),
         text=True,
         check=True,
+        env=env,
     )
 
 
-def _fire_codex_handler(paths: HooksPaths, payload: dict) -> None:
+def _fire_codex_handler(paths: HooksPaths, payload: dict, *, env: dict[str, str] | None = None) -> None:
     subprocess.run(
         [sys.executable, str(paths.codex_handler), json.dumps(payload)],
         text=True,
         check=True,
+        env=env,
     )
+
+
+def _fake_tmux_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls_file = tmp_path / "tmux-calls.jsonl"
+    fake_tmux = bin_dir / "tmux"
+    fake_tmux.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "with open(os.environ['TMUX_CALLS_FILE'], 'a') as handle:\n"
+        "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+    )
+    fake_tmux.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+            "TMUX": "/tmp/tmux-1000/default,1234,0",
+            "TMUX_CALLS_FILE": str(calls_file),
+        }
+    )
+    return env, calls_file
+
+
+def _read_fake_tmux_calls(calls_file: Path) -> list[list[str]]:
+    if not calls_file.exists():
+        return []
+    return [json.loads(line) for line in calls_file.read_text().splitlines()]
 
 
 def test_claude_handler_appends_normalized_record(tmp_path):
@@ -407,6 +452,51 @@ def test_claude_handler_notification_is_waiting(tmp_path):
     assert events[-1]["notification_type"] == "permission_prompt"
 
 
+def test_claude_handler_records_tmux_waiting_state(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["claude"], paths)
+    env, calls_file = _fake_tmux_env(tmp_path)
+
+    _fire_claude_handler(
+        paths,
+        {
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "session_id": "sess-2",
+        },
+        env=env,
+    )
+
+    calls = _read_fake_tmux_calls(calls_file)
+    assert ["set-option", "@ps_agent_state", "waiting_for_input"] in calls
+    assert any(call[:2] == ["set-option", "@ps_agent_state_updated_at"] for call in calls)
+
+
+def test_claude_handler_still_appends_when_tmux_missing(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["claude"], paths)
+    env = os.environ.copy()
+    env["TMUX"] = "/tmp/tmux-1000/default,1234,0"
+    env["PATH"] = str(tmp_path / "empty-bin")
+
+    _fire_claude_handler(paths, {"hook_event_name": "Stop", "session_id": "sess-1"}, env=env)
+
+    events = read_events(paths)
+    assert len(events) == 1
+    assert events[0]["state"] == "FINISHED"
+
+
+def test_claude_handler_outside_tmux_does_not_record_option(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["claude"], paths)
+    env, calls_file = _fake_tmux_env(tmp_path)
+    env.pop("TMUX")
+
+    _fire_claude_handler(paths, {"hook_event_name": "Stop", "session_id": "sess-1"}, env=env)
+
+    assert _read_fake_tmux_calls(calls_file) == []
+
+
 def test_codex_handler_appends_normalized_record(tmp_path):
     paths = make_paths(tmp_path)
     install_engines(["codex"], paths)
@@ -429,6 +519,29 @@ def test_codex_handler_appends_normalized_record(tmp_path):
     assert rec["session_id"] == "th-9"
     assert rec["cwd"] == "/work"
     assert rec["last_assistant_message"] == "ok"
+
+
+def test_codex_handler_records_tmux_idle_state(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["codex"], paths)
+    env, calls_file = _fake_tmux_env(tmp_path)
+
+    _fire_codex_handler(paths, {"type": "agent-turn-complete", "thread-id": "th-9"}, env=env)
+
+    calls = _read_fake_tmux_calls(calls_file)
+    assert ["set-option", "@ps_agent_state", "idle"] in calls
+    assert any(call[:2] == ["set-option", "@ps_agent_state_updated_at"] for call in calls)
+
+
+def test_codex_handler_non_turn_notify_does_not_record_option(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["codex"], paths)
+    env, calls_file = _fake_tmux_env(tmp_path)
+
+    _fire_codex_handler(paths, {"type": "unrelated"}, env=env)
+
+    assert read_events(paths)[0]["state"] == "NOTIFY"
+    assert _read_fake_tmux_calls(calls_file) == []
 
 
 def test_read_events_limit_and_since(tmp_path):

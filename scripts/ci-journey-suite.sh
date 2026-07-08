@@ -1684,6 +1684,23 @@ JOURNEY_CLASSES=(
   # UsageGlancePillStateTest. It lives under com.pocketshell.app.usage, so it
   # carries its FQCN directly.
   "com.pocketshell.app.usage.UsageGlancePillE2eTest"
+  # ADDED (#1318): on-device render acceptance for the quse-v0.0.9 strict-schema
+  # usage pipeline — the G4/D33 proof the BLOCKED reviewer round asked for. Drives
+  # the PRODUCTION UsageRemoteSource.fetchUsage (real strict PocketshellUsageJsonParser)
+  # with the authoritative quse-0.0.9 FLATTENED per-provider NDJSON, maps to the real
+  # UsageScreenState, and composes the PRODUCTION UsageScreen. HARD-asserts all four
+  # provider cards render with the unified window labels straight from quse's `window`
+  # field ("Weekly limit"/zai + "Monthly limit"/copilot — labels the OLD parser could
+  # not produce), "4 providers · 1 hosts", and NO "Refresh usage failed" band. A
+  # companion @Test reproduces the exact v0.4.24 broken panel through the SAME real
+  # render path: the un-flattened provider-keyed blob must fail LOUD ("0 providers ·
+  # 0 hosts" + "Refresh usage failed"), never a silent wrong render. Pure Compose-rule
+  # UI test (like UsageGlancePillE2eTest): no Docker fixture / SSH / tmux / toxiproxy /
+  # port, so it needs NO tests.yml service change, is deterministic on the CI
+  # swiftshader AVD, and does NOT self-skip on CI. The same-input base-vs-fix red→green
+  # for the schema change is the per-push Unit-job PocketshellUsageJsonParserTest. It
+  # lives under com.pocketshell.app.usage, so it carries its FQCN directly.
+  "com.pocketshell.app.usage.Usage1318StrictSchemaRenderE2eTest"
 )
 
 # ---------------------------------------------------------------------------

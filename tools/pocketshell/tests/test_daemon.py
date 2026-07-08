@@ -17,6 +17,7 @@ socket on the host running the test suite.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -60,24 +61,61 @@ def sandbox_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             pass
 
 
+# Issue #1318: `pocketshell usage` now resolves the PINNED `quse` next to its
+# own interpreter (`sys.executable`), NOT off PATH. To point a spawned daemon
+# at a FAKE quse, the daemon must run under an interpreter whose sibling `bin`
+# dir contains the fake `quse`. `_fake_python_bin` builds such a dir (a
+# `python` symlink to the real interpreter) and `_spawn_daemon(python_exe=...)`
+# runs the daemon through it, injecting PYTHONPATH so `pocketshell` (and its
+# deps) stay importable under the shadow interpreter.
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+_SITE_PACKAGES = next(
+    (p for p in reversed(sys.path) if p.endswith("site-packages")),
+    "",
+)
+
+
+def _fake_python_bin(bin_dir: Path) -> Path:
+    """Create ``bin_dir/python`` as a symlink to the real interpreter.
+
+    Returns the symlink path, suitable as ``_spawn_daemon(python_exe=...)`` so
+    a fake ``quse`` written into ``bin_dir`` is the one the daemon resolves.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_link = bin_dir / "python"
+    if not python_link.exists():
+        python_link.symlink_to(sys.executable)
+    return python_link
+
+
 def _spawn_daemon(
     socket_path: Path,
     *,
     idle_timeout: float = 120.0,
     extra_env: dict[str, str] | None = None,
+    python_exe: Path | None = None,
 ) -> subprocess.Popen:
     """Spawn a real daemon process via ``python -m pocketshell daemon _serve``.
 
     Returns the running Popen handle. The caller is responsible for
-    terminating the process at the end of the test.
+    terminating the process at the end of the test. Pass ``python_exe`` (from
+    :func:`_fake_python_bin`) to run the daemon under a shadow interpreter
+    whose sibling ``bin`` dir holds a fake ``quse`` (issue #1318).
     """
     env = dict(os.environ)
     env["POCKETSHELL_DAEMON_SOCKET"] = str(socket_path)
     env["POCKETSHELL_DAEMON_IDLE_SECS"] = str(idle_timeout)
+    interpreter = str(python_exe) if python_exe is not None else sys.executable
+    if python_exe is not None:
+        # The shadow interpreter does not inherit the venv's site-packages, so
+        # put the editable src + installed deps on PYTHONPATH explicitly.
+        existing = env.get("PYTHONPATH", "")
+        parts = [p for p in (_SRC_DIR, _SITE_PACKAGES, existing) if p]
+        env["PYTHONPATH"] = os.pathsep.join(parts)
     if extra_env:
         env.update(extra_env)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "pocketshell", "daemon", "_serve"],
+        [interpreter, "-m", "pocketshell", "daemon", "_serve"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -243,14 +281,15 @@ def test_usage_fetch_round_trip(
     sandbox_socket: Path,
     tmp_path: Path,
 ) -> None:
-    """Daemon's ``usage.fetch`` invokes the fake quse and returns its stdout."""
+    """Daemon's ``usage.fetch`` invokes the pinned quse and flattens its
+    provider-keyed output into per-provider NDJSON (issue #1318)."""
     fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    payload = '{"provider":"codex","status":"ok"}\n'
+    python_exe = _fake_python_bin(fake_bin)
+    # quse-0.0.9 emits a provider-keyed object; the daemon flattens it.
+    payload = '{"codex": {"status": "ok", "short_term": {"percent_remaining": 77.0, "reset_at": null, "window": "5h"}}}\n'
     _write_fake_quse(fake_bin, payload=payload)
 
-    env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
     try:
         result = daemon_mod.call(
             "usage.fetch",
@@ -259,8 +298,11 @@ def test_usage_fetch_round_trip(
             timeout=10.0,
         )
         assert isinstance(result, dict)
-        assert result["stdout"] == payload
         assert result["returncode"] == 0
+        # stdout is FLATTENED NDJSON: one record, provider injected from key.
+        record = json.loads(result["stdout"].strip())
+        assert record["provider"] == "codex"
+        assert record["short_term"]["window"] == "5h"
     finally:
         _terminate(proc)
 
@@ -276,12 +318,14 @@ def test_two_concurrent_clients_cache_hit_is_faster(
     daemon's in-memory dict and should land well under 50 ms.
     """
     fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    payload = '{"provider":"codex","status":"ok"}\n'
+    python_exe = _fake_python_bin(fake_bin)
+    payload = '{"codex": {"status": "ok"}}\n'
+    # The daemon flattens the provider-keyed payload into NDJSON before
+    # caching; the cold and warm responses both carry this flattened form.
+    flattened = '{"provider": "codex", "status": "ok"}\n'
     _write_fake_quse(fake_bin, payload=payload, sleep_secs=0.3)
 
-    env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
     try:
         # Cold call — runs the (slow) fake quse.
         cold_start = time.monotonic()
@@ -298,7 +342,7 @@ def test_two_concurrent_clients_cache_hit_is_faster(
             socket_obj.close()
         cold_elapsed = time.monotonic() - cold_start
 
-        assert cold_response["result"]["stdout"] == payload
+        assert cold_response["result"]["stdout"] == flattened
         assert cold_response.get("cached") is False
         # The fake quse sleeps 300 ms; allow generous slack but assert
         # the call did take real time.
@@ -319,7 +363,7 @@ def test_two_concurrent_clients_cache_hit_is_faster(
             socket_obj2.close()
         warm_elapsed = time.monotonic() - warm_start
 
-        assert warm_response["result"]["stdout"] == payload
+        assert warm_response["result"]["stdout"] == flattened
         assert warm_response.get("cached") is True
         # 100 ms ceiling for an in-memory cache hit is very generous
         # — typically lands well under 10 ms — but tolerates a busy CI.
@@ -338,30 +382,30 @@ def test_no_cache_param_bypasses_cache(
 ) -> None:
     """``no_cache=True`` forces the daemon to re-run the upstream call."""
     fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    python_exe = _fake_python_bin(fake_bin)
     counter_file = tmp_path / "counter"
     counter_file.write_text("0")
-    # Each invocation increments the counter and echoes the new value.
+    # Each invocation increments the counter and emits a provider-keyed doc
+    # whose per-provider `call` field carries the new counter value.
     script = fake_bin / "quse"
     script.write_text(
         "#!/bin/sh\n"
         f"n=$(cat {counter_file})\n"
         "n=$((n+1))\n"
         f'echo "$n" > {counter_file}\n'
-        'printf \'{"provider":"x","call":%s}\\n\' "$n"\n'
+        'printf \'{"x": {"status": "ok", "call": %s}}\\n\' "$n"\n'
     )
     script.chmod(0o755)
 
-    env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
     try:
         # First call populates the cache.
         first = daemon_mod.call("usage.fetch", socket_path=sandbox_socket)
-        assert first["stdout"].strip() == '{"provider":"x","call":1}'
+        assert json.loads(first["stdout"].strip())["call"] == 1
 
         # Second without no_cache must hit the cache and not increment.
         cached = daemon_mod.call("usage.fetch", socket_path=sandbox_socket)
-        assert cached["stdout"].strip() == '{"provider":"x","call":1}'
+        assert json.loads(cached["stdout"].strip())["call"] == 1
 
         # Third with no_cache must re-run upstream — counter increments.
         fresh = daemon_mod.call(
@@ -369,7 +413,7 @@ def test_no_cache_param_bypasses_cache(
             params={"no_cache": True},
             socket_path=sandbox_socket,
         )
-        assert fresh["stdout"].strip() == '{"provider":"x","call":2}'
+        assert json.loads(fresh["stdout"].strip())["call"] == 2
     finally:
         _terminate(proc)
 
@@ -463,17 +507,18 @@ def test_no_daemon_flag_skips_daemon_probe(
     """
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    daemon_payload = '{"from":"daemon"}\n'
-    subprocess_payload = '{"from":"subprocess"}\n'
+    # Provider names encode the source so the flattened NDJSON reveals which
+    # path answered (issue #1318: provider-keyed payloads).
+    daemon_payload = '{"fromdaemon": {"status": "ok"}}\n'
+    subprocess_payload = '{"fromsubprocess": {"status": "ok"}}\n'
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
     # Spin up a daemon that returns a different payload so we can
     # distinguish "daemon answered" vs "subprocess answered".
     daemon_bin = tmp_path / "daemon_bin"
-    daemon_bin.mkdir()
+    daemon_python = _fake_python_bin(daemon_bin)
     _write_fake_quse(daemon_bin, payload=daemon_payload)
-    daemon_env = {"PATH": f"{daemon_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=daemon_env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=daemon_python)
     try:
         # Confirm the daemon is up and would answer the call.
         assert daemon_mod.is_daemon_running(sandbox_socket)
@@ -492,8 +537,8 @@ def test_no_daemon_flag_skips_daemon_probe(
         )
         assert result.exit_code == 0, result.output
         # Must be the subprocess payload, NOT the daemon payload.
-        assert "subprocess" in result.output
-        assert "daemon" not in result.output
+        assert "fromsubprocess" in result.output
+        assert "fromdaemon" not in result.output
     finally:
         _terminate(proc)
 
@@ -506,15 +551,14 @@ def test_usage_uses_daemon_by_default(
     """Without ``--no-daemon`` the CLI must dispatch via the daemon."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    daemon_payload = '{"from":"daemon"}\n'
-    subprocess_payload = '{"from":"subprocess"}\n'
+    daemon_payload = '{"fromdaemon": {"status": "ok"}}\n'
+    subprocess_payload = '{"fromsubprocess": {"status": "ok"}}\n'
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
     daemon_bin = tmp_path / "daemon_bin"
-    daemon_bin.mkdir()
+    daemon_python = _fake_python_bin(daemon_bin)
     _write_fake_quse(daemon_bin, payload=daemon_payload)
-    daemon_env = {"PATH": f"{daemon_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=daemon_env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=daemon_python)
     try:
         monkeypatch.setattr(
             "pocketshell.usage._resolve_quse_binary",
@@ -528,8 +572,8 @@ def test_usage_uses_daemon_by_default(
         )
         assert result.exit_code == 0, result.output
         # Daemon path should have produced the daemon_payload.
-        assert "daemon" in result.output
-        assert "subprocess" not in result.output
+        assert "fromdaemon" in result.output
+        assert "fromsubprocess" not in result.output
     finally:
         _terminate(proc)
 
@@ -542,7 +586,7 @@ def test_usage_falls_through_when_daemon_absent(
     """No daemon socket on disk => CLI must use the subprocess path."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    payload = '{"from":"subprocess"}\n'
+    payload = '{"fromsubprocess": {"status": "ok"}}\n'
     _write_fake_quse(fake_bin, payload=payload)
     monkeypatch.setattr(
         "pocketshell.usage._resolve_quse_binary",
@@ -556,7 +600,7 @@ def test_usage_falls_through_when_daemon_absent(
     runner = CliRunner()
     result = runner.invoke(usage_command, ["--json"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
-    assert "subprocess" in result.output
+    assert "fromsubprocess" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -949,7 +993,7 @@ def test_failed_usage_fetch_is_not_cached(
 ) -> None:
     """A non-zero return from ``quse`` must not pin a bad result in cache."""
     fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+    python_exe = _fake_python_bin(fake_bin)
     counter_file = tmp_path / "counter"
     counter_file.write_text("0")
     script = fake_bin / "quse"
@@ -962,8 +1006,7 @@ def test_failed_usage_fetch_is_not_cached(
         "exit 2\n"
     )
     script.chmod(0o755)
-    env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
-    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
     try:
         first = daemon_mod.call("usage.fetch", socket_path=sandbox_socket)
         assert first["returncode"] == 2

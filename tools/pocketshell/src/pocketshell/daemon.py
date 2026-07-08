@@ -358,11 +358,11 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
        }
 
     Returning stdout in the envelope preserves the CLI/daemon contract.
-    The stdout is normalized by :mod:`pocketshell.usage` before it is cached,
-    because ``quse --json`` can expose provider quirks that are not the
-    PocketShell app-facing schema. ``quse --json`` emits **NDJSON** (one
-    provider per line, not a single document), so normalization keeps that
-    line-oriented wire format.
+    ``quse --json`` emits a **provider-keyed JSON object**; the daemon
+    FLATTENS it into per-provider NDJSON via
+    :func:`pocketshell.usage.normalize_usage_stdout` before caching, so the
+    cached envelope stdout is already the app-facing NDJSON wire format (the
+    CLI proxies it verbatim, without re-flattening).
     """
     # Lazy import to avoid a circular module load at startup: the
     # daemon module is imported from ``cli.py`` which also imports
@@ -378,17 +378,13 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
 
     quse_path = _usage._resolve_quse_binary()
     if quse_path is None:
-        # Mirror the CLI's exit-127 behaviour. The daemon does NOT
-        # cache this; a `quse` install during the daemon's lifetime
-        # should be picked up on the next call.
+        # quse is bundled WITH pocketshell (issue #1318): a missing pinned
+        # copy is a packaging-integrity error, not a "install quse" nag. The
+        # daemon does NOT cache this failure.
         return {
             "stdout": "",
-            "stderr": (
-                "pocketshell: `quse` is not installed on this host. "
-                "Install it via `uv tool install quse` or `pipx install quse` "
-                "and re-run.\n"
-            ),
-            "returncode": 127,
+            "stderr": _usage._QUSE_MISSING_MESSAGE + "\n",
+            "returncode": _usage._QUSE_MISSING_EXIT_CODE,
             "provider": provider,
         }
 
@@ -402,8 +398,16 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
         capture_output=True,
         text=True,
     )
+    # Only a successful (exit 0) quse run is flattened into per-provider
+    # NDJSON. A failed fetch is proxied raw (it is not a valid provider-keyed
+    # document, and the daemon does not cache failures anyway).
+    stdout = (
+        _usage.normalize_usage_stdout(completed.stdout)
+        if completed.returncode == 0
+        else completed.stdout
+    )
     return {
-        "stdout": _usage.normalize_usage_stdout(completed.stdout),
+        "stdout": stdout,
         "stderr": completed.stderr,
         "returncode": completed.returncode,
         "provider": provider,

@@ -31,11 +31,35 @@ from pocketshell.usage_capture import (
 )
 
 
+# The flattened per-provider NDJSON `write_capture` consumes (pocketshell's
+# own output format — one provider record per line).
 _NDJSON = (
     '{"provider": "codex", "status": "ok", '
     '"short_term": {"percent_remaining": 77.0, "reset_at": "2026-06-11T15:00:00Z"}}\n'
     '{"provider": "claude", "status": "ok", '
     '"short_term": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z"}}\n'
+)
+
+# quse v0.0.9's provider-keyed `--json` document — what `subprocess.run`
+# returns when the CLI capture path shells out to the pinned quse. The
+# `usage --capture` flow FLATTENS this into the NDJSON above before caching.
+_QUSE_KEYED = json.dumps(
+    {
+        "codex": {
+            "status": "ok",
+            "short_term": {"percent_remaining": 77.0, "reset_at": "2026-06-11T15:00:00Z", "window": "5h"},
+            "long_term": {"percent_remaining": 88.0, "reset_at": "2026-06-18T15:00:00Z", "window": "7d"},
+            "error": None,
+            "details": {},
+        },
+        "claude": {
+            "status": "ok",
+            "short_term": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z", "window": "5h"},
+            "long_term": {"percent_remaining": 85.0, "reset_at": "2026-06-18T14:00:00Z", "window": "7d"},
+            "error": None,
+            "details": {},
+        },
+    }
 )
 
 
@@ -152,7 +176,7 @@ def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
 def test_cli_capture_writes_cache_and_history(tmp_path: Path) -> None:
     env = {"XDG_STATE_HOME": str(tmp_path / "state")}
     with patch("pocketshell.usage._resolve_quse_binary", return_value="/usr/bin/quse"), patch(
-        "pocketshell.usage.subprocess.run", return_value=_fake_completed(stdout=_NDJSON)
+        "pocketshell.usage.subprocess.run", return_value=_fake_completed(stdout=_QUSE_KEYED)
     ), patch("pocketshell.usage._try_daemon_usage_fetch", return_value=None):
         result = CliRunner().invoke(cli, ["usage", "--capture", "--no-daemon"], env=env)
 

@@ -508,10 +508,7 @@ class UsageViewModelTest {
             ),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"exhausted",
-              "short_term":null,"long_term":null,
-              "block_reason":"Codex quota exhausted",
-              "error":null,"details":{}}""".trimIndent(),
+            """{"provider":"codex","status":"exhausted","short_term":null,"long_term":null,"block_reason":"Codex quota exhausted","error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("codex.example" to HostUsageFetch.Records(records, Instant.now())),

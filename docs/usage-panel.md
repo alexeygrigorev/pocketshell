@@ -55,16 +55,17 @@ NAME each record carries drives the label:
 | `monthly` | `Monthly limit` |
 | anything else (`short_term` / `long_term` / unknown) | humanized (`Short term` / `Long term`, #522) |
 
-The two main coding-agent providers — **Codex and Claude Code** — both use the
-same 5h + 7d windows, so both render the identical concrete `5h window` /
-`7d window` labels. Codex derives the span from its detail-window
-`limit_window_seconds`; Claude Code's quota is the same fixed 5h/7d so the
-span is seeded canonically (server-side in `pocketshell usage`, and as a
-parser fallback so older hosts still render it). **Monthly-cadence providers
-keep their real cadence**: GitHub Copilot's long-term quota renders
-`Monthly limit`, NOT a 7d window. Providers whose span is genuinely unknown
-fall back to the humanized `Short term` / `Long term` label so nothing is
-mislabeled.
+The window NAME comes STRAIGHT from quse's `window` field — quse v0.0.9 is the
+single source of truth for the span (issue #1318). The two main coding-agent
+providers — **Codex and Claude Code** — both use the same 5h + 7d windows, so
+quse emits `5h` / `7d` for both and they render the identical concrete
+`5h window` / `7d window` labels. **Monthly-cadence providers keep their real
+cadence**: GitHub Copilot's long-term quota carries `monthly` and renders
+`Monthly limit`, NOT a 7d window. When quse carries no span (`window: null`,
+e.g. Copilot's short-term bucket), the parser falls back to the generic key
+name so the label humanizes to `Short term` / `Long term`. There is no
+downstream re-derivation of the span from `details` — the app IGNORES
+`details` entirely.
 
 ## Surfaces
 
@@ -151,28 +152,40 @@ schema.
 
 ## Expected JSON Schema
 
-`pocketshell usage --json` emits newline-delimited JSON (NDJSON) — one object per line per provider:
+`quse` (the pinned usage backend bundled with `pocketshell`, issue #1318) is
+the single source of truth for the unified schema. Its `--json` output is a
+**provider-keyed object**; `pocketshell usage --json` FLATTENS it into
+newline-delimited JSON (NDJSON) — one record per line per provider, injecting
+the provider name from the key and passing quse's unified fields through
+unchanged. No downstream re-derivation of windows / resets / percentages
+(hard-cut, D22). `quse`'s raw output:
 
 ```json
 {
-  "provider": "codex",
-  "status": "ok",
-  "short_term": {"percent_remaining": 77.0, "reset_at": "2026-05-24T15:53:01Z", "window": null},
-  "long_term":  {"percent_remaining": 88.0, "reset_at": "2026-05-30T20:33:54Z", "window": null},
-  "block_reason": null,
-  "error": null,
-  "details": {"limit_reached": false, "windows": {"primary_window": {...}, "secondary_window": {...}}}
-}
-{
-  "provider": "claude",
-  "status": "ok",
-  "short_term": {"percent_remaining": 41.0, "reset_at": "2026-05-24T14:30:00Z"},
-  "long_term":  {"percent_remaining": 85.0, "reset_at": "2026-05-28T14:59:59Z"},
-  "block_reason": null,
-  "error": null,
-  "details": {...}
+  "codex": {
+    "status": "ok",
+    "short_term": {"percent_remaining": 100.0, "reset_at": "2026-07-07T23:57:08Z", "window": "5h"},
+    "long_term":  {"percent_remaining": 2.0,   "reset_at": "2026-07-11T06:23:55Z", "window": "7d"},
+    "error": null,
+    "details": { ... extra/human-CLI only; the app IGNORES it ... }
+  },
+  "claude": { "status": "ok", "short_term": {...}, "long_term": {...}, "error": null, "details": {...} }
 }
 ```
+
+which `pocketshell usage --json` flattens to one record per line:
+
+```json
+{"provider":"codex","status":"ok","short_term":{"percent_remaining":100.0,"reset_at":"2026-07-07T23:57:08Z","window":"5h"},"long_term":{"percent_remaining":2.0,"reset_at":"2026-07-11T06:23:55Z","window":"7d"},"error":null,"details":{...}}
+{"provider":"claude","status":"ok","short_term":{...},"long_term":{...},"error":null,"details":{...}}
+```
+
+The app reads `provider`, `status`, `short_term` / `long_term`
+`{percent_remaining, reset_at, window}`, and `error` directly, and expects
+this exact schema — a mismatch fails the whole panel loudly (no per-record
+skip-resilience). `reset_at` is canonical ISO-8601 UTC; the window label comes
+straight from `short_term.window` / `long_term.window`. The app **ignores**
+`details`.
 
 The supported providers are `codex`, `claude`, `copilot`, and `zai`.
 `gemini` is accepted but reports `status: "unsupported"` because Gemini

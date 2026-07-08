@@ -1,0 +1,132 @@
+{
+  "claude": {
+    "details": {
+      "limit_reached": false,
+      "subscription": null,
+      "windows": {
+        "five_hour": {
+          "reset_at": "2026-07-07T23:19:59Z",
+          "used_percent": 9.0
+        },
+        "seven_day": {
+          "reset_at": "2026-07-09T14:59:59Z",
+          "used_percent": 70.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 30.0,
+      "reset_at": "2026-07-09T14:59:59Z",
+      "window": "7d"
+    },
+    "short_term": {
+      "percent_remaining": 91.0,
+      "reset_at": "2026-07-07T23:19:59Z",
+      "window": "5h"
+    },
+    "status": "ok"
+  },
+  "codex": {
+    "details": {
+      "limit_reached": true,
+      "reset_credits": [
+        {
+          "expires_at": "2026-07-26T23:52:15Z",
+          "status": "available",
+          "title": "Full reset (Weekly + 5 hr)"
+        },
+        {
+          "expires_at": "2026-07-31T19:09:12Z",
+          "status": "available",
+          "title": "Full reset (Weekly + 5 hr)"
+        }
+      ],
+      "reset_credits_available": 2,
+      "reset_credits_error": null,
+      "windows": {
+        "primary_window": {
+          "reset_at": "2026-07-07T23:57:08Z",
+          "used_percent": 0.0
+        },
+        "secondary_window": {
+          "reset_at": "2026-07-11T06:23:55Z",
+          "used_percent": 98.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 2.0,
+      "reset_at": "2026-07-11T06:23:55Z",
+      "window": "7d"
+    },
+    "short_term": {
+      "percent_remaining": 100.0,
+      "reset_at": "2026-07-07T23:57:08Z",
+      "window": "5h"
+    },
+    "status": "ok"
+  },
+  "copilot": {
+    "details": {
+      "limit_reached": false,
+      "premium_entitlement": 1500,
+      "premium_percent_remaining": 97.1,
+      "premium_remaining": 1457
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 97.1,
+      "reset_at": "2026-08-01T00:00:00Z",
+      "window": "monthly"
+    },
+    "short_term": {
+      "percent_remaining": 100.0,
+      "reset_at": null,
+      "window": null
+    },
+    "status": "ok"
+  },
+  "zai": {
+    "details": {
+      "limit_reached": false,
+      "max_used_percent": 44.0,
+      "windows": {
+        "five_hour": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": null,
+          "used_percent": 42.0,
+          "window_hours": 5
+        },
+        "monthly_web_search": {
+          "limit": 4000,
+          "remaining": 3962,
+          "reset_at": "2026-07-27T14:04:58Z",
+          "used_percent": 1.0,
+          "window_hours": 5
+        },
+        "weekly": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": "2026-07-11T14:04:58Z",
+          "used_percent": 44.0,
+          "window_hours": null
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 56.0,
+      "reset_at": "2026-07-11T14:04:58Z",
+      "window": "weekly"
+    },
+    "short_term": {
+      "percent_remaining": 58.0,
+      "reset_at": null,
+      "window": "5h"
+    },
+    "status": "ok"
+  }
+}

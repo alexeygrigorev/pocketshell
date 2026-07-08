@@ -1,17 +1,33 @@
 """`pocketshell usage` subcommand.
 
-Implementation delegates to the existing `quse` CLI via `subprocess.run`
-and normalizes JSON records into PocketShell's app-facing schema. Human
-output is proxied verbatim.
+Implementation delegates to the **pinned** `quse` CLI via `subprocess.run`
+and FLATTENS its provider-keyed `--json` document into the per-provider
+NDJSON the Android app consumes. Human output is proxied verbatim.
 
-Daemon mode (issue #219, first PR scope)
-----------------------------------------
+quse is the single source of truth for the unified schema (issue #1318,
+D22 hard-cut): pocketshell does NOT re-derive windows / resets / percentages
+downstream. It parses quse's provider-keyed object, injects the `provider`
+name from each key, and passes quse's unified fields through unchanged. A
+schema mismatch (non-JSON / non-object payload) raises loudly rather than
+silently emptying the panel.
+
+quse is a hard dependency of pocketshell (see `pyproject.toml`), so its
+console-script ships in the SAME bin directory as the running interpreter.
+`_resolve_quse_binary` resolves that pinned copy next to `sys.executable`
+and NEVER falls back to PATH — a host-level `quse` upgrade must not shadow
+the pinned copy, and a missing pinned copy is a packaging-integrity error
+(fail loud), not a user "install quse" nag.
+
+Daemon mode (issue #219)
+------------------------
 
 When the IPC daemon is running, ``pocketshell usage --json`` sends a
 ``usage.fetch`` JSON-RPC request to ``$XDG_RUNTIME_DIR/pocketshell/daemon.sock``
-instead of forking ``quse`` itself. The daemon caches the result for
-30 s, so a polled usage row in the Android app returns the second-and-
-later calls in microseconds.
+instead of forking ``quse`` itself. The daemon caches the ALREADY-FLATTENED
+NDJSON for 30 s, so a polled usage row in the Android app returns the
+second-and-later calls in microseconds. The daemon performs the flatten
+before caching; the CLI proxies the daemon's NDJSON verbatim (it is NOT
+re-flattened — that would fail, NDJSON is not a provider-keyed object).
 
 The fall-through is intentional and matches the spike's Q6 parity rule:
 
@@ -19,91 +35,84 @@ The fall-through is intentional and matches the spike's Q6 parity rule:
   daemon is up (debugging / belt-and-braces).
 - ``--no-cache`` is honoured by the daemon (cache miss + populate)
   but is intentionally a no-op on the subprocess path: there is no
-  cache to bypass when every call is a fresh subprocess. This keeps
-  the CLI surface uniform without paying for client-side caching that
-  duplicates the daemon's logic.
+  cache to bypass when every call is a fresh subprocess.
 - The probe is best-effort: any error talking to the daemon
   (``ECONNREFUSED``, stale socket, version-skew RPC error, slow
   reply) falls through silently to the subprocess path. The daemon
   never blocks correctness.
-
-Why subprocess instead of `import quse`:
-
-- `quse` is currently not published to PyPI; declaring it as a normal
-  `pyproject.toml` dependency would break `uv tool install
-  pocketshell` for any user (including the maintainer's dev box).
-- Subprocess delegation keeps `pocketshell` decoupled from `quse`'s
-  internal module layout, so updates to `quse` don't break the wrapper.
-- The PATH-discovery story for `quse` is solved by the Android bootstrap
-  wrapper, which derives PATH from the user's shell rc before probing
-  tools. Delegating to whatever `quse` is on PATH keeps this wrapper
-  decoupled from that bootstrap plumbing.
-
-Later PRs will fold the provider-detection logic in directly so
-`pocketshell` is the canonical implementation and the subprocess
-hop disappears, but that is explicit non-scope here per the brief on
-issue [#170](https://github.com/alexeygrigorev/pocketshell/issues/170).
 """
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Optional, Sequence
-import urllib.error
-import urllib.request
 
 import click
 
-_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
-_CODEX_COMPATIBLE_PROVIDERS = {
-    "codex",
-    "openai",
-    "openai-codex",
-    "openai_codex",
-    "chatgpt",
-}
 _CLAUDE_USAGE_AUTH_SETUP_MESSAGE = (
     "Claude usage authentication needs setup on this host. "
     "Open Claude Code on the host and complete sign-in, then refresh usage."
 )
 
+# quse is bundled WITH pocketshell as a pinned dependency (issue #1318). A
+# missing pinned quse is therefore a packaging-integrity error, NOT a user
+# "install quse" nag: the fix is reinstalling pocketshell, not installing a
+# separate host tool. Exit non-zero (but NOT 127 — 127 is reserved for
+# "pocketshell itself not found" on the app side) with a clear message.
+_QUSE_MISSING_MESSAGE = (
+    "pocketshell: the bundled `quse` usage backend is missing from this "
+    "pocketshell install. Reinstall pocketshell (e.g. "
+    "`uv tool install --force pocketshell`) to restore it."
+)
+_QUSE_MISSING_EXIT_CODE = 1
+
 
 def _resolve_quse_binary() -> Optional[str]:
-    """Locate the `quse` CLI on PATH, or return ``None`` if absent.
+    """Resolve the PINNED `quse` console-script shipped with pocketshell.
 
-    Pulled out as a function so the unit suite can monkeypatch it.
-    `shutil.which` returns the same path the user would see from
-    `command -v quse`, which is the probe the Android app already runs.
+    quse is a hard dependency (pyproject ``dependencies``), so its
+    console-script lands in the SAME ``bin`` directory as the ``pocketshell``
+    interpreter (the venv / ``uv tool`` install dir). We resolve it there —
+    next to ``sys.executable`` — and NEVER fall back to ``PATH``: a
+    host-level ``quse`` on PATH must not shadow the pinned copy (a host
+    upgrade must not reach us), and a missing pinned copy is a
+    packaging-integrity error, not a "please install quse" nag. Returns the
+    absolute path, or ``None`` when the pinned copy is absent. Pulled out so
+    the unit suite can monkeypatch it.
+
+    Console-scripts live next to the UNRESOLVED ``sys.executable``: in a venv
+    (or a ``uv tool`` install) ``bin/python`` is a symlink to the underlying
+    interpreter, so ``Path(sys.executable).resolve()`` points at the shared
+    interpreter dir where ``quse`` is NOT installed. We therefore check the
+    interpreter's own ``bin`` dir first, and only fall through to the
+    resolved dir for layouts where the two coincide. Both candidates are
+    anchored to ``sys.executable`` — this is NOT a PATH search.
     """
-    return shutil.which("quse")
+    exe_dir = Path(sys.executable).parent
+    candidates = [exe_dir]
+    resolved_dir = Path(sys.executable).resolve().parent
+    if resolved_dir != exe_dir:
+        candidates.append(resolved_dir)
+    for bin_dir in candidates:
+        candidate = bin_dir / "quse"
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _run_quse(args: Sequence[str]) -> int:
-    """Invoke `quse` with [args]; proxy stdout/stderr and exit code.
+    """Invoke the pinned `quse` with [args]; proxy stdout/stderr and exit.
 
-    Using `subprocess.run(..., check=False)` and forwarding the captured
-    output rather than `os.execvp` keeps the call testable (the test
-    suite can monkeypatch `subprocess.run`) and lets us decorate the
-    failure mode with a friendly hint when `quse` is missing.
+    Used for the human-readable (non-JSON) path where output stays
+    byte-identical to `quse`.
     """
     quse_path = _resolve_quse_binary()
     if quse_path is None:
-        # Same wording the bootstrap sheet uses so the user sees a
-        # consistent message whether they hit the bin via `pocketshell
-        # usage` or the app's poll loop.
-        click.echo(
-            "pocketshell: `quse` is not installed on this host. "
-            "Install it via `uv tool install quse` or `pipx install quse` "
-            "and re-run.",
-            err=True,
-        )
-        return 127
+        click.echo(_QUSE_MISSING_MESSAGE, err=True)
+        return _QUSE_MISSING_EXIT_CODE
 
     completed = subprocess.run(
         [quse_path, *args],
@@ -119,166 +128,15 @@ def _run_quse(args: Sequence[str]) -> int:
     return completed.returncode
 
 
-def _normalize_reset_at(value: Any) -> Optional[str]:
-    """Return an ISO-8601 UTC reset timestamp, accepting provider quirks.
-
-    OpenAI's Codex usage endpoint currently returns ``reset_at`` as Unix epoch
-    seconds. Older ``quse`` releases attempted ISO parsing only, which turned a
-    valid reset into ``null`` and left the app rendering ``resets —``.
-    """
-    if value is None:
-        return None
-    parsed: datetime
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            if text.isdigit():
-                parsed = datetime.fromtimestamp(float(text), tz=timezone.utc)
-            else:
-                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except (OverflowError, OSError, ValueError):
-            try:
-                parsed = datetime.strptime(text, "%Y-%m-%d")
-            except ValueError:
-                return None
-            parsed = parsed.replace(tzinfo=timezone.utc)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _percent_remaining_from_used(value: Any) -> Optional[float]:
-    try:
-        used = float(value)
-    except (TypeError, ValueError):
-        return None
-    return round(max(0.0, min(100.0, 100.0 - used)), 2)
-
-
-def _reset_after_seconds_to_iso(
-    value: Any,
-    *,
-    now: Optional[datetime] = None,
-) -> Optional[str]:
-    if value is None:
-        return None
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        return None
-    if seconds < 0:
-        return None
-    base = now or datetime.now(timezone.utc)
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=timezone.utc)
-    reset_at = base.astimezone(timezone.utc).timestamp() + seconds
-    try:
-        parsed = datetime.fromtimestamp(reset_at, tz=timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        return None
-    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _window_label_from_seconds(value: Any) -> Optional[str]:
-    try:
-        seconds = int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if seconds <= 0:
-        return None
-    units = (
-        (24 * 60 * 60, "d"),
-        (60 * 60, "h"),
-        (60, "m"),
-    )
-    for unit_seconds, suffix in units:
-        if seconds >= unit_seconds and seconds % unit_seconds == 0:
-            return f"{seconds // unit_seconds}{suffix}"
-    return f"{seconds}s"
-
-
-def _window_label_from_detail(detail: dict[str, Any]) -> Optional[str]:
-    label = _window_label_from_seconds(detail.get("limit_window_seconds"))
-    if label is not None:
-        return label
-    try:
-        minutes = float(detail.get("window_minutes"))
-    except (TypeError, ValueError):
-        return None
-    return _window_label_from_seconds(minutes * 60)
-
-
-def _window_from_detail(
-    detail: Any,
-    *,
-    now: Optional[datetime] = None,
-) -> Optional[dict[str, Any]]:
-    if not isinstance(detail, dict):
-        return None
-    percent_remaining = _percent_remaining_from_used(detail.get("used_percent"))
-    reset_at = _normalize_reset_at(detail.get("reset_at")) or _reset_after_seconds_to_iso(
-        detail.get("reset_after_seconds"),
-        now=now,
-    )
-    window = _window_label_from_detail(detail)
-    if percent_remaining is None and reset_at is None and window is None:
-        return None
-    return {
-        "percent_remaining": percent_remaining,
-        "reset_at": reset_at,
-        "window": window,
-    }
-
-
-def _merge_window(
-    current: Any,
-    detail: Any,
-    *,
-    prefer_detail_percent: bool = False,
-    default_window: Optional[str] = None,
-    now: Optional[datetime] = None,
-) -> Any:
-    if not isinstance(current, dict):
-        if not isinstance(detail, dict):
-            return current
-        current = {"percent_remaining": None, "reset_at": None}
-    else:
-        current = dict(current)
-
-    detail_window = _window_from_detail(detail, now=now)
-    if detail_window is not None:
-        if prefer_detail_percent or current.get("percent_remaining") is None:
-            current["percent_remaining"] = detail_window.get("percent_remaining")
-        if current.get("reset_at") is None:
-            current["reset_at"] = detail_window.get("reset_at")
-        if current.get("window") is None and detail_window.get("window") is not None:
-            current["window"] = detail_window.get("window")
-
-    # Issue #800: providers with a genuinely fixed cadence (Claude Code 5h/7d,
-    # Copilot monthly) carry no `limit_window_seconds`, so the span never lands
-    # in `window`. Seed the canonical span here so the app renders the concrete
-    # label ("5h window" / "7d window" / "Monthly limit") rather than the
-    # generic "Short term" / "Long term". Only fills when nothing else set it.
-    if default_window is not None and current.get("window") is None:
-        current["window"] = default_window
-
-    reset_after_seconds = current.get("reset_after_seconds")
-    current["reset_at"] = _normalize_reset_at(current.get("reset_at")) or _reset_after_seconds_to_iso(
-        reset_after_seconds,
-        now=now,
-    )
-    current.pop("reset_after_seconds", None)
-    return current
-
-
 def _actionable_error(provider: str, error: Any) -> Optional[str]:
+    """Rewrite a provider `error` string into an actionable, human message.
+
+    This is genuine error-message UX, NOT schema re-derivation: quse owns the
+    schema and reports the raw upstream error; pocketshell only translates a
+    couple of known auth failures into a "here is what to do" message so the
+    app surfaces "sign in on the host" instead of a bare "HTTP Error 401".
+    Idempotent — the rewritten messages do not re-match these patterns.
+    """
     if error is None:
         return None
     text = str(error).strip()
@@ -306,190 +164,48 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
     return text
 
 
-def _read_codex_bearer_token(auth_path: Path = _CODEX_AUTH_PATH) -> Optional[str]:
-    try:
-        data = json.loads(auth_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    token = data.get("tokens", {}).get("access_token")
-    return token if isinstance(token, str) and token.strip() else None
+def normalize_usage_stdout(stdout: str) -> str:
+    """Flatten quse's provider-keyed `--json` object into per-provider NDJSON.
 
+    quse v0.0.9 emits ONE JSON object keyed by provider name; each value is
+    the unified per-provider record (``status`` / ``short_term`` /
+    ``long_term`` / ``error`` / ``details``). This is a THIN flatten — one
+    NDJSON line per provider — that injects the provider name (from the
+    object key) as a top-level ``provider`` field and passes quse's unified
+    fields through unchanged. quse is the single source of truth for the
+    schema (D22): pocketshell does NOT re-derive windows / resets /
+    percentages here.
 
-def _fetch_codex_detail_windows() -> Optional[dict[str, dict[str, Any]]]:
-    token = _read_codex_bearer_token()
-    if token is None:
-        return None
-    req = urllib.request.Request(
-        _CODEX_USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
-        return None
-    rate_limit = payload.get("rate_limit")
-    if not isinstance(rate_limit, dict):
-        return None
-    windows: dict[str, dict[str, Any]] = {}
-    for name in ("primary_window", "secondary_window"):
-        value = rate_limit.get(name)
-        if isinstance(value, dict):
-            windows[name] = value
-    return windows or None
-
-
-def _codex_needs_source_patch(record: dict[str, Any], detail_windows: dict[str, Any]) -> bool:
-    has_window_shape = any(
-        isinstance(record.get(key), dict) for key in ("short_term", "long_term")
-    ) or bool(detail_windows)
-    if not has_window_shape:
-        return False
-    for top_level_key, detail_key in (
-        ("short_term", "primary_window"),
-        ("long_term", "secondary_window"),
-    ):
-        top_level = record.get(top_level_key)
-        detail = detail_windows.get(detail_key)
-        top_level_reset = None
-        if isinstance(top_level, dict):
-            top_level_reset = top_level.get("reset_at")
-            if top_level_reset is None:
-                top_level_reset = top_level.get("reset_after_seconds")
-        detail_reset = None
-        if isinstance(detail, dict):
-            detail_reset = detail.get("reset_at")
-            if detail_reset is None:
-                detail_reset = detail.get("reset_after_seconds")
-        if top_level_reset is None and detail_reset is None:
-            return True
-    return False
-
-
-def _is_codex_compatible_provider(provider: str) -> bool:
-    return provider.replace(" ", "_").lower() in _CODEX_COMPATIBLE_PROVIDERS
-
-
-def normalize_usage_record(
-    record: dict[str, Any],
-    *,
-    now: Optional[datetime] = None,
-) -> dict[str, Any]:
-    """Normalize a provider record emitted by ``quse --json``.
-
-    PocketShell owns the app-facing schema even when it delegates provider
-    probing to ``quse``. Keep this post-processing focused on schema repairs
-    that older ``quse`` releases cannot express correctly.
+    Strict / fail-loud: non-JSON stdout, a non-object top-level payload, or a
+    non-object provider value all raise ``ValueError`` so a schema mismatch
+    fails visibly instead of silently emptying the usage panel. Handles both
+    the multi-provider and single-provider (``{"<p>": {...}}``) shapes — both
+    are provider-keyed objects. Empty/blank stdout passes through untouched
+    (the caller decides what an empty read means).
     """
-    normalized = dict(record)
-    provider = str(normalized.get("provider", "")).lower()
-    details = normalized.get("details")
-    detail_windows = details.get("windows") if isinstance(details, dict) else None
-    if not isinstance(detail_windows, dict):
-        detail_windows = {}
-
-    if _is_codex_compatible_provider(provider):
-        # Codex's ChatGPT usage response exposes the real primary/secondary
-        # windows under details. Older quse versions hard-code short_term to
-        # 100% and lose epoch reset timestamps, which regressed issue #501.
-        if _codex_needs_source_patch(normalized, detail_windows):
-            fetched_windows = _fetch_codex_detail_windows()
-            if fetched_windows is not None:
-                detail_windows = {**detail_windows, **fetched_windows}
-                details_obj = dict(details) if isinstance(details, dict) else {}
-                details_obj["windows"] = detail_windows
-                normalized["details"] = details_obj
-        short_term = _merge_window(
-            normalized.get("short_term"),
-            detail_windows.get("primary_window"),
-            prefer_detail_percent=True,
-            now=now,
-        )
-        if short_term is not None:
-            normalized["short_term"] = short_term
-        long_term = _merge_window(
-            normalized.get("long_term"),
-            detail_windows.get("secondary_window"),
-            prefer_detail_percent=True,
-            now=now,
-        )
-        if long_term is not None:
-            normalized["long_term"] = long_term
-    elif provider == "claude":
-        # Issue #800: Claude Code's windows are the same concrete 5h / 7d spans
-        # as Codex; seed them so the app frames them as "5h window" / "7d window"
-        # rather than the generic "Short term" / "Long term".
-        short_term = _merge_window(
-            normalized.get("short_term"),
-            detail_windows.get("five_hour"),
-            default_window="5h",
-            now=now,
-        )
-        if short_term is not None:
-            normalized["short_term"] = short_term
-        long_term = _merge_window(
-            normalized.get("long_term"),
-            detail_windows.get("seven_day"),
-            default_window="7d",
-            now=now,
-        )
-        if long_term is not None:
-            normalized["long_term"] = long_term
-    elif provider == "copilot":
-        # Issue #800: Copilot's long-term quota is a monthly cycle — label it
-        # with its real cadence, NOT a 7d window. The short-term window is the
-        # fixed 100% bucket with no clean span, so leave it generic.
-        if isinstance(normalized.get("short_term"), dict):
-            normalized["short_term"] = _merge_window(normalized.get("short_term"), None, now=now)
-        long_term = _merge_window(
-            normalized.get("long_term"),
-            None,
-            default_window="monthly",
-            now=now,
-        )
-        if long_term is not None:
-            normalized["long_term"] = long_term
-    else:
-        if isinstance(normalized.get("short_term"), dict):
-            normalized["short_term"] = _merge_window(normalized.get("short_term"), None, now=now)
-        if isinstance(normalized.get("long_term"), dict):
-            normalized["long_term"] = _merge_window(normalized.get("long_term"), None, now=now)
-
-    actionable = _actionable_error(provider, normalized.get("error"))
-    if actionable != normalized.get("error"):
-        normalized["error"] = actionable
-    return normalized
-
-
-def normalize_usage_stdout(
-    stdout: str,
-    *,
-    now: Optional[datetime] = None,
-) -> str:
-    """Normalize NDJSON stdout from ``quse --json`` for app consumption."""
     if not stdout.strip():
         return stdout
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"quse --json did not emit valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "quse --json must be a provider-keyed JSON object, got "
+            f"{type(parsed).__name__}"
+        )
     lines: list[str] = []
-    changed = False
-    for raw_line in stdout.splitlines():
-        if not raw_line.strip():
-            lines.append(raw_line)
-            continue
-        try:
-            parsed = json.loads(raw_line)
-        except json.JSONDecodeError:
-            return stdout
-        if not isinstance(parsed, dict):
-            return stdout
-        normalized = normalize_usage_record(parsed, now=now)
-        changed = changed or normalized != parsed
-        lines.append(json.dumps(normalized, sort_keys=True))
-    suffix = "\n" if stdout.endswith("\n") else ""
-    return "\n".join(lines) + suffix if changed else stdout
+    for provider, record in parsed.items():
+        if not isinstance(record, dict):
+            raise ValueError(
+                f"quse --json provider '{provider}' is not a JSON object "
+                f"(got {type(record).__name__})"
+            )
+        flattened: dict[str, Any] = {"provider": provider, **record}
+        if flattened.get("error") is not None:
+            flattened["error"] = _actionable_error(provider, flattened["error"])
+        lines.append(json.dumps(flattened, sort_keys=True))
+    return "\n".join(lines) + "\n"
 
 
 def _try_daemon_usage_fetch(
@@ -502,7 +218,9 @@ def _try_daemon_usage_fetch(
     Returns the JSON-RPC ``result`` envelope (a dict with
     ``stdout``/``stderr``/``returncode`` keys) on success, or ``None``
     when the daemon is unreachable / errors out and the caller should
-    fall through to the one-shot subprocess path.
+    fall through to the one-shot subprocess path. The envelope's ``stdout``
+    is ALREADY-FLATTENED per-provider NDJSON (the daemon flattens before
+    caching), so callers proxy it verbatim — they must NOT re-flatten it.
 
     Lazy import keeps the cold-cache CLI start fast for users who
     never hit the daemon path.
@@ -544,7 +262,7 @@ def _try_daemon_usage_fetch(
     "--json",
     "json_output",
     is_flag=True,
-    help="Emit machine-readable JSON output identical to `quse --json`.",
+    help="Emit machine-readable per-provider NDJSON (flattened from `quse --json`).",
 )
 @click.option(
     "--no-daemon",
@@ -611,9 +329,10 @@ def usage_command(
     By default the command probes the IPC daemon's Unix socket
     (``$XDG_RUNTIME_DIR/pocketshell/daemon.sock``) and dispatches a
     ``usage.fetch`` JSON-RPC call when the daemon is live. Otherwise
-    it falls through to ``quse [provider] [--json]`` as a one-shot
-    subprocess. JSON output is normalized into PocketShell's schema so
-    the app is not pinned to provider-specific `quse` quirks.
+    it falls through to the pinned ``quse [provider] [--json]`` as a one-shot
+    subprocess. JSON output is FLATTENED from quse's provider-keyed document
+    into per-provider NDJSON — quse owns the schema, pocketshell just reshapes
+    it into the one-record-per-line wire format the app reads.
 
     ``--capture`` and ``--cached`` implement the stale-while-revalidate
     cache (#689): a scheduled ``--capture`` writes the latest reading +
@@ -640,16 +359,18 @@ def usage_command(
             ctx.exit(exit_code)
         return
 
-    # JSON output is the format the daemon caches against (NDJSON
-    # straight from `quse --json`). Human-readable output is rare and
-    # not on the Android hot path, so it does not get the daemon
-    # speed-up — falling through to subprocess is simpler than
-    # teaching the daemon to render two formats.
+    # JSON output is the format the daemon caches against (per-provider NDJSON
+    # already flattened by the daemon). Human-readable output is rare and not
+    # on the Android hot path, so it does not get the daemon speed-up —
+    # falling through to subprocess is simpler than teaching the daemon to
+    # render two formats.
     if json_output and not no_daemon:
         envelope = _try_daemon_usage_fetch(provider, no_cache=no_cache)
         if envelope is not None:
+            # The daemon already flattened quse's document into NDJSON before
+            # caching; proxy it verbatim (re-flattening NDJSON would raise).
             if envelope.get("stdout"):
-                sys.stdout.write(normalize_usage_stdout(str(envelope["stdout"])))
+                sys.stdout.write(str(envelope["stdout"]))
             if envelope.get("stderr"):
                 sys.stderr.write(envelope["stderr"])
             exit_code = int(envelope.get("returncode", 0))
@@ -680,34 +401,31 @@ def _fetch_usage_ndjson(
 ) -> tuple[Optional[str], str, int]:
     """Fetch live usage NDJSON for the cache capture.
 
-    Returns ``(stdout, stderr, returncode)`` where ``stdout`` is the
-    normalized NDJSON (or ``None`` when ``quse`` is missing). Mirrors the
-    command's own daemon-then-subprocess fall-through so a scheduled
-    ``--capture`` benefits from the daemon cache when one is live.
+    Returns ``(stdout, stderr, returncode)`` where ``stdout`` is the flattened
+    per-provider NDJSON (or ``None`` when the pinned ``quse`` is missing).
+    Mirrors the command's own daemon-then-subprocess fall-through so a
+    scheduled ``--capture`` benefits from the daemon cache when one is live.
     """
     if not no_daemon:
         envelope = _try_daemon_usage_fetch(provider, no_cache=False)
         if envelope is not None:
-            stdout = normalize_usage_stdout(str(envelope.get("stdout") or ""))
+            # Daemon envelope stdout is already-flattened NDJSON — use as-is.
+            stdout = str(envelope.get("stdout") or "")
             stderr = str(envelope.get("stderr") or "")
             return stdout, stderr, int(envelope.get("returncode", 0))
 
     quse_path = _resolve_quse_binary()
     if quse_path is None:
-        return (
-            None,
-            (
-                "pocketshell: `quse` is not installed on this host. "
-                "Install it via `uv tool install quse` or `pipx install quse` "
-                "and re-run.\n"
-            ),
-            127,
-        )
+        return (None, _QUSE_MISSING_MESSAGE + "\n", _QUSE_MISSING_EXIT_CODE)
     args: list[str] = [quse_path]
     if provider:
         args.append(provider)
     args.append("--json")
     completed = subprocess.run(args, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        # A failed live fetch is not flattened/cached — return quse's raw
+        # stdout so the caller can decide (it will not be persisted).
+        return completed.stdout, completed.stderr, completed.returncode
     return normalize_usage_stdout(completed.stdout), completed.stderr, completed.returncode
 
 
@@ -768,16 +486,17 @@ def _emit_reset_events() -> int:
 
 
 def _run_quse_json(args: Sequence[str]) -> int:
-    """Invoke ``quse`` and normalize JSON stdout before proxying it."""
+    """Invoke the pinned `quse --json` and flatten its output before proxying.
+
+    quse emits a provider-keyed JSON object; ``normalize_usage_stdout``
+    flattens it into per-provider NDJSON for the app. On a non-zero exit the
+    raw quse stdout/stderr is proxied verbatim (a failed fetch is not
+    flattened) so the app's exit!=0 provider-error path sees the real output.
+    """
     quse_path = _resolve_quse_binary()
     if quse_path is None:
-        click.echo(
-            "pocketshell: `quse` is not installed on this host. "
-            "Install it via `uv tool install quse` or `pipx install quse` "
-            "and re-run.",
-            err=True,
-        )
-        return 127
+        click.echo(_QUSE_MISSING_MESSAGE, err=True)
+        return _QUSE_MISSING_EXIT_CODE
 
     completed = subprocess.run(
         [quse_path, *args],
@@ -785,6 +504,12 @@ def _run_quse_json(args: Sequence[str]) -> int:
         capture_output=True,
         text=True,
     )
+    if completed.returncode != 0:
+        if completed.stdout:
+            sys.stdout.write(completed.stdout)
+        if completed.stderr:
+            sys.stderr.write(completed.stderr)
+        return completed.returncode
     if completed.stdout:
         sys.stdout.write(normalize_usage_stdout(completed.stdout))
     if completed.stderr:

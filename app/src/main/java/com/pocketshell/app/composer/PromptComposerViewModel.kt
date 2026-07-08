@@ -274,6 +274,7 @@ public class PromptComposerViewModel @Inject constructor(
     private var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
         null
     private var outboundSidecarDispatchInFlight: Boolean = false
+    internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     /**
      * Issue #971: the [SendRequest] for the prompt currently in flight, captured
@@ -926,8 +927,16 @@ public class PromptComposerViewModel @Inject constructor(
         // emission with no live collector) can never leave the composer stuck on
         // "Sending…" forever.
         armSendWatchdog()
+        val handoffRequest = SendRequest(
+            text = text,
+            withEnter = withEnter,
+            cleanDraft = draft,
+            attachments = attachments,
+            sendTarget = sendTarget,
+        )
+        inFlightSendRequest = handoffRequest
         if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
-            viewModelScope.launch {
+            viewModelScope.launch(outboundQueueDispatcher) {
                 try {
                     enqueueAndDispatchSidecarBackedSend(
                         cleanDraft = draft,
@@ -1080,6 +1089,14 @@ public class PromptComposerViewModel @Inject constructor(
         if (queuedItem.id != itemId) {
             outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
         }
+        inFlightSendRequest = SendRequest(
+            text = appendAttachmentPaths(cleanDraft, attachments.map { it.remotePath }),
+            withEnter = withEnter,
+            cleanDraft = cleanDraft,
+            attachments = attachments,
+            sendTarget = sendTarget,
+            outboundQueueItemId = queuedItem.id,
+        )
         refreshOutboundQueueItemsFor(sessionKey)
         dispatchPreparedOutboundItem(queuedItem.id)
     }
@@ -1174,7 +1191,12 @@ public class PromptComposerViewModel @Inject constructor(
         request: SendRequest,
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
-        if (request.text.isEmpty()) return
+        if (request.text.isEmpty()) {
+            disarmSendWatchdog()
+            inFlightSendRequest = null
+            _uiState.update { it.copy(sendInFlight = false, attachmentUpload = AttachmentUploadState.Idle) }
+            return
+        }
         // Issue #891: the send resolved (to failure) — disarm the overall-send
         // watchdog so the retryable failed state we are about to set is not
         // immediately re-stamped by a late watchdog firing.
@@ -1274,6 +1296,18 @@ public class PromptComposerViewModel @Inject constructor(
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
         val requeued = id?.let { outboundQueueStore.requeueForRetry(it) }
+            ?: request.sendTarget.sessionKey.takeIf { it.isNotBlank() }?.let { sessionKey ->
+                val candidates = outboundQueueStore.itemsFor(sessionKey)
+                    .filter { it.state != OutboundState.Delivered }
+                candidates
+                    .firstOrNull {
+                        it.cleanText == request.cleanDraft &&
+                            it.state != OutboundState.Delivered
+                    }
+                    ?: candidates.firstOrNull()
+            }?.let {
+                outboundQueueStore.requeueForRetry(it.id)
+            }
         if (requeued == null) {
             // No durable row to keep queued — fall back to the composer-restore
             // path so the typed prompt is not silently lost.
@@ -1482,6 +1516,7 @@ public class PromptComposerViewModel @Inject constructor(
         // back to the composer-restore path inside markOutboundSendDeferred with
         // the watchdog-specific copy so the typed prompt is not lost and the user
         // sees that the send timed out.
+        requeueStaleOutboundInFlight(staleAfterMs = 0L)
         markOutboundSendDeferred(request, noRowFallbackMessage = SEND_TIMEOUT_MESSAGE)
     }
 
@@ -1659,8 +1694,9 @@ public class PromptComposerViewModel @Inject constructor(
     public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
         if (_uiState.value.sendInFlight) return null
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
-        val next = outboundQueueStore.itemsFor(target)
+        val next = _outboundQueueItems.value
             .firstOrNull { item ->
+                item.sessionKey == target &&
                 item.id !in excludingIds &&
                     (item.state == OutboundState.Queued || item.state == OutboundState.Failed)
             }
@@ -1723,11 +1759,11 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun dispatchOutboundItem(id: String): Boolean {
         if (_uiState.value.sendInFlight) return false
+        if (outboundSidecarDispatchInFlight) return false
         val sidecarStore = outboundAttachmentSidecarStore
         if (sidecarStore != null) {
-            if (outboundSidecarDispatchInFlight) return false
             outboundSidecarDispatchInFlight = true
-            viewModelScope.launch {
+            viewModelScope.launch(outboundQueueDispatcher) {
                 try {
                     val sidecars = sidecarStore.refsFor(id)
                     if (sidecars.isNotEmpty()) {
@@ -1752,7 +1788,22 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return true
         }
-        return claimAndEmitOutboundItem(id)
+        outboundSidecarDispatchInFlight = true
+        viewModelScope.launch(outboundQueueDispatcher) {
+            try {
+                claimAndEmitOutboundItem(id)
+            } catch (cancelled: CancellationException) {
+                clearStrandedSendInFlight()
+                throw cancelled
+            } catch (t: Throwable) {
+                clearStrandedSendInFlight(
+                    error = "Send failed: reconnect, then send again or discard the draft.",
+                )
+            } finally {
+                outboundSidecarDispatchInFlight = false
+            }
+        }
+        return true
     }
 
     private suspend fun dispatchPreparedOutboundItem(id: String): Boolean {
@@ -1791,6 +1842,9 @@ public class PromptComposerViewModel @Inject constructor(
         } catch (timeout: TimeoutCancellationException) {
             Result.failure(timeout)
         } catch (cancelled: CancellationException) {
+            outboundQueueStore.requeueForRetry(id)
+            refreshOutboundQueueItemsFor(uploading.sessionKey)
+            clearStrandedSendInFlight()
             throw cancelled
         } catch (t: Throwable) {
             Result.failure(t)
@@ -3138,6 +3192,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     public fun onForegroundResume() {
         viewModelScope.launch {
+            requeueStaleOutboundInFlight()
             if (!connectivity.refresh()) return@launch
             val snapshot = runCatching { pendingTranscriptionStore.snapshot() }
                 .getOrElse { return@launch }

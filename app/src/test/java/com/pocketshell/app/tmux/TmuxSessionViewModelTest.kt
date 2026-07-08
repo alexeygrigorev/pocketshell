@@ -7348,7 +7348,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun tmuxInputEnqueueRejectsWhenPendingByteBudgetIsFull() = runTest(scheduler) {
+    fun tmuxInputStreamDropsOverflowAndAcceptsLaterBytes() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             sendCommandGatePrefix = "send-keys -l -t %0"
@@ -7363,14 +7363,26 @@ class TmuxSessionViewModelTest {
         }
         runCurrent()
 
-        val thrown = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
-            .exceptionOrNull()
+        val overflow = runCatching { sink.write("overflow".toByteArray(Charsets.US_ASCII)) }
         assertTrue(
-            "enqueue must fail fast instead of blocking when the pending-byte budget is full",
-            thrown is IOException,
+            "the bridge-facing input stream must drop overflow instead of killing the input drainer",
+            overflow.isSuccess,
         )
         client.sendCommandGate?.complete(Unit)
         advanceUntilIdle()
+
+        sink.write("after".toByteArray(Charsets.US_ASCII))
+        advanceUntilIdle()
+
+        val literalSends = client.sentCommands.filter { it.startsWith("send-keys -l -t %0") }
+        assertTrue(
+            "later input must still reach tmux after a transient full-queue drop",
+            literalSends.any { it.contains("'after'") },
+        )
+        assertTrue(
+            "overflow bytes should be dropped rather than replayed after the backlog drains",
+            literalSends.none { it.contains("overflow") },
+        )
     }
 
     @Test
@@ -11890,6 +11902,49 @@ class TmuxSessionViewModelTest {
         assertEquals(
             listOf(
                 "send-keys -l -t %0 -- 'never-rendered prompt'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    /**
+     * Codex input-freeze follow-up: a Codex/agent output storm can wedge the
+     * `capture-pane` command the submit ack gate uses to confirm the paste
+     * landed. The ack timeout must bound the WHOLE capture loop, including a
+     * single stuck capture command, so typing never parks forever before the
+     * submit Enter.
+     */
+    @Test
+    fun sendToAgentPaneAckTimeoutBoundsStuckCaptureCommand() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(80L)
+        client.suspendForeverOnCommandPrefix = "capture-pane"
+
+        val send = async { vm.sendToAgentPaneResult("%0", "blocked capture prompt") }
+
+        advanceTimeBy(79L)
+        runCurrent()
+        assertFalse(
+            "the submit Enter must not fire before the ack timeout elapses",
+            client.sentCommands.contains("send-keys -t %0 Enter"),
+        )
+
+        advanceUntilIdle()
+        assertTrue("stuck capture must fall back instead of hanging Send", send.await().isSuccess)
+        assertEquals(
+            "a stuck ack capture should be tried once, then cancelled by the wall-clock timeout",
+            1,
+            client.sentCommands.count { it.startsWith("capture-pane") },
+        )
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'blocked capture prompt'",
                 "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },

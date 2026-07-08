@@ -923,10 +923,26 @@ public fun TmuxSessionScreen(
     val paletteAgent: AgentKind? = liveAgentForPane
         ?: currentPaneId?.let { stickyAgentForPane[it] }
     val surfaceTerminalState = surfacePane?.terminalState
-    val visibleTerminalText by remember(currentPaneId, surfaceTerminalState) {
-        surfaceTerminalState?.flowOfVisibleScreenText ?: flowOf("")
+    val quickReplyInputEligible = sessionLive &&
+        surfaceTerminalState != null &&
+        currentSelectedTab != SessionTab.Conversation &&
+        tmuxSessionHasPositiveAgentEvidence(
+            hasLiveDetection = currentDetection != null,
+            hasStickyAgent = paletteAgent != null,
+            recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind),
+        )
+    val visibleTerminalText by remember(currentPaneId, surfaceTerminalState, quickReplyInputEligible) {
+        if (quickReplyInputEligible) {
+            surfaceTerminalState?.flowOfVisibleScreenText ?: flowOf("")
+        } else {
+            flowOf("")
+        }
     }.collectAsState(
-        initial = surfaceTerminalState?.visibleScreenTextSnapshot().orEmpty(),
+        initial = if (quickReplyInputEligible) {
+            surfaceTerminalState?.visibleScreenTextSnapshot().orEmpty()
+        } else {
+            ""
+        },
     )
     val agentQuickReplies = remember(visibleTerminalText) {
         agentQuickRepliesForVisibleText(visibleTerminalText)
@@ -2372,15 +2388,9 @@ public fun TmuxSessionScreen(
 
             run {
                 val pane = surfacePane
-                val quickReplyInputEnabled = sessionLive &&
-                    pane != null &&
+                val quickReplyInputEnabled = quickReplyInputEligible &&
                     !showMicSheet &&
-                    !showConversation &&
-                    tmuxSessionHasPositiveAgentEvidence(
-                        hasLiveDetection = currentDetection != null,
-                        hasStickyAgent = paletteAgent != null,
-                        recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind),
-                    )
+                    !showConversation
                 if (quickReplyInputEnabled && agentQuickReplies.isNotEmpty()) {
                     AgentQuickReplyRow(
                         replies = agentQuickReplies,

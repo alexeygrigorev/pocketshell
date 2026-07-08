@@ -231,7 +231,10 @@ class PromptComposerViewModelTest {
             outboundAttachmentSidecarStore = outboundAttachmentSidecarStore,
             savedStateHandle = savedStateHandle,
         )
-        if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
+        if (samplerDispatcher != null) {
+            vm.samplerDispatcher = samplerDispatcher
+            vm.outboundQueueDispatcher = samplerDispatcher
+        }
         vm.clock = clock
         // Issue #882: track for teardown so a test that leaves recording active
         // doesn't leak the #880 ticker loop into `runTest`'s final
@@ -4154,6 +4157,34 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun retryNextOutboundItemSchedulesQueueClaimOffCallerThread() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val item = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "saved prompt",
+            createdAtMs = 1L,
+            paneId = "%1",
+        )
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        val retried = vm.retryNextOutboundItem()
+
+        assertEquals(item.id, retried)
+        assertTrue(sent.isEmpty())
+        assertEquals(OutboundState.Queued, queue.item(item.id)!!.state)
+
+        advanceUntilIdle()
+
+        assertEquals(item.id, sent.single().outboundQueueItemId)
+        assertEquals(OutboundState.InFlight, queue.item(item.id)!!.state)
+    }
+
+    @Test
     fun retryNextOutboundItemClaimsOldestCurrentTargetAndHonorsLiveWindowExclusions() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val first = queue.enqueue(
@@ -4348,6 +4379,42 @@ class PromptComposerViewModelTest {
         assertEquals(2, queue.item(stale.id)!!.attemptCount)
         assertEquals(OutboundState.InFlight, queue.item(fresh.id)!!.state)
         assertEquals(listOf(stale.id, fresh.id), vm.outboundQueueItems.value.map { it.id })
+    }
+
+    @Test
+    fun foregroundResumeRequeuesStaleUploadingOutboundRows() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val now = 500_000L
+        val staleUpload = OutboundItem(
+            id = "stale-upload",
+            sessionKey = "1/session-a",
+            cleanText = "recover upload",
+            state = OutboundState.Uploading,
+            createdAtMs = 1L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS - 1L,
+            attachments = listOf(DurableAttachmentRef("/tmp/local.png", "local.png", "image/png")),
+        )
+        val freshUpload = staleUpload.copy(
+            id = "fresh-upload",
+            cleanText = "leave upload",
+            createdAtMs = 2L,
+            lastAttemptAtMs = now - PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS + 1L,
+        )
+        queue.enqueueExisting(staleUpload)
+        queue.enqueueExisting(freshUpload)
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            clock = { now },
+        )
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.onForegroundResume()
+        runCurrent()
+
+        assertEquals(OutboundState.Queued, queue.item(staleUpload.id)!!.state)
+        assertEquals(OutboundState.Uploading, queue.item(freshUpload.id)!!.state)
+        assertEquals(listOf(staleUpload.id, freshUpload.id), vm.outboundQueueItems.value.map { it.id })
     }
 
     @Test

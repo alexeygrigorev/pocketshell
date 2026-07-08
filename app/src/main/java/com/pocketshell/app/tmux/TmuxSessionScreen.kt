@@ -157,7 +157,6 @@ import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
-import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.cards.SessionCardFeedChip
 import com.pocketshell.app.cards.SessionCardInteractions
@@ -186,16 +185,11 @@ import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
-import com.pocketshell.uikit.components.Badge
-import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.KebabTrigger
-import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.LoadingIndicator
-import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.Crumb
-import com.pocketshell.uikit.model.ConnectionStatus as UiConnectionStatus
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -3239,285 +3233,6 @@ private fun SessionSwitcherOverlay(
     }
 }
 
-@Composable
-internal fun TmuxSessionDrawer(
-    visible: Boolean,
-    state: HostTmuxSessionPickerState,
-    hostName: String,
-    currentSessionName: String,
-    onRefresh: () -> Unit,
-    onDismiss: () -> Unit,
-    onAttach: (String) -> Unit,
-    onCreate: () -> Unit,
-) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(animationSpec = tween(durationMillis = MotionDurationMs)),
-        exit = fadeOut(animationSpec = tween(durationMillis = MotionDurationMs)),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(PocketShellColors.Background.copy(alpha = 0.72f))
-                .clickable(onClick = onDismiss),
-        )
-    }
-    AnimatedVisibility(
-        visible = visible,
-        enter = slideInHorizontally(
-            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-            initialOffsetX = { it },
-        ),
-        exit = slideOutHorizontally(
-            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-            targetOffsetX = { it },
-        ),
-    ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
-            Column(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(0.92f)
-                    .widthIn(max = SessionDrawerMaxWidth)
-                    .background(PocketShellColors.Surface)
-                    .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .testTag(TMUX_SESSION_SWITCHER_TAG)
-                    .clickable(onClick = {}),
-            ) {
-                // Issue #156 (4.1): stack the header vertically — title
-                // row, subtitle row — with the close affordance pinned
-                // top-right so it doesn't compress the title onto one
-                // cramped line.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 8.dp),
-                ) {
-                    Column(modifier = Modifier.fillMaxWidth().padding(end = 40.dp)) {
-                        Text(
-                            text = "Tmux sessions",
-                            color = PocketShellColors.Text,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = "$hostName / $currentSessionName",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .size(36.dp)
-                            .testTag(TMUX_SESSION_DRAWER_CLOSE_TAG)
-                            .clickable(
-                                role = androidx.compose.ui.semantics.Role.Button,
-                                onClick = onDismiss,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "×",
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 20.sp,
-                        )
-                    }
-                }
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = PocketShellSpacing.sm),
-                    verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-                ) {
-                    item { SectionHeader(label = "Options") }
-                    item(key = "create-session") {
-                        TmuxSessionDrawerOptionRow(
-                            label = "+ New session",
-                            sublabel = "Separate workspace on this host",
-                            onClick = onCreate,
-                            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_CREATE_TAG),
-                        )
-                    }
-                    item(key = "refresh-sessions") {
-                        TmuxSessionDrawerOptionRow(
-                            label = "Refresh sessions",
-                            sublabel = null,
-                            onClick = onRefresh,
-                            modifier = Modifier.testTag(TMUX_SESSION_DRAWER_REFRESH_TAG),
-                        )
-                    }
-                    item {
-                        SectionHeader(
-                            label = "Available sessions",
-                            count = (state as? HostTmuxSessionPickerState.Ready)?.rows?.size,
-                        )
-                    }
-                    when (state) {
-                        HostTmuxSessionPickerState.Idle,
-                        is HostTmuxSessionPickerState.Loading,
-                        -> item {
-                            TmuxSessionDrawerMessage(
-                                text = if (state is HostTmuxSessionPickerState.Loading) {
-                                    "Loading sessions from ${state.hostName}..."
-                                } else {
-                                    "Loading sessions..."
-                                },
-                            )
-                        }
-                        is HostTmuxSessionPickerState.Ready -> {
-                            state.message?.let { message ->
-                                item { TmuxSessionDrawerMessage(text = message) }
-                            }
-                            items(state.rows, key = { it.name }) { row ->
-                                TmuxSessionDrawerRow(
-                                    row = row,
-                                    selected = row.name == currentSessionName,
-                                    enabled = row.name != currentSessionName,
-                                    onClick = { onAttach(row.name) },
-                                )
-                            }
-                        }
-                        is HostTmuxSessionPickerState.Fallback -> item {
-                            TmuxSessionDrawerMessage(text = state.message)
-                        }
-                        // Issue #109: in-session drawer also handles
-                        // connect-error by rendering the same friendly
-                        // body line. Retry/raw-shell affordances live on
-                        // the host-list sheet only — from inside an
-                        // already-open session the user typically wants
-                        // the message and can dismiss the drawer to
-                        // continue with the live connection.
-                        is HostTmuxSessionPickerState.ConnectError -> item {
-                            val host = state.request.host
-                            TmuxSessionDrawerMessage(
-                                text = "Couldn't reach ${host.username}@${host.hostname}:${host.port}. " +
-                                    state.summary.shortReason,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TmuxSessionDrawerMessage(text: String) {
-    Text(
-        text = text,
-        color = PocketShellColors.TextSecondary,
-        style = PocketShellType.bodyDense,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, PocketShellShapes.extraSmall)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-    )
-}
-
-@Composable
-private fun TmuxSessionDrawerOptionRow(
-    label: String,
-    sublabel: String?,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, PocketShellShapes.small)
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = PocketShellShapes.small,
-            ),
-    ) {
-        ListRow(
-            title = label,
-            subtitle = sublabel,
-            onClick = onClick,
-            modifier = modifier,
-            trailing = {
-                Text(
-                    text = "›",
-                    color = PocketShellColors.TextSecondary,
-                    style = PocketShellType.bodyDense,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            },
-        )
-    }
-}
-
-@Composable
-private fun TmuxDrawerRowContainer(
-    selected: Boolean,
-    content: @Composable () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev,
-                shape = PocketShellShapes.small,
-            )
-            .border(
-                width = 1.dp,
-                color = if (selected) PocketShellColors.AccentDim else PocketShellColors.BorderSoft,
-                shape = PocketShellShapes.small,
-            ),
-    ) {
-        content()
-    }
-}
-
-@Composable
-private fun TmuxSessionDrawerRow(
-    row: HostTmuxSessionRow,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    TmuxDrawerRowContainer(selected = selected) {
-        ListRow(
-            title = row.name,
-            subtitle = when {
-                selected -> "current"
-                row.attached -> "attached"
-                else -> "available"
-            },
-            leading = {
-                StatusDot(
-                    status = if (row.attached || selected) {
-                        UiConnectionStatus.Connected
-                    } else {
-                        UiConnectionStatus.Idle
-                    },
-                )
-            },
-            trailing = {
-                Box(
-                    modifier = Modifier.defaultMinSize(minWidth = PocketShellDensity.tapTargetMin),
-                    contentAlignment = Alignment.CenterEnd,
-                ) {
-                    Badge(
-                        label = if (selected) "Open" else "Attach",
-                        role = if (selected) BadgeRole.Active else BadgeRole.Idle,
-                        mono = false,
-                    )
-                }
-            },
-            onClick = if (enabled) onClick else null,
-            modifier = Modifier
-                .padding(vertical = if (selected) 1.dp else 0.dp)
-                .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin),
-        )
-    }
-}
-
 internal data class SessionSwitcherPage(
     val name: String,
     val statusLabel: String,
@@ -4533,14 +4248,9 @@ private sealed interface TmuxDialogMode {
 }
 
 private val VerticalSwipeThreshold = 72.dp
-private val SessionDrawerMaxWidth = 360.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
-internal const val TMUX_SESSION_SWITCHER_TAG = "tmux:session-switcher"
-internal const val TMUX_SESSION_DRAWER_CLOSE_TAG = "tmux:session-drawer:close"
-internal const val TMUX_SESSION_DRAWER_CREATE_TAG = "tmux:session-drawer:create"
-internal const val TMUX_SESSION_DRAWER_REFRESH_TAG = "tmux:session-drawer:refresh"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
 
 // Issue #778: test tag on the conversation-loading placeholder shown when the

@@ -14796,63 +14796,62 @@ public class TmuxSessionViewModel @Inject constructor(
         // capture confirms instantly (preserves the #526 tunable minimum).
         if (minFloorMs > 0L) delay(minFloorMs)
 
-        // Bound the ack poll by iteration count rather than a wall clock so the
-        // loop is deterministic under virtual time AND cannot spin forever (a
-        // `SystemClock` reading is a no-op 0 under the unit-test default-values
-        // runtime, which would make an elapsed-based bound never trip — #869
-        // OOM). Each capture is itself a round-trip, so this stays RTT-adaptive.
         val ackTimeoutMs = agentSubmitAckTimeoutMsOverrideForTest ?: AGENT_SUBMIT_ACK_TIMEOUT_MS
-        val maxPolls = (ackTimeoutMs / AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
-            .toInt()
-            .coerceAtLeast(1)
         var poll = 0
         // The longest single `capture-pane` round-trip seen so far — the RTT
         // addend for the hardened fallback floor (#869).
         var maxCaptureRttMs = 0L
-        while (true) {
-            if (client.disconnected.value) return
-            val captureStartMs = agentSubmitNowMs()
-            val visible = agentPaneShowsPayload(client, paneId, ackNeedle)
-            maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
-            if (visible) {
-                // The paste is visible in the pane — the agent has ingested it.
-                // Press Enter now (caller does the send-keys Enter).
-                DiagnosticEvents.record(
-                    "action",
-                    "agent_submit_ack",
-                    "pane" to paneId,
-                    "result" to "ack_observed",
-                    "polls" to poll,
-                )
-                return
+        var disconnectedDuringAck = false
+        val ackObserved = withTimeoutOrNull(ackTimeoutMs.coerceAtLeast(1L)) {
+            while (true) {
+                if (client.disconnected.value) {
+                    disconnectedDuringAck = true
+                    return@withTimeoutOrNull false
+                }
+                val captureStartMs = agentSubmitNowMs()
+                val visible = agentPaneShowsPayload(client, paneId, ackNeedle)
+                maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
+                if (visible) {
+                    // The paste is visible in the pane — the agent has ingested it.
+                    // Press Enter now (caller does the send-keys Enter).
+                    DiagnosticEvents.record(
+                        "action",
+                        "agent_submit_ack",
+                        "pane" to paneId,
+                        "result" to "ack_observed",
+                        "polls" to poll,
+                    )
+                    return@withTimeoutOrNull true
+                }
+                poll += 1
+                delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
             }
-            poll += 1
-            if (poll >= maxPolls) {
-                // Hardened needle-miss fallback (#869): we could not confirm
-                // ingestion. Do NOT degrade to the short floor that caused the
-                // missed-submit. Hold the Enter until an ADEQUATE working floor
-                // has elapsed since the gate started:
-                //   max(minFloor, FALLBACK_FLOOR + maxCaptureRtt).
-                val fallbackFloorMs = maxOf(
-                    minFloorMs,
-                    com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
-                        maxCaptureRttMs,
-                )
-                val elapsedMs = agentSubmitNowMs() - gateStartMs
-                val remainingMs = fallbackFloorMs - elapsedMs
-                if (remainingMs > 0L) delay(remainingMs)
-                DiagnosticEvents.record(
-                    "action",
-                    "agent_submit_ack",
-                    "pane" to paneId,
-                    "result" to "fallback_floor",
-                    "polls" to poll,
-                    "fallbackFloorMs" to fallbackFloorMs,
-                )
-                return
-            }
-            delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
-        }
+        } == true
+        if (disconnectedDuringAck) return
+        if (ackObserved) return
+
+        // Codex input-freeze follow-up: the ack timeout must bound the WHOLE
+        // capture loop, not just the number of polls. A single stuck
+        // `capture-pane` on the busy control lane used to park this coroutine past
+        // the advertised timeout, making Codex sends appear frozen. On timeout,
+        // keep the #869 fallback floor, then let the caller send Enter rather than
+        // blocking user input indefinitely.
+        val fallbackFloorMs = maxOf(
+            minFloorMs,
+            com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
+                maxCaptureRttMs,
+        )
+        val elapsedMs = agentSubmitNowMs() - gateStartMs
+        val remainingMs = fallbackFloorMs - elapsedMs
+        if (remainingMs > 0L) delay(remainingMs)
+        DiagnosticEvents.record(
+            "action",
+            "agent_submit_ack",
+            "pane" to paneId,
+            "result" to "fallback_floor",
+            "polls" to poll,
+            "fallbackFloorMs" to fallbackFloorMs,
+        )
     }
 
     /**

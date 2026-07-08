@@ -11897,6 +11897,49 @@ class TmuxSessionViewModelTest {
     }
 
     /**
+     * Codex input-freeze follow-up: a Codex/agent output storm can wedge the
+     * `capture-pane` command the submit ack gate uses to confirm the paste
+     * landed. The ack timeout must bound the WHOLE capture loop, including a
+     * single stuck capture command, so typing never parks forever before the
+     * submit Enter.
+     */
+    @Test
+    fun sendToAgentPaneAckTimeoutBoundsStuckCaptureCommand() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(80L)
+        client.suspendForeverOnCommandPrefix = "capture-pane"
+
+        val send = async { vm.sendToAgentPaneResult("%0", "blocked capture prompt") }
+
+        advanceTimeBy(79L)
+        runCurrent()
+        assertFalse(
+            "the submit Enter must not fire before the ack timeout elapses",
+            client.sentCommands.contains("send-keys -t %0 Enter"),
+        )
+
+        advanceUntilIdle()
+        assertTrue("stuck capture must fall back instead of hanging Send", send.await().isSuccess)
+        assertEquals(
+            "a stuck ack capture should be tried once, then cancelled by the wall-clock timeout",
+            1,
+            client.sentCommands.count { it.startsWith("capture-pane") },
+        )
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'blocked capture prompt'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    /**
      * Issue #869 (reviewer BLOCKED-G4 follow-up): the needle-miss FALLBACK must
      * NOT degrade to the pre-#869 short floor — that short delay IS the
      * maintainer's missed-submit symptom. When the ack is never observed (an

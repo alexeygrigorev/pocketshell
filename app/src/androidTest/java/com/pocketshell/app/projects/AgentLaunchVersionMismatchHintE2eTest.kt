@@ -76,6 +76,16 @@ class AgentLaunchVersionMismatchHintE2eTest {
         )
         // The raw Click jargon must NOT leak to the user.
         assertFalse("raw Click error must not leak: $hint", hint.contains("No such command"))
+        // Regression (chronic emulator red): the #976 launch-collision guard
+        // (`tmux has-session`) runs BEFORE the version pre-flight. For a
+        // fresh-name launch the session is ABSENT, so the guard must NOT fire
+        // and must NOT short-circuit the version hint with its "already open"
+        // collision message. This is exactly the failure that kept this E2E red
+        // for days (the fake reported a never-created session as already open).
+        assertFalse(
+            "launch-collision guard must not short-circuit the version pre-flight: $hint",
+            hint.contains("already open"),
+        )
         // The doomed agent line must NOT be typed into the pane.
         assertFalse(
             "must not send-keys a launch that will fail: ${session.execCommands}",

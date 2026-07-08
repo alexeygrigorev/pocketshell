@@ -65,6 +65,13 @@ class FakeOldHostSshSession(
     private val connectRpcMode: OldHostConnectRpcMode = OldHostConnectRpcMode.UNKNOWN_COMMAND,
     private val hangDelayMs: Long = DEFAULT_HANG_DELAY_MS,
     private val slowDelayMs: Long = DEFAULT_SLOW_DELAY_MS,
+    /**
+     * Session names this host reports as already open (`tmux has-session`
+     * exits 0). Empty by default — a not-yet-created launch target is absent,
+     * so the #976 launch-collision guard does NOT fire and the launch reaches
+     * the #759 version pre-flight. Populate it to model a real name collision.
+     */
+    private val openSessions: Set<String> = emptySet(),
 ) : SshSession {
 
     /** Every command the session was asked to `exec`, in order. */
@@ -107,6 +114,27 @@ class FakeOldHostSshSession(
                 OldHostConnectRpcMode.UNKNOWN_COMMAND ->
                     return unknownCommandResult(connectRpcName)
             }
+        }
+
+        // Issue #759 (chronic emulator red): the launch path's #976
+        // routing-safety guard probes `tmux has-session -t '<name>'` BEFORE the
+        // version pre-flight and REFUSES the launch (with the "already open"
+        // collision message) when the target session already exists. This fake
+        // never actually creates a session, so a not-yet-created target is
+        // ABSENT — it MUST report the tmux "can't find session" non-zero exit,
+        // exactly like a real host launching an agent into a fresh directory.
+        // The old catch-all returned exit 0 here, which the collision guard read
+        // as a FALSE "already open" and short-circuited the version-mismatch
+        // pre-flight this old-host seam exists to exercise — the root cause of
+        // the chronic-red `AgentLaunchVersionMismatchHintE2eTest`. A session
+        // named in [openSessions] does exist (for future collision proofs).
+        if (command.contains("tmux has-session")) {
+            val exists = openSessions.any { command.contains("-t '$it'") || command.contains("-t $it") }
+            return ExecResult(
+                stdout = "",
+                stderr = if (exists) "" else "can't find session",
+                exitCode = if (exists) 0 else 1,
+            )
         }
 
         return when {

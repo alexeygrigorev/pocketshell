@@ -194,6 +194,7 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.core.terminal.ui.TerminalSurface
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
@@ -213,7 +214,6 @@ import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -931,23 +931,6 @@ public fun TmuxSessionScreen(
             hasStickyAgent = paletteAgent != null,
             recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind),
         )
-    val visibleTerminalText by remember(currentPaneId, surfaceTerminalState, quickReplyInputEligible) {
-        if (quickReplyInputEligible) {
-            surfaceTerminalState?.flowOfVisibleScreenText ?: flowOf("")
-        } else {
-            flowOf("")
-        }
-    }.collectAsState(
-        initial = if (quickReplyInputEligible) {
-            surfaceTerminalState?.visibleScreenTextSnapshot().orEmpty()
-        } else {
-            ""
-        },
-    )
-    val agentQuickReplies = remember(visibleTerminalText) {
-        agentQuickRepliesForVisibleText(visibleTerminalText)
-    }
-
     // Issue #770: the set of engine slash-commands the terminal should make
     // tappable for the visible pane. Sourced verbatim from [AgentCommandCatalog]
     // for the detected/sticky engine — so only commands that actually exist for
@@ -2386,22 +2369,17 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            run {
-                val pane = surfacePane
-                val quickReplyInputEnabled = quickReplyInputEligible &&
-                    !showMicSheet &&
-                    !showConversation
-                if (quickReplyInputEnabled && agentQuickReplies.isNotEmpty()) {
-                    AgentQuickReplyRow(
-                        replies = agentQuickReplies,
-                        onReply = { reply ->
-                            viewModel.writeInputToPane(
-                                pane.paneId,
-                                reply.payload.toByteArray(Charsets.UTF_8),
-                            )
-                        },
-                    )
-                }
+            surfacePane?.let { pane ->
+                AgentQuickReplyBand(
+                    terminalState = pane.terminalState,
+                    enabled = quickReplyInputEligible && !showMicSheet && !showConversation,
+                    onReply = { reply ->
+                        viewModel.writeInputToPane(
+                            pane.paneId,
+                            reply.payload.toByteArray(Charsets.UTF_8),
+                        )
+                    },
+                )
             }
 
             // Issue #810 (hard-cut, D22) — the prompt composer affordance is
@@ -3104,6 +3082,24 @@ internal fun detectedPortForwardNavigation(remotePort: Int): PortForwardNavigati
  * not an overlay, so it reserves its own height above the composer/bottom
  * controls and never covers terminal content or the input controls.
  */
+@Composable
+private fun AgentQuickReplyBand(
+    terminalState: TerminalSurfaceState,
+    enabled: Boolean,
+    onReply: (AgentQuickReply) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val replies by remember(terminalState, enabled) {
+        agentQuickRepliesForVisibleTextFlow(
+            visibleText = terminalState.flowOfVisibleScreenText,
+            enabled = enabled,
+        )
+    }.collectAsState(initial = emptyList())
+    if (replies.isNotEmpty()) {
+        AgentQuickReplyRow(replies = replies, onReply = onReply, modifier = modifier)
+    }
+}
+
 @Composable
 internal fun AgentQuickReplyRow(
     replies: List<AgentQuickReply>,

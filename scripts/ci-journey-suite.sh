@@ -348,6 +348,30 @@ JOURNEY_CLASSES=(
   # retry callbacks in the same per-push androidTest lane as the send-feedback
   # composer proofs. Pure Compose, no Docker fixture.
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  # ADDED (#1272): the durable "couldn't deliver — retry" surface wired into the
+  # LIVE composer chrome. A voice command transcribed successfully but never
+  # delivered to a pane (permanent pane death / channel overflow) was silently
+  # lost — the #1341 data-loss slice made it durable but had NO user-visible
+  # retry surface (the #1341 reviewer blocked closure on exactly that). This
+  # drives the REAL production PromptComposerSheet (no *StandIn/*Proxy) through a
+  # real permanent-dead-pane persist, asserts the retry row is VISIBLE with
+  # viewport CONTAINMENT (assertNodeFullyWithinRoot, not bare assertIsDisplayed),
+  # and proves Retry re-delivers into a live pane + Dismiss discards. Pure Compose,
+  # no Docker fixture, no assumeTrue self-skip. Carries its FQ name directly.
+  "com.pocketshell.app.composer.PromptComposerUndeliveredRetryTest"
+  # ADDED (#1272 round-2, finding 1): the PRODUCTION-WIRING proof. The class
+  # above bypasses the composer's hiltViewModel() guard (SheetContent called
+  # directly / the inlineDictationViewModel override seam), so it never runs the
+  # REAL `storeOwner is GeneratedComponentManagerHolder -> hiltViewModel()`
+  # branch that resolves the activity-scoped InlineDictationViewModel the session
+  # screen collects (the exact link #1341 blocked on). This class launches the
+  # real @AndroidEntryPoint ComposerHiltHostActivity (debug source set), mounts
+  # the PRODUCTION PromptComposerSheet with NO seam, drives an undelivered
+  # transcript into the SAME activity-scoped VM (via ViewModelProvider(activity)),
+  # and asserts the retry row renders with viewport CONTAINMENT + Retry
+  # re-delivers — proving the guard's real Hilt branch binds the production VM.
+  # Pure Compose, no Docker fixture, no assumeTrue self-skip.
+  "com.pocketshell.app.composer.PromptComposerUndeliveredRetryHiltWiringTest"
   # ADDED (#1308): batch "Resend all" for the queued backlog. The presence/absence
   # + callback + within-root containment of the new button live in
   # PromptComposerOutboundQueueTest above; this class is its keyboard-UP occlusion

@@ -108,12 +108,17 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.pocketshell.app.fileviewer.BoundedImageDecoder
+import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.session.UndeliveredTranscriptBanner
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.agentcommands.AgentCommand
 import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.app.voice.UndeliveredTranscript
+import dagger.hilt.internal.GeneratedComponentManagerHolder
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.components.DisclosureIcon
@@ -233,8 +238,21 @@ public fun PromptComposerSheet(
     // (timer + waveform) until Discard / Insert / Send — issue #1245 removed the
     // separate hands-free "lock" concept.
     autoStartRecording: Boolean = false,
+    // Issue #1272: override seam for the activity-scoped inline-dictation
+    // ViewModel that owns the durable undelivered-transcript queue + delivery
+    // channel. Production leaves it null — the sheet resolves the SAME
+    // activity-scoped instance TmuxSessionScreen uses via `hiltViewModel()` (so a
+    // Retry re-injects into the live delivery channel the session screen
+    // collects). Tests pass a real instance directly so the retry surface renders
+    // without a Hilt graph.
+    inlineDictationViewModel: InlineDictationViewModel? = null,
 ) {
     val state by viewModel.uiState.collectAsState()
+    // Issue #1272: surface the durable "couldn't deliver — retry" queue in the
+    // composer's own bottom chrome so a voice command that was transcribed but
+    // never reached a pane (permanent pane death / channel overflow) is
+    // recoverable by the user instead of silently lost.
+    val undelivered = rememberComposerUndeliveredBinding(inlineDictationViewModel)
     val pendingItems by viewModel.pendingItems.collectAsState()
     val outboundQueueItems by viewModel.outboundQueueItems.collectAsState()
     val context = LocalContext.current
@@ -501,6 +519,10 @@ public fun PromptComposerSheet(
             onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
             onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueued(); Unit },
             agentKind = agentKind,
+            // Issue #1272: the durable undelivered-transcript retry surface.
+            undeliveredTranscripts = undelivered.transcripts,
+            onRetryUndelivered = undelivered.onRetry,
+            onDismissUndelivered = undelivered.onDismiss,
         )
     }
 
@@ -564,6 +586,62 @@ public fun PromptComposerSheet(
  * a window decor view), so the previews target this composable directly.
  */
 @OptIn(ExperimentalComposeUiApi::class)
+/**
+ * Issue #1272: the composer's live binding to the durable undelivered-transcript
+ * queue — the list to render plus the Retry / Dismiss callbacks.
+ */
+private data class ComposerUndeliveredBinding(
+    val transcripts: List<UndeliveredTranscript>,
+    val onRetry: (String) -> Unit,
+    val onDismiss: (String) -> Unit,
+)
+
+/**
+ * Issue #1272: resolve the ACTIVITY-scoped [InlineDictationViewModel] that owns
+ * the durable undelivered-transcript queue and the delivery channel the session
+ * screen collects.
+ *
+ * The composer sheet is composed inside the SAME activity-scoped
+ * `ViewModelStoreOwner` as `TmuxSessionScreen`, so `hiltViewModel()` here returns
+ * the SAME instance the session screen's `transcriptions` collector reads — a
+ * Retry re-injects into that live channel and reaches the focused pane (or
+ * re-persists if the pane is still gone). That is why the retry lives on the
+ * shared inline-dictation VM, not a private composer copy.
+ *
+ * Guarded: composer render / connected tests mount [PromptComposerSheet] under a
+ * plain (non-Hilt) `ComponentActivity` that has no `InlineDictationViewModel`
+ * factory. Only a Hilt `@AndroidEntryPoint` activity (a
+ * [GeneratedComponentManagerHolder]) can resolve the VM, so a non-Hilt owner
+ * degrades to an inert empty surface instead of crashing. Tests that WANT the
+ * surface pass [override] directly.
+ */
+@Composable
+private fun rememberComposerUndeliveredBinding(
+    override: InlineDictationViewModel?,
+): ComposerUndeliveredBinding {
+    val storeOwner = LocalViewModelStoreOwner.current
+    val vm: InlineDictationViewModel? = override
+        ?: if (storeOwner is GeneratedComponentManagerHolder) {
+            hiltViewModel<InlineDictationViewModel>(storeOwner)
+        } else {
+            null
+        }
+    return if (vm != null) {
+        val transcripts by vm.undeliveredTranscripts.collectAsState()
+        ComposerUndeliveredBinding(
+            transcripts = transcripts,
+            onRetry = vm::retryUndelivered,
+            onDismiss = vm::dismissUndelivered,
+        )
+    } else {
+        ComposerUndeliveredBinding(
+            transcripts = emptyList(),
+            onRetry = {},
+            onDismiss = {},
+        )
+    }
+}
+
 @Composable
 internal fun SheetContent(
     state: PromptComposerViewModel.UiState,
@@ -615,6 +693,14 @@ internal fun SheetContent(
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
     agentKind: AgentKind? = null,
+    // Issue #1272: the durable "couldn't deliver — retry" queue for voice
+    // commands that were transcribed successfully but never reached a pane
+    // (permanent pane death / channel overflow). Rendered in the sticky bottom
+    // chrome so it stays visible above the soft keyboard. Empty default keeps
+    // previews / legacy tests that don't wire it source-compatible.
+    undeliveredTranscripts: List<UndeliveredTranscript> = emptyList(),
+    onRetryUndelivered: (String) -> Unit = {},
+    onDismissUndelivered: (String) -> Unit = {},
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
     val attachmentUploading =
@@ -1159,6 +1245,26 @@ internal fun SheetContent(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
+        }
+
+        // Issue #1272: the durable "couldn't deliver — retry" surface. A voice
+        // command that was transcribed successfully but never reached a pane
+        // (the session was permanently gone by the time Whisper resolved, or the
+        // bounded delivery channel overflowed) is persisted and surfaced HERE, in
+        // the composer's sticky bottom chrome — OUTSIDE the scrollable upper
+        // region so it stays visible directly above the Send row even with the
+        // soft keyboard up. Tapping Retry re-injects the text into the shared
+        // inline-dictation delivery channel (re-delivered to the focused pane, or
+        // re-persisted if the pane is still gone); Dismiss discards it. Before
+        // this wiring the retry item had no user-visible surface at all, so the
+        // maintainer's dictate-then-vanish symptom had no recovery affordance.
+        if (undeliveredTranscripts.isNotEmpty()) {
+            UndeliveredTranscriptBanner(
+                items = undeliveredTranscripts,
+                onRetry = onRetryUndelivered,
+                onDismiss = onDismissUndelivered,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
         }
 
         // Issue #745: connection-lost indicator. Sits OUTSIDE the scrollable

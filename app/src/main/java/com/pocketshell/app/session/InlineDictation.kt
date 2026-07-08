@@ -1217,15 +1217,21 @@ public fun KeyBarWithMic(
  * affordance so the user recovers a command that was transcribed successfully
  * but never reached a pane. Rendered at the top of [KeyBarWithMic] whenever the
  * durable [UndeliveredTranscriptStore] has entries.
+ *
+ * `internal` (not `private`) so the LIVE prompt composer chrome
+ * ([com.pocketshell.app.composer.PromptComposerSheet]) reuses the SAME banner —
+ * same design-system tokens, same test tags — rather than re-styling a second
+ * copy off the token ladder.
  */
 @Composable
-private fun UndeliveredTranscriptBanner(
+internal fun UndeliveredTranscriptBanner(
     items: List<UndeliveredTranscript>,
     onRetry: (String) -> Unit,
     onDismiss: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     androidx.compose.foundation.layout.Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .testTag(UNDELIVERED_TRANSCRIPT_BANNER_TAG)
             .background(

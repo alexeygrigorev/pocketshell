@@ -117,6 +117,17 @@ jobs:
           chmod +x scripts/check-design-tokens.sh
           scripts/check-design-tokens.sh
 
+      # Repo-wide oversized-file hygiene guard. This fast git-ls-files ratchet
+      # pins the current oversized first-party files by byte count and fails if
+      # one grows, or if a new non-exempt tracked file exceeds 128 KiB. Vendor,
+      # generated, worktree output, and shared/core-terminal are exempted. Lower
+      # sizes are welcome; re-baseline with --update only after shrinkage.
+      - name: Oversized-file hygiene guard
+        run: |
+          chmod +x scripts/check-file-size-hygiene.sh
+          scripts/check-file-size-hygiene.sh --self-test
+          scripts/check-file-size-hygiene.sh
+
       # Issue #1047 (re-landed + re-baselined under #1324): connection-core
       # god-object ratchet. Three fast static greps over
       # app/.../tmux/TmuxSessionViewModel.kt that stop the dual-authority /

@@ -342,6 +342,21 @@ command for cwd `/workspace/pocketshell` finds it via `find ... -mmin -5`.
 | Instrumented UI / smoke | `app/src/androidTest/` on emulator | Compose screen tests, navigation, local emulator-to-Docker agent smoke |
 | Manual smoke | Emulator + Docker | Issue-based implementer/reviewer flow, with reviewer emulator evidence before approval |
 
+### Fast Static Guards
+
+`scripts/check-file-size-hygiene.sh` is a cheap repo-wide `git ls-files` guard
+for oversized first-party files. It uses a 128 KiB threshold, ignores
+vendor/generated/worktree directories and `shared/core-terminal`, and compares
+against `scripts/file-size-hygiene-baseline.txt`. A baselined oversized file may
+shrink or disappear, but it may not grow; a new non-exempt tracked file over the
+threshold fails. Run:
+
+```bash
+scripts/check-file-size-hygiene.sh --self-test
+scripts/check-file-size-hygiene.sh
+scripts/check-file-size-hygiene.sh --update   # only after files shrink
+```
+
 ---
 
 ## Connecting the emulator to the Docker server

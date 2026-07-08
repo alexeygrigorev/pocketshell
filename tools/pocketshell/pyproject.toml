@@ -27,12 +27,19 @@ classifiers = [
     "Topic :: Software Development",
     "Topic :: System :: Monitoring",
 ]
-# `pocketshell usage` delegates to the existing `quse` CLI via subprocess
-# (see `pocketshell/usage.py`) so this utility does not need `quse`
-# published on PyPI; the provider-detection implementation may be folded
-# in directly later. Pin lower-bound only.
+# `pocketshell usage` delegates to the `quse` CLI, which is now a PINNED
+# hard dependency (issue #1318): quse owns the unified usage schema, so we
+# ship a known-good quse WITH pocketshell and invoke that pinned console-
+# script (next to `sys.executable`, never PATH — see `pocketshell/usage.py`
+# `_resolve_quse_binary`). A host-level quse upgrade must not reach us.
 dependencies = [
     "click>=8.2.0",
+    # Usage backend + single source of truth for the unified provider schema
+    # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse
+    # 0.0.9's provider-keyed `--json` document (per provider: status +
+    # short_term/long_term {percent_remaining, reset_at, window} + error) and
+    # fails loudly on any schema drift, so the version is frozen, not a range.
+    "quse==0.0.9",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
     # for `pocketshell push` / the `usage --capture` reset-push send. Imported
     # lazily and fail-soft — a host without it (or without a Firebase

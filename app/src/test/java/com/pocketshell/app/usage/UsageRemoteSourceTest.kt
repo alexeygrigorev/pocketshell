@@ -136,13 +136,19 @@ class UsageRemoteSourceTest {
         assertTrue(record.lastError?.contains("HTTP Error 401", ignoreCase = true) == false)
     }
 
-    // -- issue #1223: exit-0 per-record resilience (#847 version-skew class) --
+    // -- issue #1318: exit-0 STRICT schema — any drift fails the whole panel --
+    //
+    // Hard-cut reversal of #1223's per-record skip-resilience: quse v0.0.9 is
+    // the single source of truth for the schema, so `pocketshell usage --json`
+    // emits exactly the expected per-provider NDJSON. A drifted/malformed
+    // record is a schema violation now, and the app fails LOUDLY (whole-panel
+    // Failed) instead of silently skipping the bad record.
 
     @Test
-    fun fetchUsage_exit0PartialDrift_stillRendersHealthyProvider() = runTest {
-        // An old/mismatched host CLI emits provider A fine but provider B
-        // drifted (short_term is not an object). Before #1223 the whole usage
-        // panel showed Failed/blank; the healthy provider must now render.
+    fun fetchUsage_exit0PartialDrift_failsLoudNoSilentSkip() = runTest {
+        // Provider A is fine but provider B drifted (short_term is not an
+        // object). #1318: the whole panel must surface a visible failure, NOT
+        // silently render only the healthy provider.
         val session = FakeSshSession(
             mapOf(
                 defaultFetchCommand to ExecResult(
@@ -157,16 +163,13 @@ class UsageRemoteSourceTest {
 
         val result = source.fetchUsage(session)
 
-        assertTrue(result is UsageFetchResult.Success)
-        val record = (result as UsageFetchResult.Success).records.single()
-        assertEquals("codex", record.provider)
-        assertEquals(UsageStatus.Ok, record.status)
+        assertTrue("a drifted record must fail loud, not skip", result is UsageFetchResult.Failed)
     }
 
     @Test
-    fun fetchUsage_exit0NonJsonPreamble_stillRendersAllProviders() = runTest {
-        // A wrapper prepends a non-JSON MOTD/deprecation line before the valid
-        // NDJSON. All valid providers must still render.
+    fun fetchUsage_exit0NonJsonPreamble_failsLoud() = runTest {
+        // A non-JSON MOTD/deprecation preamble line is a schema violation now:
+        // the panel fails loudly instead of skipping the line.
         val session = FakeSshSession(
             mapOf(
                 defaultFetchCommand to ExecResult(
@@ -182,9 +185,7 @@ class UsageRemoteSourceTest {
 
         val result = source.fetchUsage(session)
 
-        assertTrue(result is UsageFetchResult.Success)
-        val records = (result as UsageFetchResult.Success).records
-        assertEquals(listOf("codex", "claude"), records.map { it.provider })
+        assertTrue("a non-JSON preamble must fail loud", result is UsageFetchResult.Failed)
     }
 
     @Test

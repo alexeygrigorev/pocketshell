@@ -3,171 +3,84 @@ package com.pocketshell.core.usage
 import org.json.JSONException
 import org.json.JSONObject
 import java.time.Instant
-import kotlin.math.ceil
 
 /**
- * Parser for the normalized JSON produced by `pocketshell usage --json`.
+ * Parser for the per-provider NDJSON produced by `pocketshell usage --json`.
  *
- * `pocketshell usage --json` emits one JSON object per line (newline-delimited
- * JSON, also known as NDJSON). Each record has a fixed shape:
+ * `pocketshell usage` flattens quse's provider-keyed `--json` document into
+ * newline-delimited JSON — ONE object per line per provider. quse v0.0.9 is
+ * the single source of truth for the unified schema (issue #1318, D22
+ * hard-cut): the app reads quse's exact fields and does NOT re-derive windows
+ * / resets / percentages. Each record has this fixed shape:
  *
  * ```json
  * {
- *   "provider": "codex",
+ *   "provider": "claude",
  *   "status": "ok",
- *   "short_term": {"percent_remaining": 77.0, "reset_at": "...", "window": null},
- *   "long_term":  {"percent_remaining": 88.0, "reset_at": "...", "window": null},
+ *   "short_term": {"percent_remaining": 91.0, "reset_at": "2026-07-07T23:19:59Z", "window": "5h"},
+ *   "long_term":  {"percent_remaining": 30.0, "reset_at": "2026-07-09T14:59:59Z", "window": "7d"},
  *   "block_reason": null,
  *   "error": null,
- *   "details": { ... }
+ *   "details": { ... IGNORED by the app ... }
  * }
  * ```
  *
- * Either `short_term` or `long_term` (or both) may be present. `status`
- * values include `ok`, `unsupported`, `error`, and `limited` / `blocked`
- * for providers that have hit a quota wall. When `status == "error"` the
- * `error` field carries a free-form string.
+ * Either `short_term` or `long_term` (or both) may be present / null. The
+ * window label comes straight from `short_term.window` / `long_term.window`
+ * (e.g. `5h`, `7d`, `weekly`, `monthly`, or `null` → the generic key name).
+ * `status` values include `ok`, `unsupported`, `error`, and `limited` /
+ * `blocked`. When `status == "error"` the `error` field carries a free-form
+ * string. The app IGNORES `details` entirely — windows come from the unified
+ * top-level fields.
+ *
+ * STRICT / fail-loud (issue #1318): the parser expects quse's exact schema.
+ * Any malformed record — non-JSON line, missing `provider`, a `short_term` /
+ * `long_term` that is not an object — throws [UsageParseException], which the
+ * caller surfaces as a whole-panel error. There is no per-record
+ * skip-resilience, no `details.windows` alias fallback, and no re-derivation:
+ * a schema mismatch fails visibly instead of silently rendering a broken
+ * panel. Genuine RUNTIME states (SSH failure, quse-missing / exit != 0
+ * provider-error, empty `--cached`) are handled by the caller, not here.
  *
  * Parsing stays app-credential-free: the app only consumes JSON already
  * fetched by a server-side command.
  */
-public class PocketshellUsageJsonParser(
-    private val now: () -> Instant = { Instant.now() },
-) {
+public class PocketshellUsageJsonParser {
 
     @Throws(UsageParseException::class)
     public fun parse(input: String): List<UsageProviderRecord> {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return emptyList()
 
+        // `pocketshell usage --json` is newline-delimited JSON: exactly one
+        // provider record per line. We parse each non-blank line strictly and
+        // THROW on the first malformed line (fail-loud, issue #1318). No
+        // per-record skip-resilience, no multi-line accumulation — pocketshell
+        // emits compact single-line records, and any drift is a hard error.
         val records = mutableListOf<UsageProviderRecord>()
-        // Per-record resilience (issue #1223): an old/mismatched host CLI (or a
-        // custom `usageCommandOverride` wrapper) can emit one healthy provider
-        // record plus one drifted/malformed record, or prepend a non-JSON
-        // MOTD/deprecation line. We parse record-by-record, SKIP a record that
-        // fails (accumulating a per-record diagnostic), and return the ones that
-        // parsed. Only when ZERO records parse from non-empty input do we
-        // surface a whole-panel failure — this mirrors the graceful degradation
-        // the exit != 0 path (`parseProviderErrorStdout`) already has, and is the
-        // same version-skew class behind the v0.4.10 connect break (#847): one
-        // drifted line must not break the whole surface.
-        val diagnostics = mutableListOf<String>()
-        var candidateCount = 0
-        // `pocketshell usage --json` is newline-delimited JSON (NDJSON): one
-        // record per line. We also accept records that span multiple lines by
-        // accumulating until braces balance — this keeps the parser
-        // tolerant of pretty-printed output from custom wrapper scripts
-        // (per-host `usageCommandOverride`) without losing the
-        // per-record error reporting the line index gives us.
-        val buffer = StringBuilder()
-        var depth = 0
-        var inString = false
-        var escape = false
         for ((index, rawLine) in trimmed.lines().withIndex()) {
-            val line = rawLine
-            if (buffer.isEmpty() && line.isBlank()) continue
-            for (ch in line) {
-                buffer.append(ch)
-                if (escape) {
-                    escape = false
-                    continue
-                }
-                when (ch) {
-                    '\\' -> if (inString) escape = true
-                    '"' -> inString = !inString
-                    '{' -> if (!inString) depth += 1
-                    '}' -> if (!inString) depth -= 1
-                }
+            val line = rawLine.trim()
+            if (line.isEmpty()) continue
+            val obj = try {
+                JSONObject(line)
+            } catch (e: JSONException) {
+                throw UsageParseException(
+                    "invalid usage JSON near line ${index + 1}: ${e.message}",
+                    e,
+                )
             }
-            if (buffer.isNotEmpty() && depth == 0 && !inString) {
-                val record = buffer.toString().trim()
-                buffer.setLength(0)
-                if (record.isEmpty()) continue
-                candidateCount += 1
-                parseCandidate(record, index + 1)
-                    .onSuccess { records += it }
-                    .onFailure { diagnostics += (it.message ?: "invalid usage record near line ${index + 1}") }
-            } else if (buffer.isNotEmpty()) {
-                // Multi-line record: keep the newline so the next iteration
-                // separates tokens correctly.
-                buffer.append('\n')
-            }
-        }
-        if (buffer.isNotEmpty() && (depth != 0 || inString)) {
-            // A trailing, never-closed record. Count it as one more failed
-            // candidate rather than hard-failing the whole panel — the same
-            // skip-or-total-failure rule below decides the outcome.
-            candidateCount += 1
-            diagnostics += "invalid usage JSON: unterminated record"
-        }
-
-        if (records.isEmpty() && candidateCount > 0) {
-            // Non-empty input, nothing parsed: surface a visible failure (never
-            // a silent empty-success). The message aggregates every per-record
-            // diagnostic so the cause is still reportable.
-            throw UsageParseException(
-                "invalid usage JSON: no usable records (" +
-                    diagnostics.joinToString("; ").ifBlank { "all records unparseable" } +
-                    ")",
-            )
+            records += parseRecord(obj)
         }
         return records
-    }
-
-    private fun parseCandidate(record: String, lineNumber: Int): Result<UsageProviderRecord> = runCatching {
-        val obj = try {
-            JSONObject(record)
-        } catch (e: JSONException) {
-            throw UsageParseException("invalid usage JSON near line $lineNumber: ${e.message}", e)
-        }
-        parseRecord(obj)
     }
 
     private fun parseRecord(obj: JSONObject): UsageProviderRecord {
         val provider = obj.requiredString("provider")
         val rawStatus = obj.optString("status", "unknown").ifBlank { "unknown" }
-        val detailWindows = obj.optJSONObject("details")?.optJSONObject("windows")
 
         val windows = mutableListOf<UsageWindow>()
-        val codexCompatible = provider.isCodexCompatibleProvider()
-        parseWindow(
-            record = obj,
-            jsonKey = "short_term",
-            // Issue #800: Claude Code's short window is the same concrete 5h
-            // span Codex uses, so seed the span as the fallback window name
-            // when the record carries no explicit `window`. This makes the
-            // data-driven `windowLabel` mapping render "5h window" for Claude
-            // exactly like Codex, without any provider check in the UI layer.
-            // Codex itself still derives "5h"/"7d" from its detail-window
-            // `limit_window_seconds`; this fallback only fills providers whose
-            // span is genuinely fixed (Claude 5h/7d, Copilot monthly).
-            windowName = canonicalWindowName(provider, isShortTerm = true),
-            provider = provider,
-            detailWindow = detailWindows?.firstObject(
-                when {
-                    codexCompatible -> listOf("primary_window", "primary", "short_term", "five_hour", "5h")
-                    provider.equals("claude", ignoreCase = true) -> listOf("five_hour", "short_term", "5h")
-                    else -> emptyList()
-                },
-            ),
-            preferDetailPercent = codexCompatible,
-            preferDetailWindowMetadata = codexCompatible,
-        )?.let { windows += it }
-        parseWindow(
-            record = obj,
-            jsonKey = "long_term",
-            windowName = canonicalWindowName(provider, isShortTerm = false),
-            provider = provider,
-            detailWindow = detailWindows?.firstObject(
-                when {
-                    codexCompatible -> listOf("secondary_window", "secondary", "long_term", "seven_day", "7d")
-                    provider.equals("claude", ignoreCase = true) -> listOf("seven_day", "long_term", "7d")
-                    else -> emptyList()
-                },
-            ),
-            preferDetailPercent = codexCompatible,
-            preferDetailWindowMetadata = codexCompatible,
-        )?.let { windows += it }
+        parseWindow(record = obj, jsonKey = "short_term", provider = provider)?.let { windows += it }
+        parseWindow(record = obj, jsonKey = "long_term", provider = provider)?.let { windows += it }
 
         return UsageProviderRecord(
             provider = provider,
@@ -180,61 +93,46 @@ public class PocketshellUsageJsonParser(
     }
 
     /**
-     * Convert a usage window object into a [UsageWindow]. The
-     * `pocketshell usage --json` payload reports `percent_remaining`,
-     * while the PocketShell model uses
-     * `used` / `limit` in `percent` units; convert `percent_remaining = R`
-     * to `used = 100 - R, limit = 100, unit = "percent"`.
+     * Convert a usage window object into a [UsageWindow]. quse reports
+     * `percent_remaining`; the PocketShell model uses `used` / `limit` in
+     * `percent` units, so `percent_remaining = R` maps to
+     * `used = 100 - R, limit = 100, unit = "percent"`.
      *
-     * Returns `null` when the field is missing or null on the record
-     * (some providers only expose one of short/long term).
+     * The window NAME comes straight from quse's `window` field (`5h`, `7d`,
+     * `weekly`, `monthly`, …); when quse carries no span (`window: null`) the
+     * generic key name (`short_term` / `long_term`) is used so the UI's
+     * `windowLabel` humanizes it. The reset time comes straight from the
+     * `reset_at` field (canonical ISO-8601 UTC).
+     *
+     * Returns `null` when the field is absent / null on the record, or when
+     * the window carries no `percent_remaining` (some providers expose only
+     * one of short/long term). THROWS when the field is present but is not an
+     * object, or when `percent_remaining` / `reset_at` are malformed
+     * (fail-loud, issue #1318).
      */
     private fun parseWindow(
         record: JSONObject,
         jsonKey: String,
-        windowName: String,
         provider: String,
-        detailWindow: JSONObject? = null,
-        preferDetailPercent: Boolean = false,
-        preferDetailWindowMetadata: Boolean = false,
     ): UsageWindow? {
-        val obj = if (!record.has(jsonKey) || record.isNull(jsonKey)) {
-            null
-        } else {
-            record.opt(jsonKey) as? JSONObject
+        if (!record.has(jsonKey) || record.isNull(jsonKey)) return null
+        val obj = record.opt(jsonKey) as? JSONObject
             ?: throw UsageParseException("'$jsonKey' for $provider is not an object")
-        }
-        val detailPercentRemaining = detailWindow?.percentRemainingFromUsedPercent()
-        val percentRemaining = when {
-            preferDetailPercent && detailPercentRemaining != null -> detailPercentRemaining
-            obj != null && obj.has("percent_remaining") && !obj.isNull("percent_remaining") ->
-                obj.requiredNumber("percent_remaining", provider, jsonKey)
-            detailPercentRemaining != null -> detailPercentRemaining
-            else -> null
-        }
-        if (percentRemaining == null) {
-            // Per-provider window may exist but carry no value (e.g.
-            // copilot short_term is hardcoded but other providers may
-            // omit it). Treat as absent.
+
+        if (!obj.has("percent_remaining") || obj.isNull("percent_remaining")) {
+            // The window object exists but carries no value (e.g. a provider
+            // that only populates one range, or an error record with null
+            // percent). Treat as absent — no renderable window.
             return null
         }
+        val percentRemaining = obj.requiredNumber("percent_remaining", provider, jsonKey)
         val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
-        val detailWindowLabel = detailWindow?.windowLabelFromLimitSeconds()
-        val topLevelWindowLabel = obj?.optionalString("window")
         return UsageWindow(
-            name = if (preferDetailWindowMetadata) {
-                detailWindowLabel ?: topLevelWindowLabel ?: windowName
-            } else {
-                topLevelWindowLabel ?: detailWindowLabel ?: windowName
-            },
+            name = obj.optionalString("window") ?: jsonKey,
             used = used,
             limit = 100.0,
             unit = "percent",
-            resetAt = if (preferDetailWindowMetadata) {
-                detailWindow?.optionalResetInstant(now) ?: obj?.optionalResetInstant(now)
-            } else {
-                obj?.optionalResetInstant(now) ?: detailWindow?.optionalResetInstant(now)
-            },
+            resetAt = obj.optionalResetInstant(),
         )
     }
 
@@ -262,46 +160,18 @@ public class PocketshellUsageJsonParser(
     }
 }
 
-private val CODEX_COMPATIBLE_PROVIDERS = setOf(
-    "codex",
-    "openai",
-    "openai-codex",
-    "openai_codex",
-    "chatgpt",
-)
-
 private const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE =
     "Claude login needed on this host. " +
         "Open Claude Code on the host and sign in, then refresh usage."
 
-private fun String.isCodexCompatibleProvider(): Boolean =
-    lowercase().replace(' ', '_') in CODEX_COMPATIBLE_PROVIDERS
-
 /**
- * Issue #800: the fallback window name to use when a provider's record does
- * not carry an explicit `window` span. This is the data-driven hook the UI's
- * `windowLabel` mapping consumes, so providers with a genuinely fixed cadence
- * render the concrete label without any provider check in the Compose layer:
- *
- * - **Claude Code** — both windows are the same 5h / 7d spans as Codex, so
- *   surface them as "5h" / "7d" (renders "5h window" / "7d window").
- * - **GitHub Copilot** — the long-term quota is a monthly cycle, so surface
- *   "monthly" (renders "Monthly limit"), NOT 7d. Its short-term window is the
- *   fixed 100% bucket with no clean span, so it keeps the generic name.
- * - **Everything else** (Codex, Z.AI, unknown spans) keeps the generic
- *   `short_term` / `long_term` name. Codex still upgrades to "5h"/"7d" from its
- *   detail-window `limit_window_seconds`; the generic name only shows when no
- *   span is known, preserving the #522 humanizer fallback.
+ * Rewrite a provider `error` string into an actionable, human message. This is
+ * genuine error-message UX (a legit runtime state, kept per issue #1318), NOT
+ * schema re-derivation: it translates a couple of known auth failures into
+ * "here is what to do" text so the panel shows "sign in on the host" instead
+ * of a bare "HTTP Error 401". Idempotent — the rewritten messages do not
+ * re-match these patterns.
  */
-private fun canonicalWindowName(provider: String, isShortTerm: Boolean): String {
-    val normalized = provider.lowercase().replace(' ', '_')
-    return when {
-        normalized == "claude" -> if (isShortTerm) "5h" else "7d"
-        normalized == "copilot" && !isShortTerm -> "monthly"
-        else -> if (isShortTerm) "short_term" else "long_term"
-    }
-}
-
 private fun actionableProviderError(provider: String, error: String?): String? {
     val text = error?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val lower = text.lowercase()
@@ -349,13 +219,6 @@ private fun JSONObject.optionalString(name: String): String? {
     return optString(name).trim().ifBlank { null }
 }
 
-private fun JSONObject.firstObject(names: List<String>): JSONObject? {
-    names.forEach { name ->
-        optJSONObject(name)?.let { return it }
-    }
-    return null
-}
-
 private fun JSONObject.requiredNumber(name: String, provider: String, windowKey: String): Double {
     if (!has(name) || isNull(name)) {
         throw UsageParseException("missing '$name' for $provider $windowKey")
@@ -368,95 +231,28 @@ private fun JSONObject.requiredNumber(name: String, provider: String, windowKey:
     } ?: throw UsageParseException("invalid '$name' for $provider $windowKey")
 }
 
-private fun JSONObject.optionalInstant(name: String): Instant? {
-    if (!has(name) || isNull(name)) return null
-    val value = opt(name)
+/**
+ * Read quse's canonical `reset_at` (ISO-8601 UTC, e.g. `2026-07-07T23:19:59Z`).
+ * quse owns the timestamp format (issue #1318): the app parses that one field
+ * directly — no `resets_at` / `next_reset_at` / `reset_after_seconds` alias
+ * fallbacks. A malformed value THROWS (fail-loud). A numeric epoch-seconds
+ * value is still accepted as a convenience, but a bare non-ISO string is a
+ * hard error.
+ */
+private fun JSONObject.optionalResetInstant(): Instant? {
+    if (!has("reset_at") || isNull("reset_at")) return null
+    val value = opt("reset_at")
     if (value is Number) {
         return try {
             Instant.ofEpochSecond(value.toLong())
         } catch (e: Exception) {
-            throw UsageParseException("invalid '$name': $value", e)
+            throw UsageParseException("invalid 'reset_at': $value", e)
         }
     }
     val raw = value?.toString()?.trim()?.ifBlank { return null } ?: return null
-    raw.toLongOrNull()?.let { epochSeconds ->
-        return try {
-            Instant.ofEpochSecond(epochSeconds)
-        } catch (e: Exception) {
-            throw UsageParseException("invalid '$name': $raw", e)
-        }
-    }
     return try {
         Instant.parse(raw)
     } catch (e: Exception) {
-        throw UsageParseException("invalid '$name': $raw", e)
+        throw UsageParseException("invalid 'reset_at': $raw", e)
     }
-}
-
-private fun JSONObject.optionalResetInstant(now: () -> Instant): Instant? =
-    optionalInstant("reset_at")
-        ?: optionalInstant("resets_at")
-        ?: optionalInstant("resetAt")
-        ?: optionalInstant("resetsAt")
-        ?: optionalInstant("next_reset_at")
-        ?: optionalInstant("nextResetAt")
-        ?: optionalDurationSeconds("reset_after_seconds")?.let { seconds ->
-            try {
-                now().plusSeconds(seconds)
-            } catch (e: Exception) {
-                throw UsageParseException("invalid 'reset_after_seconds': $seconds", e)
-            }
-        }
-        ?: optionalDurationSeconds("reset_after")?.let { seconds ->
-            try {
-                now().plusSeconds(seconds)
-            } catch (e: Exception) {
-                throw UsageParseException("invalid 'reset_after': $seconds", e)
-            }
-        }
-
-private fun JSONObject.optionalDurationSeconds(name: String): Long? {
-    if (!has(name) || isNull(name)) return null
-    val value = opt(name)
-    val seconds = when (value) {
-        is Number -> value.toDouble()
-        is String -> value.trim().toDoubleOrNull()
-        else -> null
-    } ?: throw UsageParseException("invalid '$name': $value")
-    if (!seconds.isFinite() || seconds < 0.0) {
-        throw UsageParseException("invalid '$name': $value")
-    }
-    return ceil(seconds).toLong()
-}
-
-private fun JSONObject.percentRemainingFromUsedPercent(): Double? {
-    if (!has("used_percent") || isNull("used_percent")) return null
-    val value = opt("used_percent")
-    val used = when (value) {
-        is Number -> value.toDouble()
-        is String -> value.trim().toDoubleOrNull()
-        else -> null
-    } ?: return null
-    return (100.0 - used).coerceIn(0.0, 100.0)
-}
-
-private fun JSONObject.windowLabelFromLimitSeconds(): String? {
-    if (!has("limit_window_seconds") || isNull("limit_window_seconds")) return null
-    val seconds = when (val value = opt("limit_window_seconds")) {
-        is Number -> value.toLong()
-        is String -> value.trim().toLongOrNull()
-        else -> null
-    } ?: return null
-    if (seconds <= 0L) return null
-    val units = listOf(
-        24L * 60L * 60L to "d",
-        60L * 60L to "h",
-        60L to "m",
-    )
-    for ((unitSeconds, suffix) in units) {
-        if (seconds >= unitSeconds && seconds % unitSeconds == 0L) {
-            return "${seconds / unitSeconds}$suffix"
-        }
-    }
-    return "${seconds}s"
 }

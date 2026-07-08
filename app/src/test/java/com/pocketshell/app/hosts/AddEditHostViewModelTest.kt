@@ -80,6 +80,7 @@ class AddEditHostViewModelTest {
         // The UnconfinedTestDispatcher runs the viewModelScope launch
         // synchronously, so the state has already settled.
         assertTrue(vm.state.value.saved)
+        assertNotNull(vm.state.value.savedHostId)
         assertNull(vm.state.value.error)
         assertTrue(vm.state.value.fieldErrors.isClean())
 
@@ -91,6 +92,30 @@ class AddEditHostViewModelTest {
         assertEquals(2222, hosts[0].port)
         assertEquals("alexey", hosts[0].username)
         assertEquals(keyId, hosts[0].keyId)
+    }
+
+    @Test
+    fun loadHost_clearsPriorSavedSignal() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.updateState {
+            it.copy(
+                name = "prod",
+                hostname = "example.com",
+                username = "alexey",
+                selectedKeyId = keyId,
+            )
+        }
+        vm.save()
+        assertTrue(vm.state.value.saved)
+        assertNotNull(vm.state.value.savedHostId)
+
+        vm.loadHost(requireNotNull(vm.state.value.savedHostId))
+
+        assertFalse(vm.state.value.saved)
+        assertNull(vm.state.value.savedHostId)
     }
 
     @Test

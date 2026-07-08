@@ -339,60 +339,69 @@ class AppDatabaseTest {
     // version bump, or a removed mid-chain `MIGRATION_x_y`) slips past them and
     // then crash-loops 100% of users on their first launch after the update
     // (Room hard-fails validation when no migration path reaches `version`).
-    // These two tests close that: (1) a derived graph check that the migration
-    // set forms one unbroken path from the earliest supported schema up to the
-    // current `version`, and (2) a seed+migrate sweep that opens EVERY supported
-    // start version through the migration set to current without throwing.
+    // These tests close that: (1) a derived graph reachability check, (2) an
+    // explicit legacy recovery-start guard for issue #1271, and (3) a
+    // seed+migrate sweep that opens EVERY supported start version through the
+    // migration set to current without throwing.
 
     /**
-     * The migration graph must form a single unbroken chain from the earliest
-     * supported start version up to [APP_DATABASE_SCHEMA_VERSION], with no gap.
+     * Every supported migration start must have a forward path to
+     * [APP_DATABASE_SCHEMA_VERSION], with no gap.
      *
      * Derived entirely from [APP_DATABASE_MIGRATIONS] — NOT a hardcoded version
-     * list — so the day someone bumps [APP_DATABASE_SCHEMA_VERSION] (or removes
-     * a mid-chain migration) without supplying the matching migration, this
+     * list — so the day someone bumps [APP_DATABASE_SCHEMA_VERSION], removes a
+     * mid-chain migration, or breaks one of the issue #1271 bridge paths, this
      * assertion goes RED in the JVM Unit job instead of the maintainer's device.
      */
     @Test
     fun migrationGraphReachesCurrentVersionWithoutGaps() {
-        // Each migration covers the half-open interval [startVersion, endVersion).
-        // Order by start so we can walk the chain and detect any gap/overlap.
-        val ordered = APP_DATABASE_MIGRATIONS.sortedBy { it.startVersion }
+        val byStart = APP_DATABASE_MIGRATIONS.groupBy { it.startVersion }
         assertTrue(
             "Expected at least one migration in APP_DATABASE_MIGRATIONS",
-            ordered.isNotEmpty(),
+            byStart.isNotEmpty(),
         )
 
-        val earliestSupported = ordered.first().startVersion
-        var reached = earliestSupported
-        for (migration in ordered) {
-            // The next migration must pick up exactly where the chain currently
-            // ends. A startVersion past `reached` means a forgotten step (a hole
-            // in the chain); a startVersion before it means an overlap/regress.
-            assertEquals(
-                "Migration chain gap/overlap: chain reached v$reached but the next " +
-                    "migration starts at v${migration.startVersion} " +
-                    "(no MIGRATION_${reached}_* covers the step from v$reached)",
-                reached,
-                migration.startVersion,
-            )
+        for (migration in APP_DATABASE_MIGRATIONS) {
             assertTrue(
                 "Migration ${migration.startVersion}->${migration.endVersion} does not advance the version",
                 migration.endVersion > migration.startVersion,
             )
-            reached = migration.endVersion
         }
 
-        // The chain must terminate exactly at the database's declared version.
-        // If `version` was bumped past the last migration's endVersion (the
-        // classic "forgot MIGRATION_N_N+1" update crash), this fails RED.
-        assertEquals(
-            "Migration chain ends at v$reached but APP_DATABASE_SCHEMA_VERSION is " +
-                "$APP_DATABASE_SCHEMA_VERSION — a version step has no migration; every " +
-                "installed user on v$reached would crash-loop on update (D22).",
-            APP_DATABASE_SCHEMA_VERSION,
-            reached,
-        )
+        for (startVersion in byStart.keys.sorted()) {
+            var reached = startVersion
+            val visited = mutableSetOf<Int>()
+            while (reached != APP_DATABASE_SCHEMA_VERSION) {
+                assertTrue(
+                    "Migration graph cycle while walking from v$startVersion; revisited v$reached",
+                    visited.add(reached),
+                )
+                val next = byStart[reached]?.singleOrNull()
+                assertNotNull(
+                    "No migration edge starts at v$reached while walking from v$startVersion " +
+                        "to v$APP_DATABASE_SCHEMA_VERSION",
+                    next,
+                )
+                reached = next!!.endVersion
+            }
+        }
+    }
+
+    @Test
+    fun legacyRecoveryVersionsHaveNonDestructiveMigrationStarts() {
+        val supportedMigrationStarts = APP_DATABASE_MIGRATIONS.map { it.startVersion }.toSet()
+
+        for (version in listOf(2, 3, 4, 5, 6, 7, 9)) {
+            assertTrue(
+                "Legacy schema v$version must recover through APP_DATABASE_MIGRATIONS, " +
+                    "not the destructive fallback allowlist",
+                version in supportedMigrationStarts,
+            )
+            assertTrue(
+                "Legacy schema v$version must not be destructively allowlisted",
+                version !in APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.toSet(),
+            )
+        }
     }
 
     /**
@@ -443,6 +452,43 @@ class AppDatabaseTest {
 
                 val key = migratedDb.sshKeyDao().getById(1)
                 assertNotNull("ssh_key row lost migrating from v$startVersion", key)
+
+                if (startVersion in 2..7 || startVersion == 9) {
+                    val snippets = migratedDb.snippetDao().getByHostId(1).first()
+                    assertEquals(
+                        "Snippet row lost migrating from legacy v$startVersion",
+                        listOf("echo legacy v$startVersion"),
+                        snippets.map { it.body },
+                    )
+                }
+
+                if (startVersion in 3..7 || startVersion == 9) {
+                    val roots = migratedDb.projectRootDao().getByHostId(1).first()
+                    assertEquals(
+                        "Project-root row lost migrating from legacy v$startVersion",
+                        listOf("~/legacy-v$startVersion"),
+                        roots.map { it.path },
+                    )
+                }
+
+                if (startVersion == 7 || startVersion == 9) {
+                    val costs = migratedDb.aiApiCallLogDao().getAll().first()
+                    assertEquals(
+                        "AI cost row lost migrating from legacy v$startVersion",
+                        1,
+                        costs.size,
+                    )
+                    assertEquals(123L, costs[0].computedCostUsdMillicents)
+                }
+
+                if (startVersion == 9) {
+                    val pending = migratedDb.pendingTranscriptionDao().getAllOnce()
+                    assertEquals(
+                        "Pending-transcription row lost migrating from legacy v9",
+                        listOf("pending-v9"),
+                        pending.map { it.id },
+                    )
+                }
             } finally {
                 migratedDb.close()
             }
@@ -450,12 +496,34 @@ class AppDatabaseTest {
         }
     }
 
+    @Test
+    fun postResetVersionTwoMigratesToCurrentPreservingRows() = runTest {
+        val databaseName = "post-reset-v2-to-current-${System.nanoTime()}.db"
+        seedPostResetVersionTwoDatabaseWithHostRow(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("host-v8", hosts[0].name)
+            assertEquals("pocketshell usage --json", hosts[0].usageCommandOverride)
+
+            val key = migratedDb.sshKeyDao().getById(1)
+            assertNotNull(key)
+            assertEquals("", key!!.fingerprint)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
     /**
      * Seed a raw SQLite database at [version] with one ssh_key + one host row,
      * stamping `user_version = version` so Room runs the migration chain. The
-     * per-version schema is built by replaying the production migrations forward
-     * from the v8 baseline (the same shapes [APP_DATABASE_MIGRATIONS] produce),
-     * so a seed at vN is byte-for-byte what an on-device vN install looks like.
+     * per-version schema is built from the shipped legacy shapes for v2-v7/v9
+     * and from the post-reset v8 ladder for the current preservation path.
      */
     private fun seedSchemaAtVersionWithHostRow(databaseName: String, version: Int) {
         context.deleteDatabase(databaseName)
@@ -470,13 +538,34 @@ class AppDatabaseTest {
         }
     }
 
+    private fun seedPostResetVersionTwoDatabaseWithHostRow(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionEightSchema(it)
+            insertHostRowForVersion(it, 8)
+            it.execSQL("PRAGMA user_version = 2")
+        }
+    }
+
     /**
-     * Build the schema for [targetVersion] by starting at the v8 baseline and
-     * applying the forward DDL of each production migration in turn, stopping
-     * once the schema matches [targetVersion]. Mirrors [APP_DATABASE_MIGRATIONS]
-     * exactly so the seed cannot drift from the real on-device shapes.
+     * Build the schema for [targetVersion]. Versions 2-7 and 9 use the
+     * pre-reset shipped schema family from the v0.2.x migration history;
+     * v8+ uses the post-reset preservation ladder.
      */
     private fun buildSchemaLadderUpTo(db: SQLiteDatabase, targetVersion: Int) {
+        if (targetVersion in 2..7) {
+            createLegacySchemaUpTo(db, targetVersion)
+            return
+        }
+        if (targetVersion == 9) {
+            createLegacySchemaUpTo(db, 9)
+            return
+        }
+
         createVersionEightSchema(db) // v8 baseline (ssh_keys + hosts + host-scoped tables)
         if (targetVersion <= 8) return
 
@@ -501,9 +590,10 @@ class AppDatabaseTest {
         applyMigration15To16Schema(db) // -> v16
     }
 
-    /** v8 hosts has the `pathOverride` column and ssh_keys has no `fingerprint`. */
     private fun insertHostRowForVersion(db: SQLiteDatabase, version: Int) {
-        if (version <= 8) {
+        if (version in 2..7 || version == 9) {
+            insertLegacyHostRowForVersion(db, version)
+        } else if (version == 8) {
             db.execSQL(
                 "INSERT INTO ssh_keys(id, name, privateKeyPath, hasPassphrase, createdAt) " +
                     "VALUES(1, 'key-v$version', '/keys/k', 1, 100)",
@@ -537,6 +627,324 @@ class AppDatabaseTest {
                 ) VALUES(
                     1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
                     5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+        }
+    }
+
+    private fun createLegacySchemaUpTo(db: SQLiteDatabase, targetVersion: Int) {
+        createLegacyVersionOneSchema(db)
+        applyLegacyMigration1To2Schema(db)
+        if (targetVersion <= 2) return
+
+        applyLegacyMigration2To3Schema(db)
+        if (targetVersion <= 3) return
+
+        applyLegacyMigration3To4Schema(db)
+        if (targetVersion <= 4) return
+
+        applyLegacyMigration4To5Schema(db)
+        if (targetVersion <= 5) return
+
+        applyLegacyMigration5To6Schema(db)
+        if (targetVersion <= 6) return
+
+        applyLegacyMigration6To7Schema(db)
+        if (targetVersion <= 7) return
+
+        applyLegacyMigration7To8Schema(db)
+        applyLegacyMigration8To9Schema(db)
+    }
+
+    private fun createLegacyVersionOneSchema(db: SQLiteDatabase) {
+        db.execSQL("PRAGMA foreign_keys=OFF")
+        db.execSQL(
+            """
+            CREATE TABLE ssh_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                privateKeyPath TEXT NOT NULL,
+                hasPassphrase INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+        db.execSQL(
+            """
+            CREATE TABLE port_remappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                remotePort INTEGER NOT NULL,
+                localPort INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_port_remappings_hostId ON port_remappings(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX index_port_remappings_hostId_remotePort " +
+                "ON port_remappings(hostId, remotePort)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                lastSeenAt INTEGER NOT NULL,
+                tags TEXT,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_sessions_hostId ON sessions(hostId)")
+        db.execSQL("CREATE UNIQUE INDEX index_sessions_hostId_name ON sessions(hostId, name)")
+        db.execSQL(
+            """
+            CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_snippets_hostId ON snippets(hostId)")
+        db.execSQL(
+            """
+            CREATE TABLE agent_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                paneRef TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                jsonlPath TEXT,
+                detectedAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE UNIQUE INDEX index_agent_sessions_paneRef ON agent_sessions(paneRef)")
+    }
+
+    private fun applyLegacyMigration1To2Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN tmuxInstalled INTEGER")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN lastBootstrapAt INTEGER")
+    }
+
+    private fun applyLegacyMigration2To3Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS project_roots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                path TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_project_roots_hostId ON project_roots(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS index_project_roots_hostId_path " +
+                "ON project_roots(hostId, path)"
+        )
+    }
+
+    private fun applyLegacyMigration3To4Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN heruInstalled INTEGER")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN heruLastDetectedAt INTEGER")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN usageCommandOverride TEXT")
+    }
+
+    private fun applyLegacyMigration4To5Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts RENAME COLUMN heruInstalled TO quseInstalled")
+        db.execSQL("ALTER TABLE hosts RENAME COLUMN heruLastDetectedAt TO quseLastDetectedAt")
+    }
+
+    private fun applyLegacyMigration5To6Schema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pathOverride TEXT")
+    }
+
+    private fun applyLegacyMigration6To7Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS ai_api_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                timestampMillis INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                inputUnits INTEGER NOT NULL,
+                outputUnits INTEGER NOT NULL,
+                unitCostUsdMillicents INTEGER NOT NULL,
+                computedCostUsdMillicents INTEGER NOT NULL,
+                metadataJson TEXT
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_ai_api_call_log_timestampMillis " +
+                "ON ai_api_call_log(timestampMillis)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_ai_api_call_log_provider_feature " +
+                "ON ai_api_call_log(provider, feature)"
+        )
+    }
+
+    private fun applyLegacyMigration7To8Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE snippets_legacy_v8 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "INSERT INTO snippets_legacy_v8 (id, hostId, label, body, kind) " +
+                "SELECT id, hostId, label, body, kind FROM snippets"
+        )
+        db.execSQL("DROP TABLE snippets")
+        db.execSQL("ALTER TABLE snippets_legacy_v8 RENAME TO snippets")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_snippets_hostId ON snippets(hostId)")
+    }
+
+    private fun applyLegacyMigration8To9Schema(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS pending_transcriptions (
+                id TEXT NOT NULL,
+                audioPath TEXT NOT NULL,
+                recordingTimestampMs INTEGER NOT NULL,
+                destinationContext TEXT NOT NULL,
+                retryCount INTEGER NOT NULL,
+                lastErrorMessage TEXT,
+                audioByteSize INTEGER NOT NULL,
+                createdAtMs INTEGER NOT NULL,
+                PRIMARY KEY(id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_pending_transcriptions_recordingTimestampMs " +
+                "ON pending_transcriptions(recordingTimestampMs)"
+        )
+    }
+
+    private fun insertLegacyHostRowForVersion(db: SQLiteDatabase, version: Int) {
+        db.execSQL(
+            "INSERT INTO ssh_keys(id, name, privateKeyPath, hasPassphrase, createdAt) " +
+                "VALUES(1, 'key-v$version', '/keys/k', 1, 100)",
+        )
+
+        when (version) {
+            2, 3 -> db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103
+                )
+                """.trimIndent(),
+            )
+            4 -> db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, heruInstalled, heruLastDetectedAt, usageCommandOverride
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+            5 -> db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, quseInstalled, quseLastDetectedAt, usageCommandOverride
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+            else -> db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, quseInstalled, quseLastDetectedAt, usageCommandOverride,
+                    pathOverride
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, 'pocketshell usage --json', '~/bin'
+                )
+                """.trimIndent(),
+            )
+        }
+
+        db.execSQL(
+            "INSERT INTO snippets(id, hostId, label, body, kind) " +
+                "VALUES(1, 1, 'legacy-v$version', 'echo legacy v$version', 'command')",
+        )
+        if (version >= 3) {
+            db.execSQL(
+                "INSERT INTO project_roots(id, hostId, label, path, createdAt) " +
+                    "VALUES(1, 1, 'legacy', '~/legacy-v$version', 110)",
+            )
+        }
+        if (version >= 7) {
+            db.execSQL(
+                """
+                INSERT INTO ai_api_call_log(
+                    id, timestampMillis, provider, feature, inputUnits, outputUnits,
+                    unitCostUsdMillicents, computedCostUsdMillicents, metadataJson
+                ) VALUES(1, 150, 'openai', 'whisper', 12, 34, 10, 123, '{"requestId":"legacy"}')
+                """.trimIndent(),
+            )
+        }
+        if (version == 9) {
+            db.execSQL(
+                """
+                INSERT INTO pending_transcriptions(
+                    id, audioPath, recordingTimestampMs, destinationContext, retryCount,
+                    lastErrorMessage, audioByteSize, createdAtMs
+                ) VALUES(
+                    'pending-v9', '/audio/pending-v9.wav', 160,
+                    '${PendingTranscriptionEntity.DESTINATION_COMPOSER}', 1,
+                    'offline', 2048, 161
                 )
                 """.trimIndent(),
             )

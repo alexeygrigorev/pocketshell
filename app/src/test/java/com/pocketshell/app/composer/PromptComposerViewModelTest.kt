@@ -24,6 +24,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -623,6 +624,91 @@ class PromptComposerViewModelTest {
             PromptComposerViewModel.AttachmentUploadState.Idle,
             vm.uiState.value.attachmentUpload,
         )
+    }
+
+    // -- Issue #1350: Send clears the draft for EVERY prompt shape --------
+    //
+    // Class-coverage guard for the maintainer's dogfood annoyance ("the next
+    // dictation/typing appends to stale text"). `clearComposerForHandoff`
+    // (issue #971 single-representation hand-off) empties the editable draft the
+    // instant a Send is dispatched, and it is length/shape-INDEPENDENT. These
+    // pin that invariant across the whole class — short, long/wrapping,
+    // multi-line, and attachment-bearing — so a future change can't
+    // reintroduce a stale draft for one shape (e.g. a wrapped long prompt).
+
+    @Test
+    fun sendClearsDraftForShortPrompt() = runTest {
+        assertSendClearsDraft("deploy the staging build now")
+    }
+
+    @Test
+    fun sendClearsDraftForLongWrappingPrompt() = runTest {
+        assertSendClearsDraft(
+            "please carefully refactor the authentication middleware module so that " +
+                "every single inbound request is fully validated against the brand new " +
+                "rotating session token format and structured audit logging schema before " +
+                "it is ever allowed to reach the request handler layer or any downstream " +
+                "service in the pipeline today",
+        )
+    }
+
+    @Test
+    fun sendClearsDraftForMultiLinePrompt() = runTest {
+        assertSendClearsDraft(
+            "first line of the plan\nsecond line continues it\nthird and final line",
+        )
+    }
+
+    @Test
+    fun sendClearsDraftForAttachmentBearingPrompt() = runTest {
+        val vm = newVm()
+        val sends = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job = launch { vm.sendRequests.collect { sends += it } }
+        vm.onDraftChange("review these carefully and report anything suspicious you find")
+        vm.attachFiles(count = 2) {
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt",
+                    "~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv",
+                ),
+            )
+        }
+        advanceUntilIdle()
+        assertEquals(2, vm.uiState.value.attachments.size)
+
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // Both the draft text AND the staged attachment tiles clear on hand-off.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertTrue(vm.uiState.value.sendInFlight)
+        // The composed prompt that actually went out still carried the clean text
+        // (the paths are folded into the outgoing text at send time, #544).
+        assertEquals(1, sends.size)
+        assertTrue(sends.single().text.contains("review these"))
+        job.cancelAndJoin()
+    }
+
+    private suspend fun TestScope.assertSendClearsDraft(prompt: String) {
+        val vm = newVm()
+        val sends = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job = launch { vm.sendRequests.collect { sends += it } }
+        vm.onDraftChange(prompt)
+        assertEquals(prompt, vm.uiState.value.draft)
+
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // The editor is emptied the instant the send is handed off to the queue
+        // (issue #971 single-representation), regardless of prompt length/shape —
+        // so the next dictation/typing starts from a clean field.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.sendInFlight)
+        // The exact prompt still travelled out in the SendRequest (nothing lost).
+        assertEquals(1, sends.size)
+        assertEquals(prompt, sends.single().text)
+        job.cancelAndJoin()
     }
 
     @Test

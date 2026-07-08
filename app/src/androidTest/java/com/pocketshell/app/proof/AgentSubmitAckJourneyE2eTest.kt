@@ -280,28 +280,55 @@ class AgentSubmitAckJourneyE2eTest {
 
     /**
      * After a submit, the fake-agent clears its input box (`> ` with no buffer),
-     * so the typed prompt must NO LONGER appear in the input region — it left the
-     * input rather than sitting unsent. The `FAKE-AGENT SUBMITTED: <prompt>`
-     * marker (emitted ONLY on Enter) legitimately contains the prompt, so we strip
-     * that marker line out of the visible text and assert the prompt's tail does
-     * not appear in the REMAINDER (the live input box). If Send had left the
-     * prompt unsent, the input box would still show `> <prompt>` here (and there'd
-     * be no SUBMITTED marker, which the caller already asserted appears).
+     * so the CURRENT input box must be empty — the typed prompt left the input
+     * rather than sitting unsent. This asserts against the AUTHORITATIVE remote
+     * `capture-pane -p` (the VISIBLE pane only), NOT the app-side `transcriptText`.
+     *
+     * Issue #1350 (the long-prompt false-fail this fixes): `transcriptText`
+     * includes the pane's SCROLLBACK. On the phone-sized grid, a long/wrapping
+     * prompt's earlier typing renders overflow the short pane and scroll into
+     * history, so the prompt's tail lingers in SCROLLBACK even after the current
+     * input box is cleared. The prior transcript-based check filtered out only the
+     * single `FAKE-AGENT SUBMITTED:` marker line, so those historical input-box
+     * fragments survived and false-failed the LONG prompt only
+     * (`remainder='…pipelinetodayFAKE-AGENT-READY'`) — while the real input box was
+     * empty (proven: `capture-pane -p` shows `>` after the submit). Short prompts
+     * fit the visible pane, never scroll into scrollback, and always passed.
+     *
+     * `capture-pane -p` returns the VISIBLE pane only, so it tests the REAL
+     * property ("the prompt left the input box NOW") and cannot be polluted by
+     * scrollback — yet it STILL fails if the submit genuinely left the prompt
+     * unsent in the input line (the input box line would read `> <prompt>`). This
+     * is the SAME authoritative input-box check the mid-flow
+     * [waitForSidecarCaptureEmptyInput] already relies on. Polled because the
+     * fake-agent renders asynchronously after the submit Enter.
      */
     private fun assertInputBoxEmptyAfterSubmit(label: String, prompt: String) {
+        val key = requireNotNull(seededKey)
         val promptTailStripped = prompt.filterNot { it.isWhitespace() }.takeLast(16)
-        // Remove every SUBMITTED-marker line (whitespace-stripped) from the
-        // whitespace-stripped visible text, then check the input box remainder.
-        val remainderStripped = visibleTerminalText()
-            .lines()
-            .filterNot { it.filterNot { c -> c.isWhitespace() }.contains(FAKE_AGENT_SUBMITTED.filterNot { c -> c.isWhitespace() }) }
-            .joinToString("")
-            .filterNot { it.isWhitespace() }
+        val deadline = SystemClock.elapsedRealtime() + INPUT_CLEARED_AFTER_SUBMIT_TIMEOUT_MS
+        var inputLine = ""
+        var lastCapture = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            lastCapture = runBlocking { sidecarCapturePane(key) }
+            // The input box is the last `> `-prefixed VISIBLE line; it is empty
+            // when it trims to just `>` (the fake-agent cleared the buffer on
+            // submit). A wrapped SUBMITTED marker's continuation rows are plain
+            // prompt text (no leading `>`), so they never masquerade as the input
+            // box here.
+            inputLine = lastCapture.lines()
+                .lastOrNull { it.trimStart().startsWith(">") }
+                ?.trim()
+                .orEmpty()
+            if (inputLine == ">") return
+            SystemClock.sleep(150)
+        }
         assertTrue(
-            "$label: input box must be EMPTY after submit (prompt left the input, " +
-                "not unsent); the prompt tail '$promptTailStripped' still appears " +
-                "in the input box. remainder='${remainderStripped.takeLast(80)}'",
-            !remainderStripped.contains(promptTailStripped),
+            "$label: the agent input box must be EMPTY after submit (the prompt left " +
+                "the input — really sent, not left unsent). The VISIBLE input box line " +
+                "is '$inputLine' (prompt tail '$promptTailStripped'). capture-pane -p:\n" +
+                lastCapture,
+            inputLine == ">",
         )
     }
 
@@ -554,6 +581,12 @@ class AgentSubmitAckJourneyE2eTest {
         const val SESSION_NAME: String = "issue869-fake-agent"
         const val FAKE_AGENT_READY: String = "FAKE-AGENT-READY"
         const val FAKE_AGENT_SUBMITTED: String = "FAKE-AGENT SUBMITTED: "
+
+        // Issue #1350: how long to poll the authoritative `capture-pane -p` for the
+        // input box to clear after the submit Enter (the fake-agent renders the
+        // cleared box asynchronously). Mirrors the 8s bound the mid-flow
+        // [waitForSidecarCaptureEmptyInput] already uses.
+        const val INPUT_CLEARED_AFTER_SUBMIT_TIMEOUT_MS: Long = 8_000L
 
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

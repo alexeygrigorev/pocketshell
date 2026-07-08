@@ -151,6 +151,8 @@ class ConnectionController(
             is ConnectionEvent.TransportDropped -> onTransportDropped(current, event)
             ConnectionEvent.TransportLive -> onTransportLive(current)
             is ConnectionEvent.NetworkChanged -> onNetworkChanged(current, event)
+            ConnectionEvent.NetworkLost -> current
+            ConnectionEvent.NetworkRestored -> current
             is ConnectionEvent.TargetGone -> onTargetGone(current, event)
             is ConnectionEvent.SeedLanded -> onSeedLanded(current, event)
         }
@@ -368,6 +370,7 @@ fun ConnectionState.targetIdOrNull(): SessionId? = when (this) {
     is ConnectionState.Attaching -> targetId
     is ConnectionState.Live -> targetId
     is ConnectionState.Backgrounded -> targetId
+    is ConnectionState.NetworkLossSuspended -> targetId
     is ConnectionState.Reattaching -> targetId
     is ConnectionState.Reconnecting -> targetId
     is ConnectionState.Gone -> targetId
@@ -381,11 +384,48 @@ fun ConnectionState.hostOrNull(): HostKey? = when (this) {
     is ConnectionState.Attaching -> host
     is ConnectionState.Live -> host
     is ConnectionState.Backgrounded -> host
+    is ConnectionState.NetworkLossSuspended -> host
     is ConnectionState.Reattaching -> host
     is ConnectionState.Reconnecting -> host
     is ConnectionState.Gone -> host
     is ConnectionState.Unreachable -> host
 }
+
+/**
+ * Pure foundation reducer for the future S4 network-loss path.
+ *
+ * This is intentionally NOT called by [ConnectionController.submit] in this prep
+ * slice. It defines the contract that VM/app wiring will later fold in:
+ * live loss holds without redial; restore rides through when the transport is
+ * proven alive, otherwise it enters the silent reconnect ladder.
+ */
+fun reduceNetworkLossRestore(
+    current: ConnectionState,
+    event: ConnectionEvent,
+    liveness: LivenessPort,
+    nowMs: Long,
+): ConnectionState =
+    when (event) {
+        ConnectionEvent.NetworkLost ->
+            if (current is ConnectionState.Live) {
+                ConnectionState.NetworkLossSuspended(current.host, current.targetId, sinceMs = nowMs)
+            } else {
+                current
+            }
+
+        ConnectionEvent.NetworkRestored ->
+            if (current is ConnectionState.NetworkLossSuspended) {
+                if (liveness.transportProvenAliveRecently()) {
+                    ConnectionState.Live(current.host, current.targetId)
+                } else {
+                    ConnectionState.Reconnecting(current.host, current.targetId, attempt = 1)
+                }
+            } else {
+                current
+            }
+
+        else -> current
+    }
 
 /**
  * Debug-only dispatcher-confinement guard for [ConnectionController]

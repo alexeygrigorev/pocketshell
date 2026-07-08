@@ -508,6 +508,7 @@ class ConnectionEffectDriver(
                 is ConnectionState.Attaching -> "Attaching"
                 is ConnectionState.Live -> "Live"
                 is ConnectionState.Backgrounded -> "Backgrounded"
+                is ConnectionState.NetworkLossSuspended -> "NetworkLossSuspended"
                 is ConnectionState.Reattaching -> "Reattaching"
                 is ConnectionState.Reconnecting -> "Reconnecting(${state.attempt})"
                 is ConnectionState.Gone -> "Gone"

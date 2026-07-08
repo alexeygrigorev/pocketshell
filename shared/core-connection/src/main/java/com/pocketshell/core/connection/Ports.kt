@@ -42,6 +42,15 @@ interface TransportPort {
 }
 
 /**
+ * Synchronous transport-liveness signal for resolving network restore without
+ * over-eager redial. It mirrors the existing liveness probe IO shape, but stays
+ * controller-facing and pure for JVM reducer tests.
+ */
+fun interface LivenessPort {
+    fun transportProvenAliveRecently(): Boolean
+}
+
+/**
  * Wraps `TmuxClient`. The controller observes the transport-drop oracle; the VM
  * adapter owns the control-mode IO.
  */

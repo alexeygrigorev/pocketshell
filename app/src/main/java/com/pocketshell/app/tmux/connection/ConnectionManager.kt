@@ -265,6 +265,7 @@ class ConnectionManager(
             // Backgrounded keeps the prior live surface in the inline VM; project to Connected
             // for comparison parity.
             is ConnectionState.Backgrounded -> "Connected"
+            is ConnectionState.NetworkLossSuspended -> "Connected"
             is ConnectionState.Reattaching -> "Reconnecting"
             is ConnectionState.Reconnecting -> "Reconnecting"
             is ConnectionState.Gone -> "Failed"

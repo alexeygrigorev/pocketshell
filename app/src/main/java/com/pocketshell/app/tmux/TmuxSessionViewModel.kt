@@ -1857,6 +1857,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // trySend never suspends.
     private val staleRenderWatchdogWake = Channel<Unit>(Channel.CONFLATED)
 
+    private val staleRenderSparseWakeBaselines = StaleRenderSparseWakeBaselines()
+
     /**
      * Issue #1166 test seam: fire the stale-render watchdog wake directly, so a
      * JVM test can assert that a backed-off watchdog snaps to the hot cadence on a
@@ -11731,6 +11733,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // A stale loop otherwise only self-terminates on its NEXT tick via
         // isCurrentRuntime (up to one full tick of double/triple captures per switch).
         staleRenderWatchdogJob?.cancel()
+        staleRenderSparseWakeBaselines.clear()
         staleRenderWatchdogJob = bridgeScope.launch {
             var tick = 0
             // Issue #1166: consecutive stable ticks drive the back-off interval.
@@ -11758,6 +11761,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // the back-off so the resume tick captures at the hot cadence.
                     stableTicks = 0
                     unverifiedStreak = 0
+                    staleRenderSparseWakeBaselines.clear()
                     tick += 1
                     continue
                 }
@@ -11767,6 +11771,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!shouldRunStaleRenderWatchdogCapture()) {
                     stableTicks = 0
                     unverifiedStreak = 0
+                    staleRenderSparseWakeBaselines.clear()
                     tick += 1
                     continue
                 }
@@ -11818,14 +11823,17 @@ public class TmuxSessionViewModel @Inject constructor(
                         HealOutcome.Healthy -> {
                             stableTicks += 1
                             unverifiedStreak = 0
+                            staleRenderSparseWakeBaselines.rememberIfHealthySparse(activePane)
                         }
                         HealOutcome.Healed -> {
                             stableTicks = 0
                             unverifiedStreak = 0
+                            staleRenderSparseWakeBaselines.remove(activePane)
                         }
                         HealOutcome.Unverified -> {
                             stableTicks = 0
                             unverifiedStreak += 1
+                            staleRenderSparseWakeBaselines.remove(activePane)
                             recordHealCaptureUnverified(activePane, unverifiedStreak)
                         }
                     }
@@ -11902,10 +11910,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * the real capture-diff oracle a little sooner (a no-op heal), never a wrong heal.
      */
     private fun activeVisiblePaneRenderLooksSuspect(): Boolean {
-        val pane = activeVisiblePane() ?: return false
-        val state = pane.terminalState
-        return state.visibleRenderMayHaveLostFrame() ||
-            state.surfaceIsBlackWhileModelHasContent()
+        return activeVisiblePane()?.let(staleRenderSparseWakeBaselines::renderLooksSuspect) == true
     }
 
     /**

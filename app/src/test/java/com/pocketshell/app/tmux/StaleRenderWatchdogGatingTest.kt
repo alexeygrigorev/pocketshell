@@ -68,6 +68,9 @@ import java.io.InputStream
  *  - [healthyStreamingOutputDoesNotCutBackedOffWaitShort]: the #1219 wake gate — a
  *    dense healthy pane's %output is IGNORED (no capture cuts the backed-off wait
  *    short), the direct counterpart of the black case below.
+ *  - [healthySparseStreamingOutputDoesNotCutBackedOffWaitShort]: issue #1164 follow-up —
+ *    a legitimately sparse-but-authoritatively-healthy streaming pane also ignores
+ *    %output wakes, so the broad local sparse predicate does not falsely pin it to 4s.
  *  - [fragmentsOverBlackStreamingPaneStillHealsWithinHotBound]: the LOAD-BEARING
  *    black-recovery guard — a fragments-over-black (#966/#1138/#1214) redraw on a
  *    STREAMING pane during a backed-off window STILL heals within ≤4s (its render is
@@ -515,6 +518,82 @@ class StaleRenderWatchdogGatingTest {
     }
 
     // -------------------------------------------------------------------------
+    // (5d) A SPARSE-BUT-HEALTHY streaming pane's %output also does NOT cut a
+    //      BACKED-OFF wait short. This is the issue #1164 false-positive audit:
+    //      [visibleRenderMayHaveLostFrame] deliberately pre-flags >3-line sparse
+    //      panes for reveal/resize, but the steady watchdog must not treat a pane
+    //      that the authoritative capture just confirmed HEALTHY as genuinely
+    //      suspect and keep it in the 4s hot path.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun healthySparseStreamingOutputDoesNotCutBackedOffWaitShort() = runVmTest {
+        val sparseLines = sparseHealthyLines()
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1").apply {
+            defaultCaptureResponse =
+                CommandResponse(number = 80L, output = sparseLines, isError = false)
+        }
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        pane.terminalState.appendRemoteOutput(
+            sparseHealthyFrame(sparseLines).toByteArray(Charsets.US_ASCII),
+        )
+        advanceUntilIdle()
+        assertTrue(
+            "precondition: this pane is locally sparse enough to be pre-flagged by " +
+                "visibleRenderMayHaveLostFrame(), so a pure local wake gate would " +
+                "mistake it for suspect",
+            pane.terminalState.visibleRenderMayHaveLostFrame(),
+        )
+        assertFalse(
+            "precondition: the authoritative capture matches the sparse render, so " +
+                "this is a HEALTHY sparse pane, not fragments-over-black",
+            pane.terminalState.visibleRenderLostFrameVsCapture(sparseLines.joinToString("\n")),
+        )
+
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
+
+        // Matching captures at t=4s and t=12s confirm HEALTHY twice, putting the
+        // loop inside the 16s backed-off wait.
+        val before = client.captureCount()
+        advanceTimeBy(13 * 1000L)
+        runCurrent()
+        assertEquals("backed off to 2 healthy captures by t=13s", 2, client.captureCount() - before)
+
+        // Fresh sparse streaming output lands ~1s into the 16s wait. Because the
+        // pane was just authoritatively confirmed healthy and has not become
+        // locally worse, the wake must NOT shortcut the wait back to the 4s path.
+        val beforeWake = client.captureCount()
+        vm.recordPaneOutputActivityForTest("%1")
+        advanceTimeBy(2 * 1000L)
+        runCurrent()
+        assertEquals(
+            "REGRESSION (#1164): a HEALTHY but sparse streaming pane must NOT falsely " +
+                "look suspect to the wake gate and cut a backed-off wait short. No " +
+                "capture may land 2s into the 16s window; true suspect/UNVERIFIED " +
+                "recovery is covered by the black-pane tests. Captured " +
+                "${client.captureCount() - beforeWake}.",
+            0,
+            client.captureCount() - beforeWake,
+        )
+
+        advanceTimeBy(16 * 1000L)
+        runCurrent()
+        assertTrue(
+            "the backed-off tick still fires after the full interval",
+            client.captureCount() > beforeWake,
+        )
+    }
+
+    // -------------------------------------------------------------------------
     // (5b) A PARTIAL-BLACK REDRAW during a BACKED-OFF window HEALS within the hot
     //      bound (issue #1166 heal-latency fix, the #1138 no-black-screen bar). A
     //      redraw on device arrives AS %output, so it wakes the backed-off watchdog
@@ -725,6 +804,14 @@ class StaleRenderWatchdogGatingTest {
         append("scattered fragment B\r\n")
         append("scattered fragment C\r\n")
         append("3\r\n")
+    }
+
+    private fun sparseHealthyLines(): List<String> =
+        List(5) { "healthy sparse status row $it" }
+
+    private fun sparseHealthyFrame(lines: List<String>): String = buildString {
+        append(CLEAR_ONLY)
+        for (line in lines) append(line).append("\r\n")
     }
 
     private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {

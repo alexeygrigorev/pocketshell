@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.core.connection.Clock
+import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.SessionId
@@ -215,7 +216,7 @@ class ConnectionManagerEquivalenceTest {
             landLiveFromRealFeedback(sessionA, host)
             assertEquals("Connected", statusName())
             background()
-            clock.now = 70_000L // past the 60s grace
+            clock.now = ConnectionController.DEFAULT_GRACE_MS + 1L
             foreground()
             assertEquals("Reconnecting", statusName())
         }
@@ -303,8 +304,8 @@ class ConnectionManagerEquivalenceTest {
 
     /**
      * APPROVED DIVERGENCE #2 (within-grace foreground, #685 Bug-A): bg → fg WITHIN
-     * the 60s grace window with the lease still warm. The controller rides the warm
-     * lease → Reattaching (no probe), and a REAL reseed lands it back to Live →
+     * the default grace window with the lease still warm. The controller rides the
+     * warm lease → Reattaching (no probe), and a REAL reseed lands it back to Live →
      * Connected with NO reconnect.
      */
     @Test

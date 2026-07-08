@@ -99,7 +99,7 @@ temporary user-facing toggle (locked decision **D29** — see decisions.md).
 - **P1 — screen-keyed reveal (#686): MERGED.** The `RevealStateMachine`
   id-tagged-seed / drop-non-target behaviour above.
 - **P2 — single grace owner (#635): MERGED.** The within-grace foreground probe
-  / ride-through owned by one lease-anchored 60 s grace window, collapsing the
+  / ride-through owned by one lease-anchored grace window, now 90 s by default, collapsing the
   clocks that caused #685.
 - **P3 — id-tagged reseed-on-reattach (#553): MERGED.** Within-grace reattach
   UNCONDITIONALLY re-captures the active pane (full clear+restore) keyed to the

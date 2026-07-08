@@ -85,7 +85,7 @@ class SshLeaseTransportPort(
 ) : TransportPort {
 
     /**
-     * The warm-lease predicate the single 60s grace check ANDs against. The
+     * The warm-lease predicate the single controller grace check ANDs against. The
      * controller calls this synchronously from its reducer, so this is a
      * non-suspending best-effort read off the lease manager's live set; the
      * authoritative `hasLiveOrConnectingLease` suspend query backs the reseed

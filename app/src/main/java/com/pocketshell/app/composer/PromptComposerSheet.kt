@@ -323,7 +323,7 @@ public fun PromptComposerSheet(
             val previews = uris.map { uri ->
                 PromptComposerViewModel.AttachmentPreview(
                     uri = uri,
-                    mimeType = runCatching { context.contentResolver.getType(uri) }.getOrNull(),
+                    mimeType = null,
                 )
             }
             viewModel.attachFiles(count = uris.size, previews = previews) {
@@ -705,6 +705,7 @@ internal fun SheetContent(
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
     val attachmentUploading =
         state.attachmentUpload as? PromptComposerViewModel.AttachmentUploadState.Uploading
+    val retryableOutboundItem = retryableOutboundQueueItem(outboundQueueItems)
 
     // Issue #169 Part 1: hold the screen on while we are actively
     // capturing audio or waiting for Whisper. Without this, the system's
@@ -821,6 +822,19 @@ internal fun SheetContent(
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
         onSend(true)
+    }
+    val commitSendOrRetryQueued: () -> Unit = {
+        if (draftFieldValue.text.isEmpty() &&
+            state.attachments.isEmpty() &&
+            retryableOutboundItem != null &&
+            !state.sendInFlight
+        ) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            onRetryOutboundItem(retryableOutboundItem.id)
+        } else {
+            commitAndSend()
+        }
     }
     // Issue #682 / #567: bound the composer body to the room ABOVE the keyboard.
     //
@@ -1361,10 +1375,12 @@ internal fun SheetContent(
                     // disable while a send is in flight (#745). [commitAndSend]
                     // flushes the live text before dispatching so the tap delivers.
                     val sendEnabled =
-                        (draftFieldValue.text.isNotEmpty() || state.attachments.isNotEmpty()) &&
+                        (draftFieldValue.text.isNotEmpty() ||
+                            state.attachments.isNotEmpty() ||
+                            retryableOutboundItem != null) &&
                             !state.sendInFlight
                     SendButton(
-                        onClick = commitAndSend,
+                        onClick = commitSendOrRetryQueued,
                         enabled = sendEnabled,
                         sending = state.sendInFlight,
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
@@ -3081,6 +3097,11 @@ internal fun outboundQueueStateLabel(item: OutboundItem): String = when (item.st
 
 internal fun outboundAttachmentCountLabel(count: Int): String =
     "$count attachment${if (count == 1) "" else "s"}"
+
+internal fun retryableOutboundQueueItem(items: List<OutboundItem>): OutboundItem? =
+    items
+        .filter { it.state == OutboundState.Queued || it.state == OutboundState.Failed }
+        .minByOrNull { it.createdAtMs }
 
 /**
  * Issue #180 helper: humanise an epoch-millis timestamp into "Just now"

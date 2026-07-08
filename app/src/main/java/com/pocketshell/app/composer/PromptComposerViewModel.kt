@@ -961,30 +961,67 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return
         }
-        val outboundItem = enqueueOutboundSend(
+        if (outboundQueueStore !== DisabledOutboundQueueStore &&
+            sendTarget.sessionKey.isNotBlank()
+        ) {
+            viewModelScope.launch(outboundQueueDispatcher) {
+                try {
+                    val outboundItem = enqueueOutboundSend(
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        withEnter = withEnter,
+                        sendTarget = sendTarget,
+                    )
+                    emitPreparedSendRequest(
+                        text = text,
+                        withEnter = withEnter,
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        sendTarget = sendTarget,
+                        outboundQueueItemId = outboundItem?.id,
+                    )
+                } catch (cancelled: CancellationException) {
+                    clearStrandedSendInFlight()
+                    throw cancelled
+                } catch (t: Throwable) {
+                    clearStrandedSendInFlight(
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
+                }
+            }
+            return
+        }
+        emitPreparedSendRequest(
+            text = text,
+            withEnter = withEnter,
             cleanDraft = draft,
             attachments = attachments,
-            withEnter = withEnter,
             sendTarget = sendTarget,
+            outboundQueueItemId = null,
         )
-        // Issue #254: a `Channel.trySend` buffers the item until a
-        // collector consumes it, so a send dispatched while the sheet's
-        // collector is mid-recreate (dismiss → re-open) is delivered to
-        // the next collector instead of being dropped.
+    }
+
+    private fun emitPreparedSendRequest(
+        text: String,
+        withEnter: Boolean,
+        cleanDraft: String,
+        attachments: List<StagedAttachment>,
+        sendTarget: SendTargetSnapshot,
+        outboundQueueItemId: String?,
+    ) {
+        // Issue #254: a `Channel.trySend` buffers the item until a collector
+        // consumes it, so a send dispatched while the sheet's collector is
+        // mid-recreate (dismiss → re-open) is delivered to the next collector.
         val request = SendRequest(
             text = text,
             withEnter = withEnter,
-            // Issue #872: carry the clean draft + staged tiles so a failed
-            // send restores the original text + the actual attachment tiles,
-            // not the paths-folded-into-text proxy.
-            cleanDraft = draft,
+            cleanDraft = cleanDraft,
             attachments = attachments,
             sendTarget = sendTarget,
-            outboundQueueItemId = outboundItem?.id,
+            outboundQueueItemId = outboundQueueItemId,
         )
-        // Issue #971: remember the in-flight prompt so a wedged/cancelled send
-        // (watchdog / strand-clear / cancellation) restores the EXACT draft +
-        // tiles to the now-cleared composer, not an empty one.
+        // Issue #971: remember the in-flight prompt so wedged/cancelled send
+        // recovery restores the exact draft + tiles to the now-cleared composer.
         inFlightSendRequest = request
         if (_sendRequests.trySend(request).isFailure) {
             // Issue #971/#987: a buffer-full enqueue is a transient dispatch

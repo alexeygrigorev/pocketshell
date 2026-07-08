@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -13,7 +14,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Reproduce-first, CLASS-COVERING regression proof for issue #1292 (#1291 /
@@ -100,6 +105,73 @@ class DeferredPrefsCorruptPrefsTest {
         assertEquals("v", reopened.getString("k", null))
     }
 
+    /**
+     * Deterministic #1361 reproduction: the eager warm open observes the corrupt
+     * file, then pauses before running recovery. The cold [DeferredPrefs.get]
+     * path runs while that warm recovery is in flight, writes to the recovered
+     * handle, and then the warm path is released. On the flaky shape this causes
+     * two recovery deletes; the second delete can land after the write and make
+     * the value disappear on screen re-open. The fixed implementation single-
+     * flights the opener, so the cold path waits for the in-flight warm recovery
+     * instead of starting a second delete.
+     */
+    @Test
+    fun warm_recovery_delete_cannot_race_cold_write_and_reopen() {
+        val corruptContext = RacingCorruptScreenPrefsContext(realContext)
+        val warmDispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "deferred-prefs-warm-test")
+        }.asCoroutineDispatcher()
+
+        try {
+            val deferred = DeferredPrefs(corruptContext, PREFS_NAME, warmDispatcher)
+            corruptContext.awaitFirstThrowingOpenStarted()
+
+            val recoveredRef = AtomicReference<SharedPreferences?>()
+            val failureRef = AtomicReference<Throwable?>()
+            val coldGetThread = Thread(
+                {
+                    runCatching { deferred.get() }
+                        .onSuccess { recoveredRef.set(it) }
+                        .onFailure { failureRef.set(it) }
+                },
+                "deferred-prefs-cold-get-test",
+            )
+            coldGetThread.start()
+
+            val coldPathStartedSecondRecovery =
+                corruptContext.awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread)
+            if (coldPathStartedSecondRecovery) {
+                coldGetThread.joinOrFail()
+                failureRef.get()?.let { throw AssertionError("cold get failed", it) }
+                recoveredRef.getOrFail()
+                    .edit().putString("k", "v").commit()
+                corruptContext.allowFirstCorruptOpenToRecover()
+            } else {
+                corruptContext.allowFirstCorruptOpenToRecover()
+                coldGetThread.joinOrFail()
+                failureRef.get()?.let { throw AssertionError("cold get failed", it) }
+                recoveredRef.getOrFail()
+                    .edit().putString("k", "v").commit()
+            }
+
+            deferred.awaitBuildThreadNameForTest()
+
+            assertEquals(
+                "DeferredPrefs must not let eager warm recovery run a second " +
+                    "delete after the cold path has a writable recovered handle",
+                1,
+                corruptContext.deleteAttempts.get(),
+            )
+
+            val reopenedDeferred = DeferredPrefs(corruptContext, PREFS_NAME, warmDispatcher)
+            val reopened = reopenedDeferred.get()
+            reopenedDeferred.awaitBuildThreadNameForTest()
+            assertEquals("v", reopened.getString("k", null))
+        } finally {
+            warmDispatcher.close()
+        }
+    }
+
     private fun clearPrefs() {
         realContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -136,7 +208,79 @@ class DeferredPrefsCorruptPrefsTest {
         }
     }
 
+    private class RacingCorruptScreenPrefsContext(base: Context) : ContextWrapper(base) {
+        @Volatile
+        private var corrupt = true
+
+        private val firstThrowingOpenStarted = CountDownLatch(1)
+        private val firstThrowingOpenMayRecover = CountDownLatch(1)
+        private val secondThrowingOpenStarted = CountDownLatch(1)
+
+        val throwingOpenAttempts = AtomicInteger(0)
+        val deleteAttempts = AtomicInteger(0)
+
+        override fun getApplicationContext(): Context = this
+
+        override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+            if (name == PREFS_NAME && corrupt) {
+                when (throwingOpenAttempts.incrementAndGet()) {
+                    1 -> {
+                        firstThrowingOpenStarted.countDown()
+                        assertTrue(
+                            "test did not release the paused warm corrupt open",
+                            firstThrowingOpenMayRecover.await(5, TimeUnit.SECONDS),
+                        )
+                    }
+                    2 -> secondThrowingOpenStarted.countDown()
+                }
+                throw RuntimeException(
+                    "simulated corrupt $PREFS_NAME.xml: unexpected end of document",
+                )
+            }
+            return super.getSharedPreferences(name, mode)
+        }
+
+        override fun deleteSharedPreferences(name: String?): Boolean {
+            if (name == PREFS_NAME) {
+                corrupt = false
+                deleteAttempts.incrementAndGet()
+            }
+            return super.deleteSharedPreferences(name)
+        }
+
+        fun awaitFirstThrowingOpenStarted() {
+            assertTrue(
+                "warm open did not reach the corrupt prefs read",
+                firstThrowingOpenStarted.await(5, TimeUnit.SECONDS),
+            )
+        }
+
+        fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline) {
+                if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) return true
+                if (coldGetThread.state == Thread.State.BLOCKED) return false
+            }
+            throw AssertionError(
+                "cold get neither raced into a second corrupt open nor blocked " +
+                    "behind the in-flight warm open",
+            )
+        }
+
+        fun allowFirstCorruptOpenToRecover() {
+            firstThrowingOpenMayRecover.countDown()
+        }
+    }
+
     private companion object {
         const val PREFS_NAME = "file_viewer_prefs"
+
+        fun Thread.joinOrFail() {
+            join(TimeUnit.SECONDS.toMillis(5))
+            assertTrue("thread $name did not finish", !isAlive)
+        }
+
+        fun AtomicReference<SharedPreferences?>.getOrFail(): SharedPreferences =
+            get() ?: throw AssertionError("DeferredPrefs.get did not return prefs")
     }
 }

@@ -79,21 +79,31 @@ internal class DeferredPrefs(
     @Volatile
     private var buildThreadName: String? = null
 
+    // Single-flight the eager warm and cold get() opener paths. Without this,
+    // both can observe a corrupt file and both can run recovery deletion; the
+    // second delete may land after the first recovered handle writes (#1361).
+    private val openLock = Any()
     private val warmUpScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val deferred: Deferred<SharedPreferences> = warmUpScope.async {
         buildThreadName = currentPhysicalThreadName()
-        opener().also { cachedPrefs = it }
+        openOrGetCached()
     }
 
     /**
      * The opened prefs. Warm case: the eager off-main build already published
      * [cachedPrefs] — a plain volatile read, zero on-Main disk work. Cold /
      * contended case: open SYNCHRONOUSLY via the resilient [opener] (which caches
-     * as a side effect) rather than `runBlocking`-awaiting the off-main coroutine
-     * — that await parked Main on the whole contended IO-queue drain during cold
-     * start (#1249), and this path must never `runBlocking` on Main (#1292).
+     * as a side effect), or share the eager warm if it is already inside the
+     * opener, rather than `runBlocking`-awaiting the off-main coroutine — that
+     * await parked Main on the whole contended IO-queue drain during cold start
+     * (#1249), and this path must never `runBlocking` on Main (#1292).
      */
-    fun get(): SharedPreferences = cachedPrefs ?: opener().also { cachedPrefs = it }
+    fun get(): SharedPreferences = openOrGetCached()
+
+    private fun openOrGetCached(): SharedPreferences =
+        cachedPrefs ?: synchronized(openLock) {
+            cachedPrefs ?: opener().also { cachedPrefs = it }
+        }
 
     /**
      * Test-only: block until the off-main open completes and return the name of

@@ -4,7 +4,9 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -88,6 +91,16 @@ const val GIT_WORKTREE_ROW_TAG_PREFIX = "gitWorktreeRow:"
 
 // "Open on GitHub" action (issue #648) — only shown when origin is a GitHub repo.
 const val GIT_OPEN_ON_GITHUB_TAG = "gitOpenOnGitHub"
+
+// In-app unified diff viewer (issue #1242).
+const val GIT_DIFF_VIEW_TAG = "gitDiffView"
+const val GIT_DIFF_BACK_TAG = "gitDiffBack"
+const val GIT_DIFF_LOADING_TAG = "gitDiffLoading"
+const val GIT_DIFF_ERROR_TAG = "gitDiffError"
+const val GIT_DIFF_CONTENT_TAG = "gitDiffContent"
+const val GIT_DIFF_TRUNCATED_TAG = "gitDiffTruncated"
+const val GIT_DIFF_OPEN_ON_GITHUB_TAG = "gitDiffOpenOnGitHub"
+const val GIT_DIFF_LINE_TAG_PREFIX = "gitDiffLine:"
 
 // Issues tab (issue #649): the repo's GitHub issues via `gh issue list`.
 const val GIT_ISSUES_TAB_TAG = "gitTabIssues"
@@ -145,6 +158,7 @@ fun GitHistoryScreen(
     }
     val state by viewModel.state.collectAsState()
     val createState by viewModel.createState.collectAsState()
+    val diffState by viewModel.diffState.collectAsState()
     val context = LocalContext.current
     val openUrl: (String) -> Unit = { url ->
         runCatching {
@@ -155,12 +169,16 @@ fun GitHistoryScreen(
         hostName = hostName,
         state = state,
         createState = createState,
+        diffState = diffState,
         onBack = onBack,
         onRetry = viewModel::retry,
         onOpenGitHub = openUrl,
         onSubmitNewIssue = viewModel::createIssue,
         onDismissCreateIssue = viewModel::dismissCreateIssue,
         onOpenIssueUrl = openUrl,
+        onCommitSelected = viewModel::loadDiff,
+        onDismissDiff = viewModel::dismissDiff,
+        onOpenCommitOnGitHub = openUrl,
         modifier = modifier,
     )
 }
@@ -177,13 +195,18 @@ internal fun GitHistoryScaffold(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     createState: CreateIssueUiState = CreateIssueUiState.Idle,
+    diffState: GitDiffUiState = GitDiffUiState.Hidden,
     onOpenGitHub: (String) -> Unit = {},
     onSubmitNewIssue: (String, String) -> Unit = { _, _ -> },
     onDismissCreateIssue: () -> Unit = {},
     onOpenIssueUrl: (String) -> Unit = {},
+    onCommitSelected: (String, String) -> Unit = { _, _ -> },
+    onDismissDiff: () -> Unit = {},
+    onOpenCommitOnGitHub: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showCreateSheet by rememberSaveable { mutableStateOf(false) }
+    val gitHubUrl = (state as? GitHistoryUiState.Ready)?.gitHubUrl
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -205,6 +228,7 @@ internal fun GitHistoryScaffold(
                         onDismissCreateIssue()
                         showCreateSheet = true
                     },
+                    onCommitSelected = onCommitSelected,
                 )
                 is GitHistoryUiState.NotARepo -> NotARepoPanel(state.dir)
                 is GitHistoryUiState.Failed -> ErrorPanel(
@@ -213,6 +237,21 @@ internal fun GitHistoryScaffold(
                     onRetry = onRetry,
                 )
             }
+        }
+
+        // In-app unified diff viewer (#1242): an opaque overlay over the whole
+        // screen while a commit's diff is open, so the escape-hatch "Open on
+        // GitHub" list row underneath stays reachable when the viewer is closed.
+        if (diffState !is GitDiffUiState.Hidden) {
+            val commitGitHubUrl = gitHubUrl?.let { base ->
+                diffRefOf(diffState)?.let { ref -> "${base.trimEnd('/')}/commit/$ref" }
+            }
+            GitDiffView(
+                diffState = diffState,
+                gitHubCommitUrl = commitGitHubUrl,
+                onBack = onDismissDiff,
+                onOpenOnGitHub = onOpenCommitOnGitHub,
+            )
         }
     }
 
@@ -244,6 +283,7 @@ private fun ReadyPanel(
     state: GitHistoryUiState.Ready,
     onOpenGitHub: (String) -> Unit,
     onNewIssue: () -> Unit,
+    onCommitSelected: (String, String) -> Unit,
 ) {
     // Default to Overview so the at-a-glance "what's happening" view (status,
     // branches, worktrees) is what the user lands on; History is one tap away.
@@ -271,7 +311,7 @@ private fun ReadyPanel(
         )
         when (tab) {
             GitTab.Overview -> OverviewPanel(state, onOpenGitHub)
-            GitTab.History -> HistoryPanel(state)
+            GitTab.History -> HistoryPanel(state, onCommitSelected = onCommitSelected)
             GitTab.Issues -> IssuesPanel(state, onNewIssue = onNewIssue)
         }
     }
@@ -327,7 +367,10 @@ private fun GitHistoryHeader(
 }
 
 @Composable
-private fun HistoryPanel(state: GitHistoryUiState.Ready) {
+private fun HistoryPanel(
+    state: GitHistoryUiState.Ready,
+    onCommitSelected: (String, String) -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
@@ -346,10 +389,13 @@ private fun HistoryPanel(state: GitHistoryUiState.Ready) {
             }
         }
         itemsIndexed(state.commits, key = { index, c -> "$index:${c.shortHash}" }) { _, commit ->
+            val subject = commit.subject.ifBlank { "(no subject)" }
+            // Tapping a commit opens its unified diff in-app (#1242).
             ListRow(
-                title = commit.subject.ifBlank { "(no subject)" },
+                title = subject,
                 subtitle = "${commit.author} · ${commit.relativeTime}",
                 leading = { GlyphCell(commit.shortHash) },
+                onClick = { onCommitSelected(commit.shortHash, subject) },
                 modifier = Modifier.testTag(GIT_HISTORY_ROW_TAG_PREFIX + commit.shortHash),
             )
         }
@@ -698,6 +744,215 @@ private fun ErrorPanel(
                 }
             }
         }
+    }
+}
+
+// ---- unified diff viewer (issue #1242) ------------------------------------
+
+/** The commit ref a non-hidden [GitDiffUiState] is about, for the commit URL. */
+private fun diffRefOf(state: GitDiffUiState): String? = when (state) {
+    is GitDiffUiState.Loading -> state.ref
+    is GitDiffUiState.Ready -> state.diff.ref
+    is GitDiffUiState.Failed -> state.ref
+    GitDiffUiState.Hidden -> null
+}
+
+/** The commit subject a non-hidden [GitDiffUiState] carries, for the header. */
+private fun diffSubjectOf(state: GitDiffUiState): String = when (state) {
+    is GitDiffUiState.Loading -> state.subject
+    is GitDiffUiState.Ready -> state.subject
+    is GitDiffUiState.Failed -> state.subject
+    GitDiffUiState.Hidden -> ""
+}
+
+/**
+ * The in-app unified diff viewer (issue #1242). A full-screen opaque overlay
+ * that renders a commit's `git show` output over the shared monospace renderer
+ * with `+`/`-` gutters and syntax-neutral coloring. Long lines DON'T wrap — each
+ * row's code scrolls horizontally under a single shared scroll state so the
+ * whole diff pans together and a long line is never wrap-mangled on the narrow
+ * Pixel-7 width. A visible truncation marker appears when the diff was bounded.
+ * "Open on GitHub" stays available as the escape hatch when the commit's GitHub
+ * URL is known.
+ */
+@Composable
+private fun GitDiffView(
+    diffState: GitDiffUiState,
+    gitHubCommitUrl: String?,
+    onBack: () -> Unit,
+    onOpenOnGitHub: (String) -> Unit,
+) {
+    val ref = diffRefOf(diffState).orEmpty()
+    val subject = diffSubjectOf(diffState)
+    // One shared horizontal scroll state so every code line pans together.
+    val hScroll = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PocketShellColors.Background)
+            .testTag(GIT_DIFF_VIEW_TAG),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Background)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+                .padding(end = PocketShellDensity.rowPadH),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(PocketShellDensity.tapTargetMin)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(GIT_DIFF_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = ref,
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.labelMono,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+                Text(
+                    text = subject,
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyDense,
+                    maxLines = 2,
+                )
+            }
+            if (gitHubCommitUrl != null) {
+                PocketShellButton(
+                    text = "GitHub",
+                    onClick = { onOpenOnGitHub(gitHubCommitUrl) },
+                    variant = ButtonVariant.Text,
+                    modifier = Modifier.testTag(GIT_DIFF_OPEN_ON_GITHUB_TAG),
+                )
+            }
+        }
+
+        when (diffState) {
+            GitDiffUiState.Hidden -> Unit
+            is GitDiffUiState.Loading -> Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(GIT_DIFF_LOADING_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                LoadingIndicator.Spinner(size = SpinnerSize.Small)
+            }
+            is GitDiffUiState.Failed -> Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(PocketShellDensity.rowPadH)
+                    .testTag(GIT_DIFF_ERROR_TAG),
+            ) {
+                Text(
+                    text = "Couldn't load diff",
+                    color = PocketShellColors.Red,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = diffState.message,
+                    color = PocketShellColors.TextSecondary,
+                    style = PocketShellType.bodyMono,
+                )
+            }
+            is GitDiffUiState.Ready -> Column(modifier = Modifier.fillMaxSize()) {
+                // Truncation notice as a FIXED banner at the top of the body (not
+                // a trailing lazy item, which would be off-screen at the bottom of
+                // a huge diff and never seen), so the user always knows the diff
+                // was bounded and can fall back to "Open on GitHub".
+                if (diffState.diff.truncated) {
+                    Text(
+                        text = "Diff truncated — showing the first part. Open on GitHub for the rest.",
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(PocketShellColors.SurfaceElev)
+                            .padding(
+                                horizontal = PocketShellDensity.rowPadH,
+                                vertical = PocketShellSpacing.sm,
+                            )
+                            .testTag(GIT_DIFF_TRUNCATED_TAG),
+                    )
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag(GIT_DIFF_CONTENT_TAG),
+                    contentPadding = PaddingValues(vertical = PocketShellSpacing.sm),
+                ) {
+                    itemsIndexed(
+                        diffState.diff.lines,
+                        key = { index, _ -> "diffline:$index" },
+                    ) { index, line ->
+                        DiffLineRow(line = line, index = index, hScroll = hScroll)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One rendered diff line (#1242): a fixed-width `+`/`-` gutter followed by the
+ * code, which scrolls horizontally under the shared [hScroll] state so a long
+ * line pans instead of wrapping. The row background is tinted by the line kind
+ * across the FULL width (the tint sits outside the scroll region).
+ */
+@Composable
+private fun DiffLineRow(line: DiffLine, index: Int, hScroll: ScrollState) {
+    val fg = when (line.kind) {
+        DiffLineKind.Added -> PocketShellColors.Green
+        DiffLineKind.Removed -> PocketShellColors.Red
+        DiffLineKind.HunkHeader -> PocketShellColors.Accent
+        DiffLineKind.FileHeader -> PocketShellColors.TextSecondary
+        DiffLineKind.CommitMeta -> PocketShellColors.TextSecondary
+        DiffLineKind.Context -> PocketShellColors.Text
+    }
+    val bg = when (line.kind) {
+        DiffLineKind.Added -> Color(0x1A22C55E)
+        DiffLineKind.Removed -> Color(0x1AEF4444)
+        DiffLineKind.HunkHeader -> PocketShellColors.AccentSoft
+        else -> Color.Transparent
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .testTag(GIT_DIFF_LINE_TAG_PREFIX + index),
+    ) {
+        Text(
+            text = line.gutter,
+            color = fg,
+            style = PocketShellType.bodyMono,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            modifier = Modifier
+                .width(16.dp)
+                .padding(start = PocketShellSpacing.sm),
+        )
+        Text(
+            text = line.content,
+            color = fg,
+            style = PocketShellType.bodyMono,
+            softWrap = false,
+            maxLines = 1,
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(hScroll)
+                .padding(end = PocketShellSpacing.sm),
+        )
     }
 }
 

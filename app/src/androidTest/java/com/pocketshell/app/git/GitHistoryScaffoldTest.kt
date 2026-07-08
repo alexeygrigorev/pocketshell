@@ -34,9 +34,13 @@ class GitHistoryScaffoldTest {
         onRetry: () -> Unit = {},
         onOpenGitHub: (String) -> Unit = {},
         createState: CreateIssueUiState = CreateIssueUiState.Idle,
+        diffState: GitDiffUiState = GitDiffUiState.Hidden,
         onSubmitNewIssue: (String, String) -> Unit = { _, _ -> },
         onDismissCreateIssue: () -> Unit = {},
         onOpenIssueUrl: (String) -> Unit = {},
+        onCommitSelected: (String, String) -> Unit = { _, _ -> },
+        onDismissDiff: () -> Unit = {},
+        onOpenCommitOnGitHub: (String) -> Unit = {},
     ) {
         compose.setContent {
             PocketShellTheme {
@@ -46,10 +50,14 @@ class GitHistoryScaffoldTest {
                     onBack = {},
                     onRetry = onRetry,
                     createState = createState,
+                    diffState = diffState,
                     onOpenGitHub = onOpenGitHub,
                     onSubmitNewIssue = onSubmitNewIssue,
                     onDismissCreateIssue = onDismissCreateIssue,
                     onOpenIssueUrl = onOpenIssueUrl,
+                    onCommitSelected = onCommitSelected,
+                    onDismissDiff = onDismissDiff,
+                    onOpenCommitOnGitHub = onOpenCommitOnGitHub,
                 )
             }
         }
@@ -373,6 +381,149 @@ class GitHistoryScaffoldTest {
         compose.onNodeWithTag(GIT_CREATE_ISSUE_ERROR_TAG).assertIsDisplayed()
         // The form is still present so the user can fix and retry.
         compose.onNodeWithTag(GIT_CREATE_ISSUE_TITLE_TAG).assertIsDisplayed()
+    }
+
+    // ---- unified diff viewer (issue #1242) ---------------------------------
+
+    private fun sampleDiff(
+        ref: String = "a1b2c3d",
+        truncated: Boolean = false,
+        longLine: Boolean = false,
+    ) = GitCommitDiff(
+        ref = ref,
+        lines = listOf(
+            DiffLine("", "commit ${ref}0000", DiffLineKind.CommitMeta),
+            DiffLine("", "diff --git a/Foo.kt b/Foo.kt", DiffLineKind.FileHeader),
+            DiffLine("", "@@ -1,3 +1,4 @@", DiffLineKind.HunkHeader),
+            DiffLine(" ", "fun foo() {", DiffLineKind.Context),
+            DiffLine("-", "    val old = 1", DiffLineKind.Removed),
+            DiffLine(
+                "+",
+                if (longLine) "    val new = ${"x".repeat(400)}" else "    val new = 2",
+                DiffLineKind.Added,
+            ),
+            DiffLine(" ", "}", DiffLineKind.Context),
+        ),
+        truncated = truncated,
+    )
+
+    @Test
+    fun tappingCommitInvokesOnCommitSelected() {
+        var selected: Pair<String, String>? = null
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+            ),
+            onCommitSelected = { hash, subject -> selected = hash to subject },
+        )
+        compose.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
+        compose.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + "a1b2c3d").performClick()
+        assertEquals("a1b2c3d" to "Add timeline view", selected)
+    }
+
+    @Test
+    fun diffReadyRendersGuttersAndContent() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Add timeline view", sampleDiff()),
+        )
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_VIEW_TAG)
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_CONTENT_TAG)
+        // The added/removed code and the subject header are visible.
+        compose.onNodeWithText("Add timeline view").assertIsDisplayed()
+        compose.onNodeWithText("    val new = 2").assertIsDisplayed()
+        compose.onNodeWithText("    val old = 1").assertIsDisplayed()
+    }
+
+    @Test
+    fun diffLongLineRendersWithoutWrapping() {
+        // A very long added line must render (single-line, horizontally
+        // scrollable) — the full-device scroll proof is the emulator screenshot.
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Long line", sampleDiff(longLine = true)),
+        )
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_CONTENT_TAG)
+        compose.onNodeWithTag(GIT_DIFF_LINE_TAG_PREFIX + "5").assertExists()
+    }
+
+    @Test
+    fun diffTruncatedShowsMarker() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Big commit", sampleDiff(truncated = true)),
+        )
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_TRUNCATED_TAG)
+    }
+
+    @Test
+    fun diffNotTruncatedHidesMarker() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Small commit", sampleDiff(truncated = false)),
+        )
+        compose.onNodeWithTag(GIT_DIFF_TRUNCATED_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun diffLoadingShowsSpinner() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Loading("a1b2c3d", "Add timeline view"),
+        )
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_LOADING_TAG)
+    }
+
+    @Test
+    fun diffFailedShowsError() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Failed("a1b2c3d", "gone", "Unknown commit: a1b2c3d"),
+        )
+        compose.assertNodeFullyWithinRoot(GIT_DIFF_ERROR_TAG)
+        compose.onNodeWithText("Unknown commit: a1b2c3d").assertIsDisplayed()
+    }
+
+    @Test
+    fun diffBackDismisses() {
+        var dismissed = 0
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Add timeline view", sampleDiff()),
+            onDismissDiff = { dismissed++ },
+        )
+        compose.onNodeWithTag(GIT_DIFF_BACK_TAG).performClick()
+        assertEquals(1, dismissed)
+    }
+
+    @Test
+    fun diffOpenOnGitHubFiresCommitUrlWhenRepoIsGitHub() {
+        var opened: String? = null
+        setState(
+            GitHistoryUiState.Ready(
+                dir = "/home/u/git/proj",
+                commits = listOf(commit("a1b2c3d", "Add timeline view")),
+                truncated = false,
+                overview = overview(),
+                gitHubUrl = "https://github.com/owner/repo",
+            ),
+            diffState = GitDiffUiState.Ready("Add timeline view", sampleDiff(ref = "a1b2c3d")),
+            onOpenCommitOnGitHub = { opened = it },
+        )
+        compose.onNodeWithTag(GIT_DIFF_OPEN_ON_GITHUB_TAG).performClick()
+        assertEquals("https://github.com/owner/repo/commit/a1b2c3d", opened)
+    }
+
+    @Test
+    fun diffOpenOnGitHubHiddenWhenRepoNotGitHub() {
+        setState(
+            configuredReady(),
+            diffState = GitDiffUiState.Ready("Add timeline view", sampleDiff()),
+        )
+        compose.onNodeWithTag(GIT_DIFF_OPEN_ON_GITHUB_TAG).assertDoesNotExist()
     }
 
     @Test

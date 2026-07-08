@@ -25,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -318,6 +319,148 @@ class GitHistoryDockerTest {
         }
         composeRule.onNodeWithTag(GIT_ISSUES_HINT_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue649-configure-gh-hint")
+    } }
+
+    @Test
+    fun tappingCommitShowsUnifiedDiffOverWarmSession(): Unit { runBlocking {
+        // Issue #1242: tap a commit → its unified diff is fetched via `git show`
+        // over the SAME warm lease the log rode (D21, no new connection) and
+        // renders in-app with +/- gutters.
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue1242-$suffix"
+        val repo = "$root/proj"
+        seededRoot = root
+
+        var shortHash = ""
+        withTimeout(30_000) {
+            connect()?.use { session ->
+                val script = listOf(
+                    "mkdir -p '$repo'",
+                    "cd '$repo'",
+                    "git init -q",
+                    "git config user.email tester@example.com",
+                    "git config user.name 'PocketShell Tester'",
+                    "printf 'one\\ntwo\\n' > a.txt",
+                    "git add a.txt",
+                    "git commit -q -m 'Seed a.txt'",
+                    "printf 'one\\nCHANGED\\nthree\\n' > a.txt",
+                    "git add a.txt",
+                    "git commit -q -m 'Change a.txt'",
+                    "echo ok",
+                ).joinToString(" && ")
+                val exit = session.exec(script)
+                assertEquals("seed exit (stderr=${exit.stderr})", 0, exit.exitCode)
+                shortHash = session.exec("git -C '$repo' rev-parse --short HEAD").stdout.trim()
+            } ?: error("could not connect to seed diff repo")
+        }
+        assertTrue("seed must yield a short hash", shortHash.isNotBlank())
+
+        // Issue #699: still ONE warm lease for the log AND the git show.
+        val dialCount = AtomicInteger(0)
+        composeRule.setContent {
+            GitHistoryScreen(
+                hostId = 1242L,
+                hostName = "proj",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                dir = repo,
+                onBack = {},
+                viewModel = newGitHistoryViewModel(dialCount),
+            )
+        }
+
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_HISTORY_TAB_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_HISTORY_ROW_TAG_PREFIX + shortHash)
+        }
+        composeRule.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + shortHash).performClick()
+
+        // The diff renders: content view + the added/removed lines from the commit.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_DIFF_CONTENT_TAG)
+        }
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTextExists("CHANGED")
+        }
+        composeRule.onNodeWithTag(GIT_DIFF_CONTENT_TAG).assertExists()
+        // Only one real SSH handshake for the whole log + show journey (#699/D21).
+        assertEquals(
+            "git show should reuse ONE warm lease, not dial per action (#699/D21)",
+            1,
+            dialCount.get(),
+        )
+        WalkthroughScreenshotArtifacts.capture("issue1242-git-diff")
+    } }
+
+    @Test
+    fun largeCommitDiffIsTruncatedWithMarker(): Unit { runBlocking {
+        // Issue #1242 (AC2): a diff larger than the server-side byte cap must
+        // come back windowed with a visible truncation marker — never an
+        // unbounded read.
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val root = "/tmp/issue1242-big-$suffix"
+        val repo = "$root/proj"
+        seededRoot = root
+
+        var shortHash = ""
+        withTimeout(40_000) {
+            connect()?.use { session ->
+                // seq 1..60000 is ~400 KiB of added lines — well over the 256 KiB
+                // DEFAULT_DIFF_BYTE_CAP, so the diff is byte-capped + truncated.
+                val script = listOf(
+                    "mkdir -p '$repo'",
+                    "cd '$repo'",
+                    "git init -q",
+                    "git config user.email tester@example.com",
+                    "git config user.name 'PocketShell Tester'",
+                    "seq 1 60000 > big.txt",
+                    "git add big.txt",
+                    "git commit -q -m 'Add big.txt'",
+                    "echo ok",
+                ).joinToString(" && ")
+                val exit = session.exec(script)
+                assertEquals("seed exit (stderr=${exit.stderr})", 0, exit.exitCode)
+                shortHash = session.exec("git -C '$repo' rev-parse --short HEAD").stdout.trim()
+            } ?: error("could not connect to seed big-diff repo")
+        }
+        assertTrue(shortHash.isNotBlank())
+
+        composeRule.setContent {
+            GitHistoryScreen(
+                hostId = 12420L,
+                hostName = "proj",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                dir = repo,
+                onBack = {},
+                viewModel = newGitHistoryViewModel(),
+            )
+        }
+
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_HISTORY_TAB_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_HISTORY_TAB_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_HISTORY_ROW_TAG_PREFIX + shortHash)
+        }
+        composeRule.onNodeWithTag(GIT_HISTORY_ROW_TAG_PREFIX + shortHash).performClick()
+
+        // The truncation marker appears (the read was bounded, not unbounded).
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(GIT_DIFF_TRUNCATED_TAG)
+        }
+        composeRule.onNodeWithTag(GIT_DIFF_TRUNCATED_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue1242-git-diff-truncated")
     } }
 
     @Test

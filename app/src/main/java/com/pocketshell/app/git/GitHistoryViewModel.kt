@@ -82,6 +82,24 @@ sealed interface GitHistoryUiState {
 }
 
 /**
+ * State of the in-app unified diff viewer (#1242), separate from the main screen
+ * load so opening/closing a commit's diff doesn't disturb the list/overview.
+ */
+sealed interface GitDiffUiState {
+    /** No diff open — the commit list is shown. */
+    data object Hidden : GitDiffUiState
+
+    /** Fetching the diff for [ref] via `git show` over the warm session. */
+    data class Loading(val ref: String, val subject: String) : GitDiffUiState
+
+    /** The diff loaded. [diff] carries the classified lines + truncation flag. */
+    data class Ready(val subject: String, val diff: GitCommitDiff) : GitDiffUiState
+
+    /** The diff couldn't be read (bad ref, transport drop). */
+    data class Failed(val ref: String, val subject: String, val message: String) : GitDiffUiState
+}
+
+/**
  * State of the "New issue" create form (#650), separate from the screen's main
  * load state so opening/submitting the sheet doesn't disturb the list/overview.
  */
@@ -118,10 +136,12 @@ class GitHistoryViewModel @Inject constructor(
         ioDispatcher: CoroutineDispatcher,
         bestEffortProbeTimeoutMs: Long = BEST_EFFORT_PROBE_TIMEOUT_MS,
         createIssueTimeoutMs: Long = CREATE_ISSUE_TIMEOUT_MS,
+        diffTimeoutMs: Long = DIFF_TIMEOUT_MS,
     ) : this(sshLeaseManager) {
         this.ioDispatcher = ioDispatcher
         this.bestEffortProbeTimeoutMs = bestEffortProbeTimeoutMs
         this.createIssueTimeoutMs = createIssueTimeoutMs
+        this.diffTimeoutMs = diffTimeoutMs
     }
 
     private val _state = MutableStateFlow<GitHistoryUiState>(
@@ -133,7 +153,12 @@ class GitHistoryViewModel @Inject constructor(
     private val _createState = MutableStateFlow<CreateIssueUiState>(CreateIssueUiState.Idle)
     val createState: StateFlow<CreateIssueUiState> = _createState.asStateFlow()
 
+    /** Unified diff viewer state (#1242), independent of the main screen state. */
+    private val _diffState = MutableStateFlow<GitDiffUiState>(GitDiffUiState.Hidden)
+    val diffState: StateFlow<GitDiffUiState> = _diffState.asStateFlow()
+
     private var request: Request? = null
+    private var diffJob: Job? = null
     // Issue #699: the screen borrows ONE warm lease from the app-wide
     // @Singleton SshLeaseManager (keyed identically to the live session
     // screens, so it shares the same transport per host) and reuses
@@ -144,6 +169,7 @@ class GitHistoryViewModel @Inject constructor(
     private var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private var bestEffortProbeTimeoutMs: Long = BEST_EFFORT_PROBE_TIMEOUT_MS
     private var createIssueTimeoutMs: Long = CREATE_ISSUE_TIMEOUT_MS
+    private var diffTimeoutMs: Long = DIFF_TIMEOUT_MS
 
     /**
      * Issue #1085 (F2): the application-scoped coroutine the warm-lease
@@ -238,6 +264,58 @@ class GitHistoryViewModel @Inject constructor(
     fun dismissCreateIssue() {
         createJob?.cancel()
         _createState.value = CreateIssueUiState.Idle
+    }
+
+    /**
+     * Open the in-app unified diff for commit [ref] (#1242) — fetched via
+     * `git show` over the SAME warm session the log rode (D21, no new
+     * connection). [subject] is carried so the diff header can show it while the
+     * body loads. Any in-flight diff load is cancelled first.
+     *
+     * The read is byte-capped server-side by [GitHistoryGateway.commitDiff] and
+     * time-bounded here, so a giant commit can neither hang the screen nor pull
+     * an unbounded payload. Failures surface on [diffState] as
+     * [GitDiffUiState.Failed] rather than a blank viewer.
+     */
+    fun loadDiff(ref: String, subject: String) {
+        val req = request ?: return
+        diffJob?.cancel()
+        _diffState.value = GitDiffUiState.Loading(ref = ref, subject = subject)
+        diffJob = viewModelScope.launch {
+            val outcome = withContext(ioDispatcher) {
+                val live = ensureSession(req)
+                    ?: return@withContext GitDiffUiState.Failed(
+                        ref = ref,
+                        subject = subject,
+                        message = "Couldn't reach ${req.username}@${req.hostname}.",
+                    )
+                val gateway = GitHistoryGateway(live)
+                val result = boundedGatewayResult(
+                    timeoutMs = diffTimeoutMs,
+                    timeoutMessage = "git show timed out",
+                ) {
+                    gateway.commitDiff(req.dir, ref)
+                }
+                result.fold(
+                    onSuccess = { diff -> GitDiffUiState.Ready(subject = subject, diff = diff) },
+                    onFailure = { error ->
+                        if (error is CancellationException) throw error
+                        GitDiffUiState.Failed(
+                            ref = ref,
+                            subject = subject,
+                            message = error.message ?: error.javaClass.simpleName,
+                        )
+                    },
+                )
+            }
+            _diffState.value = outcome
+        }
+    }
+
+    /** Close the diff viewer, returning to the commit list (#1242). */
+    fun dismissDiff() {
+        diffJob?.cancel()
+        _diffState.value = GitDiffUiState.Hidden
     }
 
     private fun load() {
@@ -385,6 +463,7 @@ class GitHistoryViewModel @Inject constructor(
     override fun onCleared() {
         loadJob?.cancel()
         createJob?.cancel()
+        diffJob?.cancel()
         // Issue #1085 (F2): refcount-- the warm transport OFF the Main thread.
         // This screen's VM is `hiltViewModel()` nav-scoped, so `onCleared` fires
         // on an ordinary foreground back/navigate-away ON the Main thread. The
@@ -487,6 +566,9 @@ class GitHistoryViewModel @Inject constructor(
 
         /** Bound the user-triggered gh create call independently of the screen load. */
         private const val CREATE_ISSUE_TIMEOUT_MS: Long = 15_000L
+
+        /** Bound the user-triggered `git show` diff read (#1242) independently. */
+        private const val DIFF_TIMEOUT_MS: Long = 20_000L
 
         /** Cap the history so a giant repo doesn't blow up the listing. */
         const val COMMIT_LIMIT: Int = GitHistoryGateway.DEFAULT_LIMIT

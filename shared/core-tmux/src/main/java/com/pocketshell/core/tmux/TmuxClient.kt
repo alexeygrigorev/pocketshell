@@ -877,7 +877,7 @@ internal class RealTmuxClient(
     // collector before abandoning its (bounded) pre-registration replay list
     // and proceeding to drain the live channel. Prevents a
     // registered-but-never-collected pane from parking its replay job — and
-    // pinning up to [PRE_REGISTRATION_MAX_BYTES] of replay — for the life of
+    // pinning a bounded pre-registration replay — for the life of
     // the connection. Generous by default so the normal path (the ViewModel
     // collects within milliseconds) is unaffected; tests inject a short value.
     private val firstSubscriberReplayGraceMs: Long = DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS,
@@ -937,45 +937,11 @@ internal class RealTmuxClient(
     private val paneOutputPipes =
         ConcurrentHashMap<String, PaneOutputPipe>()
 
-    // Issue #1204: bounded pre-registration replay buffers, keyed by pane id.
-    //
-    // Pane pipes are created lazily by [outputFor]. Any `%output` tmux emits
-    // for a pane BEFORE its pipe is registered (fresh-session prewarm,
-    // attach/switch races, window-add materialization) used to be discarded by
-    // the null-safe `paneOutputPipes[paneId]?.send(event)` no-op — no counter,
-    // no diagnostic, no recovery. On a Claude pane, whose TUI only repaints
-    // incrementally, a lost first frame stays black indefinitely. We now hold
-    // those frames in a small bounded buffer per pane and replay them, in
-    // order, when [outputFor] finally registers the pipe. Overflow/eviction is
-    // bounded and fires the `tmux_client_preregistration_output_drop`
-    // diagnostic so the loss is never invisible again.
-    //
-    // [preRegistrationBuffers] is guarded by [preRegistrationLock]. The lock is
-    // taken ONLY on the cold paths (an `%output` for an as-yet-unregistered
-    // pane, and pane registration) — the hot path (pipe already registered)
-    // stays lock-free.
-    //
-    // Issue #1212 lifecycle hardening:
-    //  * The map is access-order (LRU): every `%output` for a pane moves it to
-    //    the most-recent end, so the eldest entry is the least-recently-active
-    //    pane — the right global-eviction victim.
-    //  * [totalPreRegistrationBytes] tracks the aggregate retained bytes across
-    //    ALL panes so a flood of never-registered background panes can't
-    //    accumulate 256 KB × pane-count for the connection's lifetime. Bounded
-    //    by BOTH [PRE_REGISTRATION_TOTAL_MAX_BYTES] and
-    //    [PRE_REGISTRATION_MAX_PANES] (evict eldest whole buffer on overflow).
-    //  * [windowPanes] maps a window id to the pane ids last seen in its
-    //    `%layout-change` layout, so when a `%window-close` arrives the dead
-    //    panes' pre-registration buffers are released instead of lingering.
-    private val preRegistrationLock = Any()
-    private val preRegistrationBuffers = LinkedHashMap<String, PreRegistrationOutputBuffer>(
-        16,
-        0.75f,
-        /* accessOrder = */ true,
-    )
-    private var totalPreRegistrationBytes = 0L
-    private val windowPanes = HashMap<String, MutableSet<String>>()
-    private val preRegistrationDroppedEvents = AtomicInteger(0)
+    private val preRegistrationOutput =
+        PreRegistrationOutputBookkeeper<PaneOutputPipe>(
+            sessionName = sessionName,
+            diagnosticFields = ::commonDiagnosticFields,
+        )
 
     // Issue #173: latched signal that the reader loop has exited (or
     // [close] was called). The reader sets this from its `finally` block
@@ -1767,21 +1733,18 @@ internal class RealTmuxClient(
         paneOutputPipes[paneId]?.let { return it.flow.asSharedFlow() }
         // Cold path: register the pipe, seeding it with any output buffered
         // before this first registration (issue #1204). Everything happens
-        // under [preRegistrationLock] and the pipe is published into
+        // under the pre-registration output lock and the pipe is published into
         // [paneOutputPipes] only AFTER it is built with its replay set, so a
         // concurrent [emitOutput] either (a) still sees no pipe and appends to
         // the pre-registration buffer we are about to drain, or (b) sees the
         // published pipe and sends strictly after the replayed frames (the
         // pipe drains its live channel only after replaying — FIFO order is
         // preserved end to end).
-        val pipe = synchronized(preRegistrationLock) {
-            paneOutputPipes[paneId] ?: run {
-                val drainedBuffer = preRegistrationBuffers.remove(paneId)
-                if (drainedBuffer != null) {
-                    totalPreRegistrationBytes -= drainedBuffer.bufferedBytes
-                }
-                val buffered = drainedBuffer?.drain().orEmpty()
-                val created = PaneOutputPipe.create(
+        val pipe = preRegistrationOutput.registerPipe(
+            paneId = paneId,
+            existingPipe = { paneOutputPipes[paneId] },
+            createPipe = { buffered ->
+                PaneOutputPipe.create(
                     scope = clientScope,
                     paneId = paneId,
                     preRegistrationReplay = buffered,
@@ -1793,10 +1756,11 @@ internal class RealTmuxClient(
                         commonDiagnosticFields() + mapOf("session" to sessionName)
                     },
                 )
+            },
+            publishPipe = { created ->
                 paneOutputPipes[paneId] = created
-                created
-            }
-        }
+            },
+        )
         return pipe.flow.asSharedFlow()
     }
 
@@ -1915,11 +1879,7 @@ internal class RealTmuxClient(
         paneOutputPipes.values.forEach { it.close() }
         // Issue #1204/#1212: drop any pre-registration buffers that never got a
         // pipe, and the window→pane bookkeeping that drives pane-death cleanup.
-        synchronized(preRegistrationLock) {
-            preRegistrationBuffers.clear()
-            totalPreRegistrationBytes = 0L
-            windowPanes.clear()
-        }
+        preRegistrationOutput.clear()
         // Issue #173: signal disconnection BEFORE we tear the rest down
         // so observers like [TmuxSessionViewModel] can flip their
         // connection-status state without racing the scope cancel.
@@ -2154,18 +2114,14 @@ internal class RealTmuxClient(
                         // later `%window-close` can release their
                         // pre-registration buffers. Synchronous + lock-guarded;
                         // never suspends the reader.
-                        synchronized(preRegistrationLock) {
-                            trackWindowPanesLocked(event.windowId, event.layout)
-                        }
+                        preRegistrationOutput.trackWindowPanes(event.windowId, event.layout)
                     }
                     is ControlEvent.WindowClose -> {
                         // Issue #1212: the window (and every pane it owned) is
                         // gone — release those panes' pre-registration buffers
                         // so a never-viewed background pane can't retain up to
                         // 256 KB for the connection's lifetime.
-                        synchronized(preRegistrationLock) {
-                            releasePreRegistrationBuffersForWindowLocked(event.windowId)
-                        }
+                        preRegistrationOutput.releaseBuffersForWindow(event.windowId)
                     }
                     else -> Unit
                 }
@@ -2279,203 +2235,25 @@ internal class RealTmuxClient(
      * Cold path: no pipe yet. Hold the frame in a bounded per-pane
      * pre-registration buffer so it can be replayed when [outputFor] registers
      * the pipe, instead of being silently dropped. The re-check under
-     * [preRegistrationLock] closes the register/append race with [outputFor]:
+     * the pre-registration output lock closes the register/append race with [outputFor]:
      * if registration published the pipe in the meantime we send directly (the
      * frame then lands strictly after any replayed frames).
      */
     private fun deliverToPaneStream(event: ControlEvent.Output) {
-        paneOutputPipes[event.paneId]?.let {
-            it.send(event)
-            return
-        }
-        val registered = synchronized(preRegistrationLock) {
-            val existing = paneOutputPipes[event.paneId]
-            if (existing != null) {
-                existing
-            } else {
-                // `getOrPut` on the access-order map also moves this pane to the
-                // most-recent end, so global eviction never targets the pane we
-                // are actively buffering for.
-                val buffer = preRegistrationBuffers.getOrPut(event.paneId) {
-                    PreRegistrationOutputBuffer(event.paneId)
-                }
-                val bytesBefore = buffer.bufferedBytes
-                buffer.add(event) { droppedForPane, evictedBytes ->
-                    recordPreRegistrationDrop(event.paneId, droppedForPane, evictedBytes)
-                }
-                totalPreRegistrationBytes += buffer.bufferedBytes - bytesBefore
-                // Issue #1212: bound the AGGREGATE across all panes so many
-                // orphaned/background pane-ids can't each pin a full per-pane
-                // buffer for the connection's lifetime.
-                enforceGlobalPreRegistrationBoundsLocked(protectPane = event.paneId)
-                null
-            }
-        }
-        registered?.send(event)
-    }
-
-    /**
-     * Issue #1212: keep the total retained pre-registration bytes and the
-     * number of distinct retained pane buffers bounded across ALL panes, not
-     * just per pane. Evicts the least-recently-active pane's whole buffer
-     * (access-order LRU) — never the pane we are currently buffering for
-     * ([protectPane]) — until both caps are satisfied.
-     *
-     * Caller must hold [preRegistrationLock].
-     */
-    private fun enforceGlobalPreRegistrationBoundsLocked(protectPane: String) {
-        while (preRegistrationBuffers.size > PRE_REGISTRATION_MAX_PANES) {
-            val victim = firstEvictablePaneLocked(protectPane) ?: break
-            evictPreRegistrationBufferLocked(victim, reason = "pane_count")
-        }
-        while (totalPreRegistrationBytes > PRE_REGISTRATION_TOTAL_MAX_BYTES &&
-            preRegistrationBuffers.size > 1
-        ) {
-            val victim = firstEvictablePaneLocked(protectPane) ?: break
-            evictPreRegistrationBufferLocked(victim, reason = "total_bytes")
-        }
-    }
-
-    /**
-     * The least-recently-active pane id that is NOT [protectPane], or null if
-     * only the protected pane remains. Iterating the access-order map's keys
-     * does not itself reorder, so the first non-protected key is the LRU
-     * victim. Caller must hold [preRegistrationLock].
-     */
-    private fun firstEvictablePaneLocked(protectPane: String): String? {
-        for (key in preRegistrationBuffers.keys) {
-            if (key != protectPane) return key
-        }
-        return null
-    }
-
-    /** Drop a whole pre-registration buffer and account its bytes. Caller must hold the lock. */
-    private fun evictPreRegistrationBufferLocked(paneId: String, reason: String) {
-        val removed = preRegistrationBuffers.remove(paneId) ?: return
-        totalPreRegistrationBytes -= removed.bufferedBytes
-        val total = preRegistrationDroppedEvents.addAndGet(removed.eventCount)
-        TmuxClientDiagnostics.record(
-            "tmux_client_preregistration_global_evict",
-            commonDiagnosticFields() + mapOf(
-                "session" to sessionName,
-                "pane" to paneId,
-                "bytes" to removed.bufferedBytes,
-                "reason" to reason,
-                "droppedEvents" to removed.eventCount,
-                "totalDroppedEvents" to total,
-                "retainedPanes" to preRegistrationBuffers.size,
-                "retainedBytes" to totalPreRegistrationBytes,
-                "maxPanes" to PRE_REGISTRATION_MAX_PANES,
-                "maxTotalBytes" to PRE_REGISTRATION_TOTAL_MAX_BYTES,
-            ),
-        )
-        Log.w(
-            ISSUE_105_DIAG_TAG,
-            "tmux-preregistration-global-evict pane=$paneId reason=$reason " +
-                "bytes=${removed.bufferedBytes} droppedEvents=${removed.eventCount} " +
-                "retainedPanes=${preRegistrationBuffers.size} retainedBytes=$totalPreRegistrationBytes",
+        preRegistrationOutput.deliverToPaneStream(
+            event = event,
+            pipeForPane = { paneId -> paneOutputPipes[paneId] },
+            sendToPipe = { pipe, output -> pipe.send(output) },
         )
     }
-
-    /**
-     * Issue #1212: record which pane ids a window owns, parsed from its
-     * `%layout-change` layout string. A pane belongs to exactly one window, so
-     * a pane appearing in this window's layout is removed from any other
-     * window's set (handles a pane moved between windows). Caller must hold
-     * [preRegistrationLock].
-     */
-    private fun trackWindowPanesLocked(windowId: String, layout: String) {
-        val panes = extractLayoutPaneIds(layout)
-        if (panes.isEmpty()) return
-        for (entry in windowPanes) {
-            if (entry.key != windowId) entry.value.removeAll(panes)
-        }
-        windowPanes.getOrPut(windowId) { HashSet() }.addAll(panes)
-    }
-
-    /**
-     * Issue #1212: a window closed — release the pre-registration buffers of
-     * every pane it owned and forget the window. Caller must hold
-     * [preRegistrationLock].
-     */
-    private fun releasePreRegistrationBuffersForWindowLocked(windowId: String) {
-        val panes = windowPanes.remove(windowId) ?: return
-        for (paneId in panes) {
-            val removed = preRegistrationBuffers.remove(paneId) ?: continue
-            totalPreRegistrationBytes -= removed.bufferedBytes
-            TmuxClientDiagnostics.record(
-                "tmux_client_preregistration_window_close_evict",
-                commonDiagnosticFields() + mapOf(
-                    "session" to sessionName,
-                    "pane" to paneId,
-                    "window" to windowId,
-                    "bytes" to removed.bufferedBytes,
-                    "droppedEvents" to removed.eventCount,
-                    "retainedPanes" to preRegistrationBuffers.size,
-                    "retainedBytes" to totalPreRegistrationBytes,
-                ),
-            )
-            Log.i(
-                ISSUE_105_DIAG_TAG,
-                "tmux-preregistration-window-close-evict pane=$paneId window=$windowId " +
-                    "bytes=${removed.bufferedBytes} retainedPanes=${preRegistrationBuffers.size}",
-            )
-        }
-    }
-
-    /**
-     * Extract the pane ids from a tmux layout string. A leaf cell is
-     * `<w>x<h>,<x>,<y>,<paneId>`; container cells (`{...}` / `[...]`) have no
-     * trailing pane id, so the regex matches only leaves. tmux layouts use bare
-     * pane numbers; we `%`-prefix them to match [outputFor] / `%output` keys.
-     * Over-matching a phantom id is harmless (no such buffer exists);
-     * under-matching just misses a cleanup that the global cap still bounds.
-     */
-    private fun extractLayoutPaneIds(layout: String): Set<String> =
-        LAYOUT_PANE_REGEX.findAll(layout)
-            .map { "%" + it.groupValues[1] }
-            .toSet()
 
     /** Issue #1212 test seam: aggregate retained pre-registration bytes across all panes. */
     internal fun preRegistrationRetainedBytesForTest(): Long =
-        synchronized(preRegistrationLock) { totalPreRegistrationBytes }
+        preRegistrationOutput.retainedBytesForTest()
 
     /** Issue #1212 test seam: number of distinct panes with a retained pre-registration buffer. */
     internal fun preRegistrationBufferCountForTest(): Int =
-        synchronized(preRegistrationLock) { preRegistrationBuffers.size }
-
-    /**
-     * Issue #1204: a pre-registration frame was evicted (buffer overflow). Count
-     * it and — on the first eviction for this pane's buffer — surface the
-     * `tmux_client_preregistration_output_drop` diagnostic into the exportable
-     * JSONL so this data-loss class feeds the #1175 export and is never
-     * invisible again.
-     */
-    private fun recordPreRegistrationDrop(paneId: String, droppedForPane: Int, evictedBytes: Int) {
-        val total = preRegistrationDroppedEvents.incrementAndGet()
-        if (droppedForPane == 1) {
-            TmuxClientDiagnostics.record(
-                "tmux_client_preregistration_output_drop",
-                commonDiagnosticFields() + mapOf(
-                    "session" to sessionName,
-                    "pane" to paneId,
-                    "bytes" to evictedBytes,
-                    "droppedEvents" to droppedForPane,
-                    "totalDroppedEvents" to total,
-                    "maxEvents" to PRE_REGISTRATION_MAX_EVENTS,
-                    "maxBytes" to PRE_REGISTRATION_MAX_BYTES,
-                ),
-            )
-        }
-        if (shouldLogTmuxDropCount(droppedForPane)) {
-            Log.w(
-                ISSUE_105_DIAG_TAG,
-                "tmux-preregistration-output-drop pane=$paneId bytes=$evictedBytes " +
-                    "droppedEvents=$droppedForPane totalDroppedEvents=$total " +
-                    "maxEvents=$PRE_REGISTRATION_MAX_EVENTS maxBytes=$PRE_REGISTRATION_MAX_BYTES",
-            )
-        }
-    }
+        preRegistrationOutput.bufferCountForTest()
 
     private fun emitPublicEvent(event: ControlEvent) {
         if (event is ControlEvent.Begin || event is ControlEvent.End || event is ControlEvent.Error) {
@@ -2677,39 +2455,12 @@ internal class RealTmuxClient(
         private const val OUTPUT_BACKLOG_EVENTS = 4096
 
         /**
-         * Issue #1204: per-pane pre-registration replay buffer caps. `%output`
-         * arriving before a pane's pipe is registered is held here (bounded by
-         * BOTH limits, evict-oldest) and replayed on registration. Small on
-         * purpose: this only needs to bridge the brief prewarm/attach window,
-         * not act as unbounded scrollback.
-         */
-        private const val PRE_REGISTRATION_MAX_EVENTS = 256
-        private const val PRE_REGISTRATION_MAX_BYTES = 256L * 1024L
-
-        /**
-         * Issue #1212: GLOBAL caps across all pre-registration buffers so many
-         * orphaned/never-registered background pane-ids can't each pin a full
-         * per-pane buffer for the connection's lifetime. When either is
-         * exceeded the least-recently-active pane's whole buffer is evicted.
-         */
-        private const val PRE_REGISTRATION_TOTAL_MAX_BYTES = 1024L * 1024L
-        private const val PRE_REGISTRATION_MAX_PANES = 64
-
-        /**
          * Issue #1212: default grace a registered pane pipe waits for its first
          * collector before abandoning its pre-registration replay. Generous so
          * the ViewModel's prompt collect is never affected; a pane left
          * uncollected this long is treated as unviewed and its replay released.
          */
         private const val DEFAULT_FIRST_SUBSCRIBER_REPLAY_GRACE_MS = 30_000L
-
-        /**
-         * Issue #1212: pane-id extractor for a tmux layout string. Matches a
-         * leaf cell's trailing `<w>x<h>,<x>,<y>,<paneId>`; container cells
-         * (`{...}`/`[...]`) have no trailing id so are skipped. Non-overlapping
-         * left-to-right, so adjacent leaves each yield exactly their own id.
-         */
-        private val LAYOUT_PANE_REGEX = Regex("""\d+x\d+,\d+,\d+,(\d+)""")
 
         /**
          * Logcat tag for issue #105 live-update diagnostics. Kept short
@@ -3027,55 +2778,6 @@ internal class RealTmuxClient(
                 )
             }
         }
-    }
-
-    /**
-     * Issue #1204: bounded FIFO buffer holding `%output` frames that arrive for
-     * a pane BEFORE its [PaneOutputPipe] is registered by [outputFor]. Capped at
-     * [PRE_REGISTRATION_MAX_EVENTS] frames AND [PRE_REGISTRATION_MAX_BYTES]
-     * bytes; on overflow the oldest frame is evicted (evict-oldest), the drop
-     * is reported via the `onDrop` callback (counted + surfaced as a
-     * diagnostic), and the single most recent frame is always retained so a
-     * lone large first frame is never dropped to nothing.
-     *
-     * NOT thread-safe on its own — every access is serialised by the client's
-     * [preRegistrationLock].
-     */
-    private class PreRegistrationOutputBuffer(
-        private val paneId: String,
-    ) {
-        private val events = ArrayDeque<ControlEvent.Output>()
-
-        /** Running total of retained bytes — read by the client's global-bound accounting (#1212). */
-        var bufferedBytes: Long = 0L
-            private set
-        private var droppedEvents = 0
-
-        /** Number of frames currently retained — reported on whole-buffer eviction (#1212). */
-        val eventCount: Int
-            get() = events.size
-
-        /**
-         * Append [event], evicting the oldest frame(s) while the buffer exceeds
-         * either cap (but never the single most recent frame). [onDrop] is
-         * invoked once per eviction with the running per-pane drop count and the
-         * evicted frame's byte size.
-         */
-        fun add(event: ControlEvent.Output, onDrop: (droppedForPane: Int, evictedBytes: Int) -> Unit) {
-            events.addLast(event)
-            bufferedBytes += event.data.size
-            while (events.size > 1 &&
-                (events.size > PRE_REGISTRATION_MAX_EVENTS || bufferedBytes > PRE_REGISTRATION_MAX_BYTES)
-            ) {
-                val evicted = events.removeFirst()
-                bufferedBytes -= evicted.data.size
-                droppedEvents++
-                onDrop(droppedEvents, evicted.data.size)
-            }
-        }
-
-        /** Snapshot the buffered frames in arrival order for replay. */
-        fun drain(): List<ControlEvent.Output> = events.toList()
     }
 
     /**

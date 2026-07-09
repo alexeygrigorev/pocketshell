@@ -215,11 +215,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private val inFlightRetryIds: MutableSet<String> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
-    private var speechRecognitionSession: SpeechRecognitionSession? = null
-    private var speechRecognitionGeneration: Long = 0L
     private var activeProvider: VoiceTranscriptionProvider? = null
-    private var liveSpeechBaseDraft: String = ""
-    private var liveSpeechLastTranscript: String = ""
 
     /**
      * Issue #211 / #254: one-shot Send dispatch surface. The composer
@@ -436,6 +432,66 @@ public class PromptComposerViewModel @Inject constructor(
     // substitute a virtual TestDispatcher so `delay` advances under
     // `runTest`'s control without burning wall-clock time.
     internal var samplerDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+    private val androidSpeechRecognition = AndroidSpeechRecognitionDelegate(
+        speechRecognitionProvider = speechRecognitionProvider,
+        clock = { clock() },
+        callbacks = object : AndroidSpeechRecognitionDelegate.Callbacks {
+            override fun currentDraft(): String = _uiState.value.draft
+
+            override fun updateUi(
+                transform: (UiState) -> UiState,
+            ) {
+                _uiState.update { transform(it) }
+            }
+
+            override fun persistDraft(draft: String) {
+                savedStateHandle[KEY_DRAFT] = draft
+            }
+
+            override fun onRecordingStarted(startedAtMs: Long) {
+                recordingStartedAtMs = startedAtMs
+            }
+
+            override fun onSessionStarted() {
+                activeProvider = VoiceTranscriptionProvider.AndroidSpeech
+            }
+
+            override fun onSessionCleared() {
+                activeProvider = null
+            }
+
+            override fun setWasRecording(wasRecording: Boolean) {
+                savedStateHandle[KEY_WAS_RECORDING] = wasRecording
+            }
+
+            override fun startRecordingTimerTicker() {
+                this@PromptComposerViewModel.startRecordingTimerTicker()
+            }
+
+            override fun stopRecordingTimerTicker() {
+                this@PromptComposerViewModel.stopRecordingTimerTicker()
+            }
+
+            override fun clearPendingTranscriptionSend() {
+                this@PromptComposerViewModel.clearPendingTranscriptionSend()
+            }
+
+            override fun consumePendingTranscriptionSend(): AndroidSpeechRecognitionDelegate.PendingSend {
+                val pending = AndroidSpeechRecognitionDelegate.PendingSend(
+                    enabled = pendingSendOnTranscribeSuccess,
+                    withEnter = pendingSendWithEnter,
+                    target = pendingSendTarget,
+                )
+                clearPendingTranscriptionSend()
+                return pending
+            }
+
+            override fun dispatchSendNow(withEnter: Boolean, target: SendTargetSnapshot) {
+                this@PromptComposerViewModel.dispatchSendNow(withEnter, target)
+            }
+        },
+    )
 
     /**
      * Replace the draft text. Called when the user edits the text area
@@ -2179,97 +2235,7 @@ public class PromptComposerViewModel @Inject constructor(
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startAndroidSpeechRecognition() {
-        if (!speechRecognitionProvider.isAvailable()) {
-            DiagnosticEvents.record(
-                "action",
-                "composer_recording_start_result",
-                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-                "status" to "failure",
-                "cause" to "Unavailable",
-            )
-            _uiState.update {
-                it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
-            }
-            return
-        }
-
-        liveSpeechBaseDraft = _uiState.value.draft
-        liveSpeechLastTranscript = ""
-        recordingStartedAtMs = clock()
-        val generation = ++speechRecognitionGeneration
-
-        val listener = object : SpeechRecognitionListener {
-            override fun onPartial(text: String) {
-                if (isCurrentAndroidSpeechRecognition(generation)) {
-                    applyLiveSpeechTranscript(text)
-                }
-            }
-
-            override fun onFinal(text: String) {
-                if (isCurrentAndroidSpeechRecognition(generation)) {
-                    finishAndroidSpeechRecognition(text)
-                }
-            }
-
-            override fun onError(message: String) {
-                if (isCurrentAndroidSpeechRecognition(generation)) {
-                    failAndroidSpeechRecognition(message)
-                }
-            }
-        }
-
-        val session = try {
-            speechRecognitionProvider.start(
-                language = voiceSettings.recognitionLanguageTag(),
-                listener = listener,
-            )
-        } catch (t: Throwable) {
-            null
-        }
-
-        if (session == null) {
-            speechRecognitionGeneration++
-            liveSpeechBaseDraft = ""
-            liveSpeechLastTranscript = ""
-            DiagnosticEvents.record(
-                "action",
-                "composer_recording_start_result",
-                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-                "status" to "failure",
-                "cause" to "StartFailed",
-            )
-            _uiState.update {
-                it.copy(error = ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
-            }
-            return
-        }
-
-        speechRecognitionSession = session
-        activeProvider = VoiceTranscriptionProvider.AndroidSpeech
-        savedStateHandle[KEY_WAS_RECORDING] = true
-        DiagnosticEvents.record(
-            "action",
-            "composer_recording_start_result",
-            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-            "status" to "success",
-        )
-        _uiState.update {
-            it.copy(
-                recording = RecordingState.Recording,
-                amplitude = 0.12f,
-                hasDetectedSpeech = false,
-                silenceThresholdSeconds = 0f,
-                recordingElapsedMs = 0L,
-                liveTranscript = null,
-                error = null,
-            )
-        }
-
-        // Issue #880: the Android recognizer path has no PCM sampler loop to
-        // advance the elapsed timer, so drive it from a wall-clock ticker
-        // anchored at recording start. Without this the MM:SS counter stayed
-        // frozen at 00:00 while dictating.
-        startRecordingTimerTicker()
+        androidSpeechRecognition.start(voiceSettings.recognitionLanguageTag())
     }
 
     /**
@@ -2844,187 +2810,12 @@ public class PromptComposerViewModel @Inject constructor(
         }
     }
 
-    private fun isCurrentAndroidSpeechRecognition(generation: Long): Boolean =
-        activeProvider == VoiceTranscriptionProvider.AndroidSpeech &&
-            speechRecognitionSession != null &&
-            speechRecognitionGeneration == generation
-
     private fun stopAndroidSpeechRecognition() {
-        // Issue #880: recording is ending (moving to Transcribing) — stop the
-        // wall-clock elapsed-timer ticker so it does not keep updating state.
-        stopRecordingTimerTicker()
-        val session = speechRecognitionSession ?: run {
-            failAndroidSpeechRecognition(ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
-            return
-        }
-        runCatching { session.stopListening() }.onFailure {
-            DiagnosticEvents.record(
-                "action",
-                "composer_recording_stop",
-                "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-                "status" to "failure",
-                "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
-                "cause" to it.javaClass.simpleName,
-            )
-            failAndroidSpeechRecognition(it.message ?: ANDROID_SPEECH_UNAVAILABLE_MESSAGE)
-            return
-        }
-        DiagnosticEvents.record(
-            "action",
-            "composer_recording_stop",
-            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-            "status" to "transcribing",
-            "durationMs" to (clock() - recordingStartedAtMs).coerceAtLeast(0L),
-        )
-        _uiState.update {
-            it.copy(
-                recording = RecordingState.Transcribing,
-                amplitude = 0f,
-                error = null,
-            )
-        }
-    }
-
-    private fun applyLiveSpeechTranscript(rawText: String): String {
-        val text = rawText.trim()
-        if (text.isEmpty()) return _uiState.value.draft
-
-        var newDraft = ""
-        _uiState.update { current ->
-            val expectedCurrent = appendTranscript(liveSpeechBaseDraft, liveSpeechLastTranscript)
-            val base = if (current.draft == expectedCurrent) {
-                liveSpeechBaseDraft
-            } else {
-                current.draft
-            }
-            liveSpeechBaseDraft = base
-            liveSpeechLastTranscript = text
-            newDraft = appendTranscript(base, text)
-            current.copy(
-                draft = newDraft,
-                amplitude = 0.35f,
-                hasDetectedSpeech = true,
-                // Issue #870 (reopen): the raw growing partial. The sheet's
-                // dedicated two-line LiveTranscriptTwoLine area resolves the
-                // visible tail width-aware at render time, so the newest words
-                // always stay visible — no VM-side char budget (the superseded
-                // width-independent approach re-clipped the tail on device).
-                liveTranscript = text,
-                error = null,
-            )
-        }
-        savedStateHandle[KEY_DRAFT] = newDraft
-        return newDraft
-    }
-
-    private fun finishAndroidSpeechRecognition(rawText: String) {
-        val text = rawText.trim().ifEmpty { liveSpeechLastTranscript.trim() }
-        if (text.isEmpty()) {
-            failAndroidSpeechRecognition(ANDROID_SPEECH_NO_TEXT_MESSAGE)
-            return
-        }
-
-        applyLiveSpeechTranscript(text)
-        val pendingSend = pendingSendOnTranscribeSuccess
-        val pendingWithEnter = pendingSendWithEnter
-        val pendingTarget = pendingSendTarget
-        clearPendingTranscriptionSend()
-        clearAndroidSpeechSession()
-
-        _uiState.update {
-            it.copy(
-                recording = RecordingState.Idle,
-                amplitude = 0f,
-                hasDetectedSpeech = false,
-                liveTranscript = null,
-                error = null,
-            )
-        }
-
-        if (pendingSend) {
-            dispatchSendNow(pendingWithEnter, pendingTarget)
-        }
-        DiagnosticEvents.record(
-            "action",
-            "composer_transcription_result",
-            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-            "status" to "success",
-            "transcriptBytes" to text.toByteArray(Charsets.UTF_8).size,
-            "queuedSend" to pendingSend,
-        )
-    }
-
-    private fun failAndroidSpeechRecognition(message: String) {
-        if (message.isAndroidNoTextFailure() && liveSpeechLastTranscript.isNotBlank()) {
-            finishAndroidSpeechRecognition(liveSpeechLastTranscript)
-            return
-        }
-        clearPendingTranscriptionSend()
-        clearAndroidSpeechSession()
-        _uiState.update {
-            it.copy(
-                recording = RecordingState.Idle,
-                amplitude = 0f,
-                hasDetectedSpeech = false,
-                liveTranscript = null,
-                error = androidSpeechFailureMessage(message),
-            )
-        }
-        DiagnosticEvents.record(
-            "action",
-            "composer_transcription_result",
-            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-            "status" to "failure",
-            "cause" to "SpeechRecognitionError",
-        )
+        androidSpeechRecognition.stop()
     }
 
     private fun cancelAndroidSpeechRecognition() {
-        val restoredDraft = liveSpeechBaseDraft
-        clearPendingTranscriptionSend()
-        clearAndroidSpeechSession()
-        savedStateHandle[KEY_DRAFT] = restoredDraft
-        _uiState.update {
-            it.copy(
-                recording = RecordingState.Idle,
-                amplitude = 0f,
-                hasDetectedSpeech = false,
-                liveTranscript = null,
-                draft = restoredDraft,
-                error = null,
-            )
-        }
-        DiagnosticEvents.record(
-            "action",
-            "composer_recording_cancel",
-            "provider" to VoiceTranscriptionProvider.AndroidSpeech.name,
-        )
-    }
-
-    private fun clearAndroidSpeechSession() {
-        // Issue #880: ensure the elapsed-timer ticker is stopped on every
-        // recognizer teardown path (final / error / cancel), independent of the
-        // stop-listening transition above.
-        stopRecordingTimerTicker()
-        val session = speechRecognitionSession
-        speechRecognitionSession = null
-        speechRecognitionGeneration++
-        runCatching { session?.cancel() }
-        activeProvider = null
-        liveSpeechBaseDraft = ""
-        liveSpeechLastTranscript = ""
-        savedStateHandle[KEY_WAS_RECORDING] = false
-    }
-
-    private fun String.isAndroidNoTextFailure(): Boolean =
-        isBlank() ||
-            this == NO_SPEECH_DETECTED_MESSAGE ||
-            this == ANDROID_SPEECH_NO_TEXT_MESSAGE
-
-    private fun androidSpeechFailureMessage(message: String): String = when {
-        message.isBlank() -> ANDROID_SPEECH_FAILED_MESSAGE
-        message == NO_SPEECH_DETECTED_MESSAGE -> ANDROID_SPEECH_NO_TEXT_MESSAGE
-        else -> message
+        androidSpeechRecognition.cancel()
     }
 
     /**
@@ -3463,12 +3254,12 @@ public class PromptComposerViewModel @Inject constructor(
         // to at this point in the lifecycle.
         if (_uiState.value.recording == RecordingState.Recording) {
             if (activeProvider == VoiceTranscriptionProvider.AndroidSpeech) {
-                runCatching { speechRecognitionSession?.cancel() }
+                androidSpeechRecognition.cancelSession()
             } else {
                 runCatching { audioRecorder.stop() }
             }
         }
-        runCatching { speechRecognitionSession?.cancel() }
+        androidSpeechRecognition.cancelSession()
         viewModelScope.cancel()
         super.onCleared()
     }
@@ -4071,7 +3862,7 @@ public class PromptComposerViewModel @Inject constructor(
     }
 }
 
-private fun appendTranscript(draft: String, transcript: String): String {
+internal fun appendTranscript(draft: String, transcript: String): String {
     if (transcript.isBlank()) return draft
     val sep = if (draft.isEmpty() || draft.endsWith(" ")) "" else " "
     return draft + sep + transcript

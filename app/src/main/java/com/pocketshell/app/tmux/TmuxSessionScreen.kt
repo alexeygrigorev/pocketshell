@@ -46,11 +46,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -2944,11 +2942,6 @@ internal fun settleSessionSwitchTarget(
     return settledPaneSession
 }
 
-private sealed interface TmuxDialogMode {
-    data object RenameSession : TmuxDialogMode
-    data object StopSession : TmuxDialogMode
-}
-
 private val VerticalSwipeThreshold = 72.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
@@ -4011,69 +4004,6 @@ internal fun recordTmuxReconnectUiStateRendered(
         )
         else -> Unit
     }
-}
-
-@Composable
-private fun TmuxLifecycleDialog(
-    mode: TmuxDialogMode,
-    sessionName: String,
-    text: String,
-    onTextChange: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit,
-) {
-    // Issue #898: the create-session branch is gone — "+ New session" now opens
-    // the rich SessionTypePickerSheet (hard-cut D22). This dialog only handles
-    // the remaining text/confirm lifecycle actions: Rename and Stop.
-    val title = when (mode) {
-        TmuxDialogMode.RenameSession -> "Rename session"
-        TmuxDialogMode.StopSession -> "Stop session"
-    }
-    val confirm = when (mode) {
-        TmuxDialogMode.StopSession -> "Stop"
-        else -> "Save"
-    }
-    val isTextMode = mode == TmuxDialogMode.RenameSession
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        modifier = Modifier
-            .navigationBarsPadding()
-            .imePadding(),
-        title = { Text(title) },
-        text = {
-            if (isTextMode) {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    singleLine = true,
-                    label = { Text("Session name") },
-                )
-            } else {
-                val target = when (mode) {
-                    TmuxDialogMode.StopSession -> sessionName
-                    else -> ""
-                }
-                Text("This will close $target.")
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onConfirm,
-                enabled = !isTextMode || text.trim().isNotEmpty(),
-                modifier = Modifier.testTag(TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG),
-            ) {
-                Text(confirm)
-            }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                modifier = Modifier.testTag(TMUX_LIFECYCLE_DIALOG_CANCEL_TAG),
-            ) {
-                Text("Cancel")
-            }
-        },
-    )
 }
 
 @Composable

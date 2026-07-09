@@ -2070,6 +2070,16 @@ for fqcn in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
   fi
 done
 
+# Core-terminal proof selectors/runners live in a sourced helper so this driver
+# keeps the proof execution and summary wiring local while the class cluster is
+# isolated.
+# shellcheck source=scripts/ci-journey-core-terminal-functions.sh
+CI_JOURNEY_CORE_TERMINAL_HELPER="$REPO_ROOT/scripts/ci-journey-core-terminal-functions.sh"
+if [[ ! -f "$CI_JOURNEY_CORE_TERMINAL_HELPER" && -f "$INVOCATION_DIR/scripts/ci-journey-core-terminal-functions.sh" ]]; then
+  CI_JOURNEY_CORE_TERMINAL_HELPER="$INVOCATION_DIR/scripts/ci-journey-core-terminal-functions.sh"
+fi
+source "$CI_JOURNEY_CORE_TERMINAL_HELPER"
+
 # ---------------------------------------------------------------------------
 # Issue #803: core-terminal VT-append main-thread responsiveness proof.
 #
@@ -2085,13 +2095,6 @@ done
 # (#638/#657) it joins the per-push set so a future regression that reintroduces
 # an unbounded back-to-back VT-append drain, or breaks ordering, is caught here.
 # Uses NO Docker fixture (in-process Compose UI test, no SSH/tmux).
-CORE_TERMINAL_APPEND_BURST_CLASS="com.pocketshell.core.terminal.ui.CodexAppendBurstMainThreadProofTest"
-APPEND_BURST_STATUS="PASS"
-
-run_core_terminal_append_burst() {
-  run_ct_class "$CORE_TERMINAL_APPEND_BURST_CLASS"
-}
-
 # Issue #835: if the suite budget was already spent by a #470 stall in the
 # journey loop above, SKIP the core-terminal proofs and go straight to writing
 # the summary — running another ~2 proofs would push us into the workflow job
@@ -2132,13 +2135,6 @@ fi
 # #657 CI gap: it caught the ANR only at the release confidence gate (stage 09),
 # not at PR time. Adding it here closes the loop so the Codex ANR cannot reach a
 # green `main` again. Uses NO Docker fixture (in-process Compose UI test).
-CORE_TERMINAL_OUTPUT_BURST_IME_CLASS="com.pocketshell.core.terminal.ui.CodexOutputBurstImeMainThreadProofTest"
-OUTPUT_BURST_IME_STATUS="PASS"
-
-run_core_terminal_output_burst_ime() {
-  run_ct_class "$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS"
-}
-
 # Issue #835: same budget guard as the #803 proof above.
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
@@ -2174,13 +2170,6 @@ fi
 # Uses NO Docker fixture (in-process Compose UI test). The JVM sibling
 # SshTerminalBridgeTest#onMainMultiChunkSeedRespectsTimeBudgetAcrossWholeFeed...
 # proves the same property deterministically in the per-push Unit job.
-CORE_TERMINAL_MULTICHUNK_SEED_CLASS="com.pocketshell.core.terminal.ui.CodexMultiChunkSeedAttachMainThreadProofTest"
-MULTICHUNK_SEED_STATUS="PASS"
-
-run_core_terminal_multichunk_seed() {
-  run_ct_class "$CORE_TERMINAL_MULTICHUNK_SEED_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   MULTICHUNK_SEED_STATUS="SKIPPED"
@@ -2216,13 +2205,6 @@ fi
 # a regression of #803's over-correction, an un-gated test invites the exact
 # recurrence — so it runs in this per-push gate alongside the #803/#796/#866
 # proofs. Uses NO Docker fixture (in-process Compose UI test).
-CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS="com.pocketshell.core.terminal.ui.AgentPaneLinkAffordanceOffMainProofTest"
-AGENT_LINK_AFFORDANCE_STATUS="PASS"
-
-run_core_terminal_agent_link_affordance() {
-  run_ct_class "$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   AGENT_LINK_AFFORDANCE_STATUS="SKIPPED"
@@ -2264,13 +2246,6 @@ fi
 # a REAL TerminalView (its onDraw under the platform dirty clip + the real
 # forceFullRepaint() + the real TerminalSurfaceState.fullRepaintRequests
 # collector), not a renderer-model stand-in.
-CORE_TERMINAL_REATTACH_REPAINT_CLASS="com.termux.view.TerminalViewReattachLateSubscribeRepaintInstrumentedTest"
-REATTACH_REPAINT_STATUS="PASS"
-
-run_core_terminal_reattach_repaint() {
-  run_ct_class "$CORE_TERMINAL_REATTACH_REPAINT_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   REATTACH_REPAINT_STATUS="SKIPPED"
@@ -2309,13 +2284,6 @@ fi
 # the un-fixed overlays (the activity dies with the out-of-range crash); GREEN
 # after the `layoutOverlayBounded` clamp. Uses NO Docker fixture (in-process
 # Compose UI test). It lives under com.pocketshell.core.terminal.selection.
-CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS="com.pocketshell.core.terminal.selection.TerminalOverlayUnboundedMeasureCrashTest"
-OVERLAY_UNBOUNDED_STATUS="PASS"
-
-run_core_terminal_overlay_unbounded() {
-  run_ct_class "$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   OVERLAY_UNBOUNDED_STATUS="SKIPPED"
@@ -2353,13 +2321,6 @@ fi
 # onDraw paints CONTENT (observer reports true). Proves the surface re-bind is
 # the load-bearing recovery, not another invalidate(). Uses NO Docker fixture
 # (in-process render test). Lives under com.termux.view.
-CORE_TERMINAL_SURFACE_REPAINT_CLASS="com.termux.view.TerminalViewForceSurfaceRepaintInstrumentedTest"
-SURFACE_REPAINT_STATUS="PASS"
-
-run_core_terminal_surface_repaint() {
-  run_ct_class "$CORE_TERMINAL_SURFACE_REPAINT_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   SURFACE_REPAINT_STATUS="SKIPPED"
@@ -2398,13 +2359,6 @@ fi
 # on-main scans per tick. Because #1233 is adjacent to the #796/#803/#866/#871
 # terminal-ANR class it runs alongside those proofs in this per-push gate. Uses
 # NO Docker fixture (in-process Compose UI test).
-CORE_TERMINAL_SHELL_SNAPSHOT_CLASS="com.pocketshell.core.terminal.ui.ShellPaneAffordanceSingleSnapshotProofTest"
-SHELL_SNAPSHOT_STATUS="PASS"
-
-run_core_terminal_shell_snapshot() {
-  run_ct_class "$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS"
-}
-
 if budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   SHELL_SNAPSHOT_STATUS="SKIPPED"

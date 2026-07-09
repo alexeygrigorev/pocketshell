@@ -583,21 +583,12 @@ public class PromptComposerViewModel @Inject constructor(
         error: String?,
     ) {
         _uiState.update { current ->
-            val existing = current.attachments.map { it.remotePath }.toSet()
-            val uniquePaths = paths
-                .filter { it.isNotBlank() && it !in existing }
-                .distinct()
-            val added = uniquePaths.map { path ->
-                val preview = previews.getOrNull(paths.indexOf(path))
-                StagedAttachment(
-                    remotePath = path,
-                    displayName = attachmentDisplayName(path),
-                    previewUri = preview?.uri,
-                    mimeType = preview?.mimeType,
-                )
-            }
             current.copy(
-                attachments = current.attachments + added,
+                attachments = mergeStagedAttachmentPaths(
+                    currentAttachments = current.attachments,
+                    paths = paths,
+                    previews = previews,
+                ),
                 attachmentUpload = AttachmentUploadState.Idle,
                 error = error,
             )
@@ -3748,14 +3739,4 @@ internal fun appendTranscript(draft: String, transcript: String): String {
     if (transcript.isBlank()) return draft
     val sep = if (draft.isEmpty() || draft.endsWith(" ")) "" else " "
     return draft + sep + transcript
-}
-
-private fun attachmentErrorMessage(error: Throwable): String {
-    val detail = if (error is TimeoutCancellationException) {
-        "upload timed out"
-    } else {
-        val raw = error.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
-        raw.ifBlank { error.javaClass.simpleName }
-    }
-    return "Attachment upload failed: $detail. Your draft was kept; reconnect or choose a smaller/readable file."
 }

@@ -81,10 +81,8 @@ import com.pocketshell.app.tmux.connection.shouldReportValidatedHandoffToControl
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
-import com.pocketshell.core.connection.FailureReason
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.classifyFailure
-import com.pocketshell.core.connection.retryable
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RevealStateMachine
@@ -6585,7 +6583,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     target = target,
                     attempt = attempt,
                     startedAtMs = startedAtMs,
-                    message = connectFailureMessage(t, target),
+                    message = connectFailureMessage(t, target.sessionName),
                     cause = t,
                     preserveReconnectTarget = t is TmuxAttachPanesReadyException,
                 )
@@ -7108,7 +7106,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 attempt = attempt,
                 startedAtMs = startedAtMs,
-                message = connectFailureMessage(t, target),
+                message = connectFailureMessage(t, target.sessionName),
                 cause = t,
                 preserveReconnectTarget = t is TmuxAttachPanesReadyException,
             )
@@ -7569,70 +7567,6 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         _revealState.value = revealStateMachine.state.value
     }
-
-    /**
-     * Issue #440: true when [cause] describes a connect failure that will
-     * never succeed by waiting and retrying — bad credentials, an unknown
-     * host, or a missing private key. Auto-reconnect short-circuits to the
-     * manual Reconnect affordance for these instead of burning the whole
-     * backoff schedule.
-     *
-     * We classify by walking the cause chain and matching the wrapped
-     * exception's simple class name. [com.pocketshell.core.ssh.SshException]
-     * preserves the original sshj / java.net cause on [Throwable.cause], so
-     * an authentication or DNS failure surfaces a recognisable type a few
-     * links down. Matching on the name (rather than importing the sshj
-     * hierarchy into the app module) keeps this classification self-
-     * contained and resilient to the exact wrapper depth.
-     *
-     * Deliberately NOT treated as non-retryable: connection refused,
-     * connect timeouts, and generic transport drops. Those are exactly the
-     * transient network blips the maintainer wants recovered automatically
-     * (a host briefly unreachable while rebooting, Wi-Fi handover, etc.), so
-     * they stay on the retry-with-backoff path.
-     */
-    // Issue #1326 (S3): the `Throwable → non-retryable?` and `Throwable → reason`
-    // string tables moved to the SINGLE `:shared:core-connection` classifier
-    // ([classifyFailure] + [FailureReason.retryable]). These are thin adapters over
-    // it so the auto-reconnect ladder + the [ConnectionStatus.Failed] band keep their
-    // exact behaviour while there is ONE source of truth for the reason.
-    private fun isNonRetryableConnectFailure(cause: Throwable?): Boolean =
-        !classifyFailure(cause).retryable
-
-    /**
-     * Issue #440/#1326: a short, user-facing reason for a non-retryable connect
-     * failure, used in the [ConnectionStatus.Failed] message that replaces the
-     * backoff loop. Derived from the typed [classifyFailure] reason so the wording
-     * has one source.
-     */
-    private fun nonRetryableReason(cause: Throwable?): String =
-        when (val reason = classifyFailure(cause)) {
-            FailureReason.AuthFailed -> "authentication failed"
-            FailureReason.HostUnresolved -> "host could not be resolved"
-            FailureReason.ServerRestarted -> "the tmux server restarted — all sessions ended"
-            FailureReason.SessionEnded -> "this session ended"
-            FailureReason.KeyMissing -> "private key file not found"
-            is FailureReason.Unreachable -> "connection cannot be retried"
-        }
-
-    private fun connectFailureMessage(t: Throwable, target: ConnectionTarget): String =
-        if (t is TmuxAttachPanesReadyException) {
-            val message = t.message ?: "Timed out waiting for tmux panes from ${target.sessionName}."
-            if ("Tap Reconnect" in message) message else "$message Tap Reconnect to retry."
-        } else {
-            // Issue #1322: curate the GENERAL connect-failure case. Every non-attach
-            // throwable used to be stored verbatim as `error: <Class>: <message>` and
-            // rendered RAW by [FailedConnectionRow] — the #1321 screenshot leaked the
-            // literal `TmuxClientException: failed to preflight tmux has-session ...
-            // transport is closed` (a closed-transport / has-session preflight failure
-            // originating in `TmuxClient`). A closed-transport drop is exactly the
-            // calm, recoverable [ConnectionStatus.Failed] state the "Tap Reconnect"
-            // band exists for, so fold it into a clean, calm user-facing prompt —
-            // NEVER raw exception text. The raw cause is still available in the
-            // diagnostic logs; the UI stays calm and consistent with the
-            // Reconnecting/Failed surface.
-            "Connection lost. Tap Reconnect to retry."
-        }
 
     private fun shortAppSwitchReconnectFields(
         trigger: TmuxConnectTrigger?,
@@ -9581,7 +9515,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 attempt = attempt,
                 startedAtMs = startedAtMs,
-                message = connectFailureMessage(t, target),
+                message = connectFailureMessage(t, target.sessionName),
                 cause = t,
                 preserveReconnectTarget = t is TmuxAttachPanesReadyException,
             )
@@ -17793,11 +17727,6 @@ public class TmuxSessionViewModel @Inject constructor(
             ?: return Result.failure(IllegalStateException("no activeTarget"))
         return mirrorConnectionLogToHostBody(recorder, target.toLeaseSessionTarget())
     }
-
-    private class TmuxAttachPanesReadyException(
-        message: String,
-        cause: Throwable? = null,
-    ) : RuntimeException(message, cause)
 
     // EPIC #687 Slice 1 (#1047): `reduceBackground()` is DELETED. The background
     // pause-vs-detach decision now lives in the connection core ([BackgroundEffects], the

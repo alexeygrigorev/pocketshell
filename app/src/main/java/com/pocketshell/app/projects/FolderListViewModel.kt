@@ -977,7 +977,7 @@ class FolderListViewModel internal constructor(
         // cache stays ADVISORY: the silent reconcile overwrites the seeded
         // placeholders in place.
         if (!hydrateFromClientCache(params)) {
-            _state.value = loadingState()
+            _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
             warmFromClientCacheOffMain(params)
         }
         // The maintained in-memory tree is held across opens of the SAME host
@@ -1496,7 +1496,7 @@ class FolderListViewModel internal constructor(
     private fun maybeReconcileOnOpen(params: BoundParams) {
         if (!rootSnapshotLoaded) {
             if (_state.value !is FolderListUiState.Ready) {
-                _state.value = loadingState()
+                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
             }
             return
         }
@@ -2168,7 +2168,7 @@ class FolderListViewModel internal constructor(
         val params = bound ?: return
         if (!rootSnapshotLoaded) {
             if (_state.value !is FolderListUiState.Ready) {
-                _state.value = loadingState()
+                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
             }
             return
         }
@@ -2179,7 +2179,7 @@ class FolderListViewModel internal constructor(
         probeJob?.cancel()
         probeJob = viewModelScope.launch {
             if (_state.value !is FolderListUiState.Ready) {
-                _state.value = loadingState()
+                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
             }
             // D21 / #430: gate the reconcile on the whole-process foreground
             // signal. While backgrounded this suspends (no background SSH work);
@@ -2568,15 +2568,16 @@ class FolderListViewModel internal constructor(
         refreshing: Boolean,
     ) {
         tree.applyProjection(result)
-        val projection = result.projection
-        _state.value = FolderListUiState.Ready(
-            folders = projection.folders,
-            treeRoots = projection.treeRoots,
-            flatSessions = projection.flatSessions,
-            expandedProjectPaths = projection.expandedProjectPaths,
-            isRefreshing = refreshing,
-            isCreatingSession = createSessionInFlight,
-            portForwarding = forwardingSummary(),
+        _state.value = folderListReadyState(
+            projection = result.projection,
+            refreshing = refreshing,
+            creatingSession = createSessionInFlight,
+            portForwarding = folderListForwardingSummary(
+                hostId = bound?.hostId,
+                forwardingSnapshots = forwardingSnapshots,
+                discoveredPorts = lastDiscoveredPorts,
+                treeHasSnapshot = tree.hasSnapshot,
+            ),
         )
     }
 
@@ -2584,34 +2585,6 @@ class FolderListViewModel internal constructor(
         createSessionInFlight = inFlight
         val ready = _state.value as? FolderListUiState.Ready ?: return
         _state.value = ready.copy(isCreatingSession = inFlight)
-    }
-
-    private fun loadingState(): FolderListUiState.Loading {
-        val hostId = bound?.hostId
-        val snapshot = hostId?.let { forwardingSnapshots[it] }
-        return FolderListUiState.Loading(
-            portForwarding = HostPortForwardingSummary(
-                active = snapshot?.active == true,
-                activeTunnelCount = snapshot?.tunnelCount ?: 0,
-                entryAvailable = hostId != null,
-                discoveryLoading = true,
-            ),
-        )
-    }
-
-    private fun forwardingSummary(): HostPortForwardingSummary {
-        val hostId = bound?.hostId ?: return HostPortForwardingSummary(discoveredPorts = lastDiscoveredPorts)
-        val snapshot = forwardingSnapshots[hostId]
-        return HostPortForwardingSummary(
-            discoveredPorts = mergeForwardingPortRows(
-                discoveredPorts = lastDiscoveredPorts,
-                activeRemotePorts = snapshot?.activeRemotePorts.orEmpty(),
-            ),
-            active = snapshot?.active == true,
-            activeTunnelCount = snapshot?.tunnelCount ?: 0,
-            entryAvailable = true,
-            discoveryLoading = !tree.hasSnapshot,
-        )
     }
 
     override fun onCleared() {

@@ -16083,43 +16083,19 @@ public class TmuxSessionViewModel @Inject constructor(
         columns: Int,
         rows: Int,
         detail: String = "",
-    ): String = buildString {
-        append(event)
-        append(" host=")
-        append(target.host)
-        append(" port=")
-        append(target.port)
-        append(" user=")
-        append(target.user)
-        append(" session=")
-        append(target.sessionName)
-        append(" cols=")
-        append(columns)
-        append(" rows=")
-        append(rows)
-        activeAttachMilestone?.let { milestone ->
-            append(" attempt=")
-            append(milestone.attempt)
-            append(" elapsedMs=")
-            append(SystemClock.elapsedRealtime() - milestone.startedAtMs)
-        }
-        if (detail.isNotBlank()) {
-            append(' ')
-            append(detail)
-        }
-    }
+    ): String = tmuxControlClientSizeMessage(
+        event = event,
+        target = target,
+        columns = columns,
+        rows = rows,
+        milestone = activeAttachMilestone,
+        detail = detail,
+    )
 
     private fun tmuxCommandErrorDetail(
         error: Throwable?,
         response: CommandResponse?,
-    ): String =
-        error?.let { "error=${it.javaClass.simpleName}:${it.message.orEmpty()}" }
-            ?: response?.output
-                ?.joinToString(separator = " ")
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { "tmuxError=$it" }
-            ?: "tmuxError=unknown"
+    ): String = tmuxCommandErrorDetailText(error, response)
 
     /**
      * Issue #898: create a new tmux session from the in-session kebab's rich
@@ -17721,29 +17697,10 @@ public class TmuxSessionViewModel @Inject constructor(
      *  (the controller's core state does not carry it). Falls back to the active /
      *  connecting target, then to blanks for a payload-less Idle/Gone. */
     private fun hostPortUserFor(inlineState: ConnectionState): ConnectionStatusProjection.HostPortUser =
-        when (inlineState) {
-            is ConnectionState.Connecting ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Attaching ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Live ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Backgrounded ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Reattaching ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Reconnecting ->
-                ConnectionStatusProjection.HostPortUser(inlineState.host, inlineState.port, inlineState.user)
-            is ConnectionState.Idle,
-            is ConnectionState.Gone,
-            is ConnectionState.Unreachable -> {
-                val target = activeTarget ?: connectingTarget
-                if (target != null) {
-                    ConnectionStatusProjection.HostPortUser(target.host, target.port, target.user)
-                } else {
-                    ConnectionStatusProjection.HostPortUser("", 0, "")
-                }
-            }
-        }
+        connectionStatusHostPortUserFor(
+            inlineState = inlineState,
+            activeTarget = activeTarget,
+            connectingTarget = connectingTarget,
+        )
 
 }

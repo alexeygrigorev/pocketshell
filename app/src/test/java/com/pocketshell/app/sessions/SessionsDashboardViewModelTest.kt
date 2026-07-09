@@ -5,6 +5,7 @@ import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import com.pocketshell.uikit.model.SessionAgentState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -112,6 +113,45 @@ class SessionsDashboardViewModelTest {
         assertEquals("agent-main", parsed?.sessionName)
         assertEquals(1716300000L, parsed?.lastActivity)
         assertEquals(true, parsed?.attached)
+    }
+
+    @Test
+    fun parseListSessionsRowResolvesFreshAgentStateFromDashboardShape() {
+        // Issue #1237: the dashboard shape carries @ps_agent_state (+ updated_at)
+        // as the 5th/6th columns. A fresh idle/waiting resolves to its chip
+        // state; activity is at-or-before the state write, so it is not stale.
+        val vm = newVm()
+        val idle = vm.parseListSessionsRow(
+            line = "agent-idle::1::1000::1::idle::1000",
+            hostId = 3L,
+            hostName = "hetzner",
+        )
+        assertEquals(SessionAgentState.Idle, idle?.agentState)
+        val waiting = vm.parseListSessionsRow(
+            line = "agent-wait::1::990::1::waiting_for_input::1000",
+            hostId = 3L,
+            hostName = "hetzner",
+        )
+        assertEquals(SessionAgentState.WaitingForInput, waiting?.agentState)
+    }
+
+    @Test
+    fun parseListSessionsRowDropsStaleAgentStateAndUnknownIsAbsent() {
+        val vm = newVm()
+        // Activity newer than the recorded idle → stale → Unknown (no chip).
+        val stale = vm.parseListSessionsRow(
+            line = "agent-idle::1::5000::1::idle::1000",
+            hostId = 3L,
+            hostName = "hetzner",
+        )
+        assertEquals(SessionAgentState.Unknown, stale?.agentState)
+        // Absent state option (4-field legacy shape) → Unknown.
+        val absent = vm.parseListSessionsRow(
+            line = "agent-legacy::1::1000::1",
+            hostId = 3L,
+            hostName = "hetzner",
+        )
+        assertEquals(SessionAgentState.Unknown, absent?.agentState)
     }
 
     @Test

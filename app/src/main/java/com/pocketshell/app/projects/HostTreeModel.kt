@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.SessionAgentState
 
 /**
  * The maintained in-memory project tree for ONE host — EPIC #679, Slice 1.
@@ -147,6 +148,14 @@ internal class HostTreeModel {
         var lastActivity: Long?,
         var attached: Boolean,
         var agentKind: SessionAgentKind,
+        /**
+         * Issue #1237: the resolved agent resting-state chip value, re-read from
+         * the host `@ps_agent_state` option on every reconcile. NOT sticky like
+         * [agentKind] — the latest read is always authoritative (the option is
+         * the source of truth and a stale resting state already resolves to
+         * [SessionAgentState.Unknown] upstream).
+         */
+        var agentState: SessionAgentState,
         var windows: List<WindowState>,
         /**
          * Issue #858: the non-default profile label (e.g. `"Claude (Z.AI)"`)
@@ -251,6 +260,9 @@ internal class HostTreeModel {
                 lastActivity = null,
                 attached = false,
                 agentKind = node.foreignGuess ?: SessionAgentKind.Probing,
+                // The registry seed carries no agent state — the first reconcile
+                // re-reads it from the host @ps_agent_state option (#1237).
+                agentState = SessionAgentState.Unknown,
                 windows = emptyList(),
                 // The client cache holds ordering/expand/foreign-guess only, not
                 // the recorded profile — the first reconcile re-reads it from the
@@ -452,6 +464,12 @@ internal class HostTreeModel {
             } else {
                 existing.lastActivity = entry.lastActivity
                 existing.attached = entry.attached
+                // Issue #1237: the agent state is NOT sticky — take the latest
+                // read. The `@ps_agent_state` option is authoritative and a
+                // resting state that has gone stale is already dropped to
+                // Unknown upstream (resolveSessionAgentState), so a fresh read
+                // never wrongly persists an old idle/waiting chip.
+                existing.agentState = entry.agentState
                 // Issue #716: agent-ness is STICKY. A known agent kind is only
                 // overwritten by another agent kind or a CONFIRMED Shell — an
                 // incoming Probing must NOT clobber a known agent.
@@ -630,6 +648,7 @@ internal class HostTreeModel {
             existing.lastActivity = entry.lastActivity
             existing.attached = entry.attached
             existing.agentKind = entry.agentKind
+            existing.agentState = entry.agentState
             existing.windows = entry.windows.map { it.toState() }
             existing.recordedProfile = entry.recordedProfile
             existing.tmuxSessionId = entry.tmuxSessionId
@@ -856,6 +875,7 @@ internal class HostTreeModel {
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            agentState = agentState,
             windows = windows.map { it.toState() },
             recordedProfile = recordedProfile,
             tmuxSessionId = tmuxSessionId,
@@ -869,6 +889,7 @@ internal class HostTreeModel {
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            agentState = agentState,
             recordedProfile = recordedProfile,
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,

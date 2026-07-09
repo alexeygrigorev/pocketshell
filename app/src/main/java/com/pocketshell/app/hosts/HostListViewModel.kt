@@ -47,6 +47,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
+import com.pocketshell.uikit.model.SessionAgentState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -2101,4 +2102,35 @@ internal fun resolveHostStatus(
         sessionCount = sessionCount,
         appAttached = appAttached,
     )
+}
+
+/**
+ * Aggregate the per-host agent-state chip (issue #1237) from the cross-host
+ * session list. A host may run several agent sessions in different states, so
+ * the card shows the single MOST-ACTIONABLE state, first-match precedence:
+ *
+ *  1. [SessionAgentState.WaitingForInput] — an agent is blocked on the user;
+ *     this is the "come look at me" signal and always wins.
+ *  2. [SessionAgentState.Working] — an agent is actively working.
+ *  3. [SessionAgentState.Idle] — an agent finished and is resting.
+ *  4. [SessionAgentState.Unknown] — no session reports a known state; the card
+ *     shows NO agent-state chip (absent, not wrong).
+ *
+ * Stale rows already carry [SessionAgentState.Unknown] (the dashboard clears the
+ * chip when a poll fails), so they never contribute a stale chip here.
+ */
+internal fun resolveHostAgentState(
+    hostId: Long,
+    sessions: List<SessionSummary>,
+): SessionAgentState {
+    val states = sessions.asSequence()
+        .filter { it.hostId == hostId }
+        .map { it.agentState }
+        .toSet()
+    return when {
+        SessionAgentState.WaitingForInput in states -> SessionAgentState.WaitingForInput
+        SessionAgentState.Working in states -> SessionAgentState.Working
+        SessionAgentState.Idle in states -> SessionAgentState.Idle
+        else -> SessionAgentState.Unknown
+    }
 }

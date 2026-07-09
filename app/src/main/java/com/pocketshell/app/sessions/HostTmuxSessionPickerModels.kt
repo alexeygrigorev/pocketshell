@@ -15,6 +15,22 @@ data class HostTmuxSessionRow(
      * `pocketshell sessions list` proxy or the fallback regex parse).
      */
     val path: String? = null,
+    /**
+     * Issue #1237: raw host-side `@ps_agent_state` tmux option value
+     * (`idle` / `waiting_for_input` / `working`), populated only by the list
+     * shapes that request it (the dashboard's cross-host aggregate). `null` for
+     * shapes that do not carry it (the `pocketshell sessions list` proxy, the
+     * fallback regex parse, or a legacy tmux server). Resolved to a
+     * [com.pocketshell.uikit.model.SessionAgentState] with [agentStateUpdatedAt]
+     * + [lastActivity].
+     */
+    val agentStateRaw: String? = null,
+    /**
+     * Issue #1237: `@ps_agent_state_updated_at` epoch-seconds timestamp of the
+     * last [agentStateRaw] write, used to drop a stale resting state. `null` when
+     * absent or the source shape did not carry it.
+     */
+    val agentStateUpdatedAt: Long? = null,
 )
 
 data class HostTmuxSessionPickerRequest(

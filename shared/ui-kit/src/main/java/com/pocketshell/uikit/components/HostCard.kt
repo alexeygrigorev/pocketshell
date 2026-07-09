@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
+import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -109,6 +110,11 @@ fun HostCard(
     // status dot — so this is wiring only.
     onSetupBadgeClick: (() -> Unit)? = null,
     connectingLabel: String? = null,
+    // Issue #1237: the aggregate agent resting-state across this host's sessions
+    // (most-actionable wins). Renders a compact chip BEFORE the status dot ONLY
+    // when a state is known — absent (no chip) for [SessionAgentState.Unknown],
+    // so a host with no agent activity keeps the decluttered single-dot card.
+    agentState: SessionAgentState = SessionAgentState.Unknown,
     trailingContent: (@Composable () -> Unit)? = null,
 ) {
     Row(
@@ -198,6 +204,18 @@ fun HostCard(
         // While connecting we lean on the inline connecting row above and
         // drop the dot so the row doesn't show two competing progress
         // affordances.
+        // Issue #1237: the agent resting-state chip (idle / waiting / working)
+        // leads the trailing indicator lane when known, so a "waiting for you"
+        // host stands out at a glance. Absent (no chip, no spacer) when unknown,
+        // preserving the decluttered single-dot card for quiet hosts.
+        if (connectingLabel == null && agentState.chipLabel != null) {
+            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
+            AgentStateChip(
+                state = agentState,
+                modifier = Modifier.testTag(HOST_AGENT_STATE_CHIP_TAG),
+            )
+        }
+
         if (connectingLabel == null) {
             Spacer(modifier = Modifier.width(PocketShellSpacing.md))
             HostStatusDot(state = resolveHostDotState(status = status, setupState = setupState))
@@ -355,6 +373,9 @@ private fun HostStatusDot(state: HostDotState) {
  */
 const val HOST_STATUS_DOT_TAG: String = "host-status-dot"
 const val HOST_STATUS_SPINNER_TAG: String = "host-status-dot:spinner"
+
+/** Issue #1237: tags the host-card agent-state chip (idle / waiting / working). */
+const val HOST_AGENT_STATE_CHIP_TAG: String = "host-agent-state-chip"
 
 /**
  * Accessible labels carried by the [HostStatusDot] `contentDescription`.

@@ -85,6 +85,7 @@ import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
+import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -1639,6 +1640,17 @@ private fun FlatSessionRow(
         },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Issue #1237: the agent resting-state chip leads the trailing
+                // lane when known; absent (no chip, no spacer) when unknown.
+                session.agentState.chipLabel?.let {
+                    AgentStateChip(
+                        state = session.agentState,
+                        modifier = Modifier.testTag(
+                            folderListFlatRowAgentStateChipTestTag(session.sessionName),
+                        ),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
                 // Issue #858: a non-default profile (e.g. z.ai Claude) gets a
                 // distinct chip BEFORE the kind badge so it reads as a separate
                 // dimension. A default / non-profiled / legacy session shows no
@@ -2222,6 +2234,18 @@ private fun WorkspaceSessionRow(
         // are broken out (each window row carries the agent identity in its
         // title), so it is dropped on an expanded session (#675).
         if (!expandedIntoWindows) {
+            // Issue #1237: the agent resting-state chip (idle / waiting / working)
+            // leads the trailing lane so the "waiting for you" signal is the most
+            // prominent. Absent (no chip, no spacer) when the state is unknown.
+            session.agentState.chipLabel?.let {
+                Spacer(modifier = Modifier.width(8.dp))
+                AgentStateChip(
+                    state = session.agentState,
+                    modifier = Modifier.testTag(
+                        folderSessionAgentStateChipTestTag(folderPath, session.sessionName),
+                    ),
+                )
+            }
             // Issue #858: a non-default profile (e.g. z.ai Claude) gets a
             // distinct chip BEFORE the kind badge so the tree distinguishes it
             // from a default Claude. No chip for a default / legacy session.

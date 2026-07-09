@@ -22,12 +22,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.PillKind
+import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
@@ -86,6 +88,56 @@ internal fun HostCardResumeAffordanceRender() {
         status = HostStatus.NoActiveSessions,
         onClick = {},
     )
+}
+
+/**
+ * Issue #1237: the agent-state chip (idle / working / waiting-for-input) on host
+ * cards, plus the three chip variants standalone. The top card is "waiting" (the
+ * amber come-look signal), then working (accent cyan), idle (neutral), and a
+ * quiet host with NO agent activity (Unknown → no chip, decluttered single dot).
+ * Rendered against the real theme so the fast JVM check shows the chip reads as a
+ * compact status pill next to the host status dot; the emulator screenshot is the
+ * acceptance.
+ */
+@Composable
+internal fun AgentStateChipsRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ScreenHeader(title = "Hosts", subtitle = "4 hosts · 3 active")
+        HostCard(
+            name = "hetzner",
+            subtitle = "alex@65.108.42.11",
+            status = HostStatus.ActiveSessions(count = 3),
+            agentState = SessionAgentState.WaitingForInput,
+            onClick = {},
+        )
+        HostCard(
+            name = "gpu-box",
+            subtitle = "alex@10.0.0.42",
+            status = HostStatus.ActiveSessions(count = 2),
+            agentState = SessionAgentState.Working,
+            onClick = {},
+        )
+        HostCard(
+            name = "prod",
+            subtitle = "deploy@prod.acme.io",
+            status = HostStatus.ActiveSessions(count = 1),
+            agentState = SessionAgentState.Idle,
+            onClick = {},
+        )
+        HostCard(
+            name = "edge",
+            subtitle = "ci@edge.acme.io",
+            status = HostStatus.NoActiveSessions,
+            agentState = SessionAgentState.Unknown,
+            onClick = {},
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AgentStateChip(state = SessionAgentState.WaitingForInput)
+            AgentStateChip(state = SessionAgentState.Working)
+            AgentStateChip(state = SessionAgentState.Idle)
+        }
+    }
 }
 
 @Composable

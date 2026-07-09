@@ -51,6 +51,9 @@ fun folderListFlatRowBadgeTestTag(sessionName: String): String =
 /** Issue #858: tags the non-default profile chip on a flat host-detail row. */
 fun folderListFlatRowProfileChipTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:profile"
+/** Issue #1237: tags the agent-state chip on a flat host-detail row. */
+fun folderListFlatRowAgentStateChipTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:agent-state"
 fun folderListFlatRowActionsTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
 
@@ -83,6 +86,9 @@ fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
 /** Issue #858: tags the non-default profile chip on a tree session child row. */
 fun folderSessionProfileChipTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:profile"
+/** Issue #1237: tags the agent-state chip (idle / waiting / working) on a session row. */
+fun folderSessionAgentStateChipTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:agent-state"
 fun folderSessionActionsTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
 

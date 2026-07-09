@@ -8,6 +8,8 @@ import com.pocketshell.app.systemsurfaces.ActiveSessionsWidgetProvider
 import com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import com.pocketshell.uikit.model.SessionAgentState
+import com.pocketshell.uikit.model.resolveSessionAgentState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
@@ -579,6 +581,14 @@ class SessionsDashboardViewModel @Inject constructor(
             sessionName = row.name,
             lastActivity = activity,
             attached = row.attached,
+            // Issue #1237: resolve the raw @ps_agent_state option to a chip
+            // state, dropping a resting state that has gone stale relative to
+            // session activity (the hook fires only on stop/waiting).
+            agentState = resolveSessionAgentState(
+                rawState = row.agentStateRaw,
+                stateUpdatedAtEpochSec = row.agentStateUpdatedAt,
+                sessionActivityEpochSec = activity,
+            ),
         )
     }
 
@@ -606,7 +616,9 @@ class SessionsDashboardViewModel @Inject constructor(
     private fun markHostSnapshotStale(hostId: Long) {
         val existing = perHostSnapshots[hostId] ?: return
         perHostSnapshots[hostId] = existing.map { row ->
-            row.copy(attached = false, stale = true)
+            // Issue #1237: a stale snapshot must not look current — drop the
+            // agent-state chip to Unknown too, not just the attached hint.
+            row.copy(attached = false, stale = true, agentState = SessionAgentState.Unknown)
         }
         emitAggregate()
     }
@@ -636,7 +648,8 @@ class SessionsDashboardViewModel @Inject constructor(
          * per session and matches the issue body's contract verbatim.
          */
         const val LIST_SESSIONS_COMMAND: String =
-            "list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'"
+            "list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::" +
+                "#{session_attached}::#{@ps_agent_state}::#{@ps_agent_state_updated_at}'"
 
         /**
          * Max time we wait for tmux to emit the post-kill

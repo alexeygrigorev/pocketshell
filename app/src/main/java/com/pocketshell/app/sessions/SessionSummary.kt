@@ -1,5 +1,7 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.uikit.model.SessionAgentState
+
 /**
  * One tmux session discovered on a connected host. Aggregated across
  * every host with a live [com.pocketshell.core.tmux.TmuxClient] in
@@ -29,6 +31,12 @@ package com.pocketshell.app.sessions
  * @property stale true when this row is retained from the last successful
  *   poll after a later poll failed. Stale rows are preserved for
  *   continuity, but must not look like a current live snapshot.
+ * @property agentState the resolved agent resting-state (idle / waiting-for-input
+ *   / working) read back from the host `@ps_agent_state` tmux option written by
+ *   the stop/idle hook bus (issue #1237). [SessionAgentState.Unknown] when the
+ *   option is absent/empty or a recorded resting state has gone stale — the host
+ *   card derives its agent-state chip from the aggregate of these across a host's
+ *   sessions, and shows no chip when none is known.
  */
 data class SessionSummary(
     val hostId: Long,
@@ -37,4 +45,5 @@ data class SessionSummary(
     val lastActivity: Long,
     val attached: Boolean,
     val stale: Boolean = false,
+    val agentState: SessionAgentState = SessionAgentState.Unknown,
 )

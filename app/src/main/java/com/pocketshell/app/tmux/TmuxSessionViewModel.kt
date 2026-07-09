@@ -3090,43 +3090,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Issue #178: true when [previous] and [target] address the same SSH
-     * endpoint (same host, port, user, key path). Same-host means the
-     * underlying [SshSession] is reusable for an in-channel tmux client
-     * swap. We deliberately exclude `passphrase` and `sessionName` —
-     * passphrase is only used for the initial key load (the live session
-     * is already authenticated), and the session name is the THING we're
-     * switching.
-     */
-    private fun isSameHost(previous: ConnectionTarget, target: ConnectionTarget): Boolean =
-        previous.hostId == target.hostId &&
-            previous.host == target.host &&
-            previous.port == target.port &&
-            previous.user == target.user &&
-            previous.keyPath == target.keyPath
-
-    private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean {
-        if (!left.hasSameHostAndCredential(right)) return false
-        val leftDurable = left.durableSessionKey()
-        val rightDurable = right.durableSessionKey()
-        if (leftDurable != null || rightDurable != null) {
-            return leftDurable == rightDurable
-        }
-        return left.sessionName == right.sessionName &&
-            left.startDirectory == right.startDirectory
-    }
-
-    private fun ConnectionTarget.hasSameHostAndCredential(other: ConnectionTarget): Boolean =
-        hostId == other.hostId &&
-            host == other.host &&
-            port == other.port &&
-            user == other.user &&
-            keyPath == other.keyPath
-
-    private fun ConnectionTarget.durableSessionKey(): String? =
-        durableTmuxSessionKey(hostId, tmuxSessionId, sessionCreated)
-
     private fun markSuccessfulAttachForNetworkCoalescing(
         target: ConnectionTarget,
         trigger: TmuxConnectTrigger,
@@ -3245,37 +3208,9 @@ public class TmuxSessionViewModel @Inject constructor(
             sameSessionIdentity(currentTarget, guard.target)
     }
 
-    private fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
-        TmuxRuntimeKey(
-            hostId = hostId,
-            hostname = host,
-            port = port,
-            username = user,
-            keyPath = keyPath,
-            sessionName = sessionName,
-            durableSessionKey = durableSessionKey(),
-        )
-
     private fun nextConnectGeneration(): Long {
         connectGeneration += 1L
         return connectGeneration
-    }
-
-    private fun targetLogFields(target: ConnectionTarget): String = buildString {
-        append("hostId=")
-        append(target.hostId)
-        append(" host=")
-        append(target.host)
-        append(" port=")
-        append(target.port)
-        append(" user=")
-        append(target.user)
-        append(" session=")
-        append(target.sessionName)
-        target.startDirectory?.let {
-            append(" startDirectory=")
-            append(it)
-        }
     }
 
     /**
@@ -18040,22 +17975,6 @@ public class TmuxSessionViewModel @Inject constructor(
     )
 
     /**
-     * The [com.pocketshell.app.sessions.LeaseSessionTarget] for this connection,
-     * byte-identical to the lease key the session screens use (so a borrow reuses
-     * the warm transport, not a fresh handshake). Used by the #972 host
-     * connection-log mirror.
-     */
-    private fun ConnectionTarget.toLeaseSessionTarget(): com.pocketshell.app.sessions.LeaseSessionTarget =
-        com.pocketshell.app.sessions.LeaseSessionTarget(
-            hostId = hostId,
-            hostname = host,
-            port = port,
-            username = user,
-            keyPath = keyPath,
-            passphrase = passphrase,
-        )
-
-    /**
      * Issue #972 — wire the host connection-log mirror to its trigger. Fired by the
      * [ConnectionEffectDriver] right after the current host's lease transport comes
      * back `Up` (a reconnect promoted the controller to Live): mirror the recorded
@@ -18122,26 +18041,6 @@ public class TmuxSessionViewModel @Inject constructor(
             ?: return Result.failure(IllegalStateException("no activeTarget"))
         return mirrorConnectionLogToHostBody(recorder, target.toLeaseSessionTarget())
     }
-
-    private fun ConnectionTarget.sessionCardsTargetKey(): String =
-        sessionCardsTargetKey(
-            hostId = hostId,
-            host = host,
-            port = port,
-            user = user,
-            keyPath = keyPath,
-            sessionName = sessionName,
-        )
-
-    // Issue #722: visibility widened from `private` to `internal` (no behavior
-    // change) so the characterization test seams [currentRuntimeGuardForTest],
-    // [reseedBlankVisiblePanesForTest], and [armConnectedBlankWatchdogForTest]
-    // can carry an opaque guard across the test boundary.
-    internal data class RuntimeRefreshGuard(
-        val generation: Long,
-        val target: ConnectionTarget,
-        val client: TmuxClient,
-    )
 
     private class TmuxAttachPanesReadyException(
         message: String,

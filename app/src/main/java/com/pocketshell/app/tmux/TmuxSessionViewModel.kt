@@ -14841,41 +14841,9 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #869 (reviewer BLOCKED-G4 follow-up): derive the substring to look
-     * for in the pane to confirm the composer paste landed. The on-device fixture
-     * (#869 connected proof) showed that an agent input box does TWO things to a
-     * long prompt that break a naive whole-line substring match:
-     *
-     *  1. **It reflows/wraps the line**, and `capture-pane -p` returns the
-     *     wrapped rows; joining them inserts a separator at the wrap boundary —
-     *     which can land MID-WORD (`...against the...` rendered as `against t`
-     *     + `he new...`). A substring needle containing `against the` then misses.
-     *  2. **The HEAD of a very long prompt scrolls off** the top of the visible
-     *     viewport, so only the TAIL near the cursor is captured.
-     *
-     * Both are defeated by (a) stripping ALL whitespace from both needle and
-     * visible text (so a wrap-boundary space can never split a token), and (b)
-     * matching on the TAIL of the payload near the cursor (the part that stays
-     * visible) — [AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS] whitespace-stripped chars.
-     * Returns null when there is nothing meaningful to confirm (blank payload).
-     */
-    private fun agentSubmitAckNeedle(payload: String): String? {
-        val lastLine = payload
-            .split('\n')
-            .map { it.trim() }
-            .lastOrNull { it.isNotEmpty() }
-            ?: return null
-        // Strip ALL whitespace so a wrap-boundary separator can't split a token,
-        // then take the tail near the cursor (the part that stays on-screen).
-        val stripped = lastLine.replace(WHITESPACE_RUN_REGEX, "")
-        if (stripped.isEmpty()) return null
-        return stripped.takeLast(AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS)
-    }
-
-    /**
      * Issue #869: `capture-pane -p` the pane and report whether [needle] is
      * present in its visible text. Both the visible text and the needle are
-     * whitespace-STRIPPED (see [agentSubmitAckNeedle]) so a wrapped/reflowed
+     * whitespace-stripped (see [agentSubmitAckNeedle]) so a wrapped/reflowed
      * input box — whose join inserts a separator at the wrap boundary — still
      * matches. A failed/empty capture is reported as "not yet visible" so the
      * caller keeps polling within its bounded timeout. Best-effort: never throws
@@ -14890,9 +14858,7 @@ public class TmuxSessionViewModel @Inject constructor(
             client.capturePaneTextViaExec(paneId)
         }.getOrNull() ?: return false
         if (response.isError) return false
-        val visible = response.output.joinToString(separator = "")
-            .replace(WHITESPACE_RUN_REGEX, "")
-        return visible.contains(needle)
+        return agentSubmitVisibleTextContainsNeedle(response.output, needle)
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -18910,50 +18876,6 @@ private const val MaxAgentEvents: Int = 500
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
-
-/**
- * Issue #869: ack-gate the submit Enter on the pasted composer text actually
- * landing in the agent's input — rather than a blind fixed sleep that is too
- * short under real RTT (the missed-submit the maintainer hit on-device:
- * "most of the time when I click Send it's not really sending").
- *
- * After typing the prompt into the agent pane we poll `capture-pane` and only
- * press Enter once the payload is visible in the pane (the agent has finished
- * ingesting the paste). The poll is RTT-adaptive by construction: each
- * `capture-pane` is itself a round-trip, so a high-latency host naturally
- * waits longer before the confirming capture returns.
- *
- * - [AGENT_SUBMIT_ACK_POLL_INTERVAL_MS] is the wait between capture polls.
- * - [AGENT_SUBMIT_ACK_TIMEOUT_MS] bounds the total wait so a TUI whose input
- *   rendering we can't recognise (or a `capture-pane` that keeps failing) can
- *   never deadlock Send — on timeout we fall back to pressing Enter anyway
- *   (best-effort), so the worst case is the pre-#869 blind behaviour, never a
- *   hung send. The Codex floor still applies as a MINIMUM wait so lowering the
- *   global delay can't regress the Codex TUI that motivated the original delay.
- */
-internal const val AGENT_SUBMIT_ACK_POLL_INTERVAL_MS: Long = 40L
-internal const val AGENT_SUBMIT_ACK_TIMEOUT_MS: Long = 2_000L
-
-/**
- * Issue #869: how many whitespace-stripped TAIL characters of the pasted prompt
- * the ack needle matches against `capture-pane`. Matching the TAIL (the part of
- * the input near the cursor, which stays on-screen even when the head of a long
- * prompt scrolls off the visible viewport) — and stripping ALL whitespace from
- * both sides (so a wrap-boundary separator can never split a token) — makes the
- * ack survive a reflowed/wrapped agent input box, the on-device case the
- * connected proof exposed as a needle miss. 24 chars is specific enough to avoid
- * a false positive against unrelated prompt content while comfortably fitting in
- * the visible viewport near the cursor.
- */
-internal const val AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS: Int = 24
-
-/**
- * Issue #869: a regex matching runs of whitespace. The ack needle + the visible
- * `capture-pane` text are both whitespace-STRIPPED with this so a wrapped agent
- * input box (whose row-join inserts a separator at the wrap boundary, possibly
- * mid-word) still matches the original prompt's tail.
- */
-private val WHITESPACE_RUN_REGEX = Regex("\\s+")
 // Issue #1316: the OUTER attach-reveal ceiling. Was 30 s — the maintainer's
 // "it took forever to attach / wouldn't let me touch" felt-freeze while the
 // `list-panes` reconcile head-of-line-blocked behind a busy sibling's `-CC`

@@ -8696,15 +8696,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget?,
         disconnectEvent: TmuxDisconnectEvent,
     ): String {
-        val prefix = when (disconnectEvent.reason) {
-            TmuxDisconnectReason.ReaderEof -> "Transport EOF"
-            TmuxDisconnectReason.ReaderException -> "Transport read failed"
-            TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
-            TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
-            TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
-            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
-            TmuxDisconnectReason.Unknown -> "Disconnected"
-        }
+        val prefix = tmuxDisconnectReasonPrefix(disconnectEvent.reason)
         // The user/host/port comes from the target; for the degenerate target-less
         // path (the `attachClientForTest` seam) fall back to the inline Connected
         // payload so the message stays identical to the pre-#895 behavior.
@@ -8719,15 +8711,7 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectEvent: TmuxDisconnectEvent,
         target: ConnectionTarget,
     ): String {
-        val prefix = when (disconnectEvent.reason) {
-            TmuxDisconnectReason.ReaderEof -> "Transport EOF"
-            TmuxDisconnectReason.ReaderException -> "Transport read failed"
-            TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
-            TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
-            TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
-            TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
-            TmuxDisconnectReason.Unknown -> "Disconnected"
-        }
+        val prefix = tmuxDisconnectReasonPrefix(disconnectEvent.reason)
         return "$prefix from ${target.user}@${target.host}:${target.port}; reconnecting."
     }
 

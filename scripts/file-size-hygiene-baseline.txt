@@ -12,4 +12,3 @@
 148633 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
-163683 scripts/ci-journey-suite.sh

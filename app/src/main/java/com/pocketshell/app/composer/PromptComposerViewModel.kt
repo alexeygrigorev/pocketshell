@@ -19,7 +19,6 @@ import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
-import com.pocketshell.core.voice.WhisperException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CancellationException
@@ -2555,8 +2554,7 @@ public class PromptComposerViewModel @Inject constructor(
                     clearPendingTranscriptionSend()
 
                     val combinedDraft = _uiState.updateAndReturnDraft { current ->
-                        val sep = if (current.isEmpty() || current.endsWith(" ")) "" else " "
-                        current + sep + trimmed
+                        appendTranscript(current, trimmed)
                     }
                     // Mirror the appended draft into [SavedStateHandle]
                     // immediately so a recreate after a successful
@@ -2698,45 +2696,6 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #211 helper: apply [transform] to the current draft, update
-     * [_uiState] (landing the FSM in Idle, clearing the amplitude, and
-     * clearing the error banner), and return the new draft text. Lives
-     * here as a private extension so the success branch of
-     * [stopAndTranscribe] can both update state AND know the resulting
-     * draft for the queued-send dispatch without a second read of the
-     * StateFlow (which would race with another caller mutating between
-     * the update and the read).
-     */
-    private inline fun MutableStateFlow<UiState>.updateAndReturnDraft(
-        transform: (String) -> String,
-    ): String {
-        var newDraft = ""
-        update {
-            newDraft = transform(it.draft)
-            it.copy(
-                recording = RecordingState.Idle,
-                draft = newDraft,
-                error = null,
-            )
-        }
-        return newDraft
-    }
-
-    /**
-     * Map a Whisper exception onto a user-facing string. Extracted out
-     * of [stopAndTranscribe] so the retry path can render the same
-     * messages without duplicating the `when` block.
-     */
-    private fun userFacingWhisperError(t: Throwable): String = when (t) {
-        is WhisperException.Auth -> "API key was rejected. Check your OpenAI key in settings."
-        is WhisperException.RateLimited -> "Rate limited by OpenAI. Try again in a moment."
-        is WhisperException.Server -> "OpenAI server error. Try again."
-        is WhisperException.Transport -> "Network error: ${t.message}"
-        is WhisperException.Parse -> "Unexpected response from Whisper."
-        else -> t.message ?: "Transcription failed"
-    }
-
-    /**
      * Issue #180: re-send the persisted audio for [id] to Whisper.
      *
      * On success the transcript is appended to the current draft and
@@ -2839,8 +2798,7 @@ public class PromptComposerViewModel @Inject constructor(
                         }
                         runCatching { pendingTranscriptionStore.markSucceeded(id) }
                         _uiState.update {
-                            val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
-                            val newDraft = it.draft + sep + trimmed
+                            val newDraft = appendTranscript(it.draft, trimmed)
                             savedStateHandle[KEY_DRAFT] = newDraft
                             it.copy(draft = newDraft, error = null)
                         }
@@ -3733,10 +3691,4 @@ public class PromptComposerViewModel @Inject constructor(
         public const val ANDROID_SPEECH_FAILED_MESSAGE: String =
             "Android speech recognition failed. Try again or choose Whisper in settings."
     }
-}
-
-internal fun appendTranscript(draft: String, transcript: String): String {
-    if (transcript.isBlank()) return draft
-    val sep = if (draft.isEmpty() || draft.endsWith(" ")) "" else " "
-    return draft + sep + transcript
 }

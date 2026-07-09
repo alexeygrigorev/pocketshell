@@ -31,14 +31,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.TextButton
 import com.github.takahirom.roborazzi.captureRoboImage
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
@@ -1416,37 +1412,7 @@ class DesignRenders {
      */
     @Test
     fun gitOverviewTab() = render("git-overview-tab") {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            ScreenHeader(title = "Git history", subtitle = "agents")
-            SegmentedToggle(
-                labels = listOf("Overview", "History"),
-                selectedIndex = 0,
-                onSelected = {},
-                fillSegments = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            // Issue #648: "Open on GitHub" appears first when origin is a GitHub repo.
-            SectionHeader(label = "Remote")
-            ListRow(title = "Open on GitHub", subtitle = "github.com/owner/repo", onClick = {})
-            SectionHeader(label = "Status")
-            ListRow(
-                title = "main",
-                subtitle = "↑1 vs origin/main · 2 uncommitted changes\na1b2c3d Add overview tab",
-                trailing = { Badge(label = "Dirty", role = BadgeRole.Error, mono = false) },
-            )
-            SectionHeader(label = "Branches", count = 2)
-            ListRow(
-                title = "main",
-                subtitle = "Add overview tab",
-                trailing = { Badge(label = "Current", role = BadgeRole.Active, mono = false) },
-            )
-            ListRow(title = "feature/x", subtitle = "tracks origin/feature/x")
-            SectionHeader(label = "Worktrees", count = 2)
-            ListRow(title = "/home/u/git/proj", subtitle = "main")
-            ListRow(title = "/home/u/git/proj-feature", subtitle = "feature/x")
-        }
+        GitOverviewTabRender()
     }
 
     /**
@@ -1460,37 +1426,7 @@ class DesignRenders {
      */
     @Test
     fun gitIssuesTab() = render("git-issues-tab") {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            ScreenHeader(title = "Git history", subtitle = "pocketshell")
-            SegmentedToggle(
-                labels = listOf("Overview", "History", "Issues"),
-                selectedIndex = 2,
-                onSelected = {},
-                fillSegments = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            SectionHeader(label = "GitHub issues", count = 3)
-            ListRow(
-                title = "view GitHub issues in-app (gh issue list)",
-                subtitle = "#649 · enhancement",
-                leading = { StatusDot(status = ConnectionStatus.Connected) },
-                trailing = { Badge(label = "Open", role = BadgeRole.Active, mono = false) },
-            )
-            ListRow(
-                title = "Open on GitHub action",
-                subtitle = "#648 · enhancement, slice-4",
-                leading = { StatusDot(status = ConnectionStatus.Idle) },
-                trailing = { Badge(label = "Closed", role = BadgeRole.Idle, mono = false) },
-            )
-            ListRow(
-                title = "Read-only repo overview tab",
-                subtitle = "#647",
-                leading = { StatusDot(status = ConnectionStatus.Idle) },
-                trailing = { Badge(label = "Closed", role = BadgeRole.Idle, mono = false) },
-            )
-        }
+        GitIssuesTabRender()
     }
 
     /**
@@ -1499,24 +1435,7 @@ class DesignRenders {
      */
     @Test
     fun gitIssuesConfigureGhHint() = render("git-issues-configure-gh-hint") {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            ScreenHeader(title = "Git history", subtitle = "pocketshell")
-            SegmentedToggle(
-                labels = listOf("Overview", "History", "Issues"),
-                selectedIndex = 2,
-                onSelected = {},
-                fillSegments = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            SectionHeader(label = "GitHub issues")
-            ListRow(
-                title = "Configure gh to see issues",
-                subtitle = "install gh (https://cli.github.com) and run `gh auth login`",
-                trailing = { Badge(label = "Setup", role = BadgeRole.Idle, mono = false) },
-            )
-        }
+        GitIssuesConfigureGhHintRender()
     }
 
     /**
@@ -1527,67 +1446,9 @@ class DesignRenders {
      * confirm row. Use it to eyeball spacing + the accent confirm button; the
      * emulator test drives the actual sheet.
      */
-    @OptIn(ExperimentalMaterial3Api::class)
     @Test
     fun gitCreateIssueForm() = render("git-create-issue-form") {
-        val fieldColors = OutlinedTextFieldDefaults.colors(
-            focusedTextColor = PocketShellColors.Text,
-            unfocusedTextColor = PocketShellColors.Text,
-            focusedBorderColor = PocketShellColors.Accent,
-            unfocusedBorderColor = PocketShellColors.BorderSoft,
-            focusedLabelColor = PocketShellColors.Accent,
-            unfocusedLabelColor = PocketShellColors.TextSecondary,
-            cursorColor = PocketShellColors.Accent,
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text(
-                text = "New GitHub issue",
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-            )
-            OutlinedTextField(
-                value = "Voice: trailing words dropped",
-                onValueChange = {},
-                singleLine = true,
-                label = { Text("Title") },
-                colors = fieldColors,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = "Steps to reproduce:\n1. Open the composer\n2. Dictate a long note",
-                onValueChange = {},
-                label = { Text("Body (optional)") },
-                colors = fieldColors,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(132.dp),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TextButton(onClick = {}) {
-                    Text(
-                        "Cancel",
-                        color = PocketShellColors.TextSecondary,
-                        style = PocketShellType.bodyDense,
-                    )
-                }
-                Button(
-                    onClick = {},
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.Background,
-                    ),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Create issue", style = PocketShellType.bodyDense)
-                }
-            }
-        }
+        GitCreateIssueFormRender()
     }
 
     /**

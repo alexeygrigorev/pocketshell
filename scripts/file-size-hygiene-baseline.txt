@@ -16,6 +16,6 @@
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh
-160299 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
+160115 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
 188725 shared/core-tmux/src/test/java/com/pocketshell/core/tmux/TmuxClientTest.kt
 189411 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt

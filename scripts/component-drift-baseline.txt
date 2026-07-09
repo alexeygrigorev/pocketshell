@@ -7,7 +7,7 @@
 #   here like any other accepted site.
 # regenerate with: scripts/check-component-drift.sh --update
 # lower numbers are better — re-baseline after migrating a screen.
-app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt 7
+app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt 6
 app/src/main/java/com/pocketshell/app/env/EnvScreen.kt 1
 app/src/main/java/com/pocketshell/app/fileexplorer/FileExplorerScreen.kt 1
 app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt 1

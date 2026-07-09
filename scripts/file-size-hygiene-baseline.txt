@@ -5,7 +5,6 @@
 # Ratchet rule: baselined files may shrink or disappear, but may not grow.
 # New non-exempt tracked files above threshold_bytes fail the guard.
 # Exemptions: vendor/generated/worktree dirs and shared/core-terminal.
-134030 app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt
 203585 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
 139372 app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt
 180197 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt

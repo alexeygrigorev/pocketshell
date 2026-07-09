@@ -17,5 +17,5 @@
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh
 160115 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
-188725 shared/core-tmux/src/test/java/com/pocketshell/core/tmux/TmuxClientTest.kt
+171240 shared/core-tmux/src/test/java/com/pocketshell/core/tmux/TmuxClientTest.kt
 189411 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt

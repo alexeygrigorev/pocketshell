@@ -12430,50 +12430,19 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #1158 (recurrence of #962/#1057): LATCH every session whose reconciled
-     * pane list reports the SERVER-TRUTH alternate-screen flag
-     * ([ParsedPane.alternateOn], from `#{alternate_on}`) into
-     * [altBufferAgentSessionIds] (sticky — never removed within the runtime).
-     * Called from [applyParsedPanes] on every reconcile (attach / switch /
-     * layout-change), so an idle full-screen agent that emits no fresh output is
-     * still caught: the tmux SERVER always knows the pane holds the alternate
-     * buffer even though the CLIENT emulator can't see it (the `-CC` capture-pane
-     * seed replays screen TEXT onto the client's MAIN buffer). This is the fix for
-     * the maintainer's fleet — an agent launched directly inside a
-     * `@ps_agent_kind=shell` session where live detection never binds.
-     *
-     * A no-op for a plain shell on the main buffer (the #894/#815 no-flap
-     * invariant): `alternate_on` is 0, nothing is latched, the tab stays hidden.
-     *
-     * Republishes the per-pane projection only when a NEW session is latched, so a
-     * steady-state reconcile allocates nothing.
+     * Issue #1158: thin forwarders into [TmuxAltBufferAgentLatch] (extracted for
+     * PR #1431 file-size hygiene). The SERVER-TRUTH `#{alternate_on}` latch and
+     * its per-pane projection live there; the VM just supplies its own state.
      */
-    private fun latchAltBufferAgentsFromParsed(parsed: List<ParsedPane>) {
-        var added = false
-        for (pane in parsed) {
-            if (!pane.alternateOn) continue
-            val sessionId = pane.sessionId.trim()
-            if (sessionId.isEmpty()) continue
-            if (altBufferAgentSessionIds.add(sessionId)) added = true
-        }
-        if (added) refreshAltBufferAgentPaneIds()
-    }
+    private fun latchAltBufferAgentsFromParsed(parsed: List<ParsedPane>) =
+        TmuxAltBufferAgentLatch.latchAltBufferAgentsFromParsed(
+            parsed, altBufferAgentSessionIds, paneRows, _altBufferAgentPaneIds,
+        )
 
-    /**
-     * Issue #1158: recompute [altBufferAgentPaneIds] from the current pane rows and
-     * the sticky [altBufferAgentSessionIds] latch. Called after a new alt-buffer
-     * sighting and on pane reconcile so a pane added to a latched session picks up
-     * (and never drops) the signal.
-     */
-    private fun refreshAltBufferAgentPaneIds() {
-        val next = paneRows.values
-            .filter { altBufferAgentSessionIds.contains(it.sessionId.trim()) }
-            .map { it.paneId }
-            .toSet()
-        if (_altBufferAgentPaneIds.value != next) {
-            _altBufferAgentPaneIds.value = next
-        }
-    }
+    private fun refreshAltBufferAgentPaneIds() =
+        TmuxAltBufferAgentLatch.refreshAltBufferAgentPaneIds(
+            altBufferAgentSessionIds, paneRows, _altBufferAgentPaneIds,
+        )
 
     /**
      * Issue #878: seed the #818 open-time default tab placeholder for a

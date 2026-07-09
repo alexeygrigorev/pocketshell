@@ -64,14 +64,19 @@ jobs:
       # (a small baseline allowlists the catalogued-but-not-yet-rewritten cases,
       # and an inline `// JUSTIFIED:` comment opts a legitimate non-IME guard
       # out), so it adds protection without reddening CI for tests it is not its
-      # job to fix. Cheap (< 1 s grep), runs BEFORE the Gradle test step. This is
-      # the machine backstop for the process.md "Regression-proof validity rules"
-      # (F2/F3) so the rule does not rely solely on reviewer memory. Additive —
-      # it does not touch the existing Unit/Python/Integration/emulator jobs.
-      - name: Test-validity guard (issue #657)
+      # job to fix. Runs BEFORE the Gradle test step. This is the machine backstop
+      # for the process.md "Regression-proof validity rules" (F2/F3) so the rule
+      # does not rely solely on reviewer memory. Additive — it does not touch the
+      # existing Unit/Python/Integration/emulator jobs. The guard now also carries
+      # the #1430 SEAM1 detector (unvetted connected-test state-injection seams —
+      # the #1158 forceActivePaneAltBufferForTest cheat class), and its self-test
+      # (below) plants a synthetic cheat + a vetted counterpart to prove SEAM1
+      # (and the other detectors) still fire red / stay green each push.
+      - name: Test-validity guard (issue #657/#848/#1048/#1154/#1430)
         run: |
-          chmod +x scripts/check-test-validity.sh
+          chmod +x scripts/check-test-validity.sh scripts/check-test-validity-selftest.sh
           scripts/check-test-validity.sh
+          scripts/check-test-validity-selftest.sh
 
       # Issue #848: per-push journey harness guard. Proof journeys listed by
       # scripts/ci-journey-suite.sh that launch MainActivity should use the

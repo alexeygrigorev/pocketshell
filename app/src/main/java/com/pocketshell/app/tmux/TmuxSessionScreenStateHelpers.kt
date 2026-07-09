@@ -1,0 +1,290 @@
+package com.pocketshell.app.tmux
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.sessions.HostTmuxSessionPickerState
+import com.pocketshell.uikit.model.SessionAgentKind
+
+/**
+ * Issue #1158 (R2 ART VerifyError fix): the session's Terminal/Conversation
+ * [TmuxSessionTabState], derived in its OWN @Composable so the alt-buffer wiring
+ * does not inflate the enormous [TmuxSessionScreen] method past ART's dex
+ * verifier register limit.
+ *
+ * The reviewer found that adding the `altBufferAgentPaneIds` collectAsState, the
+ * `altBufferAgent` local and the extra `remember(...)` key directly into the
+ * mega-composable body tipped its method past the ART verifier's register
+ * ceiling (`VerifyError ... copy1 v273<-...`), so the session screen - the app's
+ * MAIN screen - crashed at class load on-device (invisible to the JVM verifier).
+ * Extracting the derivation here moves ALL of that register pressure
+ * (`recordedAgentKind` projection, `altBufferAgentPaneIds` collectAsState,
+ * `altBufferAgent` derivation, the `derivedStateOf` remember) into this small
+ * method's own frame, letting [TmuxSessionScreen] verify again.
+ *
+ * Behaviour is IDENTICAL to the previous inline block: it returns a
+ * [State]<[TmuxSessionTabState]> which the caller reads via `by`, so the
+ * derived-state read stays attributed to the caller's restart scope and the tab
+ * chrome still stays OFF the 60ms agent-streaming flush (#1085). The alt-buffer
+ * signal is a detection-INDEPENDENT positive agent signal (see
+ * [TmuxSessionViewModel.altBufferAgentPaneIds]); a plain shell on the main buffer
+ * never latches it, preserving the #894/#815 no-flap invariant.
+ */
+@Composable
+internal fun rememberTmuxSessionTabState(
+    viewModel: TmuxSessionViewModel,
+    surfaceConversationPaneId: String?,
+    presumedAgent: Boolean,
+    currentSessionRecordedKind: SessionAgentKind?,
+    agentConversationsState: State<Map<String, AgentConversationUiState>>,
+): State<TmuxSessionTabState> {
+    val recordedAgentKind = tmuxSessionRecordedAgentKind(currentSessionRecordedKind)
+    // Issue #1158: the STICKY set of pane ids whose emulator has been seen on the
+    // ALTERNATE screen buffer - the detection-independent positive agent signal
+    // that keeps the Conversation tab reachable for an agent launched directly
+    // inside a shell-recorded session (where `@ps_agent_kind=shell`, the
+    // confirmed-shell verdict is never cleared, and live detection never binds).
+    val altBufferAgentPaneIds by viewModel.altBufferAgentPaneIds.collectAsState()
+    val altBufferAgent = surfaceConversationPaneId != null &&
+        surfaceConversationPaneId in altBufferAgentPaneIds
+    return remember(
+        surfaceConversationPaneId,
+        presumedAgent,
+        recordedAgentKind,
+        altBufferAgent,
+    ) {
+        derivedStateOf {
+            tmuxSessionTabState(
+                surfaceConversationPaneId?.let { agentConversationsState.value[it] },
+                presumedAgent,
+                recordedAgentKind,
+                altBufferAgent,
+            )
+        }
+    }
+}
+
+@Composable
+internal fun TmuxOutboundQueueAutoFlushEffect(
+    sessionLive: Boolean,
+    targetSessionKey: String,
+    promptComposerViewModel: PromptComposerViewModel,
+    controller: OutboundQueueAutoFlushController,
+) {
+    LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
+        promptComposerViewModel.outboundQueueItems.collect {
+            controller.onQueueSnapshotChanged(sessionLive) { excludingIds ->
+                promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
+            }
+        }
+    }
+}
+
+/**
+ * Issue #900: state holder for the screen-level outbound queue auto-flush
+ * effects. It resets the per-live-window failure exclusion set when the
+ * connection window changes, requeues stale in-flight rows when a target becomes
+ * live, and retries at most one queue row per queue snapshot.
+ */
+internal class OutboundQueueAutoFlushController {
+    private var windowKey: Pair<Boolean, String>? = null
+    private var autoRetriedIds: Set<String> = emptySet()
+
+    fun onConnectionWindowChanged(
+        sessionLive: Boolean,
+        targetSessionId: String,
+        requeueStaleInFlight: () -> Unit,
+    ) {
+        val nextKey = sessionLive to targetSessionId
+        if (nextKey == windowKey) return
+        windowKey = nextKey
+        autoRetriedIds = emptySet()
+        if (sessionLive) requeueStaleInFlight()
+    }
+
+    fun onQueueSnapshotChanged(
+        sessionLive: Boolean,
+        retryNext: (excludingIds: Set<String>) -> String?,
+    ): String? {
+        if (!sessionLive) return null
+        val retriedId = retryNext(autoRetriedIds) ?: return null
+        autoRetriedIds = autoRetriedIds + retriedId
+        return retriedId
+    }
+}
+
+/**
+ * Issue #463: the short leaf label for the header project crumb, derived
+ * from the active pane's working directory (the project path). Returns the
+ * last path segment (e.g. `/home/alexey/git/pocketshell` -> `pocketshell`,
+ * `~/work` -> `work`). The home directory and root collapse to `~` and `/`
+ * respectively so the crumb still reads as a place, and a blank/odd path
+ * falls back to the raw trimmed value.
+ */
+internal fun projectCrumbLabel(path: String): String {
+    val trimmed = path.trim().trimEnd('/')
+    if (trimmed.isEmpty()) return "/"
+    if (trimmed == "~") return "~"
+    val leaf = trimmed.substringAfterLast('/')
+    return leaf.ifBlank { trimmed }
+}
+
+/**
+ * Issue #686 (D28, reveal/session-identity slice 1): compute the header project
+ * crumb label keyed to the SINGLE target session identity.
+ *
+ * The header is composed from two independently-timed sources: the session
+ * label reads the nav-route TARGET `sessionName` (correct immediately), while
+ * the project crumb is derived from the currently-visible pane's cwd. During a
+ * cross-session switch (especially back->picker->open-B, which runs no teardown)
+ * the VISIBLE pane is still the LEAVING session's for several frames, so its cwd
+ * resolves to the LEAVING project. The two sources then DESYNC - the label
+ * already shows the target while the crumb still wears the leaving session's
+ * project folder, so the header paints TWO identities at once (the v0.3.34
+ * dogfood report: `...-session-b` label + `...-proj-a` crumb over a blank pane).
+ *
+ * The fix keys the crumb to the SAME target session identity the label uses, via
+ * TWO guards (a single boolean gate is not enough - back->open-B has sub-windows
+ * where the gate is briefly false while the visible pane is still the leaving
+ * one):
+ *   1. while a switch is hiding the terminal ([switchHidesTerminal]) the crumb is
+ *      suppressed (loading window), AND
+ *   2. the crumb is suppressed whenever the VISIBLE pane's session
+ *      ([visiblePaneSessionName]) does NOT match the nav-route TARGET
+ *      ([targetSessionName]) - i.e. the crumb only renders when its cwd belongs
+ *      to the session the header is keyed to.
+ * Once the target's own pane is visible the crumb returns, keyed to the target.
+ *
+ * Pure so it can be unit-tested deterministically (the desync is a transient
+ * mid-switch flash that is hard to sample reliably on an emulator).
+ *
+ * @param projectPath the visible pane's working directory (null when unknown).
+ * @param switchHidesTerminal true while a cross-session switch is loading.
+ * @param targetSessionName the nav-route TARGET session the header is keyed to.
+ * @param visiblePaneSessionName the session the currently-visible pane belongs
+ *   to (null when unknown). When it differs from [targetSessionName] the crumb
+ *   would wear a NON-target session's project, so it is suppressed.
+ * @return the crumb leaf label, or null when there should be NO crumb.
+ */
+internal fun keyedProjectCrumbLabel(
+    projectPath: String?,
+    switchHidesTerminal: Boolean,
+    targetSessionName: String,
+    visiblePaneSessionName: String?,
+): String? {
+    if (switchHidesTerminal) return null
+    // Only show the crumb when the visible pane belongs to the target session.
+    // A null visible-pane session (unknown) is allowed through so the steady
+    // state still renders the crumb (the active pane is the target's), but a
+    // KNOWN mismatch (the leaving session's pane is still shown) is suppressed.
+    if (visiblePaneSessionName != null && visiblePaneSessionName != targetSessionName) {
+        return null
+    }
+    return projectPath?.let(::projectCrumbLabel)
+}
+
+internal fun sessionSwitcherPages(
+    state: HostTmuxSessionPickerState,
+    currentSessionName: String,
+): List<SessionSwitcherPage> {
+    val current = SessionSwitcherPage(
+        name = currentSessionName,
+        statusLabel = "current",
+        selectable = false,
+    )
+    return when (state) {
+        HostTmuxSessionPickerState.Idle,
+        is HostTmuxSessionPickerState.Loading,
+        -> listOf(current.copy(statusLabel = "loading same-host sessions"))
+        is HostTmuxSessionPickerState.Ready -> {
+            val rows = state.rows.map { row ->
+                SessionSwitcherPage(
+                    name = row.name,
+                    statusLabel = when {
+                        row.name == currentSessionName -> "current"
+                        row.attached -> "attached"
+                        else -> "available"
+                    },
+                    selectable = true,
+                )
+            }
+            val currentPage = rows.firstOrNull { it.name == currentSessionName }
+                ?.copy(statusLabel = "current", selectable = false)
+                ?: current
+            listOf(currentPage) + rows.filterNot { it.name == currentSessionName }
+        }
+        is HostTmuxSessionPickerState.Fallback -> listOf(
+            current.copy(statusLabel = state.message, selectable = false),
+        )
+        is HostTmuxSessionPickerState.ConnectError -> {
+            val host = state.request.host
+            listOf(
+                current.copy(
+                    statusLabel = "Couldn't reach ${host.username}@${host.hostname}:${host.port}.",
+                    selectable = false,
+                ),
+            )
+        }
+    }
+}
+
+/**
+ * Issue #652 (epic #636): decide whether a unified-pager settle event should
+ * trigger a cross-session warm switch.
+ *
+ * The unified pager (#626) spans every open session on the host: the ACTIVE
+ * session's panes come first, then each cached session's panes. The pager
+ * remembers its page index across recompositions and across a session switch.
+ * When the user deliberately opens session A (tap a row -> nav target session
+ * becomes A -> `connect(A)` makes A active -> `rebuildUnifiedPanes()` reorders
+ * the list so A heads it), the pager can still be sitting on a *stale* index
+ * that now resolves to a DIFFERENT session's pane. The settle collector would
+ * then fire `onReplaceTmuxSession(thatOtherSession)`, yanking the user out of
+ * the session they just tapped and routing their next prompt to the wrong
+ * project - the data-loss regression reported in #652.
+ *
+ * A settle is a genuine user-driven cross-session swipe ONLY when the pager is
+ * already aligned with the deliberate nav target ([navTargetSession]); i.e. the
+ * page the user is actually looking at agrees with the session the navigation
+ * asked for. Until the pager re-aligns to a freshly-tapped target, settle
+ * events are suppressed so the explicit tap always wins over a stale index.
+ *
+ * @param settledPaneSession the session name owning the pane the pager settled
+ *   on (`null` when it can't be resolved - e.g. the list is mid-rebuild).
+ * @param navTargetSession the session the current navigation destination asked
+ *   to open (the user's explicit choice).
+ * @param pagerAlignedToNavTarget whether the pager has already realigned to
+ *   [navTargetSession] since the last nav-target change. Settles before
+ *   realignment are stale-index artifacts and must not switch sessions.
+ * @return the session to warm-switch to, or `null` to ignore the settle.
+ */
+internal fun settleSessionSwitchTarget(
+    settledPaneSession: String?,
+    navTargetSession: String,
+    pagerAlignedToNavTarget: Boolean,
+    // Issue #634 (C->A return-to-origin content-bleed): a settle is only a
+    // GENUINE cross-session swipe if the user physically dragged the pager
+    // since it last aligned to the nav target. The app's own
+    // `scrollToPage` realignment after a switch - and any lagging
+    // stale-index recomposition echo that resolves to the session we JUST
+    // LEFT - produces a settle with NO preceding user drag. Honoring those
+    // drag-less settles is exactly what intermittently warm-switched the
+    // user back to session C right after they returned to A (both sessions'
+    // frames then co-resident in the viewport). Requiring a real drag makes
+    // the deliberate return-to-origin switch impossible to undo by a phantom
+    // settle, while a real finger swipe (which always raises a drag
+    // interaction) still switches.
+    userDraggedSinceAlignment: Boolean,
+): String? {
+    if (!pagerAlignedToNavTarget) return null
+    if (!userDraggedSinceAlignment) return null
+    if (settledPaneSession == null) return null
+    if (settledPaneSession == navTargetSession) return null
+    return settledPaneSession
+}

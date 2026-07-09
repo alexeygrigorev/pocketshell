@@ -902,6 +902,12 @@ internal class RealTmuxClient(
             ?: CommandTimeoutGate.realTime(readerActivityNanos = { lastReaderActivityNanos })
     private val clientId: Long = NEXT_CLIENT_ID.incrementAndGet()
     private val clientHash: Int = System.identityHashCode(this)
+    private val disconnectDiagnostics = TmuxClientDisconnectDiagnostics(
+        sessionName = sessionName,
+        commandTimeoutMs = commandTimeoutMs,
+        clientId = clientId,
+        clientHash = clientHash,
+    )
 
     // Child scope rooted under the caller's scope. SupervisorJob() so a
     // failing reader doesn't tear down peers; Dispatchers.IO because the
@@ -940,7 +946,7 @@ internal class RealTmuxClient(
     private val preRegistrationOutput =
         PreRegistrationOutputBookkeeper<PaneOutputPipe>(
             sessionName = sessionName,
-            diagnosticFields = ::commonDiagnosticFields,
+            diagnosticFields = disconnectDiagnostics::commonDiagnosticFields,
         )
 
     // Issue #173: latched signal that the reader loop has exited (or
@@ -979,25 +985,6 @@ internal class RealTmuxClient(
     private var staleResponseBlocksToIgnore: Int = 0
     private val eventBusDroppedEvents = AtomicInteger(0)
     private val eventBusOverflowDiagnosticEmitted = AtomicBoolean(false)
-
-    @Volatile
-    private var readerExitIntent: ReaderExitIntent = ReaderExitIntent.Unknown
-
-    // Issue #998: latched when the reader parses a `%exit server exited` (the
-    // tmux SERVER announcing shutdown) before the channel EOFs. The reader-exit
-    // classifier reads this so a server-death drop is reported as
-    // [ReaderDisconnectCause.ServerExited] — categorically distinct from an
-    // ordinary [ReaderDisconnectCause.ReadEof] transport blip. An ordinary
-    // `%exit` with no "server exited" reason (e.g. a plain client exit) does NOT
-    // set this.
-    @Volatile
-    private var serverExitedInBand: Boolean = false
-
-    @Volatile
-    private var readerExitCommandKind: String? = null
-
-    @Volatile
-    private var readerExitTimeoutMode: CommandTimeoutMode? = null
 
     // Serialises concurrent sendCommand calls. tmux can only handle one
     // at a time; we queue on the Kotlin side instead of letting them
@@ -1620,13 +1607,13 @@ internal class RealTmuxClient(
             } else {
                 CommandTimeoutMode.FatalClose
             }
-            recordCommandTimeout(
+            disconnectDiagnostics.recordCommandTimeout(
                 kind = kind,
                 timeoutMode = effectiveTimeoutMode,
                 writeCompleted = wasWritten,
             )
             if (effectiveTimeoutMode != CommandTimeoutMode.FatalClose) {
-                val lateDrainMs = bestEffortLateResponseDrainMs()
+                val lateDrainMs = disconnectDiagnostics.bestEffortLateResponseDrainMs()
                 Log.w(
                     ISSUE_244_DIAG_TAG,
                     "tmux-command-${effectiveTimeoutMode.logName}-timeout kind=$kind timeoutMs=$commandTimeoutMs " +
@@ -1698,7 +1685,7 @@ internal class RealTmuxClient(
                     "tmux-command-fatal-timeout-rode-through kind=$kind timeoutMs=$commandTimeoutMs " +
                         "transportProvenAlive=true (not closing SSH shell — #979)",
                 )
-                recordFatalTimeoutRodeThrough(kind = kind)
+                disconnectDiagnostics.recordFatalTimeoutRodeThrough(kind = kind)
                 deferred.completeExceptionally(exception)
                 synchronized(responseCorrelationLock) {
                     // The line was written; if tmux still owes us a `%begin/%end`
@@ -1753,7 +1740,7 @@ internal class RealTmuxClient(
                         _outputBacklogOverflows.tryEmit(overflow)
                     },
                     diagnosticFields = {
-                        commonDiagnosticFields() + mapOf("session" to sessionName)
+                        disconnectDiagnostics.commonDiagnosticFields() + mapOf("session" to sessionName)
                     },
                 )
             },
@@ -1810,7 +1797,7 @@ internal class RealTmuxClient(
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {
-        markReaderExitIntent(ReaderExitIntent.DetachOrReplace)
+        disconnectDiagnostics.markReaderExitIntent(ReaderExitIntent.DetachOrReplace)
         // Idempotent — once we have already torn down, there is no
         // server-side state to release. Run [close] anyway so callers
         // can use this as their single teardown entry point without
@@ -1873,7 +1860,11 @@ internal class RealTmuxClient(
         timeoutMode: CommandTimeoutMode? = null,
     ) {
         if (closed) return
-        markReaderExitIntent(intent, commandKind = commandKind, timeoutMode = timeoutMode)
+        disconnectDiagnostics.markReaderExitIntent(
+            intent,
+            commandKind = commandKind,
+            timeoutMode = timeoutMode,
+        )
         closed = true
         connected = false
         paneOutputPipes.values.forEach { it.close() }
@@ -1884,8 +1875,8 @@ internal class RealTmuxClient(
         // so observers like [TmuxSessionViewModel] can flip their
         // connection-status state without racing the scope cancel.
         publishDisconnectEvent(
-            disconnectEventFor(
-                cause = classifyReaderExit("local"),
+            disconnectDiagnostics.disconnectEventFor(
+                cause = disconnectDiagnostics.classifyReaderExit("local", closed = closed),
                 source = "local",
             ),
         )
@@ -1906,17 +1897,6 @@ internal class RealTmuxClient(
             )
         }
         clientScope.cancel()
-    }
-
-    private fun markReaderExitIntent(
-        intent: ReaderExitIntent,
-        commandKind: String? = null,
-        timeoutMode: CommandTimeoutMode? = null,
-    ) {
-        if (readerExitIntent.priority > intent.priority) return
-        readerExitIntent = intent
-        readerExitCommandKind = commandKind
-        readerExitTimeoutMode = timeoutMode
     }
 
     /**
@@ -2102,7 +2082,7 @@ internal class RealTmuxClient(
                         // it as ServerExited and the reconnect path drops to the
                         // list instead of resurrecting via `new-session -A`.
                         if (isTmuxServerExitReason(event.reason)) {
-                            serverExitedInBand = true
+                            disconnectDiagnostics.markServerExitedInBand()
                             Log.i(
                                 ISSUE_105_DIAG_TAG,
                                 "tmux-exit-server-died session=$sessionName reason=${event.reason}",
@@ -2148,9 +2128,12 @@ internal class RealTmuxClient(
                 }
             }
         } finally {
-            val disconnectCause = classifyReaderExit(readerExitSource)
+            val disconnectCause = disconnectDiagnostics.classifyReaderExit(
+                readerExitSource,
+                closed = closed,
+            )
             publishDisconnectEvent(
-                disconnectEventFor(
+                disconnectDiagnostics.disconnectEventFor(
                     cause = disconnectCause,
                     source = readerExitSource,
                     exceptionClass = readerFailureClass,
@@ -2159,21 +2142,15 @@ internal class RealTmuxClient(
             )
             TmuxClientDiagnostics.record(
                 "tmux_client_reader_exit",
-                buildMap {
-                    put("session", sessionName)
-                    put("source", readerExitSource)
-                    put("disconnectCause", disconnectCause.logValue)
-                    put("disconnectReason", disconnectReasonFor(disconnectCause).logValue)
-                    put("intent", readerExitIntent.logValue)
-                    putAll(commonDiagnosticFields())
-                    put("closed", closed)
-                    put("connected", connected)
-                    put("eventBusDroppedEvents", eventBusDroppedEvents.get())
-                    readerExitCommandKind?.let { put("commandKind", it) }
-                    readerExitTimeoutMode?.let { put("timeoutMode", it.logName) }
-                    readerFailureClass?.let { put("cause", it) }
-                    readerFailureMessage?.let { put("message", it) }
-                },
+                disconnectDiagnostics.readerExitDiagnosticFields(
+                    source = readerExitSource,
+                    cause = disconnectCause,
+                    closed = closed,
+                    connected = connected,
+                    eventBusDroppedEvents = eventBusDroppedEvents.get(),
+                    exceptionClass = readerFailureClass,
+                    message = readerFailureMessage,
+                ),
             )
             // Issue #173: the reader has exited — either because [close]
             // already flipped `closed` (in which case `_disconnected` is
@@ -2264,7 +2241,7 @@ internal class RealTmuxClient(
             if (eventBusOverflowDiagnosticEmitted.compareAndSet(false, true)) {
                 TmuxClientDiagnostics.record(
                     "tmux_client_eventbus_overflow",
-                    commonDiagnosticFields() + mapOf(
+                    disconnectDiagnostics.commonDiagnosticFields() + mapOf(
                         "session" to sessionName,
                         "event" to event.javaClass.simpleName,
                         "droppedEvents" to dropped,
@@ -2282,115 +2259,16 @@ internal class RealTmuxClient(
         }
     }
 
-    private fun recordCommandTimeout(
-        kind: String,
-        timeoutMode: CommandTimeoutMode,
-        writeCompleted: Boolean,
-    ) {
-        TmuxClientDiagnostics.record(
-            "tmux_client_command_timeout",
-            commonDiagnosticFields() + mapOf(
-                "session" to sessionName,
-                "commandKind" to kind,
-                "timeoutMode" to timeoutMode.logName,
-                "timeoutMs" to commandTimeoutMs,
-                "writeCompleted" to writeCompleted,
-            ),
-        )
-    }
-
-    private fun bestEffortLateResponseDrainMs(): Long =
-        BEST_EFFORT_LATE_RESPONSE_DRAIN_MS.coerceAtMost(commandTimeoutMs).coerceAtLeast(1L)
-
-    /**
-     * Issue #979: a `FatalClose` command timed out, but the transport-liveness
-     * oracle (#986/#964) proves the SSH link is still alive, so we did NOT close
-     * the SSH shell — the slow reply rode through. Recorded so the reviewer can
-     * tell a self-inflicted-drop-avoided event apart from a genuine command
-     * timeout that DID tear the channel down.
-     */
-    private fun recordFatalTimeoutRodeThrough(kind: String) {
-        TmuxClientDiagnostics.record(
-            "tmux_client_fatal_timeout_rode_through",
-            commonDiagnosticFields() + mapOf(
-                "session" to sessionName,
-                "commandKind" to kind,
-                "timeoutMs" to commandTimeoutMs,
-                "transportProvenAlive" to true,
-            ),
-        )
-    }
-
-    private fun classifyReaderExit(source: String): ReaderDisconnectCause =
-        when {
-            readerExitIntent == ReaderExitIntent.CommandTimeout -> ReaderDisconnectCause.CommandTimeout
-            readerExitIntent == ReaderExitIntent.DetachOrReplace -> ReaderDisconnectCause.DetachOrReplace
-            closed && readerExitIntent == ReaderExitIntent.LocalClose -> ReaderDisconnectCause.LocalClose
-            // Issue #998: the server announced shutdown in-band before the EOF.
-            // This dominates the generic ReadEof/ReadFailure classification —
-            // it's a confirmed server-death, not an ordinary transport blip —
-            // but stays below our own intentional teardowns (close / detach /
-            // command-timeout) above so a clean local close is never mislabelled.
-            serverExitedInBand -> ReaderDisconnectCause.ServerExited
-            source == "read_failure" -> ReaderDisconnectCause.ReadFailure
-            source == "eof" -> ReaderDisconnectCause.ReadEof
-            closed -> ReaderDisconnectCause.LocalClose
-            else -> ReaderDisconnectCause.Unknown
-        }
-
-    private fun disconnectEventFor(
-        cause: ReaderDisconnectCause,
-        source: String,
-        exceptionClass: String? = null,
-        message: String? = null,
-    ): TmuxDisconnectEvent =
-        TmuxDisconnectEvent(
-            reason = disconnectReasonFor(cause),
-            source = source,
-            intent = readerExitIntent.logValue,
-            commandKind = readerExitCommandKind,
-            timeoutMode = readerExitTimeoutMode?.logName,
-            exceptionClass = exceptionClass,
-            message = message,
-        )
-
-    private fun disconnectReasonFor(cause: ReaderDisconnectCause): TmuxDisconnectReason =
-        when (cause) {
-            ReaderDisconnectCause.LocalClose -> TmuxDisconnectReason.ExplicitClose
-            ReaderDisconnectCause.DetachOrReplace -> TmuxDisconnectReason.ExplicitDetach
-            ReaderDisconnectCause.CommandTimeout -> TmuxDisconnectReason.CommandTimeout
-            ReaderDisconnectCause.ServerExited -> TmuxDisconnectReason.ServerExited
-            ReaderDisconnectCause.ReadEof -> TmuxDisconnectReason.ReaderEof
-            ReaderDisconnectCause.ReadFailure -> TmuxDisconnectReason.ReaderException
-            ReaderDisconnectCause.Unknown -> TmuxDisconnectReason.Unknown
-        }
-
     private fun publishDisconnectEvent(event: TmuxDisconnectEvent) {
         val current = _disconnectEvent.value
-        if (current == null || disconnectPriority(event.reason) >= disconnectPriority(current.reason)) {
+        if (
+            current == null ||
+            disconnectDiagnostics.disconnectPriority(event.reason) >=
+            disconnectDiagnostics.disconnectPriority(current.reason)
+        ) {
             _disconnectEvent.value = event
         }
     }
-
-    private fun disconnectPriority(reason: TmuxDisconnectReason): Int =
-        when (reason) {
-            TmuxDisconnectReason.Unknown -> 0
-            TmuxDisconnectReason.ReaderEof -> 1
-            TmuxDisconnectReason.ReaderException -> 2
-            TmuxDisconnectReason.ExplicitClose -> 3
-            TmuxDisconnectReason.ExplicitDetach -> 4
-            TmuxDisconnectReason.CommandTimeout -> 5
-            // Issue #998: a confirmed in-band server-death is the most
-            // authoritative drop cause — it must not be downgraded to a generic
-            // ReaderEof if the EOF event lands a moment later.
-            TmuxDisconnectReason.ServerExited -> 6
-        }
-
-    private fun commonDiagnosticFields(): Map<String, Any?> =
-        mapOf(
-            "clientId" to clientId,
-            "clientHash" to clientHash,
-        )
 
     /**
      * Write a single command line to [stdin], appending the `\n` tmux
@@ -2404,7 +2282,6 @@ internal class RealTmuxClient(
     private companion object {
         private const val DEFAULT_SESSION_NAME = "pocketshell"
         private const val DEFAULT_COMMAND_TIMEOUT_MS = 10_000L
-        private const val BEST_EFFORT_LATE_RESPONSE_DRAIN_MS = 1_000L
         private val NEXT_CLIENT_ID = AtomicLong(0L)
 
         private fun escapeSingleQuoted(input: String): String =
@@ -2525,44 +2402,6 @@ internal class RealTmuxClient(
                 bytes
             }
         }
-    }
-
-    private enum class CommandTimeoutMode {
-        FatalClose,
-        BestEffortDrain,
-        FailOpenDrain,
-        ;
-
-        val logName: String
-            get() = when (this) {
-                FatalClose -> "fatal"
-                BestEffortDrain -> "best-effort"
-                FailOpenDrain -> "fail-open"
-            }
-    }
-
-    private enum class ReaderExitIntent(
-        val logValue: String,
-        val priority: Int,
-    ) {
-        Unknown("unknown", 0),
-        LocalClose("local_close", 1),
-        DetachOrReplace("detach_or_replace", 2),
-        CommandTimeout("command_timeout", 3),
-    }
-
-    private enum class ReaderDisconnectCause(val logValue: String) {
-        LocalClose("local_close"),
-        DetachOrReplace("detach_or_replace"),
-        CommandTimeout("command_timeout"),
-        // Issue #998: the in-band `%exit server exited` arrived before the EOF —
-        // the tmux SERVER announced it is shutting down (host reboot / kill).
-        // This is server-death, NOT an ordinary transport blip, so a reattach
-        // must drop to the list instead of resurrecting via `new-session -A`.
-        ServerExited("server_exited"),
-        ReadEof("read_eof"),
-        ReadFailure("read_failure"),
-        Unknown("unknown"),
     }
 
     private class PaneOutputPipe private constructor(

@@ -6,11 +6,11 @@
 # New non-exempt tracked files above threshold_bytes fail the guard.
 # Exemptions: vendor/generated/worktree dirs and shared/core-terminal.
 187779 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
-155549 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
-213802 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
-924542 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
-224755 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
+153378 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
+200516 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
+919037 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
+200794 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh
-141836 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
+134918 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt

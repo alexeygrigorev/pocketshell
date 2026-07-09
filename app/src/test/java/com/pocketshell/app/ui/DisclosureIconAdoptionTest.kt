@@ -16,7 +16,7 @@ import java.io.File
  *  - `FolderListScreen.kt` must no longer carry the private `DisclosureIndicator`
  *    composable (the two-distinct-triangle-Paths affordance) and must call the
  *    shared `DisclosureIcon`.
- *  - `ConversationSystemNoteRow` (`TmuxSessionScreen.kt`) must lead its header
+ *  - `ConversationSystemNoteRow` (`TmuxConversationPane.kt`) must lead its header
  *    with a `DisclosureIcon` (it previously had NO affordance at all).
  *
  * Runs in the plain `:app:testDebugUnitTest` Unit CI job.
@@ -45,10 +45,10 @@ class DisclosureIconAdoptionTest {
 
     @Test
     fun conversationSystemNoteRowLeadsWithSharedDisclosureIcon() {
-        val src = locate("tmux/TmuxSessionScreen.kt")
+        val src = locate("tmux/TmuxConversationPane.kt")
 
         val rowStart = src.indexOf("fun ConversationSystemNoteRow(")
-        assertTrue("ConversationSystemNoteRow not found in TmuxSessionScreen.kt", rowStart >= 0)
+        assertTrue("ConversationSystemNoteRow not found in TmuxConversationPane.kt", rowStart >= 0)
         // Look at the composable body (bounded window) to confirm it now carries
         // the shared affordance it previously lacked.
         val rowBody = src.substring(rowStart, minOf(rowStart + 3000, src.length))

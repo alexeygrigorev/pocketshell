@@ -11,11 +11,11 @@
 226939 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
 950083 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
 278779 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
-167942 app/src/test/java/com/pocketshell/app/session/AgentConversationRepositoryTest.kt
-757167 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
+138541 app/src/test/java/com/pocketshell/app/session/AgentConversationRepositoryTest.kt
+738646 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh
 160115 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
 171240 shared/core-tmux/src/test/java/com/pocketshell/core/tmux/TmuxClientTest.kt
-189411 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt
+153076 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt

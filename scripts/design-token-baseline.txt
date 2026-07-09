@@ -14,7 +14,7 @@ app/src/main/java/com/pocketshell/app/fileviewer/MarkdownView.kt 2
 app/src/main/java/com/pocketshell/app/hosts/HostListScreen.kt 1
 app/src/main/java/com/pocketshell/app/hosts/QrScannerScreen.kt 1
 app/src/main/java/com/pocketshell/app/hosts/SshKeysScreen.kt 3
-app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt 19
+app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt 15
 app/src/main/java/com/pocketshell/app/projects/RepoBrowserScreen.kt 2
 app/src/main/java/com/pocketshell/app/projects/WatchedFoldersChipRow.kt 1
 app/src/main/java/com/pocketshell/app/projects/WatchedFoldersScreen.kt 2

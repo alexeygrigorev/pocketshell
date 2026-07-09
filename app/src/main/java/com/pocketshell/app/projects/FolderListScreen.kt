@@ -8,7 +8,6 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -18,11 +17,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,7 +31,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
@@ -55,8 +51,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -64,7 +58,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -83,8 +76,6 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.ButtonVariant
-import com.pocketshell.uikit.components.ConfirmDialog
-import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
@@ -95,7 +86,6 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
-import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
@@ -2497,455 +2487,6 @@ private fun ProfileChip(
         )
     }
 }
-
-/**
- * Compact provider/profile label for the [ProfileChip] (issue #858). The
- * recorded profile is the host's human label (e.g. `"Claude (Z.AI)"`); the chip
- * wants just the distinguishing provider part, so when the label is of the form
- * `Kind (Provider)` it shows `Provider` (e.g. `"Z.AI"`). Any other shape (a bare
- * profile name) is shown verbatim. Returns `null` for a blank label so the
- * caller renders no chip.
- */
-internal fun profileChipLabel(profile: String?): String? {
-    val raw = profile?.trim().orEmpty()
-    if (raw.isEmpty()) return null
-    val open = raw.lastIndexOf('(')
-    val close = raw.lastIndexOf(')')
-    if (open in 0 until close) {
-        val inner = raw.substring(open + 1, close).trim()
-        if (inner.isNotEmpty()) return inner
-    }
-    return raw
-}
-
-/**
- * Compact host-detail tree gutter. The shared density token keeps the default
- * 16 dp workspace nesting step for generic tree rows, but this screen follows
- * the tighter terminal-style host-detail mockup (#565): project rows advance by
- * only one 8 dp rung and session connectors use a narrow 16 dp cell.
- */
-private val treeProjectIndent = PocketShellSpacing.sm
-
-/**
- * Indent applied to the session-children column under an expanded project so the
- * `├─/└─` spine sits just under the project's compact chevron/dot lead (#503,
- * #565). The connector cell ([treeConnectorCellWidth]) lives inside this column
- * and the spine's vertical x ([treeSpineX]) is the visual left edge of the child
- * sub-tree.
- */
-private val treeChildIndent = PocketShellSpacing.sm
-
-/** Extra offset that makes window rows read as children of a session row. */
-private val treeWindowChildIndent = PocketShellSpacing.lg
-
-/** Width of the per-row connector cell that carries the spine + horizontal stub. */
-private val treeConnectorCellWidth = PocketShellSpacing.lg
-
-/** Horizontal position of the vertical spine inside the connector cell. */
-private val treeSpineX = PocketShellSpacing.xs
-
-/**
- * One session row hung off the project's tree spine (#503).
- *
- * The connector is split into a leading fixed-width [Canvas] cell plus the row
- * content so the whole child block reads as ONE continuous vertical spine with a
- * clean `├─` per row and a `└─` terminating the last child:
- *
- *  - **Continuous spine:** every non-last row draws the vertical from the very
- *    top edge (`y = 0`) to the very bottom edge (`y = height`) with a butt cap,
- *    and the child [Column] carries no inter-row gap, so adjacent cells abut
- *    pixel-to-pixel and the spine never seams. The last row draws the vertical
- *    only down to the stub's `y` (the `└` corner), so the spine stops exactly at
- *    the last child rather than dangling below it.
- *  - **No stray stripes:** the spine x and stub y are snapped to whole device
- *    pixels so a 1 dp hairline lands on a single column/row of pixels instead of
- *    smearing across two and reading as a broken/double line.
- *  - **Clean stub:** the horizontal stub runs from the spine to the cell's right
- *    edge (the session row's leading edge) at the row's vertical centre, where
- *    the session status dot sits.
- */
-@Composable
-private fun TreeChildRow(
-    last: Boolean,
-    connectorTestTag: String,
-    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min),
-    ) {
-        val connectorColor = PocketShellColors.Border
-        Canvas(
-            modifier = Modifier
-                .width(treeConnectorCellWidth)
-                .fillMaxHeight()
-                .testTag(connectorTestTag),
-        ) {
-            val stroke = 1.dp.toPx()
-            // Snap the spine x and stub y to whole device pixels so the 1 dp
-            // hairline paints on a single pixel column/row — sub-pixel placement
-            // is what made the spine read as discontinuous between rows (#503).
-            val x = snapToPixel(treeSpineX.toPx())
-            val stubY = snapToPixel(size.height * 0.5f) + 0.5f
-            val verticalEnd = if (last) stubY else size.height
-            drawLine(
-                color = connectorColor,
-                start = Offset(x, 0f),
-                end = Offset(x, verticalEnd),
-                strokeWidth = stroke,
-                cap = StrokeCap.Butt,
-            )
-            drawLine(
-                color = connectorColor,
-                start = Offset(x, stubY),
-                end = Offset(size.width, stubY),
-                strokeWidth = stroke,
-                cap = StrokeCap.Butt,
-            )
-        }
-        content()
-    }
-}
-
-/** Round a px value to the nearest whole device pixel (for crisp 1 dp hairlines). */
-private fun snapToPixel(px: Float): Float = kotlin.math.round(px)
-
-@Composable
-private fun CompactTreeIconButton(
-    label: String,
-    contentDescription: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    testTag: String? = null,
-    accent: Boolean = false,
-    size: Dp = PocketShellDensity.tapTargetMin,
-) {
-    val background = if (accent) {
-        PocketShellColors.AccentSoft
-    } else {
-        PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
-    }
-    val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
-    // Inner pill scales with the hit box but stays ~4 dp smaller so the
-    // trailing action keeps a 48 dp touch target while reading as compact
-    // chrome. The weighted title/count block owns truncation, so long project
-    // labels ellipsize there instead of pushing this action off-row (#597).
-    val pillSize = (size.value - 4f).coerceAtLeast(24f).dp
-    Box(
-        modifier = modifier
-            .size(size)
-            .semantics { this.contentDescription = contentDescription }
-            .clickable(role = Role.Button, onClick = onClick)
-            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(pillSize)
-                .background(background, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = label,
-                color = foreground,
-                fontSize = if (label == "+") 18.sp else 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
-        }
-    }
-}
-
-@Composable
-private fun StatusDot(active: Boolean, modifier: Modifier = Modifier) {
-    val semantic = LocalPocketShellSemantic.current
-    // Green = active agents/attached, amber = idle (#478). Colours come from
-    // the semantic role vocabulary, not raw palette tokens.
-    val color = if (active) semantic.statusActive else semantic.statusAttention
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .background(color = color, shape = CircleShape),
-    )
-}
-
-/**
- * Leading terminal tile glyph on a session row (#522 item 3). Mockup #489 leads
- * every session row with a rounded `>_` terminal tile before the project name —
- * the rows previously led with only the [StatusDot]. The tile sits alongside (and
- * after) the status dot, so the row reads as `● >_ <name>`, keeping the dot's
- * active/idle signal while adding the terminal affordance the mockup shows.
- */
-@Composable
-private fun SessionTileGlyph(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .size(18.dp)
-            .background(
-                color = PocketShellColors.SurfaceElev.copy(alpha = 0.72f),
-                shape = RoundedCornerShape(4.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(4.dp),
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = ">_",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.labelMono,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
-    }
-}
-
-/**
- * A project folder is "active" when it has at least one attached session or a
- * live agent (Claude/Codex/OpenCode/probing/exited shell that just ran one) —
- * the green-dot condition in the mockup. Otherwise it reads idle (amber).
- */
-private val FolderRow.isActive: Boolean
-    get() = sessions.any { it.attached || it.agentKind.isAgent() }
-
-internal fun projectCountText(folder: FolderRow): String {
-    val sessions = folder.sessions.size
-    val agents = folderAgentWindowCount(folder)
-    // #675: the agent count now sums agent WINDOWS, so it can exceed the session
-    // count (a 2-window Claude session = 2 agents in 1 session). The collapse to
-    // a bare "N agents" therefore keys on "every session here is an agent
-    // session" (no plain shells), not on `agents == sessions` — otherwise a
-    // pure-agent folder with one multi-window session reads "1 session · 2
-    // agents" instead of the maintainer's expected "2 agents".
-    val allSessionsAreAgents = folder.sessions.isNotEmpty() &&
-        folder.sessions.all { it.agentKind.isAgent() }
-    return when {
-        agents > 0 && allSessionsAreAgents -> agents.countLabel("agent")
-        agents > 0 -> "${sessions.countLabel("session")} · ${agents.countLabel("agent")}"
-        else -> sessions.countLabel("session")
-    }
-}
-
-/**
- * Count of agent WINDOWS under a folder — issue #675.
- *
- * The header's "N agent(s)" count must reflect how the tree breaks sessions out
- * into per-window child rows. A multi-window session (e.g. two Claude windows
- * `w0`/`w1`) shows two agent rows, so it must contribute 2 to the count, not 1.
- *
- * Consistency rule (matches [folderTreeSessionChildRows], which only expands a
- * session into window child rows when it has >1 window):
- *  - Multi-window session (`windows.size > 1`): count the windows whose
- *    [FolderSessionWindowEntry.agentKind] is an agent kind.
- *  - Single-window / no-window session: count 1 when the session's own
- *    [FolderSessionEntry.agentKind] is an agent kind, else 0.
- */
-internal fun folderAgentWindowCount(folder: FolderRow): Int =
-    folder.sessions.sumOf { session ->
-        if (session.windows.size > 1) {
-            session.windows.count { it.agentKind.isAgent() }
-        } else if (session.agentKind.isAgent()) {
-            1
-        } else {
-            0
-        }
-    }
-
-private fun Int.countLabel(noun: String): String =
-    if (this == 1) "$this $noun" else "$this ${noun}s"
-
-/**
- * Folder-tree session label. Issue #431: type/agent and activity state are two
- * orthogonal facets, so the label never collapses to a bare "Idle".
- *
- *  - Shell session  -> "Shell" (no agent activity state).
- *  - Agent session  -> "<agent> · <state>", e.g. "Codex · Idle", so the agent
- *    identity always travels with the state word.
- *  - Probing        -> "Detecting" (agent identity not yet known; no state word).
- *  - Exited         -> "Shell" (the agent process is gone; it is a plain shell).
- *
- * State signal: `FolderSessionEntry` carries no per-turn working/idle flag
- * today, so the agent state defaults to "Idle" (agent waiting for input / not
- * actively working) — the literal definition the maintainer gave in #431. A
- * richer working/idle signal (live turn detection feeding a per-session state)
- * is a follow-up once #430/#438 land; this rendering is correct for the data
- * available now and avoids the conflated bare-"Idle" label.
- */
-/**
- * Short agent-type label for the right-aligned session badge — issue #478.
- * Unlike [sessionKindLabel] (which carries the activity state for the secondary
- * line), this is just the agent/shell identity the badge pill shows:
- *
- *  - Claude / Codex / OpenCode  -> the agent name.
- *  - Probing                    -> "Detecting" (identity not yet known).
- *  - Shell / Exited             -> "Shell".
- */
-internal fun sessionBadgeLabel(session: FolderSessionEntry): String = when (session.agentKind) {
-    SessionAgentKind.Claude -> "Claude"
-    SessionAgentKind.Codex -> "Codex"
-    SessionAgentKind.OpenCode -> "OpenCode"
-    SessionAgentKind.Probing -> "Detecting"
-    SessionAgentKind.Exited -> "Shell"
-    SessionAgentKind.Shell -> "Shell"
-    // Epic #821 Slice 1: a foreign session with no recorded `@ps_agent_kind`.
-    // We do NOT guess (maintainer Option B) — the badge reads "Unknown" until
-    // the user classifies it through the change-kind picker.
-    SessionAgentKind.Unknown -> "Unknown"
-}
-
-internal fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
-    SessionAgentKind.Claude -> "Claude · ${agentStateLabel(session)}"
-    SessionAgentKind.Codex -> "Codex · ${agentStateLabel(session)}"
-    SessionAgentKind.OpenCode -> "OpenCode · ${agentStateLabel(session)}"
-    SessionAgentKind.Probing -> "Detecting"
-    SessionAgentKind.Exited -> "Shell"
-    SessionAgentKind.Shell -> "Shell"
-    SessionAgentKind.Unknown -> "Unknown"
-}
-
-/**
- * Agent activity state for #431. "Idle" = agent waiting for input / not actively
- * working. No per-session working/idle signal exists on [FolderSessionEntry]
- * yet, so this defaults to "Idle"; promote to "Working" here once a live turn
- * signal is surfaced (#430/#438 follow-up).
- */
-private fun agentStateLabel(@Suppress("UNUSED_PARAMETER") session: FolderSessionEntry): String = "Idle"
-
-private fun sessionDisplayTitle(session: FolderSessionEntry): String {
-    val raw = session.sessionName.trim()
-    if (raw.isBlank()) return "Tmux session"
-    return raw
-}
-
-private fun sortedSessionWindows(session: FolderSessionEntry): List<FolderSessionWindowEntry> =
-    session.windows.sortedWith(
-        compareBy<FolderSessionWindowEntry> { it.index ?: Int.MAX_VALUE }
-            .thenBy { it.name.orEmpty() },
-    )
-
-/**
- * Issue #782: PocketShell no longer manages tmux windows. When a session has
- * more than one window (windows can only be created OUTSIDE PocketShell now),
- * each window is surfaced as its OWN session-like switcher entry suffixed
- * `[wN]` (e.g. `mysession [w0]`, `mysession [w1]`). The label leads with the
- * session name so the entry reads as a sibling of the single-window session
- * rows, with the `[wN]` suffix disambiguating which window it attaches to. An
- * optional command/name hint trails so an agent window still surfaces what's
- * running in it.
- */
-internal fun sessionWindowEntryTitle(
-    sessionName: String,
-    window: FolderSessionWindowEntry,
-): String {
-    val suffix = window.index?.let { "[w$it]" } ?: "[window]"
-    val hint = window.command?.trim()?.takeIf { it.isNotEmpty() }
-        ?: window.name?.trim()?.takeIf { it.isNotEmpty() }
-    val base = "$sessionName $suffix"
-    return if (hint == null) base else "$base $hint"
-}
-
-@Composable
-private fun WatchedPin() {
-    Box(
-        modifier = Modifier
-            .background(
-                color = PocketShellColors.Purple.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(6.dp),
-            )
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    ) {
-        Text(
-            text = "Watched",
-            color = PocketShellColors.Purple,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-private fun SessionAgentKind.isAgent(): Boolean = when (this) {
-    SessionAgentKind.Claude,
-    SessionAgentKind.Codex,
-    SessionAgentKind.OpenCode,
-    SessionAgentKind.Probing,
-    SessionAgentKind.Exited,
-    -> true
-    // Unknown is a foreign, not-yet-classified session — treat it as a
-    // non-agent for the agent-styling/status-dot purposes until the user
-    // classifies it (epic #821 Slice 1).
-    SessionAgentKind.Shell,
-    SessionAgentKind.Unknown,
-    -> false
-}
-
-@Composable
-private fun RenameSessionDialog(
-    sessionName: String,
-    onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit,
-) {
-    var newName by remember(sessionName) { mutableStateOf(sessionName) }
-    val trimmed = newName.trim()
-    val canRename = trimmed.isNotEmpty() && trimmed != sessionName
-    FormDialog(
-        title = "Rename session",
-        confirmLabel = "Rename",
-        onConfirm = { onConfirm(trimmed) },
-        onDismiss = onDismiss,
-        modifier = Modifier.testTag(RENAME_SESSION_DIALOG_TAG),
-        confirmEnabled = canRename,
-        confirmTestTag = RENAME_SESSION_CONFIRM_TAG,
-        dismissTestTag = RENAME_SESSION_CANCEL_TAG,
-    ) {
-        Text(
-            text = "Rename $sessionName on this host.",
-            color = PocketShellColors.TextSecondary,
-            style = PocketShellType.bodyDense,
-        )
-        OutlinedTextField(
-            value = newName,
-            onValueChange = { newName = it },
-            singleLine = true,
-            label = { Text("Session name") },
-            keyboardActions = KeyboardActions(onDone = {
-                if (canRename) onConfirm(trimmed)
-            }),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(RENAME_SESSION_FIELD_TAG),
-        )
-    }
-}
-
-/**
- * Confirmation dialog for the host-detail "Stop session" action (#518).
- *
- * Stopping a session ends its tmux session on the host — a destructive,
- * non-undoable action — so it is gated behind an explicit confirm. Cancel /
- * tapping outside does nothing; only the Stop button kills the session.
- */
-@Composable
-private fun StopSessionDialog(
-    sessionName: String,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit,
-) {
-    ConfirmDialog(
-        title = "Stop this session?",
-        message = "This ends the tmux session “$sessionName” on the host.",
-        confirmLabel = "Stop",
-        onConfirm = onConfirm,
-        onDismiss = onDismiss,
-        destructive = true,
-        modifier = Modifier.testTag(STOP_SESSION_DIALOG_TAG),
-        confirmTestTag = STOP_SESSION_CONFIRM_TAG,
-        dismissTestTag = STOP_SESSION_CANCEL_TAG,
-    )
-}
-
 
 private val FolderListBottomContentPadding = 12.dp
 

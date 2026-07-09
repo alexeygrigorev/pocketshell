@@ -368,25 +368,28 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
      *
      * The durable fix is the detection-INDEPENDENT alt-buffer positive signal: a
      * full-screen agent TUI holds the ALTERNATE screen buffer, which the tmux
-     * ViewModel latches STICKY and OR's into `showsConversationTab`.
+     * ViewModel latches STICKY (from the tmux SERVER-TRUTH `#{alternate_on}` flag on
+     * the `list-panes` reconcile) and OR's into `showsConversationTab`.
      *
-     * ### #780 synthetic-state model (no self-skip — hard-fail)
+     * ### REAL server-truth path (no synthetic injection — the #847/G10 lesson)
      *
-     * The tmux `-CC` control path does not reliably mirror a REMOTE pane's alternate
-     * screen buffer into the CLIENT emulator (the capture-pane seed replays the
-     * screen TEXT onto the main buffer, and an idle full-screen agent emits no fresh
-     * `%output` carrying the `?1049h` toggle), so a connected journey cannot enter
-     * the on-device alt-buffer state on its own. Per D33/#780 the failing state is
-     * injected SYNTHETICALLY on the REAL connected pane
-     * ([TmuxSessionViewModel.forceActivePaneAltBufferForTest]) — the ONLY synthetic
-     * part; the recorded-shell verdict, the detection-never-binds state, the real
-     * production tab gate and the real chrome rendering are all live. It HARD-fails
-     * (no `assumeTrue`) so CI carries real protection.
+     * The prior round of this test CHEATED: it forced the CLIENT emulator's
+     * alt-buffer verdict (`forceActivePaneAltBufferForTest`) — a signal that is
+     * INERT on the real `-CC` path (the capture-pane seed replays the alt-screen
+     * TEXT onto the client's MAIN buffer, and an idle agent emits no fresh
+     * `?1049h`), so the test was green while the maintainer's device stayed broken.
+     * That synthetic-masks-reality gap is exactly what let #1158 survive five fixes.
      *
-     * RED on base: with no `|| altBufferAgent` term the toggle stays absent even
-     * with the alt-buffer injected (the maintainer's symptom). GREEN with the fix:
-     * the latch shows the toggle, and it STAYS after the buffer leaves alt-mode
-     * (sticky).
+     * This round enters the REAL failing state: the seeded pane runs a genuine
+     * full-screen program that holds the alternate screen buffer server-side
+     * (`seedAltBufferShellSession` emits `?1049h` then idles), so the tmux SERVER
+     * reports `#{alternate_on}=1` — the app's reconcile reads it on attach and
+     * latches the session. NOTHING is injected on the client; the client emulator
+     * is on the main buffer the whole time (proving the fix does NOT rely on it).
+     *
+     * RED on base: base has no `#{alternate_on}` read + latch, so even though the
+     * pane is REALLY on the alt buffer the toggle stays absent (the maintainer's
+     * exact symptom). GREEN with the fix: the server-truth latch shows the toggle.
      */
     @Test
     fun conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession() { runBlocking {
@@ -395,8 +398,8 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
 
         attachToSeededSession(hostRowTag, sessionName)
         waitForTerminalSessionAttached()
-        waitForVisibleTerminalText("issue962-plain-ready", VISIBLE_TIMEOUT_MS) {
-            "issue962-plain-ready" in it
+        waitForVisibleTerminalText("issue1158-altbuf-ready", VISIBLE_TIMEOUT_MS) {
+            "issue1158-altbuf-ready" in it
         }
         stamp("altbuf_shell_attached session=$sessionName")
 
@@ -406,28 +409,39 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         val vm = currentViewModel()
         val verdictObserved = waitForConfirmedShellVerdict(vm)
         stamp("altbuf_confirmed_shell_verdict_observed=$verdictObserved")
-        SystemClock.sleep(SHELL_NO_TOGGLE_SETTLE_MS)
         val detectionBound = vm.agentConversations.value.values.any { it.detection != null }
         stamp("altbuf_detection_bound=$detectionBound")
 
-        // Precondition (the maintainer's symptom, base state): NO Conversation toggle
-        // — the recorded shell + no detection leaves only the "Terminal" pill.
-        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertDoesNotExist()
-        captureFullFrame("issue1158-altbuf-before-no-toggle")
-        stamp("altbuf_no_toggle_before_ok")
+        // The CLIENT emulator is NOT on the alt buffer (the -CC seed replayed the
+        // alt-screen TEXT onto the client's MAIN buffer). Record it as evidence the
+        // toggle below is driven purely by SERVER truth, not the client emulator.
+        var clientAltBuffer = false
+        compose.activityRule.scenario.onActivity { activity ->
+            clientAltBuffer = activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.isAlternateBufferActive == true
+        }
+        stamp("altbuf_client_emulator_alt_active=$clientAltBuffer")
 
-        // The agent goes full-screen: the pane's emulator switches to the ALTERNATE
-        // screen buffer. Injected synthetically on the REAL connected pane (#780) —
-        // the on-device signal a full-screen Claude/Codex TUI produces.
-        compose.activityRule.scenario.onActivity { vm.forceActivePaneAltBufferForTest(true) }
+        // LOAD-BEARING server-truth latch: the reconcile's `list-panes` read the
+        // real `#{alternate_on}=1` for the pane and latched the session. On base
+        // (no `#{alternate_on}` read + latch) this never becomes non-empty → RED.
         compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
             vm.altBufferAgentPaneIds.value.isNotEmpty()
         }
+        assertTrue(
+            "#1158 (real path): the server-truth `#{alternate_on}` latch must fire " +
+                "for the genuinely-alt-buffer pane. altBufferAgentPaneIds=" +
+                "${vm.altBufferAgentPaneIds.value}",
+            vm.altBufferAgentPaneIds.value.isNotEmpty(),
+        )
         stamp("altbuf_latched=${vm.altBufferAgentPaneIds.value.isNotEmpty()}")
 
         // DURABLE UI (load-bearing): the Terminal/Conversation toggle now appears,
-        // driven purely by the alt-buffer signal (detection is still null). RED on
-        // base (no `|| altBufferAgent`), GREEN with the fix.
+        // driven purely by the server-truth alt-buffer signal (detection is still
+        // null, client emulator on main buffer). RED on base, GREEN with the fix.
         compose.waitUntil(timeoutMillis = MASKED_TOGGLE_TIMEOUT_MS) {
             compose.onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -443,9 +457,9 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
         captureFullFrame("issue1158-altbuf-toggle-appears")
         stamp("altbuf_toggle_appears_ok")
 
-        // STICKY: the agent leaves the alt-buffer (exits its full-screen view /
-        // detection stays null). The toggle MUST remain for the session's life.
-        compose.activityRule.scenario.onActivity { vm.forceActivePaneAltBufferForTest(false) }
+        // STICKY: the tab must remain for the session's life. Settle a generous
+        // window (any later reconcile that reports `#{alternate_on}=0` must NOT
+        // collapse it) and re-assert.
         SystemClock.sleep(SHELL_NO_TOGGLE_SETTLE_MS)
         compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertExists()
         compose.onNodeWithText("Conversation", useUnmergedTree = true).assertExists()
@@ -475,7 +489,7 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
             "conversationTogglePresentForRecordedCodexAgentWhenSourceBindingFails" ->
                 seedRecordedCodexNoTranscriptSession(key)
             "conversationToggleAppearsForAltBufferAgentDirectlyLaunchedInShellSession" ->
-                seedPlainShellSession(key)
+                seedAltBufferShellSession(key)
             else -> error("unexpected test method $methodName")
         }
         seededSessionName = sessionName
@@ -494,6 +508,47 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
                 appendLine(
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
                         "\"printf 'issue962-plain-ready\\r\\n'; exec sh\"",
+                )
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("sleep 1")
+            },
+        )
+        return sessionName
+    }
+
+    /**
+     * Issue #1158 (REOPENED — the maintainer's EXACT dogfood path): a session
+     * recorded `@ps_agent_kind=shell` whose pane runs a GENUINE full-screen program
+     * holding the ALTERNATE screen buffer (it emits DEC-1049 `?1049h`, exactly what
+     * a full-screen agent TUI — Claude Code / Codex / glm-Z.AI — does for its whole
+     * run), then idles. This puts the tmux SERVER pane on `#{alternate_on}=1`
+     * REALLY — no synthetic client-emulator injection — so the reconcile's
+     * `list-panes` reads the server-truth flag on attach and latches the session.
+     *
+     * This is the real-path reproduction the five prior fixes never had: the
+     * client emulator NEVER sees the alt buffer here (the `-CC` capture-pane seed
+     * replays the alt-screen TEXT onto the client's MAIN buffer, and the pane emits
+     * no fresh `?1049h` after attach because it idles), so on base (no
+     * `#{alternate_on}` read + latch) NO toggle appears — the maintainer's symptom.
+     */
+    private suspend fun seedAltBufferShellSession(key: String): String {
+        val suffix = unique()
+        val sessionName = "issue1158-altbuf-shell-$suffix"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                // The pane program enters the ALTERNATE screen buffer (?1049h) —
+                // what a full-screen agent TUI does — prints a ready marker there,
+                // then idles (emits no further output, so the client emulator never
+                // sees the alt-buffer toggle). The tmux SERVER holds the pane on
+                // `#{alternate_on}=1` for the whole run.
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
+                        "\"printf '\\033[?1049h'; printf 'issue1158-altbuf-ready\\r\\n'; " +
+                        "exec sh -c 'while true; do sleep 30; done'\"",
                 )
                 appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
                 appendLine("sleep 1")

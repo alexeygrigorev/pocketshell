@@ -1345,14 +1345,7 @@ public class PromptComposerViewModel @Inject constructor(
         val id = request.outboundQueueItemId
         val requeued = id?.let { outboundQueueStore.requeueForRetry(it) }
             ?: request.sendTarget.sessionKey.takeIf { it.isNotBlank() }?.let { sessionKey ->
-                val candidates = outboundQueueStore.itemsFor(sessionKey)
-                    .filter { it.state != OutboundState.Delivered }
-                candidates
-                    .firstOrNull {
-                        it.cleanText == request.cleanDraft &&
-                            it.state != OutboundState.Delivered
-                    }
-                    ?: candidates.firstOrNull()
+                outboundQueueStore.itemsFor(sessionKey).deferredRetryCandidateFor(request)
             }?.let {
                 outboundQueueStore.requeueForRetry(it.id)
             }
@@ -1660,7 +1653,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     public fun discardOutboundItem(id: String) {
         val item = outboundQueueStore.item(id) ?: return
-        if (item.state != OutboundState.Queued && item.state != OutboundState.Failed) return
+        if (!item.isComposerQueueRetryable()) return
         outboundQueueStore.remove(id)
         launchSidecarRemoval(id)
         refreshOutboundQueueItems()
@@ -1686,13 +1679,10 @@ public class PromptComposerViewModel @Inject constructor(
     public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
         if (_uiState.value.sendInFlight) return null
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
-        val next = _outboundQueueItems.value
-            .firstOrNull { item ->
-                item.sessionKey == target &&
-                item.id !in excludingIds &&
-                    (item.state == OutboundState.Queued || item.state == OutboundState.Failed)
-            }
-            ?: return null
+        val next = _outboundQueueItems.value.firstComposerQueueRetryable(
+            sessionKey = target,
+            excludingIds = excludingIds,
+        ) ?: return null
         return if (dispatchOutboundItem(next.id)) next.id else null
     }
 
@@ -1727,7 +1717,7 @@ public class PromptComposerViewModel @Inject constructor(
     public fun resendAllQueued(): List<String> {
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
         val rearmedIds = outboundQueueStore.itemsFor(target)
-            .filter { it.state == OutboundState.Queued || it.state == OutboundState.Failed }
+            .composerQueueRetryableItems()
             .mapNotNull { outboundQueueStore.requeueForRetry(it.id)?.id }
         if (rearmedIds.isNotEmpty()) refreshOutboundQueueItemsFor(target)
         return rearmedIds

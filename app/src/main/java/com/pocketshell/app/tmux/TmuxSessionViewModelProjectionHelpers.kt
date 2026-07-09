@@ -49,6 +49,46 @@ internal fun tmuxCommandErrorDetailText(
             ?.let { "tmuxError=$it" }
         ?: "tmuxError=unknown"
 
+internal fun tmuxReconnectSourceCandidate(
+    trigger: TmuxConnectTrigger?,
+    sourceCandidate: String?,
+): String =
+    when {
+        sourceCandidate == "terminal_surface" -> "terminal_ui_failure"
+        sourceCandidate == "passive_disconnect" -> "tmux_eof_or_reader_disconnect"
+        sourceCandidate == "background_teardown" -> "lifecycle_teardown"
+        sourceCandidate == "foreground_reattach" -> "manual_or_foreground_reattach"
+        sourceCandidate == "network_observer" -> "network_replay_or_handoff"
+        trigger == TmuxConnectTrigger.LifecycleReattach -> "manual_or_foreground_reattach"
+        trigger == TmuxConnectTrigger.NetworkReconnect -> "network_replay_or_handoff"
+        trigger == TmuxConnectTrigger.Reconnect -> "manual_or_foreground_reattach"
+        trigger == TmuxConnectTrigger.AutoReconnect -> "tmux_eof_or_reader_disconnect"
+        else -> "none"
+    }
+
+internal fun tmuxAttachMilestoneMessage(
+    attempt: Int,
+    target: TmuxSessionViewModel.ConnectionTarget,
+    startedAtMs: Long,
+    event: String,
+    trigger: TmuxConnectTrigger,
+    detail: String = "",
+): String = buildString {
+    append(event)
+    append(" attempt=")
+    append(attempt)
+    append(" trigger=")
+    append(trigger.logValue)
+    append(' ')
+    append(targetLogFields(target))
+    append(" elapsedMs=")
+    append(SystemClock.elapsedRealtime() - startedAtMs)
+    if (detail.isNotBlank()) {
+        append(' ')
+        append(detail)
+    }
+}
+
 internal fun connectionStatusHostPortUserFor(
     inlineState: ConnectionState,
     activeTarget: TmuxSessionViewModel.ConnectionTarget?,

@@ -19,3 +19,30 @@ internal fun tmuxTargetSessionId(
     sessionCreated: Long?,
 ): SessionId =
     SessionId(durableTmuxSessionKey(hostId, tmuxSessionId, sessionCreated) ?: "$hostId/$sessionName")
+
+internal fun sessionCardsTargetKey(
+    hostId: Long,
+    host: String,
+    port: Int,
+    user: String,
+    keyPath: String,
+    sessionName: String,
+): String = buildString {
+    append(hostId)
+    append('|')
+    append(port)
+    append('|')
+    appendKeyPart(host)
+    append('|')
+    appendKeyPart(user)
+    append('|')
+    appendKeyPart(keyPath)
+    append('|')
+    appendKeyPart(sessionName.trim())
+}
+
+private fun StringBuilder.appendKeyPart(value: String) {
+    append(value.length)
+    append(':')
+    append(value)
+}

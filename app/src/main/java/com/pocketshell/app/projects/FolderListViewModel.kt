@@ -1054,28 +1054,17 @@ class FolderListViewModel internal constructor(
             // Ignore a stale result if the host changed while we were fetching.
             if (bound?.hostId != params.hostId) return@launch
             when (result) {
-                is ProfilesResult.Profiles -> applyProfiles(result.profiles)
+                is ProfilesResult.Profiles -> {
+                    val profileLists = result.profiles.toFolderListProfileLists()
+                    _claudeProfiles.value = profileLists.claudeProfiles
+                    _codexProfiles.value = profileLists.codexProfiles
+                }
                 else -> {
                     _claudeProfiles.value = emptyList()
                     _codexProfiles.value = emptyList()
                 }
             }
         }
-    }
-
-    /**
-     * Issue #718: project the host-discovered [RemoteProfile] rows onto the
-     * picker's per-engine flows. The default profile is included so the picker
-     * shows the full "Claude" / "Claude (Z.AI)" choice and pre-selects the
-     * default; the launch command omits `--profile` for the default.
-     */
-    private fun applyProfiles(profiles: List<RemoteProfile>) {
-        _claudeProfiles.value = profiles
-            .filter { it.engine == RemoteProfile.ENGINE_CLAUDE }
-            .map { ClaudeProfile(name = it.name, default = it.default) }
-        _codexProfiles.value = profiles
-            .filter { it.engine == RemoteProfile.ENGINE_CODEX }
-            .map { CodexProfile(name = it.name, default = it.default) }
     }
 
     /**

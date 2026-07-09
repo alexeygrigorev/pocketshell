@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import android.os.SystemClock
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 
 internal fun tmuxControlClientSizeMessage(
     event: String,
@@ -88,6 +89,17 @@ internal fun tmuxAttachMilestoneMessage(
         append(detail)
     }
 }
+
+internal fun tmuxDisconnectReasonPrefix(reason: TmuxDisconnectReason): String =
+    when (reason) {
+        TmuxDisconnectReason.ReaderEof -> "Transport EOF"
+        TmuxDisconnectReason.ReaderException -> "Transport read failed"
+        TmuxDisconnectReason.CommandTimeout -> "Tmux command timed out"
+        TmuxDisconnectReason.ExplicitClose -> "Connection closed locally"
+        TmuxDisconnectReason.ExplicitDetach -> "Tmux client detached"
+        TmuxDisconnectReason.ServerExited -> "Tmux server restarted"
+        TmuxDisconnectReason.Unknown -> "Disconnected"
+    }
 
 internal fun connectionStatusHostPortUserFor(
     inlineState: ConnectionState,

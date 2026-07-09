@@ -647,14 +647,7 @@ public class PromptComposerViewModel @Inject constructor(
      * an empty draft is replaced outright. A blank [prompt] is a no-op.
      */
     public fun seedDraftPrompt(prompt: String) {
-        val trimmed = prompt.trim()
-        if (trimmed.isEmpty()) return
-        val existing = _uiState.value.draft
-        val combined = if (existing.isBlank()) {
-            trimmed
-        } else {
-            existing.trimEnd() + "\n" + trimmed
-        }
+        val combined = draftWithSeededPrompt(_uiState.value.draft, prompt) ?: return
         onDraftChange(combined)
         DiagnosticEvents.record("action", "review_prompt_seeded_into_composer")
     }
@@ -673,16 +666,8 @@ public class PromptComposerViewModel @Inject constructor(
      * insert contract (the issue's "reuse the #767 insert path" requirement).
      */
     public fun prefillEngineCommand(command: String) {
-        val trimmed = command.trim()
-        if (trimmed.isEmpty()) return
-        val existing = _uiState.value.draft
-        val tokenEnd = if (existing.startsWith("/")) {
-            existing.indexOfFirst { it.isWhitespace() }.let { if (it < 0) existing.length else it }
-        } else {
-            0
-        }
-        val trailing = existing.substring(tokenEnd)
-        onDraftChange(trimmed + trailing)
+        val updatedDraft = draftWithPrefilledEngineCommand(_uiState.value.draft, command) ?: return
+        onDraftChange(updatedDraft)
         DiagnosticEvents.record("action", "engine_command_tapped_into_composer")
     }
 

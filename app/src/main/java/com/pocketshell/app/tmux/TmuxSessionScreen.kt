@@ -1,7 +1,6 @@
 package com.pocketshell.app.tmux
 
 import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -14,7 +13,6 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,7 +62,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
@@ -157,7 +154,6 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 
 /**
  * Phase 2 session screen for `tmux -CC` hosts — the per-pane equivalent of
@@ -2641,89 +2637,6 @@ public fun TmuxSessionScreen(
 
 }
 
-private val VerticalSwipeThreshold = 72.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
-
-private fun Modifier.verticalSwipeInput(
-    thresholdPx: Float,
-    onBoundary: () -> Unit,
-    onSwipeUp: (() -> Unit)? = null,
-    onSwipeDown: (() -> Unit)? = null,
-) = pointerInput(thresholdPx, onBoundary, onSwipeUp, onSwipeDown) {
-    var totalDrag = 0f
-    var triggered = false
-    detectVerticalDragGestures(
-        onDragStart = {
-            totalDrag = 0f
-            triggered = false
-        },
-        onVerticalDrag = { change, dragAmount ->
-            totalDrag += dragAmount
-            if (triggered || abs(totalDrag) < thresholdPx) {
-                return@detectVerticalDragGestures
-            }
-            val swipeUp = totalDrag < 0f
-            val callback = if (swipeUp) onSwipeUp else onSwipeDown
-            if (callback == null) return@detectVerticalDragGestures
-            triggered = true
-            onBoundary()
-            callback()
-            change.consume()
-        },
-    )
-}
-
-/**
- * Issue #167: a thin wrapper around [BackHandler] that codifies the back
- * routing on [TmuxSessionScreen].
- *
- * Order of precedence:
- *  1. If a lifecycle dialog is open ([dialogOpen]), back closes the
- *     dialog (mirroring the Cancel button).
- *  2. Otherwise, if the session drawer is open ([sessionDrawerOpen]),
- *     back closes the drawer.
- *  3. Otherwise, the window switcher / mic sheet / snippet picker
- *     overlays close in turn.
- *  4. Otherwise [onBack] runs — which pops the in-app back stack to the
- *     host list. The hosted `TmuxSessionViewModel` is then cleared by
- *     Compose's lifecycle owner, and its `onCleared()` tears the SSH +
- *     tmux client state down (via `closeCurrentConnection`).
- *
- * Extracted as its own composable so the routing behaviour can be
- * regression-tested without a Hilt graph or a live tmux client — the
- * AVD-side reviewer evidence is the user journey "attach -> system back ->
- * host list" against the deterministic Docker fixture, which exercises
- * the implicit teardown via the ViewModel's `onCleared`.
- *
- * `DropdownMenu` and `AlertDialog` already intercept system-back
- * themselves in front of any `BackHandler` registered by the screen, so
- * the more-menu and window-context-menu dropdowns are not surfaced here;
- * back on those closes the popup first by the dropdown's own handling.
- */
-@Composable
-internal fun TmuxSessionBackHandler(
-    dialogOpen: Boolean,
-    sessionDrawerOpen: Boolean,
-    micSheetOpen: Boolean,
-    snippetPickerOpen: Boolean,
-    cardFeedSheetOpen: Boolean = false,
-    onDismissDialog: () -> Unit,
-    onDismissSessionDrawer: () -> Unit,
-    onDismissMicSheet: () -> Unit,
-    onDismissSnippetPicker: () -> Unit,
-    onDismissCardFeedSheet: () -> Unit = {},
-    onBack: () -> Unit,
-) {
-    BackHandler {
-        when {
-            dialogOpen -> onDismissDialog()
-            sessionDrawerOpen -> onDismissSessionDrawer()
-            micSheetOpen -> onDismissMicSheet()
-            snippetPickerOpen -> onDismissSnippetPicker()
-            cardFeedSheetOpen -> onDismissCardFeedSheet()
-            else -> onBack()
-        }
-    }
-}

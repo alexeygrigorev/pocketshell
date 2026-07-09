@@ -8,9 +8,9 @@
 203585 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
 180197 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
 226939 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
-931899 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
-256799 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
-455455 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
+930933 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
+229516 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
+403773 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh

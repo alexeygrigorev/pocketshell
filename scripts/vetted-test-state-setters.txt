@@ -1,0 +1,43 @@
+# Vetted connected-test STATE-INJECTION seams (issue #1430, child of #848).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# A connected / journey test (app/src/androidTest, shared/*/src/androidTest) can
+# be GREEN while the real production path is BROKEN when its load-bearing
+# assertion is driven from a `*ForTest` STATE-INJECTION seam that injects a state
+# production can NEVER reach on its own. The #1158 `forceActivePaneAltBufferForTest`
+# cheat (now deleted) did exactly that — it forced an alt-buffer flag the real
+# tmux -CC seed path never sets — and hid a 5x-recurring Conversation-tab bug for
+# weeks. `scripts/check-test-validity.sh` could not grep for it because the
+# discriminator is SEMANTIC: *can the real path produce this state at all?*
+#
+# This registry is the answer the audit (#848 comment 4929654015, option (b))
+# recommended: an EXPLICIT allowlist of the state-injection seams whose injected
+# state the real path GENUINELY reaches (the #780 model — the injection only makes
+# a real-but-nondeterministic on-device state deterministic on the fast x86 AVD).
+# The SEAM1 detector in check-test-validity.sh HARD-FAILS a connected test that
+# calls a production-defined state-injection seam (force*ForTest / *Override*ForTest
+# / set*ActiveForTest) that is NOT listed here and has no inline
+# `// SEAM_JUSTIFIED:` opt-out. That forces the reviewer to write down, for every
+# NEW synthetic connected proof, WHY the real path reaches the injected state —
+# the exact judgement that was skipped for alt-buffer.
+#
+# FORMAT (enforced): one entry per line
+#     <seamName>  # <one-line real-path-reachability justification>
+# The justification after `#` is REQUIRED — a bare seam name with no reason is a
+# hard error (registry additions must be deliberate and vetted). Lines that are
+# blank or start with `#` are ignored (this header).
+#
+# SCOPE NOTE: the SEAM1 detector only consults the state-INJECTION shape
+# (force*ForTest / *Override*ForTest / set*ActiveForTest) — the narrow, highest-
+# signal shape the alt-buffer cheat took. Plain config/dispatcher/timeout knob
+# setters (setExecDispatcherForTest, setSendTimeoutForTest, ...),
+# exact-production-call wrappers (clearAgentDetectionForPaneForTest,
+# applyRecordedShellVerdictForTest), lifecycle gates (setProcessStartedForTest),
+# user-setting pins (setDefaultAgentSessionViewForTest) and read-only accessors
+# are NOT injection-shape and are not gated by SEAM1, so they do not need an entry
+# here (the #848 audit cleared them as legitimate #780-model seams).
+
+forceTreeStaleForTest  # FolderListViewModel: wraps the EXACT production call tree.markReconcileDueForTest(); the real path marks the tree due for reconcile on its real timer/change, so this only makes that reachable transition deterministic.
+forceAttachingStateForTest  # TmuxSessionViewModel: sets ConnectionState.Attaching, the EXACT state a same-host fast switch (runFastSessionSwitch/fastSwitchSessionForTest) holds before the Live flip; the real path reaches Attaching on every same-host switch.
+setRenderDrainBackloggedOverrideForTest  # TerminalSurfaceState: the seam's own doc confirms the maintainer's on-device freeze DOES drive the drain-backlogged state under a heavy Codex burst + IME amplifier; only the fast CI/dev x86 AVD never backlogs, so the override makes that real on-device state deterministic (textbook #780).

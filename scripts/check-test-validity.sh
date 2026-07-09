@@ -74,6 +74,34 @@
 #       are baselined, and stale J1 baseline entries hard-fail so the baseline
 #       only shrinks as classes are promoted or removed.
 #
+#   --- #1430 addition (the synthetic-masks-reality state-injection cheat class) ---
+#
+#   SEAM1 (HARD-FAIL on a NEW occurrence) — a connected / journey test
+#       (app/src/androidTest, shared/*/src/androidTest) that drives an assertion
+#       from a PRODUCTION-defined `*ForTest` STATE-INJECTION seam whose injected
+#       state the real path may NEVER reach, and that seam is NOT vetted in
+#       scripts/vetted-test-state-setters.txt. The #1158
+#       `forceActivePaneAltBufferForTest` cheat forced an alt-buffer flag the real
+#       tmux -CC seed path never sets, so the connected test was green while the
+#       Conversation tab stayed broken on the maintainer's fleet — a 5x recurrence
+#       a plain grep could not catch because the discriminator is semantic
+#       (*can the real path produce this state at all?*). The #848 audit's fix
+#       (option b) is a VETTED-SEAM REGISTRY: the detector matches the narrow,
+#       highest-signal state-INJECTION shape a connected test calls — force*ForTest,
+#       *Override*ForTest, set*ActiveForTest — resolves it to its production
+#       `fun ...ForTest(` definition in src/main (so test-double helpers are
+#       ignored), and HARD-FAILS when that seam is neither registry-listed nor
+#       carries an inline `// SEAM_JUSTIFIED:` opt-out. Registering a seam requires
+#       writing a one-line real-path-reachability justification — the exact
+#       judgement that was skipped for alt-buffer. Config/dispatcher/timeout knob
+#       setters, exact-production-call wrappers (clearAgentDetectionForPaneForTest),
+#       lifecycle gates (setProcessStartedForTest) and read-only accessors are NOT
+#       injection-shape, so they are deliberately out of scope (precision over
+#       recall — a noisy guard gets disabled). Self-test:
+#       scripts/check-test-validity-selftest.sh plants a synthetic unregistered
+#       force*ForTest cheat (reconstructing the deleted #1158 shape) and asserts
+#       SEAM1 flags it, plus a registered counterpart it does not flag.
+#
 #   --- #1048 addition (the runTest virtual-clock-vs-real-dispatcher flake class) ---
 #
 #   TIMING1 (ADVISORY warning, with ONE narrow HARD-FAIL) — scoped to the
@@ -107,8 +135,15 @@
 # intended direction of travel; a stale baseline entry is pruned + noted.
 #
 # Usage:
-#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1/TIMING1 hard-fail smell
+#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1/TIMING1/SEAM1 hard-fail smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
+#   scripts/check-test-validity.sh --self-test # run the synthetic red->green proof (delegates to check-test-validity-selftest.sh)
+#
+# REVIEWER FAST-CHECK: run this (and scripts/check-test-validity-selftest.sh)
+# locally before approving any test change — it is the machine sibling of
+# process.md's "Regression-proof validity rules" (F2/F3) and catches the
+# synthetic-masks-reality state-injection cheat class (SEAM1, #1430) that a code
+# read can miss.
 #
 # This is intentionally a grep-guard, not a custom lint rule, for affordability
 # (it runs in the cheap Unit job in .github/workflows/tests.yml before the
@@ -135,6 +170,15 @@ done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/test' 2>/dev/null |
 RPC_SOURCE_ROOT="app/src/main/java/com/pocketshell/app"
 ANDROID_TEST_ROOT="app/src/androidTest/java"
 CI_JOURNEY_SUITE="scripts/ci-journey-suite.sh"
+# #1430: the vetted state-injection seam registry (SEAM1). Overridable via the
+# VETTED_SEAM_REGISTRY env var so the self-test can point at a temp registry.
+VETTED_SEAM_REGISTRY="${VETTED_SEAM_REGISTRY:-scripts/vetted-test-state-setters.txt}"
+# Production source roots where a `fun ...ForTest(` DEFINITION makes a seam a
+# genuine production seam (vs a test-double helper of the same name).
+PROD_SRC_ROOTS=(app/src/main)
+while IFS= read -r d; do
+  [[ -d "$d" ]] && PROD_SRC_ROOTS+=("$d")
+done < <(find shared -maxdepth 3 -type d -path 'shared/*/src/main' 2>/dev/null | sort)
 
 # Collect all test .kt files once.
 collect_test_files() {
@@ -162,6 +206,14 @@ collect_android_test_files() {
     | while IFS= read -r d; do find "$d" -type f -name '*.kt'; done
 }
 mapfile -t ANDROID_TEST_FILES < <(collect_android_test_files)
+
+# --self-test delegates to the sibling driver (which plants synthetic red/green
+# fixtures for every detector — including the #1430 SEAM1 cheat — and asserts the
+# guard flags the bad ones / spares the good ones). Kept as a separate script for
+# affordability, but exposed here so `check-test-validity.sh --self-test` works.
+if [[ "${1:-}" == "--self-test" ]]; then
+  exec "$REPO_ROOT/scripts/check-test-validity-selftest.sh"
+fi
 
 REPORT_MODE=0
 if [[ "${1:-}" == "--report" ]]; then
@@ -861,6 +913,127 @@ scan_timing1() {
 }
 
 # --------------------------------------------------------------------------
+# SEAM1 scan (#1430) — a connected / journey test (androidTest) that drives an
+# assertion from a PRODUCTION-defined state-INJECTION seam not vetted in the
+# registry. See the header block for the full rationale (the #1158 alt-buffer
+# cheat class). Deliberately conservative (precision over recall):
+#
+#   (1) the CALL must be the state-injection SHAPE — force*ForTest,
+#       *Override*ForTest, or set*ActiveForTest — the narrow, highest-signal shape
+#       the alt-buffer cheat took (forceActivePaneAltBufferForTest). Plain config
+#       setters, exact-production-call wrappers, lifecycle gates and read
+#       accessors are out of scope.
+#   (2) the seam must be PRODUCTION-defined (`fun <name>ForTest(` under
+#       app/src/main or shared/*/src/main), so a test-double helper of the same
+#       name is ignored — the cheat class is specifically a production seam.
+#   (3) VETTED — the seam name is listed in scripts/vetted-test-state-setters.txt
+#       (each with a written real-path-reachability justification), OR the call
+#       carries an inline `// SEAM_JUSTIFIED:` opt-out (on the call line or the
+#       line directly above). Otherwise it is a NEW hard-fail.
+# --------------------------------------------------------------------------
+declare -a SEAM1_NEW=()
+declare -a SEAM1_VETTED=()          # call-site records that resolved to a vetted seam
+declare -a SEAM1_REGISTRY_NAMES=()  # the bare seam names parsed from the registry
+declare -a SEAM1_JUSTIFIED=()
+declare -a SEAM1_REGISTRY_ERRORS=()
+declare -a SEAM1_STALE_REGISTRY=()
+declare -A SEAM1_VETTED_SEEN=()
+declare -A PROD_SEAM_DEFINED=()
+
+# The state-injection call shape (the alt-buffer cheat's shape).
+SEAM1_INJECTION_SHAPE='(force[A-Za-z]*ForTest|[a-z][A-Za-z]*Override[A-Za-z]*ForTest|set[A-Za-z]*ActiveForTest)'
+
+# Build the set of production-defined `*ForTest` seam names once.
+build_prod_seam_set() {
+  local r name
+  for r in "${PROD_SRC_ROOTS[@]}"; do
+    [[ -d "$r" ]] || continue
+    while IFS= read -r name; do
+      [[ -n "$name" ]] && PROD_SEAM_DEFINED["$name"]=1
+    done < <(grep -rhoE 'fun[[:space:]]+[A-Za-z_]+ForTest[[:space:]]*\(' "$r" 2>/dev/null \
+             | sed -E 's/fun[[:space:]]+//; s/[[:space:]]*\($//')
+  done
+}
+
+# Parse the registry: each data line is `<seamName>  # <justification>`. A data
+# line with no `#`-justification is a hard error (registry additions must carry a
+# written reason). Blank / `#`-leading lines are ignored (header).
+parse_vetted_seam_registry() {
+  if [[ ! -f "$VETTED_SEAM_REGISTRY" ]]; then
+    SEAM1_REGISTRY_ERRORS+=("missing $VETTED_SEAM_REGISTRY")
+    return
+  fi
+  local line seam reason lineno=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    # Strip leading whitespace.
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == \#* ]] && continue
+    # Split on the first '#'.
+    seam="${line%%#*}"
+    reason="${line#*#}"
+    # Trim the seam token to its first word.
+    seam="${seam%%[[:space:]]*}"
+    # Trim the reason.
+    reason="${reason#"${reason%%[![:space:]]*}"}"
+    if [[ -z "$seam" ]]; then
+      continue
+    fi
+    if [[ "$line" != *"#"* || -z "$reason" ]]; then
+      SEAM1_REGISTRY_ERRORS+=("$VETTED_SEAM_REGISTRY:$lineno: '$seam' has no '# justification' (registry additions must carry a written reason)")
+      continue
+    fi
+    if [[ -z "${SEAM1_VETTED_SEEN[$seam]:-}" ]]; then
+      SEAM1_VETTED_SEEN[$seam]=1
+      SEAM1_REGISTRY_NAMES+=("$seam")
+    fi
+  done < "$VETTED_SEAM_REGISTRY"
+}
+
+scan_seam1() {
+  build_prod_seam_set
+  parse_vetted_seam_registry
+
+  local file lineno text prev seam
+  for file in "${ANDROID_TEST_FILES[@]}"; do
+    [[ -z "$file" ]] && continue
+    grep -Eq "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" "$file" || continue
+    while IFS= read -r lineno; do
+      [[ -z "$lineno" ]] && continue
+      text="$(sed -n "${lineno}p" "$file")"
+      is_code_line "$text" || continue
+      # Every injection-shape seam name called on this line.
+      while IFS= read -r seam; do
+        [[ -z "$seam" ]] && continue
+        # (2) only PRODUCTION-defined seams are the cheat class.
+        [[ -n "${PROD_SEAM_DEFINED[$seam]:-}" ]] || continue
+        # Inline opt-out on the call line or the line directly above.
+        prev="$(sed -n "$((lineno - 1))p" "$file")"
+        if printf '%s\n%s' "$prev" "$text" | grep -q 'SEAM_JUSTIFIED:'; then
+          SEAM1_JUSTIFIED+=("$file:$lineno ($seam)")
+          continue
+        fi
+        if [[ -n "${SEAM1_VETTED_SEEN[$seam]:-}" ]]; then
+          SEAM1_VETTED+=("$file:$lineno ($seam)")
+        else
+          SEAM1_NEW+=("$file:$lineno ($seam)")
+        fi
+      done < <(grep -oE "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" <<< "$text" | sed -E 's/[[:space:]]*\($//' | sort -u)
+    done < <(grep -nE "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" "$file" | cut -d: -f1)
+  done
+
+  # Registry hygiene: a vetted seam that is no longer production-defined anywhere
+  # is stale (renamed / removed) — advisory NOTE so the registry only lists live
+  # seams (mirrors the *_BASELINE stale check).
+  local v
+  for v in "${SEAM1_REGISTRY_NAMES[@]:-}"; do
+    [[ -z "$v" ]] && continue
+    [[ -n "${PROD_SEAM_DEFINED[$v]:-}" ]] || SEAM1_STALE_REGISTRY+=("$v -> not defined in any src/main")
+  done
+}
+
+# --------------------------------------------------------------------------
 # V1 scan (#1154) — non-void @Test (and @Before/@After lifecycle) methods in
 # androidTest. A Kotlin EXPRESSION body — `@Test fun x() = runBlocking { … }` —
 # returns the block's last expression. When that is non-Unit (e.g. the block
@@ -890,41 +1063,52 @@ V1_JUNIT_ANNOT='@(Test|Before|After|BeforeClass|AfterClass)([[:space:](]|$)'
 # excluded by `[^)]*`), so this does not false-positive on `fun f(a: Int = 5) { }`.
 V1_FUN_EXPR='^[[:space:]]*(override[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)*fun[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\([^)]*\)[[:space:]]*(:[[:space:]]*[^={]+)?='
 
+# V1_FUN_MODIFIER — a leading-modifier `fun` declaration head. Kept as a separate
+# constant so the in-memory scan and the (behaviour-identical) grep form agree.
+V1_FUN_MODIFIER='^[[:space:]]*(override[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)*fun[[:space:]]'
+
 scan_void1() {
+  # PERFORMANCE (#1430): the original walked each androidTest file with per-line
+  # `sed -n Np file` (a whole-file read per line) inside a forward-walk loop —
+  # tens of thousands of subprocess spawns across the androidTest tree, ~18 s. This
+  # reads each candidate file ONCE into an array and classifies lines with bash's
+  # builtin `[[ =~ ]]` using the SAME ERE constants (V1_JUNIT_ANNOT / V1_FUN_EXPR /
+  # V1_FUN_MODIFIER), so behaviour is identical while dropping the cost to ~1 s.
   local file
   for file in "${ANDROID_TEST_FILES[@]}"; do
     [[ -z "$file" ]] && continue
     # Cheap pre-filter: only files that even have a lifecycle annotation.
     grep -Eq "$V1_JUNIT_ANNOT" "$file" || continue
-    local total lineno
-    total="$(wc -l < "$file")"
-    while IFS= read -r lineno; do
-      [[ -z "$lineno" ]] && continue
+    local -a lines=()
+    mapfile -t lines < "$file"
+    local total="${#lines[@]}"
+    local i annline j text stripped
+    for ((i = 0; i < total; i++)); do
+      annline="${lines[i]}"
+      [[ "$annline" =~ $V1_JUNIT_ANNOT ]] || continue
       # Same-line form: `@Test fun x() = …` on the annotation line itself.
-      local annline
-      annline="$(sed -n "${lineno}p" "$file")"
-      if printf '%s' "$annline" | grep -Eq "$V1_FUN_EXPR"; then
-        V1_NEW+=("$file:$lineno")
+      if [[ "$annline" =~ $V1_FUN_EXPR ]]; then
+        V1_NEW+=("$file:$((i + 1))")
         continue
       fi
       # Otherwise walk forward to the next `fun` declaration, skipping further
       # annotations, blank lines, and comment lines.
-      local j="$((lineno + 1))" text
-      while [[ "$j" -le "$total" ]]; do
-        text="$(sed -n "${j}p" "$file")"
-        case "$(printf '%s' "$text" | sed -e 's/^[[:space:]]*//')" in
+      j=$((i + 1))
+      while (( j < total )); do
+        text="${lines[j]}"
+        stripped="${text#"${text%%[![:space:]]*}"}"
+        case "$stripped" in
           '@'*|''|'//'*|'/*'*|'*'*) j=$((j + 1)); continue ;;
         esac
         break
       done
-      [[ "$j" -gt "$total" ]] && continue
-      text="$(sed -n "${j}p" "$file")"
+      (( j >= total )) && continue
+      text="${lines[j]}"
       # Only flag when this is actually a `fun` declaration (an expression body).
-      if printf '%s' "$text" | grep -Eq '^[[:space:]]*(override[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)*fun[[:space:]]' \
-         && printf '%s' "$text" | grep -Eq "$V1_FUN_EXPR"; then
-        V1_NEW+=("$file:$j")
+      if [[ "$text" =~ $V1_FUN_MODIFIER ]] && [[ "$text" =~ $V1_FUN_EXPR ]]; then
+        V1_NEW+=("$file:$((j + 1))")
       fi
-    done < <(grep -nE "$V1_JUNIT_ANNOT" "$file" | cut -d: -f1)
+    done
   done
 }
 
@@ -943,6 +1127,7 @@ scan_fake1
 scan_await1
 scan_j1
 scan_timing1
+scan_seam1
 scan_void1
 
 echo "=============================================================="
@@ -951,6 +1136,7 @@ echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
 echo " CI journey suite: $CI_JOURNEY_SUITE (${#J1_WIRED_ANDROID_TEST_CLASSES[@]} androidTest class entr(y/ies) parsed)"
+echo " Vetted state-injection seam registry: $VETTED_SEAM_REGISTRY (${#SEAM1_REGISTRY_NAMES[@]} seam(s) vetted)"
 echo "=============================================================="
 
 print_list() {
@@ -993,6 +1179,11 @@ print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, n
 print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
 print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"
 print_list "TIMING1 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${TIMING1_JUSTIFIED[@]:-}"
+print_list "SEAM1 — NEW connected-test assertion driven by an UNVETTED production state-injection seam (force*/Override*/set*Active*ForTest not in the registry) [HARD FAIL]" "${SEAM1_NEW[@]:-}"
+print_list "SEAM1 — VETTED connected-test state-injection seam call (registry-listed) [advisory]" "${SEAM1_VETTED[@]:-}"
+print_list "SEAM1 — JUSTIFIED (opted out via // SEAM_JUSTIFIED:) [advisory]" "${SEAM1_JUSTIFIED[@]:-}"
+print_list "SEAM1 — REGISTRY error (a registry line has no '# justification') [HARD FAIL]" "${SEAM1_REGISTRY_ERRORS[@]:-}"
+print_list "SEAM1 — STALE registry entry (seam no longer defined in any src/main) [advisory NOTE]" "${SEAM1_STALE_REGISTRY[@]:-}"
 print_list "V1 — NEW non-void expression-body @Test/@Before/@After in androidTest (JUnit InvalidTestClassError -> class never runs) [HARD FAIL]" "${V1_NEW[@]:-}"
 
 if [[ "${#STALE_BASELINE[@]}" -gt 0 ]]; then
@@ -1026,9 +1217,15 @@ echo " V1     androidTest @Test/@Before/@After must use a VOID BLOCK body, not a
 echo "        expression body. Change  fun x() = runBlocking { … }  to"
 echo "        fun x() { runBlocking { … } }  (the block body is always Unit; the"
 echo "        expression-body value that made the method non-void is discarded)."
+echo " SEAM1  a connected test must not drive an assertion from a state-injection"
+echo "        seam (force*/Override*/set*Active*ForTest) whose injected state the"
+echo "        real path may never reach, unless the seam is vetted with a written"
+echo "        real-path-reachability reason in $VETTED_SEAM_REGISTRY"
+echo "        (or the call carries an inline // SEAM_JUSTIFIED: opt-out). This is"
+echo "        the #1158 forceActivePaneAltBufferForTest cheat class (#1430/#848)."
 echo "--------------------------------------------------------------"
 
-# Collect the HARD-FAIL categories (A5 + C1 + J1 + TIMING1).
+# Collect the HARD-FAIL categories (A5 + C1 + J1 + TIMING1 + SEAM1 + V1).
 real_hard_fail=()
 for x in \
   "${A5_NEW[@]:-}" \
@@ -1037,6 +1234,8 @@ for x in \
   "${J1_STALE_BASELINE[@]:-}" \
   "${J1_PARSER_FAILURE[@]:-}" \
   "${TIMING1_NEW_HARD[@]:-}" \
+  "${SEAM1_NEW[@]:-}" \
+  "${SEAM1_REGISTRY_ERRORS[@]:-}" \
   "${V1_NEW[@]:-}"; do
   [[ -n "$x" ]] && real_hard_fail+=("$x")
 done
@@ -1049,12 +1248,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a force*/Override*/set*Active*ForTest seam driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1 + V1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1 + SEAM1 + V1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, or non-void androidTest @Test methods (A5 + C1 + J1 + TIMING1 + V1)."
+echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + C1 + J1 + TIMING1 + SEAM1 + V1)."
 exit 0

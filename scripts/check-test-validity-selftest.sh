@@ -64,11 +64,41 @@ section_of() {
     capture && /^  - / { print }
   '
 }
+# PERFORMANCE (#1430): the guard scans the whole ~900-file test tree (~13 s), and
+# this self-test asserts it ~30 times. Naively re-running the guard per assertion
+# was ~7 min — too heavy for the per-push Unit job. But the guard's NORMAL
+# (non-report) mode prints the SAME section bullets AND carries the guard-mode
+# exit code, so ONE run per distinct fixture state serves both assert_report and
+# assert_exit. We memoize that run, keyed on a cheap signature of the fixture
+# dirs + the (possibly-overridden) registry, and re-run only when a fixture /
+# registry file changed. This drops the self-test to ~1 run per fixture state.
+_CACHE_SIG=""
+_CACHE_OUT=""
+_CACHE_RC=""
+_fixture_signature() {
+  {
+    find "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR" \
+      -type f -printf '%p|%s|%T@\n' 2>/dev/null | sort
+    printf 'REG:%s\n' "${VETTED_SEAM_REGISTRY:-<default>}"
+    [[ -n "${VETTED_SEAM_REGISTRY:-}" && -f "${VETTED_SEAM_REGISTRY}" ]] \
+      && printf 'REGSIG:%s\n' "$(cksum "$VETTED_SEAM_REGISTRY")"
+  } | cksum
+}
+ensure_guard_cache() {
+  local sig
+  sig="$(_fixture_signature)"
+  if [[ "$sig" != "$_CACHE_SIG" ]]; then
+    _CACHE_SIG="$sig"
+    _CACHE_OUT="$("$GUARD" 2>&1)"
+    _CACHE_RC=$?
+  fi
+}
+
 assert_report() {
   local mode="$1" needle="$2" section="$3" desc="$4"
-  local out sect
-  out="$("$GUARD" --report 2>&1)"
-  sect="$(section_of "$section" "$out")"
+  local sect
+  ensure_guard_cache
+  sect="$(section_of "$section" "$_CACHE_OUT")"
   if [[ "$mode" == "present" ]]; then
     if printf '%s' "$sect" | grep -Fq "$needle"; then note_pass "$desc"; else note_fail "$desc (expected '$needle' under '$section')"; fi
   else
@@ -76,11 +106,11 @@ assert_report() {
   fi
 }
 
-# Assert the guard's guard-mode exit code.
+# Assert the guard's guard-mode exit code (served from the same memoized run).
 assert_exit() {
   local want="$1" desc="$2"
-  "$GUARD" >/dev/null 2>&1
-  local got=$?
+  ensure_guard_cache
+  local got="$_CACHE_RC"
   if [[ "$got" -eq "$want" ]]; then note_pass "$desc (exit $got)"; else note_fail "$desc (want exit $want, got $got)"; fi
 }
 
@@ -400,6 +430,111 @@ assert_exit 1 "TIMING1 bare sleep-before-assert hard-fails the guard"
 # Remove the BAD TIMING1 so the final clean-state assertion (exit 0 with only
 # advisory/justified findings) holds.
 rm -f "$TIMING_FIX_DIR/Timing1BadSleepBeforeAssertTest.kt"
+
+# --------------------------------------------------------------------------
+# SEAM1 — connected test driving an assertion from an UNVETTED production
+# state-injection seam (#1430). Reconstructs the deleted #1158
+# forceActivePaneAltBufferForTest cheat: a production `force*ForTest` seam that
+# injects a state the real path never reaches, called by a connected test whose
+# load-bearing assert then reads it back — green while the feature is broken.
+# --------------------------------------------------------------------------
+echo
+echo "[SEAM1] connected test driving an assertion from an unvetted state-injection seam"
+
+# Plant a PRODUCTION state-injection seam (the alt-buffer cheat shape) under
+# src/main so the guard resolves the call to a real production seam (a
+# test-double helper of the same name must be IGNORED — proven separately below).
+cat > "$SRC_FIX_DIR/Seam1ProdSeam.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1ProdSeam {
+    // A production state-injection seam of the #1158 alt-buffer shape: it forces
+    // a runtime flag the real seed path never sets on its own.
+    fun forceActivePaneAltBufferForTest(active: Boolean) { /* injects unreachable state */ }
+}
+KT
+
+# BAD: a connected test that forces the unreachable state, then asserts on it —
+# the exact #1158 cheat. The seam is production-defined but NOT registry-vetted.
+cat > "$ANDROID_FIX_DIR/Seam1BadAltBufferCheatTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadAltBufferCheatTest {
+    fun conversationTabAppearsForLiveAgent() {
+        vm.forceActivePaneAltBufferForTest(true)   // injects a production-unreachable state
+        assertTrue(showsConversationTab())          // load-bearing — green while broken
+    }
+    private val vm = Seam1ProdSeam()
+    private fun showsConversationTab() = true
+    private fun assertTrue(b: Boolean) {}
+}
+KT
+
+# GOOD-1 (vetted): forceTreeStaleForTest IS a real production seam AND is listed
+# in scripts/vetted-test-state-setters.txt with a real-path-reachability reason.
+cat > "$ANDROID_FIX_DIR/Seam1GoodVettedTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodVettedTest {
+    fun treeGoesStale() {
+        vm.forceTreeStaleForTest()   // registry-vetted: wraps the exact production markReconcileDue call
+    }
+    private val vm = FakeVm()
+    class FakeVm { fun forceTreeStaleForTest() {} }
+}
+KT
+
+# GOOD-2 (justified): the same unvetted production seam but opted out inline.
+cat > "$ANDROID_FIX_DIR/Seam1GoodJustifiedTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodJustifiedTest {
+    fun oneOff() {
+        vm.forceActivePaneAltBufferForTest(true) // SEAM_JUSTIFIED: selftest one-off; injected state is reachable here
+    }
+    private val vm = Seam1ProdSeam()
+}
+KT
+
+# GOOD-3 (non-production helper): a `force*ForTest` of the same SHAPE but defined
+# locally in the test (NOT a production seam) must be IGNORED — the cheat class is
+# specifically a production seam.
+cat > "$ANDROID_FIX_DIR/Seam1GoodLocalHelperTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodLocalHelperTest {
+    fun usesLocalHelper() {
+        forceLocalOnlyHelperForTest(true)  // a test-double helper, never a production seam
+    }
+    private fun forceLocalOnlyHelperForTest(active: Boolean) {}
+}
+KT
+
+assert_report present "Seam1BadAltBufferCheatTest.kt" "SEAM1 — NEW" "SEAM1 fires on an unvetted production state-injection seam (reconstructs the #1158 alt-buffer cheat)"
+assert_report absent  "Seam1GoodVettedTest.kt" "SEAM1 — NEW" "SEAM1 spares a registry-vetted seam (forceTreeStaleForTest)"
+assert_report absent  "Seam1GoodJustifiedTest.kt" "SEAM1 — NEW" "SEAM1 spares a // SEAM_JUSTIFIED: opt-out"
+assert_report absent  "Seam1GoodLocalHelperTest.kt" "SEAM1 — NEW" "SEAM1 ignores a non-production test-double helper of the same shape"
+assert_exit 1 "SEAM1 unvetted production state-injection seam hard-fails the guard"
+
+# Remove the BAD SEAM1 caller so the registry-error and clean-state checks below
+# are not confounded by its hard-fail.
+rm -f "$ANDROID_FIX_DIR/Seam1BadAltBufferCheatTest.kt"
+
+# --------------------------------------------------------------------------
+# SEAM1 registry hygiene — a registry line with no `# justification` is a hard
+# error (registry additions must carry a written real-path-reachability reason).
+# Point the guard at a TEMP registry (real registry + one un-justified line) so
+# the real 3 vetted seams stay covered (no spurious SEAM1 — NEW) and only the bad
+# line trips the error.
+# --------------------------------------------------------------------------
+echo
+echo "[SEAM1] registry line without a written justification is a hard error"
+
+TMP_REG="$(mktemp)"
+cat "scripts/vetted-test-state-setters.txt" > "$TMP_REG"
+printf '\nselftestSeamWithoutReasonForTest\n' >> "$TMP_REG"   # no `# justification` -> error
+export VETTED_SEAM_REGISTRY="$TMP_REG"
+
+assert_report present "has no '# justification'" "SEAM1 — REGISTRY error" "SEAM1 flags a registry line with no written justification"
+assert_exit 1 "SEAM1 un-justified registry line hard-fails the guard"
+
+unset VETTED_SEAM_REGISTRY
+rm -f "$TMP_REG"
 
 # --------------------------------------------------------------------------
 # Clean state: only corrective/advisory fixtures remain -> guard must PASS.

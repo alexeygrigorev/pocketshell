@@ -3227,6 +3227,24 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
+    private fun currentNetworkTransitionProbeGuard(target: ConnectionTarget): RuntimeRefreshGuard? {
+        val client = clientRef ?: return null
+        val currentTarget = activeTarget ?: connectingTarget ?: return null
+        if (!sameSessionIdentity(currentTarget, target)) return null
+        return RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+    }
+
+    private fun isCurrentNetworkTransitionProbe(guard: RuntimeRefreshGuard): Boolean {
+        val currentTarget = activeTarget ?: connectingTarget ?: return false
+        return connectGeneration == guard.generation &&
+            clientRef === guard.client &&
+            sameSessionIdentity(currentTarget, guard.target)
+    }
+
     private fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         TmuxRuntimeKey(
             hostId = hostId,
@@ -5245,35 +5263,16 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #981 / #1042 / #1078: the [NetworkChangeArm.SuppressNetworkTransportProvenAlive]
-     * body. A real validated identity change WAS observed (we are past the
-     * `realValidatedIdentityChange` gate), and the live transport's keepalive
-     * has seen inbound bytes within its ride-through window — so the old socket
-     * is PASSIVELY proven alive and a teardown+redial would be the #974 spurious
-     * stable-wifi drop.
-     *
-     * Issue #1078: the passive keepalive timestamp only proves the link was alive
-     * RECENTLY. A genuine WIFI→CELLULAR handoff can leave the old socket DEAD while
-     * its last-inbound-byte age is still under the ~90s keepalive budget
-     * ([com.pocketshell.core.ssh.TransportKeepAlive]) — so a purely passive suppress
-     * here shows the session Live-but-FROZEN until that full budget finally trips
-     * (up to ~90s). The #1042 restore arm already solved the equivalent problem with
-     * a bounded ACTIVE probe; mirror it here through the SAME mechanism
-     * ([runLivenessProbePing] bounded by [RESTORE_LIVENESS_PROBE_BUDGET_MS], the
-     * authority the restore arm uses): confirm liveness with ONE bounded probe over
-     * the warm control channel before riding through. If it answers, RIDE THROUGH
-     * (the #981/#974/#1058 spurious-drop ride-through win is preserved); if it does
-     * NOT, the socket is dead post-handoff, so redial PROMPTLY via the SAME dead-link
-     * handoff authority the reducer already dispatches ([scheduleNetworkReconnect])
-     * instead of waiting out the keepalive budget. The probe is bounded so it cannot
-     * itself hang; the session stays Connected (no overlay) for at most the probe
-     * budget on the dead path. `realValidatedIdentityChange` is always `true` here
-     * (only a real handoff reaches this gate).
+     * Issue #1078 / #1193: passive keepalive freshness is not enough across a real
+     * validated handoff. Confirm the old control channel with one bounded answered
+     * round-trip before riding through; otherwise redial promptly instead of leaving
+     * the terminal Live-but-dead until the keepalive budget expires.
      */
     private fun suppressNetworkTransportProvenAlive(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
+        val probeGuard = currentNetworkTransitionProbeGuard(target)
         viewModelScope.launch {
             // Issue #1193: this handoff probe is a NETWORK-TRANSITION probe, so it
             // requires an ANSWERED round-trip (like the restore arm). Recent reader
@@ -5283,6 +5282,10 @@ public class TmuxSessionViewModel @Inject constructor(
             val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
                 runLivenessProbePing(requireAnsweredRoundTrip = true)
             } ?: false
+            if (probeGuard != null && !isCurrentNetworkTransitionProbe(probeGuard)) {
+                recordStaleNetworkTransitionProbe(change, target, "network_handoff_probe", probeGuard)
+                return@launch
+            }
             if (alive) {
                 rideThroughNetworkHandoffProvenAlive(change, target)
             } else {
@@ -5501,44 +5504,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997 / #1042: the [NetworkChangeArm.ScheduleNetworkReconnectOnRestore]
-     * body. Validation RETURNED after a loss. Unlike [scheduleNetworkReconnect] this
-     * does NOT require a `Connected` status (it recovers a loss-suspended /
-     * `Reconnecting` session — the whole point). `target` is the held
-     * [activeTarget]/[connectingTarget].
-     *
-     * Issue #1042 (cause #1) makes this LIVENESS-FIRST. The pre-#1042 body redialled
-     * UNCONDITIONALLY (a fresh lease, bypassing the proven-alive gate) on every
-     * restore. On cellular the device dips into no-validated-network constantly
-     * (tunnel, elevator, RAT handover, congestion re-validation) WITHOUT the TCP
-     * socket dying, so that unconditional redial was the maintainer's "constant
-     * reconnects on mobile internet". We check whether the EXISTING transport
-     * survived the dip before tearing it down.
-     *
-     * Issue #1193 — the restore ride-through decision now goes through ONE
-     * mechanism only: a bounded ACTIVE probe. The pre-#1193 fast-path rode through
-     * whenever the passive transport keepalive TIMESTAMP was fresh
-     * ([isTransportKeepAliveProvenAliveRecently], a pure < 90s clock comparison —
-     * NO round-trip). On a WiFi→cellular handoff the old socket is silently dead
-     * (the new radio's IP/NAT invalidates the 4-tuple) while the last-inbound-byte
-     * age is still under the ~90s keepalive budget, so that fast-path committed to
-     * a DEAD transport, flipped back to Live, and the `-CC` reader threw ~157ms
-     * later → `passive_disconnect` + reconnect churn (the maintainer's 2026-07-02
-     * cellular spurious drop). This is the SAME defect #1078 already fixed on the
-     * sibling validated-identity-change arm ([suppressNetworkTransportProvenAlive]),
-     * which a real cellular flap bypasses because it arrives via loss→restore, not
-     * identity-change. We mirror that fix here: issue ONE bounded control-channel
-     * probe that requires an ANSWERED round-trip (#1193 `requireAnsweredRoundTrip`,
-     * so stale reader activity over the OLD socket cannot mask a dead new path). If
-     * it answers, RIDE THROUGH (the #974/#981/#1042 spurious-drop-suppression win is
-     * preserved — a truly-live transport answers fast, well inside the 2s budget).
-     * Only when the probe does NOT answer (or times out) do we fall back to the #997
-     * fresh-lease redial — a genuinely dead post-handoff socket therefore redials
-     * PROMPTLY instead of freezing Live-but-dead for ~90s
-     * (BareNetworkLossRestoreReconnectE2eTest guards both outcomes). The passive
-     * keepalive check remains a NEGATIVE signal elsewhere (the #964 probe deferral,
-     * the handoff classifier) but is NO LONGER a positive ride-through authority on
-     * restore (D22 hard-cut — the passive fast-path is deleted, not flagged).
+     * Issue #997 / #1042 / #1193: validation returned after a loss, including from
+     * a loss-suspended Reconnecting state. Ride through only when the existing
+     * control channel answers one bounded transition probe; otherwise schedule the
+     * fresh-lease restore reconnect. Passive keepalive freshness is intentionally
+     * not a positive restore authority across WiFi/cellular transitions.
      */
     private fun scheduleNetworkReconnectOnRestore(
         change: TerminalNetworkChange,
@@ -5549,16 +5519,45 @@ public class TmuxSessionViewModel @Inject constructor(
         // (possibly new) path answers; redial via the #997 fresh lease if it does
         // not. No passive-timestamp fast-path — that is what committed to a dead
         // cellular socket.
+        val probeGuard = currentNetworkTransitionProbeGuard(target)
         viewModelScope.launch {
             val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
                 runLivenessProbePing(requireAnsweredRoundTrip = true)
             } ?: false
+            if (probeGuard != null && !isCurrentNetworkTransitionProbe(probeGuard)) {
+                recordStaleNetworkTransitionProbe(change, target, "network_restore_probe", probeGuard)
+                return@launch
+            }
             if (alive) {
                 rideThroughNetworkRestore(change, target, cause = "probe_answered")
             } else {
                 forceFreshLeaseRestoreReconnect(change, target)
             }
         }
+    }
+
+    private fun recordStaleNetworkTransitionProbe(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+        source: String,
+        guard: RuntimeRefreshGuard,
+    ) {
+        DiagnosticEvents.record(
+            "connection",
+            "network_transition_probe_stale",
+            "source" to source,
+            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+            "reason" to change.reason,
+            "sequence" to change.sequence,
+            "hostId" to target.hostId,
+            "session" to target.sessionName,
+            "generation" to guard.generation,
+            "currentGeneration" to connectGeneration,
+            "clientHash" to System.identityHashCode(guard.client),
+            "currentClientHash" to clientRef?.let { System.identityHashCode(it) },
+            "deferredFromBackground" to change.deferredFromBackground,
+            *change.networkDiagnosticFields(),
+        )
     }
 
     /**

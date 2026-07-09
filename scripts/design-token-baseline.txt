@@ -3,7 +3,8 @@
 # regenerate with: scripts/check-design-tokens.sh --update
 # lower numbers are better — re-baseline after migrating a screen.
 app/src/main/java/com/pocketshell/app/composer/MarkdownText.kt 4
-app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt 29
+app/src/main/java/com/pocketshell/app/composer/PromptComposerQueueBanners.kt 2
+app/src/main/java/com/pocketshell/app/composer/PromptComposerSheet.kt 23
 app/src/main/java/com/pocketshell/app/conversation/ConversationMessageTurn.kt 1
 app/src/main/java/com/pocketshell/app/conversation/ConversationTextSection.kt 3
 app/src/main/java/com/pocketshell/app/crash/CrashReportsScreen.kt 2

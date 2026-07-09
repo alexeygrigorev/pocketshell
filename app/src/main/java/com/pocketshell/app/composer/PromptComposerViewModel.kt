@@ -39,13 +39,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 
 /**
@@ -280,11 +277,11 @@ public class PromptComposerViewModel @Inject constructor(
         null
     private var outboundSidecarDispatchInFlight: Boolean = false
     internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
-    private val draftStoreWriteMutex = Mutex()
-    private val draftStoreWriteGenerations: ConcurrentHashMap<String, AtomicLong> =
-        ConcurrentHashMap()
-    private val draftStoreOverrides: ConcurrentHashMap<String, String> =
-        ConcurrentHashMap()
+    private val draftPersistence = ComposerDraftPersistence(
+        store = composerDraftStore,
+        scope = viewModelScope,
+        dispatcher = { outboundQueueDispatcher },
+    )
 
     /**
      * Issue #971: the [SendRequest] for the prompt currently in flight, captured
@@ -468,59 +465,15 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     private fun loadComposerDraft(sessionKey: String): String? {
-        val override = draftStoreOverrides[sessionKey]
-        if (override != null || draftStoreOverrides.containsKey(sessionKey)) {
-            return override?.takeIf { it.isNotEmpty() }
-        }
-        return composerDraftStore.load(sessionKey)
+        return draftPersistence.load(sessionKey)
     }
 
     private fun saveComposerDraft(sessionKey: String?, draft: String) {
-        val key = sessionKey?.takeIf { it.isNotBlank() } ?: return
-        draftStoreOverrides[key] = draft
-        val generation = nextDraftStoreWriteGeneration(key)
-        if (composerDraftStore is SharedPrefsComposerDraftStore) {
-            viewModelScope.launch(outboundQueueDispatcher) {
-                writeLatestComposerDraft(key, generation) {
-                    composerDraftStore.save(key, draft)
-                }
-            }
-        } else {
-            composerDraftStore.save(key, draft)
-        }
+        draftPersistence.save(sessionKey, draft)
     }
 
     private fun clearComposerDraft(sessionKey: String?) {
-        val key = sessionKey?.takeIf { it.isNotBlank() } ?: return
-        draftStoreOverrides[key] = ""
-        val generation = nextDraftStoreWriteGeneration(key)
-        if (composerDraftStore is SharedPrefsComposerDraftStore) {
-            viewModelScope.launch(outboundQueueDispatcher) {
-                writeLatestComposerDraft(key, generation) {
-                    composerDraftStore.clear(key)
-                }
-            }
-        } else {
-            composerDraftStore.clear(key)
-        }
-    }
-
-    private fun nextDraftStoreWriteGeneration(sessionKey: String): Long =
-        draftStoreWriteGenerations
-            .computeIfAbsent(sessionKey) { AtomicLong() }
-            .incrementAndGet()
-
-    private suspend fun writeLatestComposerDraft(
-        sessionKey: String,
-        generation: Long,
-        write: () -> Unit,
-    ) {
-        draftStoreWriteMutex.withLock {
-            val latest = draftStoreWriteGenerations[sessionKey]?.get()
-            if (latest == generation) {
-                write()
-            }
-        }
+        draftPersistence.clear(sessionKey)
     }
 
     /**

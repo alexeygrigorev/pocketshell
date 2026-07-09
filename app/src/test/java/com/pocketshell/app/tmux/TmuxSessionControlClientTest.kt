@@ -80,11 +80,10 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
 
     @Test
     fun escapeSingleQuotedRoundTripsBytesWithoutQuotes() {
-        val vm = newVm()
-        assertEquals("hello world", vm.escapeSingleQuoted("hello world"))
-        assertEquals("\n\t", vm.escapeSingleQuoted("\n\t"))
+        assertEquals("hello world", escapeSingleQuoted("hello world"))
+        assertEquals("\n\t", escapeSingleQuoted("\n\t"))
         // Empty input -> empty output.
-        assertEquals("", vm.escapeSingleQuoted(""))
+        assertEquals("", escapeSingleQuoted(""))
     }
 
     // ----- Issue #285: automatic tmux control-client sizing.

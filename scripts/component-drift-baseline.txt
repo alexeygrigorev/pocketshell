@@ -19,8 +19,9 @@ app/src/main/java/com/pocketshell/app/settings/SettingsScreen.kt 3
 app/src/main/java/com/pocketshell/app/share/HostPickerScreen.kt 2
 app/src/main/java/com/pocketshell/app/snippets/SnippetPickerSheet.kt 1
 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionAuxiliaryModals.kt 6
+app/src/main/java/com/pocketshell/app/tmux/TmuxSessionConnectionChrome.kt 4
 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionOverlays.kt 5
-app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 8
+app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 4
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/ConfirmDialog.kt 1
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/FormDialog.kt 1
 shared/ui-kit/src/main/java/com/pocketshell/uikit/components/HostCard.kt 2

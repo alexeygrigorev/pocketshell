@@ -2234,7 +2234,7 @@ class FolderListViewModel internal constructor(
         if (bound != params) return
         if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
         _state.value = FolderListUiState.ConnectError(
-            message = connectErrorCopy(cause),
+            message = folderListConnectErrorMessage(cause, REFRESH_FAILED_MESSAGE),
             cause = cause,
         )
     }
@@ -2373,7 +2373,7 @@ class FolderListViewModel internal constructor(
                 // entire enumeration command). The raw [cause] is still carried
                 // for Retry/diagnostics but never rendered.
                 _state.value = FolderListUiState.ConnectError(
-                    message = connectErrorCopy(result.cause),
+                    message = folderListConnectErrorMessage(result.cause, REFRESH_FAILED_MESSAGE),
                     cause = result.cause,
                 )
             }
@@ -2400,7 +2400,7 @@ class FolderListViewModel internal constructor(
      * scheduled (the caller must `return` without surfacing any error state).
      */
     private fun handleTransientRefreshDrop(params: BoundParams, cause: Throwable): Boolean {
-        if (!isTransientTransportDrop(cause)) return false
+        if (!isTransientFolderRefreshDrop(cause)) return false
         if (transientRefreshRetries >= TRANSIENT_REFRESH_RETRY_LIMIT) {
             // Retries exhausted: this is no longer "transient" from the user's
             // point of view. Fall through to the calm-message path below.
@@ -2418,57 +2418,6 @@ class FolderListViewModel internal constructor(
         launchReconcile(params)
         return true
     }
-
-    /**
-     * Issue #711: classify a refresh error as the TRANSIENT transport-EOF family
-     * the dogfood report surfaced — a broken transport, encountered EOF, broken
-     * pipe, a `Failed to open exec channel` wrapping that EOF, or a channel
-     * closed under the exec. This is the drop that self-recovered on the very
-     * next reconcile (the maintainer got the tree), so it must heal QUIETLY, not
-     * flash a scary band carrying the raw enumeration command.
-     *
-     * Deliberately NARROWER than the gateway's [isStaleChannelSymptom]: the
-     * "open failed" / "SSH session is not connected" stale-channel cases already
-     * have an explicit, established Retry-panel UX (#465/#680) — they surface a
-     * calm, retryable panel (now with calm copy, see [connectErrorCopy]) rather
-     * than auto-looping. Only the EOF-drop family auto-retries quietly here.
-     * Matched on message text (walking the cause chain) so it stays in lockstep
-     * with the gateway classifier without an exception-type dependency.
-     */
-    private fun isTransientTransportDrop(cause: Throwable?): Boolean {
-        var current: Throwable? = cause
-        val seen = HashSet<Throwable>()
-        while (current != null && seen.add(current)) {
-            val message = current.message
-            if (message != null &&
-                (
-                    message.contains("encountered EOF", ignoreCase = true) ||
-                        message.contains("Broken transport", ignoreCase = true) ||
-                        message.contains("broken pipe", ignoreCase = true) ||
-                        message.contains("Failed to open exec channel", ignoreCase = true) ||
-                        message.contains("channel closed", ignoreCase = true)
-                    )
-            ) {
-                return true
-            }
-            current = current.cause
-        }
-        return false
-    }
-
-    /**
-     * Issue #711: the user-facing copy for an unrecoverable folder-tree connect
-     * error. NEVER the raw transport exception (which embedded the whole
-     * `PATH=…; tmux list-sessions …` enumeration command) — a compact, calm
-     * one-liner with a Retry affordance on the panel. The reconcile-timeout case
-     * already carries its own short, calm message, so it is passed through.
-     */
-    private fun connectErrorCopy(cause: Throwable): String =
-        if (cause is FolderReconcileTimeoutException) {
-            cause.message ?: REFRESH_FAILED_MESSAGE
-        } else {
-            REFRESH_FAILED_MESSAGE
-        }
 
     private fun preserveReadyOnRefresh(message: String): Boolean {
         if (_state.value !is FolderListUiState.Ready) return false

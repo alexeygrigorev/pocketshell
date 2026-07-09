@@ -18156,58 +18156,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // ---- End Issue #626 helpers ----
 
     /**
-     * Parse one row from `list-panes -F ...` output into a
-     * [ParsedPane]. Returns null if the row is malformed — we tolerate a
-     * trailing blank line or a tmux version that surfaces fewer fields
-     * than the format string requested.
-     */
-    private fun parsePaneRow(line: String): ParsedPane? {
-        val parts = if (LIST_PANES_FIELD_SEPARATOR in line) {
-            line.split(LIST_PANES_FIELD_SEPARATOR)
-        } else {
-            line.split('\t')
-        }
-        if (parts.size < 5) return null
-        val paneId = parts[0].takeIf { it.startsWith("%") } ?: return null
-        val windowId = parts[1].takeIf { it.startsWith("@") } ?: return null
-        val hasWindowIndex = parts.getOrNull(2)?.startsWith("$") == false
-        val windowIndex = if (hasWindowIndex) parts[2].trim().toIntOrNull() else null
-        val sessionIdIndex = if (hasWindowIndex) 3 else 2
-        val sessionId = parts.getOrNull(sessionIdIndex)?.takeIf { it.startsWith("$") } ?: return null
-        val hasSessionName = parts.size >= sessionIdIndex + 4
-        val sessionNameIndex = sessionIdIndex + 1
-        val titleIndex = if (hasSessionName) sessionIdIndex + 2 else sessionIdIndex + 1
-        val paneIndexIndex = if (hasSessionName) sessionIdIndex + 3 else sessionIdIndex + 2
-        val sessionName = if (hasSessionName) parts[sessionNameIndex] else ""
-        val title = parts.getOrNull(titleIndex).orEmpty()
-        val paneIndex = parts.getOrNull(paneIndexIndex)?.trim()?.toIntOrNull() ?: 0
-        return ParsedPane(
-            paneId = paneId,
-            windowId = windowId,
-            windowIndex = windowIndex,
-            sessionId = sessionId,
-            title = title,
-            paneIndex = paneIndex,
-            cwd = parts.getOrNull(paneIndexIndex + 1).orEmpty(),
-            currentCommand = parts.getOrNull(paneIndexIndex + 2).orEmpty(),
-            // Issue #186: `#{pane_tty}` scopes the recorded-source process
-            // scan to this pane. Older tmux versions that omit the field
-            // simply return empty, in which case per-pane source resolution
-            // skips this pane rather than fall back to a host-wide scan.
-            paneTty = parts.getOrNull(paneIndexIndex + 3).orEmpty(),
-            inCopyMode = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 4)),
-            // Epic #821 slice A2: `#{pane_pid}` is the LAST field. Older tmux
-            // (or unit tests on the legacy format) omit it -> 0, and the
-            // foreign-session kind guess simply skips the pane.
-            panePid = parts.getOrNull(paneIndexIndex + 5)?.trim()?.toLongOrNull() ?: 0L,
-            sessionName = sessionName,
-        )
-    }
-
-    private fun parseTmuxBoolean(raw: String?): Boolean =
-        raw == "1" || raw.equals("true", ignoreCase = true)
-
-    /**
      * Internal value type used by the reconcile path. Visible to tests so
      * they can drive [applyParsedPanesForTest] without round-tripping the
      * format string.
@@ -18688,27 +18636,6 @@ private suspend fun PrewarmedPaneRuntime.closePartialPrewarm() {
 }
 
 /**
- * Issue #259: the live cursor position of a pane, in the pane's *visible*
- * (viewport) coordinate space, 0-based, as reported by tmux
- * `display-message -p '#{cursor_x},#{cursor_y}'`.
- *
- * This is the piece of state `capture-pane` alone cannot give us. A
- * `capture-pane` snapshot flattens the rendered grid to text but drops the
- * cursor's row/column. When we seed a freshly-attached pane with the snapshot
- * and then let live `%output` flow in, the agent's status/spinner line rewrites
- * itself *in place* with a bare carriage return (`\r` to column 0 of the
- * **current cursor row**) — it does NOT re-home the cursor first. So if the
- * seed leaves the emulator's cursor on the wrong row (e.g. the row *below* the
- * spinner, which is what a trailing newline does), the next live frame paints
- * on that wrong row and the seeded final frame stays put above it: two spinner
- * frames coexist, fragments of different frames mash together — the exact #259
- * garble (`gthinkingwithout`, two `Beboppin…` rows). Restoring the true cursor
- * after the seed makes the next live rewrite land on the same row tmux has it,
- * so the live frame cleanly overwrites the seeded one.
- */
-internal data class TmuxPaneCursor(val column: Int, val row: Int)
-
-/**
  * Issue #640: scrollback budget for the seed capture. The seed replays up to
  * this many lines of history so the freshly-attached emulator matches tmux's
  * current frame plus a little scrollback; widening it would only make the first
@@ -18992,65 +18919,6 @@ internal const val SEND_OVERPAINT_HEAL_SETTLE_MS: Long = 350L
  * local pre-check each tick (no capture). Bounded so a send never leaves a lingering poll.
  */
 internal const val SEND_OVERPAINT_HEAL_MAX_TICKS: Int = 4
-
-/**
- * Parse a tmux `display-message -p '#{cursor_x},#{cursor_y}'` reply line
- * (e.g. `0,2`) into a [TmuxPaneCursor]. Returns null when the reply is
- * missing, malformed, or carries negative coordinates — callers fall back to
- * seeding without an explicit cursor restore.
- */
-internal fun parseTmuxPaneCursor(reply: String?): TmuxPaneCursor? {
-    val parts = reply?.trim()?.split(',') ?: return null
-    if (parts.size != 2) return null
-    val column = parts[0].trim().toIntOrNull() ?: return null
-    val row = parts[1].trim().toIntOrNull() ?: return null
-    if (column < 0 || row < 0) return null
-    return TmuxPaneCursor(column = column, row = row)
-}
-
-/**
- * Issue #259: build the byte stream that seeds a freshly-attached pane's
- * emulator from a `capture-pane -p -e -S -200` snapshot.
- *
- * Three things matter for the seed to render cleanly and match the live pane:
- *
- *  1. **No forced trailing newline.** The old builder appended a final `\r\n`,
- *     which scrolled the captured content up one row and parked the cursor on
- *     the row *below* the last captured line. The agent's in-place spinner
- *     rewrite (`\r` + frame, no re-home) then painted one row too low, leaving
- *     the seeded frame stranded above the live frame. We replay the lines
- *     joined by `\r\n` with **no** terminating newline.
- *  2. **Reset SGR at the seed boundary.** `capture-pane -e` emits each cell's
- *     colour but does not guarantee a closing reset, so an unterminated colour
- *     run could bleed past the seed into live output. We emit `ESC[0m` after
- *     the last captured line (which keeps the captured content's own colours)
- *     and before moving the cursor.
- *  3. **Restore the true cursor.** When [cursor] is known we emit a
- *     viewport-absolute cursor-position (`ESC[<row+1>;<col+1>H`, 1-based) so
- *     the emulator's cursor sits exactly where tmux has it. `CSI H` targets the
- *     visible screen, so it is correct regardless of how much scrollback the
- *     capture replayed into history. When [cursor] is null (older tmux, or the
- *     query failed) we leave the cursor at the end of the replay — still better
- *     than the old below-content placement.
- */
-private fun List<String>.toTerminalViewportBytes(cursor: TmuxPaneCursor? = null): ByteArray {
-    val lines = this
-    val text = buildString {
-        append("\u001b[H\u001b[2J")
-        lines.forEachIndexed { index, line ->
-            if (index > 0) append("\r\n")
-            append(line)
-        }
-        // Close any open SGR run from the captured cells so a colour started
-        // on the last captured line cannot bleed into subsequent live output.
-        append("\u001b[0m")
-        if (cursor != null) {
-            // CSI <row>;<col> H is 1-based; tmux reports 0-based coordinates.
-            append("\u001b[${cursor.row + 1};${cursor.column + 1}H")
-        }
-    }
-    return text.toByteArray(Charsets.UTF_8)
-}
 
 private const val MaxAgentEvents: Int = 500
 internal const val CtrlAByte: Int = 0x01

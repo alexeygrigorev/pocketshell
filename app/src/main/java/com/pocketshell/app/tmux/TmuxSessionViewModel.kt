@@ -172,33 +172,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
-internal fun sessionCardsTargetKey(
-    hostId: Long,
-    host: String,
-    port: Int,
-    user: String,
-    keyPath: String,
-    sessionName: String,
-): String = buildString {
-    append(hostId)
-    append('|')
-    append(port)
-    append('|')
-    appendKeyPart(host)
-    append('|')
-    appendKeyPart(user)
-    append('|')
-    appendKeyPart(keyPath)
-    append('|')
-    appendKeyPart(sessionName.trim())
-}
-
-private fun StringBuilder.appendKeyPart(value: String) {
-    append(value.length)
-    append(':')
-    append(value)
-}
-
 /**
  * Holds the live `tmux -CC` control channel for a single SSH host /
  * session-name pair, and surfaces the resulting list of panes as

@@ -6,14 +6,13 @@
 # New non-exempt tracked files above threshold_bytes fail the guard.
 # Exemptions: vendor/generated/worktree dirs and shared/core-terminal.
 203585 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
-139372 app/src/main/java/com/pocketshell/app/projects/FolderListScreen.kt
 180197 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
 226939 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
-946455 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
-278779 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
-704615 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
+944952 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
+276460 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
+696693 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh
 160115 shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt
-138387 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt
+132209 shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt

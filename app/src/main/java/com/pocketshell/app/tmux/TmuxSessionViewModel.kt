@@ -17720,11 +17720,6 @@ public class TmuxSessionViewModel @Inject constructor(
         resetControlClientSizeForAttach()
     }
 
-    private sealed interface RuntimeCacheEviction {
-        data object HostWide : RuntimeCacheEviction
-        data class TargetRuntime(val key: TmuxRuntimeKey) : RuntimeCacheEviction
-    }
-
     /**
      * Non-suspending teardown used by `onCleared()` and the synchronous
      * test-replacement seam. Cancels the event-loop coroutine (fire and
@@ -18138,29 +18133,6 @@ public class TmuxSessionViewModel @Inject constructor(
             sessionName = sessionName,
         )
 
-    private data class ConnectIntent(
-        val target: ConnectionTarget,
-        val trigger: TmuxConnectTrigger,
-        val generation: Long,
-    )
-
-    private data class PendingReattach(
-        val target: ConnectionTarget,
-        val generation: Long,
-        val intendedTarget: ConnectionTarget?,
-        val intendedTrigger: TmuxConnectTrigger?,
-    )
-
-    private data class LifecycleReattachNetworkCoalesce(
-        val target: ConnectionTarget,
-        val generation: Long,
-    )
-
-    private data class PausedAutoReconnect(
-        val target: ConnectionTarget,
-        val reason: String,
-    )
-
     // Issue #722: visibility widened from `private` to `internal` (no behavior
     // change) so the characterization test seams [currentRuntimeGuardForTest],
     // [reseedBlankVisiblePanesForTest], and [armConnectedBlankWatchdogForTest]
@@ -18170,24 +18142,6 @@ public class TmuxSessionViewModel @Inject constructor(
         val target: ConnectionTarget,
         val client: TmuxClient,
     )
-
-    private data class AttachMilestone(
-        val attempt: Int,
-        val sessionName: String,
-        val startedAtMs: Long,
-        val trigger: TmuxConnectTrigger,
-        var firstPaneOutputLogged: Boolean = false,
-        var firstPaneListReadyLogged: Boolean = false,
-        var firstTerminalBridgeLogged: Boolean = false,
-        var firstCaptureReadyLogged: Boolean = false,
-        var firstRemoteRefreshLogged: Boolean = false,
-    )
-
-    private sealed interface PaneReconcileResult {
-        data class Ready(val paneCount: Int) : PaneReconcileResult
-        data class Failed(val cause: Throwable) : PaneReconcileResult
-        data object NoClient : PaneReconcileResult
-    }
 
     private class TmuxAttachPanesReadyException(
         message: String,

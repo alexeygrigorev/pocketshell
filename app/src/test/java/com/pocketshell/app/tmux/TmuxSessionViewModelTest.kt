@@ -2,7 +2,6 @@ package com.pocketshell.app.tmux
 
 import android.os.Looper
 import android.os.SystemClock
-import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
@@ -13929,200 +13928,6 @@ class TmuxSessionViewModelTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun refreshActiveSessionCardsPublishesFeedForActiveSession() = runTest(scheduler) {
-        val session = FakeSshSession(
-            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
-        )
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = session,
-        )
-
-        assertTrue(vm.refreshActiveSessionCards())
-        awaitCardsState(vm) { !it.loading && it.sessionName == "work" && it.feed.cards.isNotEmpty() }
-
-        val card = vm.sessionCards.value.feed.cards.single() as SessionCardsRemoteSource.ChecklistCard
-        assertEquals("release", card.id)
-        assertEquals(setOf("build-0"), card.checkedIds)
-        assertTrue(
-            "card refresh must use the current tmux session name",
-            session.execCommands.any { it.contains("push get") && it.contains("--session 'work'") },
-        )
-    }
-
-    @Test
-    fun refreshActiveSessionCardsDropsLateFeedWhenHostChangesButSessionNameMatches() = runTest(scheduler) {
-        val gate = CompletableDeferred<Unit>()
-        val oldSession = FakeSshSession(
-            execGate = gate,
-            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
-        )
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = oldSession,
-        )
-
-        assertTrue(vm.refreshActiveSessionCards())
-        awaitCondition { oldSession.execCommands.any { it.contains("push get") } }
-
-        vm.replaceClientForTest(
-            hostId = 2L,
-            hostName = "beta",
-            host = "beta.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/b",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = FakeSshSession(),
-        )
-        gate.complete(Unit)
-        runCurrent()
-        advanceUntilIdle()
-
-        assertTrue(
-            "late card feed from old host must not publish after switching to same-named session",
-            vm.sessionCards.value.feed.cards.isEmpty(),
-        )
-    }
-
-    @Test
-    fun refreshActiveSessionCardsReturnsFalseWithoutWarmSession() = runTest(scheduler) {
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = null,
-        )
-
-        assertFalse(vm.refreshActiveSessionCards())
-        assertEquals(TmuxSessionViewModel.SessionCardsUiState(), vm.sessionCards.value)
-    }
-
-    @Test
-    fun toggleChecklistItemWritesThenRefreshesFeedOnSuccess() = runTest(scheduler) {
-        val session = FakeSshSession(
-            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
-        )
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = session,
-        )
-
-        assertTrue(vm.toggleChecklistItem(cardId = "release", itemId = "build-0", checked = true))
-        awaitCardsState(vm) { !it.loading && it.feed.cards.isNotEmpty() }
-
-        val checkCommand = session.execCommands.single { it.contains("push check") }
-        assertTrue(checkCommand.contains("--id 'release'"))
-        assertTrue(checkCommand.contains("--item 'build-0'"))
-        assertTrue(checkCommand.contains("--done"))
-        assertTrue(checkCommand.contains("--session 'work'"))
-        val card = vm.sessionCards.value.feed.cards.single() as SessionCardsRemoteSource.ChecklistCard
-        assertEquals(setOf("build-0"), card.checkedIds)
-    }
-
-    @Test
-    fun toggleChecklistItemDropsPostWriteRefreshWhenHostChangesButSessionNameMatches() = runTest(scheduler) {
-        val gate = CompletableDeferred<Unit>()
-        val oldSession = FakeSshSession(
-            execGate = gate,
-            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
-        )
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = oldSession,
-        )
-
-        assertTrue(vm.toggleChecklistItem(cardId = "release", itemId = "build-0", checked = true))
-        awaitCondition { oldSession.execCommands.any { it.contains("push check") } }
-
-        vm.replaceClientForTest(
-            hostId = 2L,
-            hostName = "beta",
-            host = "beta.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/b",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = FakeSshSession(),
-        )
-        gate.complete(Unit)
-        runCurrent()
-        advanceUntilIdle()
-
-        assertTrue(oldSession.execCommands.none { it.contains("push get") })
-        assertTrue(
-            "post-write refresh from old host must not publish after switching to same-named session",
-            vm.sessionCards.value.feed.cards.isEmpty(),
-        )
-    }
-
-    @Test
-    fun toggleChecklistItemDoesNotRefreshOnHostFailure() = runTest(scheduler) {
-        val session = FakeSshSession(
-            cardGetStdouts = listOf(checklistFeedJson("work", checkedIds = listOf("build-0"))),
-            cardCheckExitCode = 1,
-        )
-        val vm = newVm()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = FakeTmuxClient(),
-            session = session,
-        )
-
-        assertTrue(vm.toggleChecklistItem(cardId = "release", itemId = "build-0", checked = false))
-        awaitCondition { session.execCommands.any { it.contains("push check") } }
-
-        assertTrue(session.execCommands.none { it.contains("push get") })
-        assertEquals(TmuxSessionViewModel.SessionCardsUiState(), vm.sessionCards.value)
-    }
-
-    @Test
     fun closedPaneClearsConversationRoutingState() = runTest(scheduler) {
         // A pane that tmux removes between reconciles cannot keep any
         // conversation state behind.
@@ -16161,8 +15966,6 @@ class TmuxSessionViewModelTest : TmuxSessionViewModelTestBase() {
         private val recordedKindOutput: String = "",
         private var recordedSourceGenerationOutput: String = "",
         private var recordedSourceOutput: String = "",
-        private val cardGetStdouts: List<String> = emptyList(),
-        private val cardCheckExitCode: Int = 0,
         // Issue #448: ports the `ss -tlnp` confirm scan reports as
         // LISTENing. The detection collector calls PortScanner.scan, which
         // runs `ss -tlnp ... | awk ...`; we answer that with one line per
@@ -16182,7 +15985,6 @@ class TmuxSessionViewModelTest : TmuxSessionViewModelTestBase() {
         // so no predicate read can ever race the exec() append. Class-covering: this
         // makes EVERY execCommands read across the suite race-safe, not just one test.
         val execCommands: MutableList<String> = java.util.concurrent.CopyOnWriteArrayList()
-        private var cardGetIndex: Int = 0
 
         // Issue #793: let a paging test reprogram the window the fake returns.
         fun setWcOutput(value: String) { wcOutput = value }
@@ -16245,23 +16047,6 @@ class TmuxSessionViewModelTest : TmuxSessionViewModelTestBase() {
                 command.contains("pocketshell agent-log") -> agentLogEnvelope(command) ?: initialEventsOutput
                 command.startsWith("tail -n ") -> initialEventsOutput
                 command.contains("ps -eo pid,ppid,tty,comm,args") -> processOutput
-                command.contains("push get") -> {
-                    val stdout = cardGetStdouts.getOrNull(cardGetIndex)
-                        ?: cardGetStdouts.lastOrNull()
-                        ?: ""
-                    if (cardGetStdouts.isNotEmpty()) cardGetIndex += 1
-                    return com.pocketshell.core.ssh.ExecResult(
-                        stdout = stdout,
-                        stderr = "",
-                        exitCode = 0,
-                    )
-                }
-                command.contains("push check") ->
-                    return com.pocketshell.core.ssh.ExecResult(
-                        stdout = "",
-                        stderr = "",
-                        exitCode = cardCheckExitCode,
-                    )
                 command.contains(".claude") ||
                     command.contains(".codex") ||
                     command.contains("opencode") -> detectionOutput

@@ -147,6 +147,55 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
+    fun parseTmuxListSessionsReadsAgentStateFromSixFieldDashboardShape() {
+        // Issue #1237: the cross-host dashboard query appends
+        // `#{@ps_agent_state}` and `#{@ps_agent_state_updated_at}` as a 5th + 6th
+        // column. Field order: name::created::activity::attached::state::updated.
+        val rows = parser.parseTmuxListSessions(
+            "codex::1779520800::1779521400::1::idle::1779521300\n" +
+                "web::1779510000::1779510500::0::waiting_for_input::1779510450\n",
+        )
+
+        assertEquals(listOf("codex", "web"), rows.map { it.name })
+        assertEquals(1779521400L, rows[0].lastActivity)
+        assertTrue(rows[0].attached)
+        assertEquals("idle", rows[0].agentStateRaw)
+        assertEquals(1779521300L, rows[0].agentStateUpdatedAt)
+        assertEquals("waiting_for_input", rows[1].agentStateRaw)
+        assertEquals(1779510450L, rows[1].agentStateUpdatedAt)
+        // The state columns carry no path.
+        assertNull(rows[0].path)
+    }
+
+    @Test
+    fun parseTmuxListSessionsSixFieldBlankStateIsNull() {
+        // A never-hooked session leaves both state columns empty; tmux expands
+        // them to blank fields, so the row parses with no recorded state.
+        val rows = parser.parseTmuxListSessions(
+            "codex::1779520800::1779521400::1::::\n",
+        )
+
+        assertEquals(listOf("codex"), rows.map { it.name })
+        assertEquals(1779521400L, rows[0].lastActivity)
+        assertNull(rows[0].agentStateRaw)
+        assertNull(rows[0].agentStateUpdatedAt)
+    }
+
+    @Test
+    fun parseTmuxListSessionsFiveFieldPathStillWinsOverSixFieldStateShape() {
+        // The 5-field path shape (issue #463) has only 4 separators, so the
+        // 6-field state attempt cannot match it — the path is preserved and no
+        // spurious agent-state is invented from the path.
+        val rows = parser.parseTmuxListSessions(
+            "codex::1779520800::1779521400::1::/home/alexey/git/pocketshell\n",
+        )
+
+        assertEquals("/home/alexey/git/pocketshell", rows[0].path)
+        assertNull(rows[0].agentStateRaw)
+        assertNull(rows[0].agentStateUpdatedAt)
+    }
+
+    @Test
     fun parseTmuxListSessionsFiveFieldKeepsNameWithDoubleColons() {
         // Issue #463: a name containing `::` must not be eaten by the new
         // 5-field path; created/activity/attached are numeric so the name

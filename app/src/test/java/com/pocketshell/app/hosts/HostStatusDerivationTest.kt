@@ -3,6 +3,7 @@ package com.pocketshell.app.hosts
 import com.pocketshell.app.sessions.SessionSummary
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
+import com.pocketshell.uikit.model.SessionAgentState
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -300,6 +301,56 @@ class HostStatusDerivationTest {
         }
     }
 
+    // --- Issue #1237: host-card agent-state aggregation -----------------
+
+    @Test
+    fun hostAgentState_isUnknown_whenNoSessionReportsAKnownState() {
+        val sessions = listOf(
+            sessionWithState(1L, "a", SessionAgentState.Unknown),
+            sessionWithState(1L, "b", SessionAgentState.Unknown),
+        )
+        assertEquals(SessionAgentState.Unknown, resolveHostAgentState(1L, sessions))
+    }
+
+    @Test
+    fun hostAgentState_showsIdle_whenOnlyIdleKnown() {
+        val sessions = listOf(
+            sessionWithState(1L, "a", SessionAgentState.Idle),
+            sessionWithState(1L, "b", SessionAgentState.Unknown),
+        )
+        assertEquals(SessionAgentState.Idle, resolveHostAgentState(1L, sessions))
+    }
+
+    @Test
+    fun hostAgentState_waitingBeatsWorkingBeatsIdle() {
+        // Most-actionable wins: a single waiting session dominates working + idle.
+        val sessions = listOf(
+            sessionWithState(1L, "a", SessionAgentState.Idle),
+            sessionWithState(1L, "b", SessionAgentState.Working),
+            sessionWithState(1L, "c", SessionAgentState.WaitingForInput),
+        )
+        assertEquals(SessionAgentState.WaitingForInput, resolveHostAgentState(1L, sessions))
+
+        val noWaiting = listOf(
+            sessionWithState(1L, "a", SessionAgentState.Idle),
+            sessionWithState(1L, "b", SessionAgentState.Working),
+        )
+        assertEquals(SessionAgentState.Working, resolveHostAgentState(1L, noWaiting))
+    }
+
+    @Test
+    fun hostAgentState_onlyCountsThisHostsSessions() {
+        val sessions = listOf(
+            sessionWithState(1L, "a", SessionAgentState.Idle),
+            sessionWithState(2L, "b", SessionAgentState.WaitingForInput),
+        )
+        // Host 1 sees only its own idle session, not host 2's waiting one.
+        assertEquals(SessionAgentState.Idle, resolveHostAgentState(1L, sessions))
+        assertEquals(SessionAgentState.WaitingForInput, resolveHostAgentState(2L, sessions))
+        // A host with no sessions at all has no chip.
+        assertEquals(SessionAgentState.Unknown, resolveHostAgentState(99L, sessions))
+    }
+
     // --- helpers --------------------------------------------------------
 
     private fun session(hostId: Long, name: String): SessionSummary = SessionSummary(
@@ -309,4 +360,10 @@ class HostStatusDerivationTest {
         lastActivity = 0L,
         attached = false,
     )
+
+    private fun sessionWithState(
+        hostId: Long,
+        name: String,
+        state: SessionAgentState,
+    ): SessionSummary = session(hostId, name).copy(agentState = state)
 }

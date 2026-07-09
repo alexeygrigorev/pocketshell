@@ -1,6 +1,7 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.resolveSessionAgentState
 
 internal fun TreeRemoteSource.TreeNode.toHydratedNode(): HostTreeModel.HydratedNode =
     HostTreeModel.HydratedNode(
@@ -40,6 +41,15 @@ internal fun FolderSessionRow.toSessionEntry(): FolderSessionEntry =
         lastActivity = lastActivity,
         attached = attached,
         agentKind = agentKind,
+        // Issue #1237: resolve the raw @ps_agent_state option to a chip state,
+        // dropping a resting state that has gone stale relative to session
+        // activity (the hook fires only on stop/waiting, so a later output means
+        // the recorded idle/waiting is no longer authoritative).
+        agentState = resolveSessionAgentState(
+            rawState = agentStateRaw,
+            stateUpdatedAtEpochSec = agentStateUpdatedAt,
+            sessionActivityEpochSec = lastActivity,
+        ),
         recordedProfile = recordedProfile,
         tmuxSessionId = tmuxSessionId,
         sessionCreated = sessionCreated,

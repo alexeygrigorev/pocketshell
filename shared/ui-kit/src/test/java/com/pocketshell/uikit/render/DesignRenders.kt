@@ -587,6 +587,15 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1237: the agent-state chip (idle / working / waiting-for-input) on
+     * host cards + the three standalone chip variants.
+     */
+    @Test
+    fun agentStateChips() = render("agent-state-chips") {
+        AgentStateChipsRender()
+    }
+
+    /**
      * Issue #603: the host-detail workspace tree with the redesigned
      * inactive / empty watched-root callout.
      *

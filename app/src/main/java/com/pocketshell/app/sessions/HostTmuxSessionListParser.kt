@@ -75,14 +75,24 @@ class HostTmuxSessionListParser @Inject constructor() {
             // the project switcher does not group every path-less session
             // under an empty-string bucket.
             path = fields.path?.trim()?.takeIf { it.isNotEmpty() },
+            // Issue #1237: only the cross-host dashboard shape carries the
+            // agent-state columns; other shapes leave them null → Unknown.
+            agentStateRaw = fields.agentStateRaw?.trim()?.takeIf { it.isNotEmpty() },
+            agentStateUpdatedAt = fields.agentStateUpdatedAt?.trim()?.toLongOrNull(),
         )
     }
 
     private fun parseStructuredTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
         for (separator in STRUCTURED_SEPARATORS) {
+            // Issue #1237: the cross-host dashboard query appends
+            // `#{@ps_agent_state}` and `#{@ps_agent_state_updated_at}` as a 5th
+            // and 6th column (both controlled: an idle/waiting/working token and
+            // an epoch int, never containing `::`). Try the 6-field shape first
+            // so the agent-state chip fields are captured.
+            parseStructuredSixFields(line, separator)?.let { return it }
             // Issue #463: the warm live-client query appends
             // `#{session_path}` as a 5th column. Try the 5-field shape
-            // first (so the session path is captured), then fall back to
+            // next (so the session path is captured), then fall back to
             // the original 4-field shape that other producers still emit.
             parseStructuredFiveFields(line, separator)?.let { return it }
             val fields = line.splitFromRight(separator, expectedTailFields = 3) ?: continue
@@ -97,6 +107,35 @@ class HostTmuxSessionListParser @Inject constructor() {
             )
         }
         return null
+    }
+
+    private fun parseStructuredSixFields(line: String, separator: String): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 5) ?: return null
+        // created + activity must be numeric epoch seconds; attached is a 0/1
+        // count. Field 4 is the (possibly empty) `@ps_agent_state` token and
+        // field 5 is the (possibly empty) `@ps_agent_state_updated_at` epoch. If
+        // any of created/activity/attached aren't numeric, or the updated-at is
+        // neither blank nor numeric, this isn't the 6-field state shape — let the
+        // 5-field (path) / 4-field paths handle it. This guards against a
+        // 5-field row whose `#{session_path}` happens to contain `::`.
+        if (fields[1].trim().toLongOrNull() == null ||
+            fields[2].trim().toLongOrNull() == null ||
+            fields[3].trim().toLongOrNull() == null
+        ) {
+            return null
+        }
+        val updatedAt = fields[5].trim()
+        if (updatedAt.isNotEmpty() && updatedAt.toLongOrNull() == null) {
+            return null
+        }
+        return TmuxListSessionsFields(
+            name = fields[0],
+            createdAt = fields[1],
+            lastActivity = fields[2],
+            attached = fields[3],
+            agentStateRaw = fields[4],
+            agentStateUpdatedAt = fields[5],
+        )
     }
 
     private fun parseStructuredFiveFields(line: String, separator: String): TmuxListSessionsFields? {
@@ -137,7 +176,17 @@ class HostTmuxSessionListParser @Inject constructor() {
         val parts = ArrayDeque<String>()
         var endExclusive = length
         repeat(expectedTailFields) {
-            val separatorIndex = lastIndexOf(separator, startIndex = endExclusive - 1)
+            // Search strictly BEFORE the field we just extracted. Starting at
+            // `endExclusive - separator.length` (not `endExclusive - 1`) skips the
+            // characters of the separator that bounds this field, so a multi-char
+            // separator (`::`) does not match an OVERLAPPING occurrence when two
+            // empty fields sit next to each other (issue #1237: a blank-state
+            // dashboard row ends `...::::`, four adjacent colons — searching from
+            // `endExclusive - 1` would re-find the same `::` shifted by one and
+            // walk off the end). For a single-char separator this is unchanged.
+            val searchFrom = endExclusive - separator.length
+            if (searchFrom < 0) return null
+            val separatorIndex = lastIndexOf(separator, startIndex = searchFrom)
             if (separatorIndex < 0) return null
             parts.addFirst(substring(separatorIndex + separator.length, endExclusive))
             endExclusive = separatorIndex
@@ -162,6 +211,10 @@ class HostTmuxSessionListParser @Inject constructor() {
         // Issue #463: session working directory from `#{session_path}`,
         // only present in the warm live-client 5-field shape.
         val path: String? = null,
+        // Issue #1237: raw `@ps_agent_state` + `@ps_agent_state_updated_at`,
+        // only present in the cross-host dashboard 6-field shape.
+        val agentStateRaw: String? = null,
+        val agentStateUpdatedAt: String? = null,
     )
 
     private companion object {

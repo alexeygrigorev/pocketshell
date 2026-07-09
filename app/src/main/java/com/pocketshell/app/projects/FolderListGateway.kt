@@ -97,6 +97,24 @@ data class FolderSessionRow(
      */
     val recordedProfile: String? = null,
     /**
+     * Issue #1237: the raw host-side `@ps_agent_state` tmux user-option value
+     * (`idle` / `waiting_for_input` / `working`), written best-effort by the
+     * generated agent stop/idle hook handlers (PR #1373). `null` when the option
+     * is absent/empty (a foreign / never-hooked session, or a legacy tmux server)
+     * — surfaced as [com.pocketshell.uikit.model.SessionAgentState.Unknown]
+     * (no chip). Resolved to a [com.pocketshell.uikit.model.SessionAgentState]
+     * with [agentStateUpdatedAt] + [lastActivity] at the entry-mapping boundary.
+     */
+    val agentStateRaw: String? = null,
+    /**
+     * Issue #1237: the `@ps_agent_state_updated_at` epoch-seconds timestamp of the
+     * last [agentStateRaw] write. Compared against [lastActivity] to drop a
+     * recorded resting state that has gone stale (the session produced output
+     * after the hook fired). `null` when the host did not record a timestamp
+     * (older host CLI) or the option is absent.
+     */
+    val agentStateUpdatedAt: Long? = null,
+    /**
      * Issue #899: tmux's stable session id (`$N`) for this live tmux server.
      * It is carried with [sessionCreated] so later slices can derive a durable
      * app identity without relying on the folder-derived [sessionName].
@@ -1968,7 +1986,8 @@ class SshFolderListGateway internal constructor(
             "tmux list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +
                 "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
-                "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP#{session_path}'"
+                "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP" +
+                "#{@ps_agent_state}$FIELD_SEP#{@ps_agent_state_updated_at}$FIELD_SEP#{session_path}'"
 
         const val LIST_PANES_COMMAND: String =
             "tmux list-panes -a -F " +
@@ -2082,7 +2101,8 @@ class SshFolderListGateway internal constructor(
             "list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +
                 "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
-                "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP#{session_path}'"
+                "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP" +
+                "#{@ps_agent_state}$FIELD_SEP#{@ps_agent_state_updated_at}$FIELD_SEP#{session_path}'"
 
         const val CONTROL_LIST_PANES_COMMAND: String =
             "list-panes -a -F " +
@@ -2152,29 +2172,30 @@ class SshFolderListGateway internal constructor(
 
         private fun parseRow(line: String): FolderSessionRow? {
             if (line.isBlank()) return null
-            // Field order (#899 + epic #821 + #858): name, session_id,
+            // Field order (#899 + epic #821 + #858 + #1237): name, session_id,
             // created, activity, attached, @ps_agent_kind, @ps_agent_profile,
-            // session_path. Use the current 8-column parse only when column 2
-            // has tmux's `$N` session-id shape; legacy rows put
-            // session_created there, and must keep the old 7-column limit so a
-            // path containing the rare `::` literal still parses. The
-            // rightmost column (session_path) absorbs any trailing separators.
-            // `@ps_agent_kind` is a controlled value
-            // (claude/codex/opencode) that never contains `::`, and
-            // `@ps_agent_profile` is a host-authored profile label, so both
-            // sit safely at their fixed columns.
+            // @ps_agent_state, @ps_agent_state_updated_at, session_path. Use the
+            // current 10-column parse only when column 2 has tmux's `$N`
+            // session-id shape; legacy rows put session_created there, and must
+            // keep the old 7-column limit so a path containing the rare `::`
+            // literal still parses. The rightmost column (session_path) absorbs
+            // any trailing separators. `@ps_agent_kind` (claude/codex/opencode),
+            // `@ps_agent_profile` (host-authored label), `@ps_agent_state`
+            // (idle/waiting_for_input/working, controlled — issue #1237), and
+            // `@ps_agent_state_updated_at` (epoch int) never contain `::`, so
+            // they sit safely at their fixed columns before the path.
             //
-            // A legacy / pre-#858 tmux server has no `@ps_agent_profile`
-            // option set: tmux expands `#{@ps_agent_profile}` to an empty
-            // string (NOT a missing column), so the field count is unchanged
-            // and the profile parses as `null` — no crash, plain kind.
+            // A legacy / pre-#1237 tmux server has no `@ps_agent_state` /
+            // `@ps_agent_state_updated_at` option set: tmux expands them to
+            // empty strings (NOT missing columns), so the field count is
+            // unchanged and the state parses as Unknown — no crash, no chip.
             val hasCurrentIdentityColumn =
                 line.split(FIELD_SEP, limit = 3).getOrNull(1)?.trim()?.firstOrNull() == '$'
-            val parts = line.split(FIELD_SEP, limit = if (hasCurrentIdentityColumn) 8 else 7)
+            val parts = line.split(FIELD_SEP, limit = if (hasCurrentIdentityColumn) 10 else 7)
             if (parts.size < 4) return null
             val name = parts[0].trim()
             if (name.isEmpty()) return null
-            val hasIdentityColumns = hasCurrentIdentityColumn && parts.size >= 8
+            val hasIdentityColumns = hasCurrentIdentityColumn && parts.size >= 10
             val sessionIdIndex = if (hasIdentityColumns) 1 else null
             val createdIndex = if (hasIdentityColumns) 2 else 1
             val activityIndex = if (hasIdentityColumns) 3 else 2
@@ -2184,11 +2205,13 @@ class SshFolderListGateway internal constructor(
             val tmuxSessionId = sessionIdIndex
                 ?.let { parts.getOrNull(it)?.trim()?.ifBlank { null } }
             val recordedKind = parts.getOrNull(kindIndex)?.let(::recordedKindFromOption)
-            // The current 8-field format puts @ps_agent_profile at index 6 and
-            // the path at index 7. The previous 7-field format had profile at
-            // index 5 and path at index 6. A stale 6-field cache row (pre-#858)
-            // has NO profile column — its index 5 IS the path. Distinguish by
-            // part count so an old row never misreads its path as a profile.
+            // The current 10-field format puts @ps_agent_profile at index 6,
+            // @ps_agent_state at 7, @ps_agent_state_updated_at at 8, and the
+            // path at index 9. The previous 7-field format had profile at
+            // index 5 and path at index 6 (no state columns). A stale 6-field
+            // cache row (pre-#858) has NO profile column — its index 5 IS the
+            // path. Distinguish by part count so an old row never misreads its
+            // path as a profile.
             val hasProfileColumn = hasIdentityColumns || parts.size >= 7
             val recordedProfile =
                 if (hasIdentityColumns) {
@@ -2198,9 +2221,16 @@ class SshFolderListGateway internal constructor(
                 } else {
                     null
                 }
+            // Issue #1237: agent-state columns exist ONLY on the current
+            // identity-column format. On legacy rows they are absent → Unknown
+            // (no chip), which is the correct "absent, not wrong" behaviour.
+            val agentStateRaw =
+                if (hasIdentityColumns) parts.getOrNull(7)?.trim()?.ifBlank { null } else null
+            val agentStateUpdatedAt =
+                if (hasIdentityColumns) parts.getOrNull(8)?.trim()?.toLongOrNull() else null
             val sessionPath =
                 (if (hasIdentityColumns) {
-                    parts.getOrNull(7)
+                    parts.getOrNull(9)
                 } else if (hasProfileColumn) {
                     parts.getOrNull(6)
                 } else {
@@ -2222,6 +2252,11 @@ class SshFolderListGateway internal constructor(
                 // Issue #858: a non-default profile label (e.g. z.ai Claude);
                 // null for default / non-profiled / legacy sessions.
                 recordedProfile = recordedProfile,
+                // Issue #1237: raw agent-state option + its timestamp, resolved
+                // to a chip state at the entry-mapping boundary (which also has
+                // session_activity for staleness).
+                agentStateRaw = agentStateRaw,
+                agentStateUpdatedAt = agentStateUpdatedAt,
                 tmuxSessionId = tmuxSessionId,
                 sessionCreated = created,
             )

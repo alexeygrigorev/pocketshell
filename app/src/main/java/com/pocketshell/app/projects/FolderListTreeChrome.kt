@@ -299,7 +299,12 @@ internal fun sessionKindLabel(session: FolderSessionEntry): String = when (sessi
     SessionAgentKind.Unknown -> "Unknown"
 }
 
-private fun agentStateLabel(@Suppress("UNUSED_PARAMETER") session: FolderSessionEntry): String = "Idle"
+// Issue #1237: the agent resting-state word for the `Kind · State` secondary
+// label. Uses the real resolved `@ps_agent_state` (idle / waiting / working) and
+// falls back to "Idle" only when the state is unknown, preserving the prior
+// default for a session with no recorded hook state.
+private fun agentStateLabel(session: FolderSessionEntry): String =
+    session.agentState.chipLabel ?: "Idle"
 
 internal fun sessionDisplayTitle(session: FolderSessionEntry): String {
     val raw = session.sessionName.trim()

@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.SessionAgentState
 
 /**
  * One folder row in the folder list — issue #171.
@@ -101,6 +102,15 @@ data class FolderSessionEntry(
     val attached: Boolean,
     val agentKind: SessionAgentKind,
     val windows: List<FolderSessionWindowEntry> = emptyList(),
+    /**
+     * Issue #1237: the resolved resting-state of this session's agent
+     * (idle / waiting-for-input / working), read back from the host-side
+     * `@ps_agent_state` tmux option written by the stop/idle hook bus.
+     * [SessionAgentState.Unknown] when the option is absent/empty or the recorded
+     * resting state has gone stale — the row then renders NO state chip (absent,
+     * not wrong).
+     */
+    val agentState: SessionAgentState = SessionAgentState.Unknown,
     /**
      * Issue #858: the human label of the non-default profile this session was
      * launched with (e.g. `"Claude (Z.AI)"`), read back from the host-side

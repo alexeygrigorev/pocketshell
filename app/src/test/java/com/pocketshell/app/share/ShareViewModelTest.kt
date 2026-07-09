@@ -1279,8 +1279,8 @@ class ShareViewModelTest {
                 CommandResponse(
                     number = 0L,
                     output = listOf(
-                        "work::\$1::101::101::0::::::/home/alexey/git/pocketshell",
-                        "scratch::\$2::202::202::1::::::/home/alexey/git/live",
+                        "work::\$1::101::101::0::::::::::/home/alexey/git/pocketshell",
+                        "scratch::\$2::202::202::1::::::::::/home/alexey/git/live",
                     ),
                     isError = false,
                 ),

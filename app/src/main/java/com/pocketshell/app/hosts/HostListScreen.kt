@@ -634,10 +634,19 @@ fun HostListScreen(
                                 ?.takeIf { it.hostId == host.id }
                                 ?.phase
                                 ?.label
+                            // Issue #1237: the aggregate agent resting-state
+                            // across this host's sessions (most-actionable wins),
+                            // surfaced as a compact chip on the card. Unknown =
+                            // no chip (absent, not wrong).
+                            val hostAgentState = resolveHostAgentState(
+                                hostId = host.id,
+                                sessions = sessions,
+                            )
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
                                 status = hostStatus,
+                                agentState = hostAgentState,
                                 onClick = {
                                     if (viewModel.beginHostOpen(host.id, host.name)) {
                                         tapRequests.trySend(host.id)

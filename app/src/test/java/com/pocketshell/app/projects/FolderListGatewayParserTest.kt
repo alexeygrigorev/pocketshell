@@ -17,22 +17,27 @@ import org.junit.Test
  * (blank cwd, malformed row, multiple panes per session with only the
  * active one winning).
  *
- * Issue #899 + epic #821 Workstream A + issue #858: `list-sessions` carries
- * tmux `session_id`, then TWO recorded fields between `session_attached` and
- * `session_path` — `@ps_agent_kind` (the agent kind PocketShell recorded at
- * launch) and `@ps_agent_profile` (the non-default profile label, e.g. a z.ai
- * Claude). Field order:
- * `name::session_id::created::activity::attached::@ps_agent_kind::@ps_agent_profile::path`.
- * The client emits this 8-field format; a legacy tmux server with no
- * `@ps_agent_profile` set expands that column to an EMPTY string (not a
- * missing column), so the profile parses as null and the path stays last.
+ * Issue #899 + epic #821 Workstream A + issue #858 + issue #1237:
+ * `list-sessions` carries tmux `session_id`, then FOUR recorded fields between
+ * `session_attached` and `session_path` — `@ps_agent_kind` (the agent kind
+ * PocketShell recorded at launch), `@ps_agent_profile` (the non-default profile
+ * label, e.g. a z.ai Claude), `@ps_agent_state` (idle / waiting_for_input /
+ * working, written by the stop/idle hook bus), and `@ps_agent_state_updated_at`
+ * (that write's epoch timestamp). Field order:
+ * `name::session_id::created::activity::attached::@ps_agent_kind::@ps_agent_profile::@ps_agent_state::@ps_agent_state_updated_at::path`.
+ * The client emits this 10-field format; a tmux server with any of the recorded
+ * options unset expands that column to an EMPTY string (not a missing column),
+ * so it parses as null / Unknown and the path stays last.
  */
 class FolderListGatewayParserTest {
 
     @Test
     fun parseListSessionsRowsReadsTmuxIdentityAndKeepsPathLast() {
+        // Field order: name, session_id, created, activity, attached, kind,
+        // profile, state, state_updated_at, path (path last, absorbs `::`).
         val rows = SshFolderListGateway.parseListSessionsRows(
-            "git-pocketshell::\$3::1700000000::1700001000::1::codex::Codex Max::/tmp/a::b\n",
+            "git-pocketshell::\$3::1700000000::1700001000::1::codex::Codex Max::" +
+                "idle::1700000900::/tmp/a::b\n",
         )
 
         assertEquals(1, rows.size)
@@ -43,7 +48,74 @@ class FolderListGatewayParserTest {
         assertEquals(true, rows[0].attached)
         assertEquals(SessionAgentKind.Codex, rows[0].recordedKind)
         assertEquals("Codex Max", rows[0].recordedProfile)
+        assertEquals("idle", rows[0].agentStateRaw)
+        assertEquals(1700000900L, rows[0].agentStateUpdatedAt)
         assertEquals("/tmp/a::b", rows[0].cwd)
+    }
+
+    // --- Issue #1237: @ps_agent_state read-back (class coverage) ----------
+
+    @Test
+    fun parseListSessionsRowsReadsIdleWaitingAndWorkingStates() {
+        val stdout =
+            "s-idle::\$1::100::200::1::claude::::idle::195::/srv/a\n" +
+                "s-wait::\$2::100::200::1::codex::::waiting_for_input::198::/srv/b\n" +
+                "s-work::\$3::100::200::1::opencode::::working::199::/srv/c\n"
+        val rows = SshFolderListGateway.parseListSessionsRows(stdout)
+        assertEquals(3, rows.size)
+        assertEquals("idle", rows[0].agentStateRaw)
+        assertEquals(195L, rows[0].agentStateUpdatedAt)
+        assertEquals("waiting_for_input", rows[1].agentStateRaw)
+        assertEquals(198L, rows[1].agentStateUpdatedAt)
+        assertEquals("working", rows[2].agentStateRaw)
+        assertEquals(199L, rows[2].agentStateUpdatedAt)
+    }
+
+    @Test
+    fun parseListSessionsRowsBlankStateOptionIsNullNotAWrongState() {
+        // A never-hooked / foreign session leaves @ps_agent_state (and its
+        // timestamp) empty; tmux expands them to blank columns, so the row keeps
+        // its kind/profile/path and reports NO recorded state (→ Unknown chip).
+        // 10 fields with BOTH state columns blank (empty @ps_agent_state and
+        // @ps_agent_state_updated_at): profile then `::::::` then path.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "s-blank::\$4::100::200::1::claude::Claude (Z.AI)::::::/srv/app\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals(SessionAgentKind.Claude, rows[0].recordedKind)
+        assertEquals("Claude (Z.AI)", rows[0].recordedProfile)
+        assertNull(rows[0].agentStateRaw)
+        assertNull(rows[0].agentStateUpdatedAt)
+        assertEquals("/srv/app", rows[0].cwd)
+    }
+
+    @Test
+    fun parseListSessionsRowsKeepsPathWithEmbeddedSeparatorAheadOfStateColumns() {
+        // The state columns are controlled tokens; the path stays the absorbing
+        // last column, so a path containing the rare `::` literal still parses
+        // with the state read correctly ahead of it.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "odd::\$9::100::200::1::claude::::waiting_for_input::150::/srv/weird::dir\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals("waiting_for_input", rows[0].agentStateRaw)
+        assertEquals(150L, rows[0].agentStateUpdatedAt)
+        assertEquals("/srv/weird::dir", rows[0].cwd)
+    }
+
+    @Test
+    fun parseListSessionsRowsLegacyNonIdentityRowHasNoStateColumns() {
+        // A legacy non-identity row (numeric col2, pre-#899 shape without the
+        // session_id / state columns) parses with NO recorded state (Unknown),
+        // never misreading a later column as the state.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "legacy::100::200::1::claude::::/srv/app\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals(SessionAgentKind.Claude, rows[0].recordedKind)
+        assertNull(rows[0].agentStateRaw)
+        assertNull(rows[0].agentStateUpdatedAt)
+        assertEquals("/srv/app", rows[0].cwd)
     }
 
     @Test

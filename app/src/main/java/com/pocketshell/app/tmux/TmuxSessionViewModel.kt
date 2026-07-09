@@ -82,11 +82,8 @@ import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.HostKey
-import com.pocketshell.core.connection.classifyFailure
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
-import com.pocketshell.core.connection.RevealStateMachine
-import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
@@ -1477,49 +1474,19 @@ public class TmuxSessionViewModel @Inject constructor(
         return !state.isAtLeast(Lifecycle.State.STARTED)
     }
 
-    /**
-     * EPIC #687 Phase 1 (P1) — the session-screen identity/reveal reducer
-     * ([RevealStateMachine]). The rendered screen state is a pure function of the
-     * TARGET session id: the screen renders strictly from [revealState], so a
-     * late / stale frame from the previous session can NEVER paint (the
-     * wrong-session-on-switch fix, #686/#658).
-     *
-     * It is fed exactly three projection sources, all id-keyed:
-     *  1. [RevealStateMachine.navigate] — the nav-route target `(targetId, name)`,
-     *     supplied at every `connect()` so the header shows the target name
-     *     immediately (and the reducer clears the leaving target's panes).
-     *  2. [RevealStateMachine.onConnectionState] — the controller's
-     *     [ConnectionController.state] (collected in [driveRevealStateMachine]),
-     *     the single connection-lifecycle source.
-     *  3. [RevealStateMachine.onSeed] — id-tagged active-pane captures fed at the
-     *     EXISTING seed-landing point ([seedPaneFromCaptureOnce]).
-     *
-     * The machine itself owns NO transport / jobs / leases — only the projection.
-     * The view renders strictly from [revealState] (the sole reveal source).
-     */
-    private val revealStateMachine: RevealStateMachine = RevealStateMachine()
+    /** Id-keyed session reveal projection; the screen renders strictly from [revealState]. */
+    private val revealController: TmuxRevealController =
+        TmuxRevealController(
+            hostKeyForTarget = { target -> hostKeyFor(target.toSshLeaseTarget().leaseKey) },
+        )
 
-    private val _revealState: MutableStateFlow<RevealState> =
-        MutableStateFlow(RevealState.Idle)
+    public val revealState: StateFlow<RevealState> = revealController.state
 
-    /**
-     * EPIC #687 P1: the id-keyed reveal projection the session screen renders from
-     * under the NEW connection path. Mirrors [RevealStateMachine.state].
-     */
-    public val revealState: StateFlow<RevealState> = _revealState.asStateFlow()
-
-    /**
-     * EPIC #687 P1: pump the controller's [ConnectionController.state] into the
-     * [RevealStateMachine] and mirror the machine's [RevealState] onto
-     * [_revealState]. The machine drops any state for a non-current target (the
-     * drop-by-id rule), so a late lifecycle event from a superseded switch never
-     * moves the reveal. Started once, here, in [viewModelScope].
-     */
+    /** Pump the authoritative [ConnectionController.state] into the reveal projection. */
     private fun driveRevealStateMachine() {
         viewModelScope.launch {
             connectionManager.stateFlow.collect { state ->
-                revealStateMachine.onConnectionState(state)
-                _revealState.value = revealStateMachine.state.value
+                revealController.onConnectionState(state)
             }
         }
     }
@@ -1528,91 +1495,30 @@ public class TmuxSessionViewModel @Inject constructor(
         driveRevealStateMachine()
     }
 
-    /**
-     * EPIC #687 P1: announce the nav-route target to the [RevealStateMachine] so
-     * the header shows the target name immediately and the leaving target's panes
-     * are cleared. Called from [connect] before any coroutine runs, so the reveal
-     * supersedes synchronously and the screen can never observe `(old panes, new
-     * id)`.
-     */
     private fun navigateRevealTo(target: ConnectionTarget) {
-        revealStateMachine.navigate(controllerSessionId(target), target.sessionName)
-        _revealState.value = revealStateMachine.state.value
+        revealController.navigateTo(target)
     }
 
-    /**
-     * EPIC #687 P1: feed an id-tagged active-pane [Seed] to the
-     * [RevealStateMachine] at the existing seed-landing point. The frame content
-     * is the captured pane transcript; the machine reveals [RevealState.Live] only
-     * for the CURRENT target and drops a seed for any superseded target (the AC-3
-     * never-paint-a-non-target-seed invariant). [frame] non-empty drives the
-     * reveal; empty keeps it loading (never-reveal-black).
-     */
     private fun offerRevealSeed(paneId: String, frame: String) {
         val target = activeTarget ?: connectingTarget ?: return
-        revealStateMachine.onSeed(
-            Seed(targetId = controllerSessionId(target), paneId = paneId, frame = frame),
-        )
-        _revealState.value = revealStateMachine.state.value
+        revealController.offerSeed(target, paneId, frame)
     }
 
-    /**
-     * EPIC #687 P1: promote the reveal to [RevealState.Live] for the CURRENT target
-     * at the inline "active pane revealed" moments — the points where the inline
-     * path clears the reveal-machine hold because the target's own pane is shown.
-     * This covers the WARM-CACHE switch (and the fast-switch/cold reveal) where no
-     * fresh `capture-pane` re-fires for an already-cached pane, so [offerRevealSeed]
-     * alone would never land a seed and the NEW-path reveal gate would stay held
-     * (the surface would never mount). Feeds the reveal machine a non-empty seed for
-     * the target's active pane id; the machine drops it if the target is no longer
-     * current (drop-by-id), so a superseded reveal never promotes the wrong session.
-     * The seed FRAME is a non-empty sentinel — the screen renders the VM's own
-     * `unifiedPanes` for the target, not the reveal machine's frame, so only the
-     * Hold→Reveal gate matters here.
-     */
     private fun promoteRevealLiveForActiveTarget() {
         val target = activeTarget ?: connectingTarget ?: return
         val activePaneId = _panes.value.firstOrNull()?.paneId ?: return
-        revealStateMachine.onSeed(
-            Seed(
-                targetId = controllerSessionId(target),
-                paneId = activePaneId,
-                frame = REVEAL_LIVE_SENTINEL_FRAME,
-            ),
-        )
-        _revealState.value = revealStateMachine.state.value
+        revealController.promoteLive(target, activePaneId)
     }
 
-    /**
-     * The opaque [HostKey] / [SessionId] the [connectionManager] controller keys on, derived
-     * from the inline transition's active/connecting target. Returns null when there is no
-     * target (Idle transition).
-     */
     private fun controllerHostAndTarget(): Pair<HostKey?, SessionId?> {
-        val target = activeTarget ?: connectingTarget ?: return (null to null)
-        return (controllerHostKey(target) to controllerSessionId(target))
+        return revealController.hostAndSessionId(activeTarget, connectingTarget)
     }
 
-    /**
-     * EPIC #687 slice 1c-iv-prep: mint the controller's [HostKey] through
-     * the SAME [hostKeyFor] encoding the [liveLeaseKeys]-backed warm snapshot uses
-     * (`hostKeyFor(leaseKey)`). Previously this path encoded the host as
-     * `user@host:port/hostId` while the warm snapshot encoded it as
-     * `user@host:port/credentialId/knownHostsId`, so the controller's `isWarm`
-     * predicate was ALWAYS FALSE for a genuinely warm host. Routing both sides
-     * through [hostKeyFor] off the one [ConnectionTarget.toSshLeaseTarget] lease
-     * key aligns the encoding so `isWarm` returns true for a warm host.
-     */
     private fun controllerHostKey(target: ConnectionTarget): HostKey =
-        hostKeyFor(target.toSshLeaseTarget().leaseKey)
+        revealController.hostKey(target)
 
     private fun controllerSessionId(target: ConnectionTarget): SessionId =
-        tmuxTargetSessionId(
-            hostId = target.hostId,
-            sessionName = target.sessionName,
-            tmuxSessionId = target.tmuxSessionId,
-            sessionCreated = target.sessionCreated,
-        )
+        revealController.sessionId(target)
 
     /**
      * EPIC #687 slice 1b: the single emission point — set the VM-internal
@@ -4259,7 +4165,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // the reveal at its current (live) frame for the bounded duration of the heal so
         // the ride-through stays INVISIBLE; cleared in the job's completion handler below.
         withinGraceSilentHealInFlight = true
-        revealStateMachine.setSilentHealInFlight(true)
+        revealController.setSilentHealInFlight(true)
         projectStatusFromController()
         // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
         // over a fresh lease; a teardown-race throw must not crash the process.
@@ -4302,7 +4208,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // suppression across an unrelated later attach.
         healJob.invokeOnCompletion {
             withinGraceSilentHealInFlight = false
-            revealStateMachine.setSilentHealInFlight(false)
+            revealController.setSilentHealInFlight(false)
             // Re-project so a genuine heal FAILURE (the calm auto-reconnect ladder is now
             // running) surfaces its normal Reconnecting band the instant the hold lifts,
             // and a SUCCESS settles on the live `Connected` it already reached.
@@ -7544,8 +7450,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #1326 (S3): carry the TYPED failure reason (the single
         // [classifyFailure] classifier) to the reveal machine so the honest error
         // surface renders a curated sentence, never a raw exception string.
-        revealStateMachine.onTerminalError(controllerSessionId(target), classifyFailure(cause))
-        _revealState.value = revealStateMachine.state.value
+        revealController.driveTerminalError(target, cause)
     }
 
     @androidx.annotation.VisibleForTesting
@@ -7562,10 +7467,7 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setRevealHoldForTest() {
         val target = activeTarget ?: connectingTarget ?: return
-        revealStateMachine.onConnectionState(
-            CoreConnectionState.Attaching(controllerHostKey(target), controllerSessionId(target)),
-        )
-        _revealState.value = revealStateMachine.state.value
+        revealController.holdFor(target)
     }
 
     private fun shortAppSwitchReconnectFields(

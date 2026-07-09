@@ -39,6 +39,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+internal fun shouldLogTmuxDropCount(count: Int): Boolean =
+    count > 0 && (count and (count - 1)) == 0
+
 /**
  * High-level client wrapping a `tmux -CC` control channel running inside an
  * [SshSession].
@@ -2240,27 +2243,20 @@ internal class RealTmuxClient(
                 // Response framing markers are internal to correlation and are
                 // deliberately not exposed to UI collectors.
                 if (event is ControlEvent.Output) {
-                    // Issue #105 diagnostics. We log BEFORE and AFTER the
-                    // emit so a reviewer reading logcat can tell apart:
-                    //   * tmux never produced %output for the external
-                    //     write (no `tmux-output-received` line appears),
-                    //   * the reader saw bytes but the bus emit suspended
-                    //     longer than expected (gap between `received`
-                    //     and `bus-emit`),
-                    //   * downstream (parser + Compose invalidation) is
-                    //     slow (the test's emulator-side checks fire long
-                    //     after `bus-emit`).
-                    // The byte count is enough to correlate with the
-                    // external write without leaking the payload itself.
-                    Log.i(
-                        ISSUE_105_DIAG_TAG,
-                        "tmux-output-received pane=${event.paneId} bytes=${event.data.size}",
-                    )
+                    val debugOutputLogging = Log.isLoggable(ISSUE_105_DIAG_TAG, Log.DEBUG)
+                    if (debugOutputLogging) {
+                        Log.i(
+                            ISSUE_105_DIAG_TAG,
+                            "tmux-output-received pane=${event.paneId} bytes=${event.data.size}",
+                        )
+                    }
                     emitOutput(event)
-                    Log.i(
-                        ISSUE_105_DIAG_TAG,
-                        "tmux-output-bus-emit pane=${event.paneId} bytes=${event.data.size}",
-                    )
+                    if (debugOutputLogging) {
+                        Log.i(
+                            ISSUE_105_DIAG_TAG,
+                            "tmux-output-delivered pane=${event.paneId} bytes=${event.data.size}",
+                        )
+                    }
                 } else {
                     emitPublicEvent(event)
                 }
@@ -2541,12 +2537,14 @@ internal class RealTmuxClient(
                 ),
             )
         }
-        Log.w(
-            ISSUE_105_DIAG_TAG,
-            "tmux-preregistration-output-drop pane=$paneId bytes=$evictedBytes " +
-                "droppedEvents=$droppedForPane totalDroppedEvents=$total " +
-                "maxEvents=$PRE_REGISTRATION_MAX_EVENTS maxBytes=$PRE_REGISTRATION_MAX_BYTES",
-        )
+        if (shouldLogTmuxDropCount(droppedForPane)) {
+            Log.w(
+                ISSUE_105_DIAG_TAG,
+                "tmux-preregistration-output-drop pane=$paneId bytes=$evictedBytes " +
+                    "droppedEvents=$droppedForPane totalDroppedEvents=$total " +
+                    "maxEvents=$PRE_REGISTRATION_MAX_EVENTS maxBytes=$PRE_REGISTRATION_MAX_BYTES",
+            )
+        }
     }
 
     private fun emitPublicEvent(event: ControlEvent) {
@@ -2566,11 +2564,13 @@ internal class RealTmuxClient(
                     ),
                 )
             }
-            Log.w(
-                ISSUE_105_DIAG_TAG,
-                "tmux-eventbus-drop event=${event.javaClass.simpleName} " +
-                    "droppedEvents=$dropped capacity=$EVENT_BUFFER",
-            )
+            if (shouldLogTmuxDropCount(dropped)) {
+                Log.w(
+                    ISSUE_105_DIAG_TAG,
+                    "tmux-eventbus-drop event=${event.javaClass.simpleName} " +
+                        "droppedEvents=$dropped capacity=$EVENT_BUFFER",
+                )
+            }
         }
     }
 
@@ -2943,13 +2943,15 @@ internal class RealTmuxClient(
                         ),
                     )
                 }
-                Log.w(
-                    ISSUE_105_DIAG_TAG,
-                    "tmux-output-backlog-overflow pane=${event.paneId} " +
-                        "bytes=${event.data.size} droppedEvents=$dropped " +
-                        "capacity=$OUTPUT_BACKLOG_EVENTS",
-                    result.exceptionOrNull(),
-                )
+                if (shouldLogTmuxDropCount(dropped)) {
+                    Log.w(
+                        ISSUE_105_DIAG_TAG,
+                        "tmux-output-backlog-overflow pane=${event.paneId} " +
+                            "bytes=${event.data.size} droppedEvents=$dropped " +
+                            "capacity=$OUTPUT_BACKLOG_EVENTS",
+                        result.exceptionOrNull(),
+                    )
+                }
             }
         }
 

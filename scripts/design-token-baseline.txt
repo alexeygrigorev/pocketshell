@@ -22,6 +22,6 @@ app/src/main/java/com/pocketshell/app/session/ConversationSyncStatusUi.kt 1
 app/src/main/java/com/pocketshell/app/session/InlineDictation.kt 4
 app/src/main/java/com/pocketshell/app/snippets/SnippetsScreen.kt 3
 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionOverlays.kt 7
-app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 6
+app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt 5
 app/src/main/java/com/pocketshell/app/usage/UsageResetBanner.kt 2
 app/src/main/java/com/pocketshell/app/usage/UsageScreen.kt 3

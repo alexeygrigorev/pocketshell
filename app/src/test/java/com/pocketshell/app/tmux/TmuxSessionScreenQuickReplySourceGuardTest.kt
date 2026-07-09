@@ -27,7 +27,14 @@ class TmuxSessionScreenQuickReplySourceGuardTest {
                 quickReplyEligibility.contains("flowOfVisibleScreenText") ||
                 quickReplyEligibility.contains("visibleScreenTextSnapshot"),
         )
-        assertTrue(src.contains("private fun AgentQuickReplyBand("))
+        val overlaySrc = locate("TmuxSessionOverlays.kt")
+        val quickReplyBand = overlaySrc.substringBetween(
+            start = "internal fun AgentQuickReplyBand(",
+            end = "@Composable\ninternal fun AgentQuickReplyRow(",
+        )
+        assertTrue(quickReplyBand.contains("agentQuickRepliesForVisibleTextFlow("))
+        assertTrue(quickReplyBand.contains("flowOfVisibleScreenText"))
+        assertTrue(quickReplyBand.contains("collectAsState(initial = emptyList())"))
     }
 
     @Test

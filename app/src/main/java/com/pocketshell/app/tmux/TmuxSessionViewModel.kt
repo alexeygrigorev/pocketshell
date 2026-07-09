@@ -16969,17 +16969,6 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Quote a string for inclusion inside single quotes in a tmux command
-     * line. tmux's command parser uses POSIX-shell-ish single quoting:
-     * everything between the outer pair of `'...'` is literal except the
-     * `'` character itself, which must be closed and re-opened
-     * (`'\''`). We replace single quotes with the close-escape-open
-     * sequence and leave everything else alone.
-     */
-    internal fun escapeSingleQuoted(input: String): String =
-        input.replace("'", "'\\''")
-
-    /**
      * Issue #209 test seam: drive the bracketed-paste hex builder
      * without going through the suspending tmux client. Returns the
      * exact hex payload that [sendBracketedPaste] would pass to

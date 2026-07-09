@@ -115,7 +115,6 @@ import com.pocketshell.app.conversation.timelineTimestamp
 import com.pocketshell.app.conversation.toolResultPairing
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
-import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.conventionalRemoteHome
 import com.pocketshell.app.projects.defaultSessionBaseName
@@ -3697,33 +3696,6 @@ private fun ConnectionStatusPill(
     )
 }
 
-
-internal fun recordTmuxReconnectUiStateRendered(
-    status: ConnectionStatus,
-    hostId: Long,
-    canReconnect: Boolean,
-) {
-    when (status) {
-        is ConnectionStatus.Reconnecting -> ReconnectCauseTrail.record(
-            stage = "ui_reconnect_state",
-            outcome = "rendered",
-            cause = "connection_status_reconnecting",
-            "hostId" to hostId,
-            "attempt" to status.attempt,
-            "maxAttempts" to status.maxAttempts,
-            "retryDelayMs" to status.retryDelayMs,
-            "canReconnect" to canReconnect,
-        )
-        is ConnectionStatus.Failed -> ReconnectCauseTrail.record(
-            stage = "ui_reconnect_state",
-            outcome = "rendered",
-            cause = "connection_status_failed",
-            "hostId" to hostId,
-            "canReconnect" to canReconnect,
-        )
-        else -> Unit
-    }
-}
 
 @Composable
 private fun PageIndicator(pageCount: Int, currentPage: Int) {

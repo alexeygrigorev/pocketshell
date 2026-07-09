@@ -293,46 +293,13 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private var inFlightSendRequest: SendRequest? = null
 
-    /**
-     * Issue #891: the overall send-operation watchdog. The maintainer's
-     * on-device symptom — a prompt with a PNG attachment stuck on "Sending…"
-     * FOREVER, only recoverable by restarting the app — happens when the
-     * in-flight state ([UiState.sendInFlight]) is set but the resolution
-     * callbacks that clear it ([markSendDelivered] / [restoreFailedSend]) never
-     * fire. Each leg of the send is already individually bounded (the
-     * [ATTACHMENT_UPLOAD_TIMEOUT_MS] upload `withTimeout`, the #886 absolute
-     * per-command ceiling on the tmux channel, and the sheet's
-     * [SEND_TIMEOUT_MS] `withTimeoutOrNull` around the host `onSend`), but
-     * there was no bound on the WHOLE operation owned by the ViewModel itself:
-     * if the upload-await coroutine ([dispatchSendAfterUpload]) wedged, or the
-     * `sendRequests` channel emission landed with no live collector (sheet
-     * dismissed mid-send / recomposition gap), nothing ever cleared
-     * `sendInFlight` and the composer was stuck.
-     *
-     * This watchdog is the top-level escape hatch (hard-cut per D22 — it
-     * REPLACES "rely on a downstream callback always firing", not an added
-     * settings flag): the instant a send goes in-flight we arm a single
-     * watchdog; if `sendInFlight` is still true after [OVERALL_SEND_TIMEOUT_MS]
-     * we route to the retryable failed-send state ([restoreFailedSend]) with
-     * the CURRENT draft + staged attachments preserved, so the user gets a
-     * "Send failed — Retry" affordance and never has to restart the app. The
-     * timeout is generous enough to sit ABOVE the per-leg bounds so the normal
-     * upload/onSend failure paths surface first; the watchdog only fires when
-     * those paths failed to resolve at all.
-     */
-    private var sendWatchdogJob: Job? = null
-
-    /**
-     * Issue #891 test seam: the overall-send watchdog timeout. Defaults to the
-     * production [OVERALL_SEND_TIMEOUT_MS]. Unit tests that exercise the watchdog
-     * set this (via [setSendWatchdogTimeoutForTest]) to a small virtual-time
-     * value so the timeout fires deterministically; unit tests that DON'T care
-     * about the watchdog set it to `null` to disable arming entirely so
-     * `runTest`'s terminal `advanceUntilIdle` does not drain a pending 110s
-     * `delay` and spuriously flip their in-flight assertions. Production always
-     * uses the non-null default — the watchdog is never disabled on-device.
-     */
-    private var sendWatchdogTimeoutMs: Long? = OVERALL_SEND_TIMEOUT_MS
+    private val watchdogs = PromptComposerWatchdogs(
+        scope = viewModelScope,
+        sendTimeoutMs = OVERALL_SEND_TIMEOUT_MS,
+        transcribeTimeoutMs = TRANSCRIBE_TIMEOUT_MS,
+        onSendExpired = ::onSendWatchdogExpired,
+        onTranscribeExpired = ::onTranscribeWatchdogExpired,
+    )
 
     /**
      * Issue #891 test seam. `timeoutMs = null` disables the watchdog for unit
@@ -341,31 +308,8 @@ public class PromptComposerViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun setSendWatchdogTimeoutForTest(timeoutMs: Long?) {
-        sendWatchdogTimeoutMs = timeoutMs
+        watchdogs.setSendTimeoutForTest(timeoutMs)
     }
-
-    /**
-     * Issue #939 (audit #935 S5-2): the transcribe-FSM watchdog. Unlike the send
-     * path (which has the #891 [sendWatchdogJob]), the voice-transcribe launch had
-     * NO time bound at all — so a wedged Whisper round-trip (or any throw before
-     * the FSM was driven back to Idle) left the composer stuck on "Transcribing…"
-     * with the mic locked, recoverable only by killing the app. This watchdog is
-     * the sibling escape hatch: the instant the FSM enters [RecordingState.Transcribing]
-     * we arm a single watchdog; if it is still `Transcribing` after
-     * [TRANSCRIBE_TIMEOUT_MS] we route back to Idle with a retryable error banner.
-     */
-    private var transcribeWatchdogJob: Job? = null
-
-    /**
-     * Issue #939 test seam, mirroring [sendWatchdogTimeoutMs]. Defaults to the
-     * production [TRANSCRIBE_TIMEOUT_MS]. Unit tests that DON'T care about the
-     * watchdog set it to `null` (so `runTest`'s terminal `advanceUntilIdle` does
-     * not drain a pending long `delay` and spuriously flip Transcribing→Idle);
-     * the dedicated watchdog test sets a small virtual-time value so the timeout
-     * fires deterministically. Production always uses the non-null default — the
-     * watchdog is never disabled on-device.
-     */
-    private var transcribeWatchdogTimeoutMs: Long? = TRANSCRIBE_TIMEOUT_MS
 
     /**
      * Issue #939 test seam. `timeoutMs = null` disables the transcribe watchdog
@@ -374,7 +318,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun setTranscribeWatchdogTimeoutForTest(timeoutMs: Long?) {
-        transcribeWatchdogTimeoutMs = timeoutMs
+        watchdogs.setTranscribeTimeoutForTest(timeoutMs)
     }
 
     /**
@@ -927,7 +871,7 @@ public class PromptComposerViewModel @Inject constructor(
         // in-flight — this is the with-attachment path the maintainer hit, where
         // a wedged upload-await could otherwise leave "Sending…" stuck forever.
         // emitSendRequest re-arms it (idempotent) once the upload resolves.
-        armSendWatchdog()
+        watchdogs.armSend()
         val job = attachmentJob ?: return emitSendRequest(withEnter, sendTarget)
         viewModelScope.launch {
             // Await the upload coroutine itself; `attachFiles` resolves the UI
@@ -944,7 +888,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // Issue #891: the send resolved (to "no send") — disarm the
                 // overall-send watchdog so it cannot later fire a spurious
                 // "Send failed" on an already-settled composer.
-                disarmSendWatchdog()
+                watchdogs.disarmSend()
                 _uiState.update { it.copy(sendInFlight = false) }
                 return@launch
             }
@@ -1001,7 +945,7 @@ public class PromptComposerViewModel @Inject constructor(
         // so a host `onSend` that never resolves (wedged channel / dropped
         // emission with no live collector) can never leave the composer stuck on
         // "Sending…" forever.
-        armSendWatchdog()
+        watchdogs.armSend()
         val handoffRequest = SendRequest(
             text = text,
             withEnter = withEnter,
@@ -1252,7 +1196,7 @@ public class PromptComposerViewModel @Inject constructor(
     public fun markSendDelivered(request: SendRequest? = null) {
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
-        disarmSendWatchdog()
+        watchdogs.disarmSend()
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot restore a stale prompt.
         inFlightSendRequest = null
@@ -1306,7 +1250,7 @@ public class PromptComposerViewModel @Inject constructor(
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
         if (request.text.isEmpty()) {
-            disarmSendWatchdog()
+            watchdogs.disarmSend()
             inFlightSendRequest = null
             _uiState.update { it.copy(sendInFlight = false, attachmentUpload = AttachmentUploadState.Idle) }
             return
@@ -1314,7 +1258,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #891: the send resolved (to failure) — disarm the overall-send
         // watchdog so the retryable failed state we are about to set is not
         // immediately re-stamped by a late watchdog firing.
-        disarmSendWatchdog()
+        watchdogs.disarmSend()
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot restore it a second time.
         inFlightSendRequest = null
@@ -1404,7 +1348,7 @@ public class PromptComposerViewModel @Inject constructor(
     ) {
         // Issue #891: the send resolved (deferred to the queue) — disarm the
         // overall-send watchdog so it cannot re-stamp a stale "Send failed".
-        disarmSendWatchdog()
+        watchdogs.disarmSend()
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot act on it again.
         inFlightSendRequest = null
@@ -1449,62 +1393,8 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #891: arm (or re-arm) the overall-send watchdog. Cancels any prior
-     * watchdog first so a re-arm (e.g. the upload-await path re-dispatching once
-     * the upload lands) keeps exactly one live timer. If `sendInFlight` is still
-     * true [OVERALL_SEND_TIMEOUT_MS] after this arm, [onSendWatchdogExpired]
-     * routes the composer to the retryable failed-send state so the user is
-     * never stuck on "Sending…" forever (the maintainer's restart-the-app bug).
-     */
-    private fun armSendWatchdog() {
-        sendWatchdogJob?.cancel()
-        val timeoutMs = sendWatchdogTimeoutMs ?: return
-        sendWatchdogJob = viewModelScope.launch {
-            delay(timeoutMs)
-            onSendWatchdogExpired()
-        }
-    }
-
-    /**
-     * Issue #891: cancel the overall-send watchdog because the send resolved
-     * (delivered, failed, no-send, or discarded). Idempotent.
-     */
-    private fun disarmSendWatchdog() {
-        sendWatchdogJob?.cancel()
-        sendWatchdogJob = null
-    }
-
-    /**
-     * Issue #939 (audit #935 S5-2): arm the transcribe watchdog the instant the
-     * FSM enters [RecordingState.Transcribing]. Sibling of [armSendWatchdog]; the
-     * voice path had no time bound before this, so a wedged Whisper round-trip or
-     * a slow IO call inside the transcribe launch left the mic locked on
-     * "Transcribing…" until app restart. If the FSM is still `Transcribing` after
-     * [transcribeWatchdogTimeoutMs] we route it back to Idle with a retryable
-     * error so the user is never stuck.
-     */
-    private fun armTranscribeWatchdog() {
-        transcribeWatchdogJob?.cancel()
-        val timeoutMs = transcribeWatchdogTimeoutMs ?: return
-        transcribeWatchdogJob = viewModelScope.launch {
-            delay(timeoutMs)
-            onTranscribeWatchdogExpired()
-        }
-    }
-
-    /**
-     * Issue #939: cancel the transcribe watchdog because the FSM resolved (Idle
-     * via success, handled failure, offline-queue, empty/no-speech, or an
-     * unexpected throw caught by the launch's `catch`). Idempotent.
-     */
-    private fun disarmTranscribeWatchdog() {
-        transcribeWatchdogJob?.cancel()
-        transcribeWatchdogJob = null
-    }
-
-    /**
      * Issue #939: the transcribe watchdog fired — the FSM has been stuck on
-     * [RecordingState.Transcribing] past [transcribeWatchdogTimeoutMs] without
+     * [RecordingState.Transcribing] past its configured timeout without
      * resolving (a wedged Whisper call or an unguarded IO hang). Route back to
      * Idle, unlock the mic, and surface a retryable error so the user can record
      * again. A no-op if the FSM already left Transcribing (benign race where the
@@ -1513,7 +1403,6 @@ public class PromptComposerViewModel @Inject constructor(
      * still retry the persisted recording.
      */
     private fun onTranscribeWatchdogExpired() {
-        transcribeWatchdogJob = null
         if (_uiState.value.recording != RecordingState.Transcribing) return
         DiagnosticEvents.record(
             "action",
@@ -1555,7 +1444,7 @@ public class PromptComposerViewModel @Inject constructor(
      * even when no send was in flight.
      */
     private fun clearStrandedSendInFlight(error: String? = null) {
-        disarmSendWatchdog()
+        watchdogs.disarmSend()
         outboundSidecarDispatchInFlight = false
         // Issue #971/#987: the composer was cleared at handoff, so a non-delivering
         // strand must not silently lose the prompt. Per the maintainer's #987
@@ -1601,7 +1490,6 @@ public class PromptComposerViewModel @Inject constructor(
      * been observed).
      */
     private fun onSendWatchdogExpired() {
-        sendWatchdogJob = null
         if (!_uiState.value.sendInFlight) return
         // Issue #971: the editable composer is cleared on handoff, so prefer the
         // captured in-flight request to restore the EXACT prompt + tiles. Fall
@@ -1652,7 +1540,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #891: an explicit discard ends any in-flight send too — disarm
         // the watchdog so it cannot resurrect a "Send failed" banner over the
         // now-empty composer.
-        disarmSendWatchdog()
+        watchdogs.disarmSend()
         // Issue #971: drop the captured in-flight request so a late
         // watchdog/strand cannot restore a prompt the user just discarded.
         inFlightSendRequest = null
@@ -2026,7 +1914,7 @@ public class PromptComposerViewModel @Inject constructor(
             outboundQueueItemId = active.id,
         )
         _uiState.update { it.copy(sendInFlight = true, error = null) }
-        armSendWatchdog()
+        watchdogs.armSend()
         // Issue #971: remember the in-flight prompt for the wedged/cancelled
         // recovery paths (watchdog / strand-clear) so they restore the exact
         // payload rather than the cleared composer.
@@ -2756,7 +2644,7 @@ public class PromptComposerViewModel @Inject constructor(
      * killing the app (the #891 send-wedge shape, but for voice).
      *
      * This launcher closes that whole class:
-     *  - **Arm a watchdog** ([armTranscribeWatchdog]) so even a Whisper round-trip
+     *  - **Arm a watchdog** so even a Whisper round-trip
      *    that wedges (never returns, never throws) is bounded — the send path has
      *    the #891 watchdog; transcribe had none.
      *  - **`catch`** any non-Cancellation throw → drive the FSM back to Idle, drop
@@ -2768,7 +2656,7 @@ public class PromptComposerViewModel @Inject constructor(
      *    arms already drove it to Idle).
      */
     private fun launchTranscribe(block: suspend () -> Unit) {
-        armTranscribeWatchdog()
+        watchdogs.armTranscribe()
         transcribeJob = viewModelScope.launch {
             try {
                 block()
@@ -2794,7 +2682,7 @@ public class PromptComposerViewModel @Inject constructor(
                     )
                 }
             } finally {
-                disarmTranscribeWatchdog()
+                watchdogs.disarmTranscribe()
                 // Belt: no normal terminal arm should leave the FSM on
                 // Transcribing, but if a future edit forgets one, this guarantees
                 // the mic is never stuck. Idempotent when already Idle.
@@ -3178,7 +3066,7 @@ public class PromptComposerViewModel @Inject constructor(
         transcribeJob = null
         // Issue #939: the user cancelled — drop the transcribe watchdog so it
         // does not fire later and re-surface a spurious timeout banner.
-        disarmTranscribeWatchdog()
+        watchdogs.disarmTranscribe()
         clearPendingTranscriptionSend()
         activeProvider = null
         savedStateHandle[KEY_WAS_RECORDING] = false
@@ -3236,13 +3124,7 @@ public class PromptComposerViewModel @Inject constructor(
         recordingJob?.cancel()
         transcribeJob?.cancel()
         attachmentJob?.cancel()
-        // Issue #891: drop the overall-send watchdog so it never outlives the
-        // ViewModel (parity with the other jobs above; viewModelScope cancel
-        // already covers it, but be explicit).
-        sendWatchdogJob?.cancel()
-        // Issue #939: drop the transcribe watchdog too (parity with the send
-        // watchdog above) so it never outlives the ViewModel.
-        transcribeWatchdogJob?.cancel()
+        watchdogs.cancelAll()
         // Issue #882: the #880 recording-elapsed ticker is an infinite
         // `while { delay() }` loop that only breaks when recording leaves
         // [RecordingState.Recording]. Cancel it explicitly on clear so it

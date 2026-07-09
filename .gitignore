@@ -74,3 +74,6 @@ keystore.properties
 
 # Firebase config (per-machine, not committed — #690)
 app/google-services.json
+
+# Generated CI journey harness output
+/artifacts/

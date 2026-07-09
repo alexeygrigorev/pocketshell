@@ -64,8 +64,6 @@ import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.HostStatus
-import com.pocketshell.uikit.model.KeyBinding
-import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -125,20 +123,7 @@ class DesignRenders {
      */
     @Test
     fun terminalHotkeysPanel() = render("terminal-hotkeys-panel") {
-        Surface(color = PocketShellColors.Surface) {
-            com.pocketshell.uikit.components.TerminalHotkeysPanel(
-                sections = sampleHotkeySections(),
-                onKey = {},
-                onClose = {},
-                // Issue #1091: render the sticky `Ctrl` modifier ARMED so the
-                // accent treatment on the `Ctrl` key is visually checked.
-                modifierState = com.pocketshell.uikit.model.KeyModifierState.OneShot,
-                // Issue #1332: default-collapsed render shows the compact COMMON
-                // set only (ARROWS first, then Esc/Tab/Enter/^C/^D) + the "Show
-                // more keys" expander.
-                initiallyExpanded = true,
-            )
-        }
+        TerminalHotkeysPanelRender()
     }
 
     /**
@@ -149,99 +134,8 @@ class DesignRenders {
      */
     @Test
     fun terminalHotkeysPanelCollapsed() = render("terminal-hotkeys-panel-collapsed") {
-        Surface(color = PocketShellColors.Surface) {
-            com.pocketshell.uikit.components.TerminalHotkeysPanel(
-                sections = sampleHotkeySections(),
-                onKey = {},
-                onClose = {},
-                initiallyExpanded = false,
-            )
-        }
+        TerminalHotkeysPanelCollapsedRender()
     }
-
-    /**
-     * Issue #1091 + #1332: the EXPANDED hotkeys panel — `CTRL COMBOS` filled with
-     * the nano keys (`^G`/`^J`/`^K`/`^O`/`^T`/`^U`/`^W`/`^X`/`^\`), the sticky
-     * `Ctrl` modifier, and the a–z LETTERS grid — all revealed behind the
-     * expander, with ARROWS still pinned at the top.
-     */
-    private fun sampleHotkeySections(): List<com.pocketshell.uikit.components.HotkeySection> =
-        listOf(
-            // Issue #1332: ARROWS first (common, always shown).
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "ARROWS",
-                keys = listOf(
-                    KeyBinding("←", KeyKind.Arrow),
-                    KeyBinding("↑", KeyKind.Arrow),
-                    KeyBinding("↓", KeyKind.Arrow),
-                    KeyBinding("→", KeyKind.Arrow),
-                ),
-                columns = 4,
-            ),
-            // Issue #1332: the compact COMMON essentials row (always shown).
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "COMMON",
-                keys = listOf(
-                    KeyBinding("Esc", KeyKind.Regular),
-                    KeyBinding("Tab", KeyKind.Regular),
-                    KeyBinding("Enter", KeyKind.Regular),
-                    KeyBinding("^C", KeyKind.Regular),
-                    KeyBinding("^D", KeyKind.Regular),
-                ),
-                columns = 5,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "CTRL COMBOS",
-                keys = listOf(
-                    KeyBinding("^A", KeyKind.Regular),
-                    KeyBinding("^B", KeyKind.Regular),
-                    KeyBinding("^C", KeyKind.Regular),
-                    KeyBinding("^D", KeyKind.Regular),
-                    KeyBinding("^E", KeyKind.Regular),
-                    KeyBinding("^G", KeyKind.Regular),
-                    KeyBinding("^J", KeyKind.Regular),
-                    KeyBinding("^K", KeyKind.Regular),
-                    KeyBinding("^L", KeyKind.Regular),
-                    KeyBinding("^O", KeyKind.Regular),
-                    KeyBinding("^R", KeyKind.Regular),
-                    KeyBinding("^T", KeyKind.Regular),
-                    KeyBinding("^U", KeyKind.Regular),
-                    KeyBinding("^W", KeyKind.Regular),
-                    KeyBinding("^X", KeyKind.Regular),
-                    KeyBinding("^Z", KeyKind.Regular),
-                    KeyBinding("^\\", KeyKind.Regular),
-                ),
-                columns = 4,
-                extended = true,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "MORE KEYS",
-                keys = listOf(KeyBinding("⇧Tab", KeyKind.Regular)),
-                columns = 4,
-                extended = true,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "INTERRUPT / EOF",
-                keys = listOf(
-                    KeyBinding("^C×2", KeyKind.Regular),
-                    KeyBinding("^D×2", KeyKind.Regular),
-                ),
-                columns = 2,
-                extended = true,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "CTRL + LETTER",
-                keys = listOf(KeyBinding("Ctrl", KeyKind.Modifier)),
-                columns = 4,
-                extended = true,
-            ),
-            com.pocketshell.uikit.components.HotkeySection(
-                title = "LETTERS",
-                keys = ('a'..'z').map { KeyBinding(it.toString(), KeyKind.Regular) },
-                columns = 7,
-                extended = true,
-            ),
-        )
 
     /** Host-list header (`ScreenHeader`) with a trailing status pill. */
     @Test
@@ -477,38 +371,7 @@ class DesignRenders {
      */
     @Test
     fun tmuxConnectingStates() = render("tmux-connecting-states") {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            LoadingLabel("waiting for tmux panes… (#757 — connecting)")
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(220.dp)
-                    .background(color = PocketShellColors.Surface),
-                contentAlignment = Alignment.Center,
-            ) {
-                LoadingIndicator.Spinner(
-                    size = SpinnerSize.Medium,
-                    label = "waiting for tmux panes…",
-                )
-            }
-
-            LoadingLabel("Attaching… (#750 — reattach, single indicator)")
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(220.dp)
-                    .background(color = PocketShellColors.Background),
-                contentAlignment = Alignment.Center,
-            ) {
-                LoadingIndicator.Spinner(
-                    size = SpinnerSize.Medium,
-                    label = "Attaching…",
-                )
-            }
-        }
+        TmuxConnectingStatesRender()
     }
 
     /**
@@ -523,27 +386,7 @@ class DesignRenders {
      */
     @Test
     fun tmuxSurfaceReconnectAffordance() = render("tmux-surface-reconnect-affordance") {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(320.dp)
-                .background(color = PocketShellColors.Background),
-            contentAlignment = Alignment.Center,
-        ) {
-            LoadingIndicator.Spinner(
-                size = SpinnerSize.Medium,
-                label = "Attaching…",
-            )
-            PocketShellButton(
-                text = "Reconnect",
-                onClick = {},
-                variant = ButtonVariant.Secondary,
-                compact = true,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp),
-            )
-        }
+        TmuxSurfaceReconnectAffordanceRender()
     }
 
     /**

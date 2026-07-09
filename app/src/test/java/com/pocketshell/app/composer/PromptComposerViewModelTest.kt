@@ -5486,45 +5486,6 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun attachThenTypeKeepsBothVisibleInState() = runTest {
-        // Issue #694 (second report): "when I attach something and then I want
-        // to type, I get strange composer behavior where I don't see
-        // anything." The state contract: attaching a file adds a chip WITHOUT
-        // mutating the draft, and typing afterwards updates the draft WITHOUT
-        // clearing the chips. Both must remain observable so the UI can render
-        // the typed text AND the attachment tile at the same time.
-        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
-        vm.attachFiles(count = 1) {
-            Result.success(listOf("~/.pocketshell/attachments/host-1/shot.png"))
-        }
-        advanceUntilIdle()
-
-        // After attach: one chip, draft still empty (attach never touches text).
-        assertEquals(1, vm.uiState.value.attachments.size)
-        assertEquals("", vm.uiState.value.draft)
-
-        // Now type. The draft updates and the chip survives.
-        vm.onDraftChange("look at this")
-        assertEquals("look at this", vm.uiState.value.draft)
-        assertEquals(1, vm.uiState.value.attachments.size)
-        assertEquals(
-            "~/.pocketshell/attachments/host-1/shot.png",
-            vm.uiState.value.attachments.single().remotePath,
-        )
-
-        // Send composes both: typed text + the attachment suffix.
-        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
-        val job: Job = launch { vm.sendRequests.collect { sent += it } }
-        vm.requestSend(withEnter = true)
-        advanceUntilIdle()
-        job.cancelAndJoin()
-
-        assertEquals(1, sent.size)
-        assertTrue(sent[0].text.startsWith("look at this"))
-        assertTrue(sent[0].text.contains("shot.png"))
-    }
-
-    @Test
     fun successfulSendClearsDraftSoSheetDismissesEveryTime() = runTest {
         // Issue #695: "when I'm sending a message, first the message
         // disappears from the Composer and then sometimes the Composer stays

@@ -5,12 +5,11 @@
 # Ratchet rule: baselined files may shrink or disappear, but may not grow.
 # New non-exempt tracked files above threshold_bytes fail the guard.
 # Exemptions: vendor/generated/worktree dirs and shared/core-terminal.
-203585 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
+197593 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
 180197 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
-226939 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
-929168 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
-143438 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
-298494 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
+216046 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
+925059 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
+294414 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png
 194363 scripts/ci-journey-suite.sh

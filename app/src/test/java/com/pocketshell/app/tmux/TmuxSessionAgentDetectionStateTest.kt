@@ -8,7 +8,6 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
-import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.TestScope
@@ -706,22 +705,52 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
     }
 
     // ─── Issue #1158 (REOPENED chain #962→#975→#1057→#1158) — the STICKY ────────
-    // alt-buffer agent latch. The maintainer launches `claude`/`codex` DIRECTLY
-    // inside a shell-recorded session, so `@ps_agent_kind` stays `shell`, the
-    // confirmed-shell verdict is never cleared, and live detection never binds for
-    // the node-wrapped-Claude / Codex-`/proc` / Z.AI fleet. The detection-
-    // INDEPENDENT alt-buffer signal restores the Conversation tab and, once shown,
-    // must STAY for the session's life (a later detection drop / buffer flip must
-    // not collapse it). ─────────────────────────────────────────────────────────
+    // alt-buffer agent latch, driven from SERVER TRUTH. The maintainer launches
+    // `claude`/`codex`/glm DIRECTLY inside a shell-recorded session, so
+    // `@ps_agent_kind` stays `shell`, the confirmed-shell verdict is never cleared,
+    // and live detection never binds for the node-wrapped-Claude / Codex-`/proc` /
+    // Z.AI fleet. The detection-INDEPENDENT alt-buffer signal restores the
+    // Conversation tab and, once shown, must STAY for the session's life.
+    //
+    // The signal source is the tmux SERVER's `#{alternate_on}` flag read on every
+    // `list-panes` reconcile ([ParsedPane.alternateOn] →
+    // [TmuxSessionViewModel.latchAltBufferAgentsFromParsed]) — NOT the CLIENT
+    // emulator (which is inert on the real `-CC` path: the capture-pane seed
+    // replays screen TEXT onto the client's MAIN buffer and an idle agent emits no
+    // fresh `?1049h`, so `isAlternateBufferActive` stays false forever — the exact
+    // synthetic-masks-reality cheat that hid #1158 for five fixes). Driving the
+    // latch through `applyParsedPanesForTest(alternateOn = true)` exercises the
+    // REAL production reconcile path.
+    //
+    // RED→GREEN (base): remove the `latchAltBufferAgentsFromParsed(sorted)` call in
+    // `applyParsedPanes` (the fix) and every case below FAILS — the server-truth
+    // `alternate_on` is read but never latched, so the tab stays hidden, exactly
+    // the maintainer's #1158 symptom. ───────────────────────────────────────────
+
+    /** Server-truth reconcile: one pane in session `$0` reporting `#{alternate_on}`. */
+    private fun TmuxSessionViewModel.reconcilePaneAltBuffer(
+        paneId: String,
+        alternateOn: Boolean,
+        sessionName: String = "work",
+    ) {
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId,
+                    "@0",
+                    "$0",
+                    "shell",
+                    paneIndex = 0,
+                    alternateOn = alternateOn,
+                    sessionName = sessionName,
+                ),
+            ),
+        )
+    }
 
     @Test
     fun altBufferAgentLatchesShellRecordedSessionAndIsStickyAcrossBufferFlip() = runTest(scheduler) {
-        // A single held surface state so the test can drive the active pane's
-        // alt-buffer verdict synthetically (the #780 model — CI has no real curses
-        // agent). The factory returns the SAME instance the (single) pane uses.
-        val surface = TerminalSurfaceState()
         val vm = newVm()
-        vm.setTerminalSurfaceStateFactoryForTest { surface }
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
         // The maintainer's exact state: the session is a CONFIRMED shell
@@ -737,21 +766,20 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
             "%0" !in vm.altBufferAgentPaneIds.value,
         )
 
-        // The agent (claude/codex/glm — kind-agnostic) goes full-screen: the pane's
-        // emulator switches to the ALTERNATE screen buffer. The watchdog tick reads
-        // it (driven here directly) and LATCHES the session.
-        surface.setAlternateBufferActiveForTest(true)
-        vm.noteActivePaneAltBufferStateForTest()
+        // The agent (claude/codex/glm — kind-agnostic) goes full-screen: the tmux
+        // SERVER reports `#{alternate_on}=1` on the next reconcile. This is the real
+        // path — no client-emulator injection — and it LATCHES the session.
+        vm.reconcilePaneAltBuffer(paneId = "%0", alternateOn = true)
         runCurrent()
         assertTrue(
-            "#1158: the alt-buffer sighting latches the session → Conversation tab shown",
+            "#1158: the server-truth alt-buffer read latches the session → Conversation tab shown",
             "%0" in vm.altBufferAgentPaneIds.value,
         )
 
         // STICKY: the agent leaves the alt-buffer (exits a full-screen view / drops
-        // detection). The tab MUST stay for the rest of the session.
-        surface.setAlternateBufferActiveForTest(false)
-        vm.noteActivePaneAltBufferStateForTest()
+        // detection) — a later reconcile reports `#{alternate_on}=0`. The tab MUST
+        // stay for the rest of the session.
+        vm.reconcilePaneAltBuffer(paneId = "%0", alternateOn = false)
         runCurrent()
         assertTrue(
             "#1158 sticky: a later buffer flip / detection drop must NOT collapse the tab",
@@ -766,23 +794,17 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
         // id inherits the Conversation tab without needing a fresh alt-buffer
         // sighting — the maintainer's long-lived sessions keep the tab across
         // reconnects.
-        val surface = TerminalSurfaceState()
         val vm = newVm()
-        vm.setTerminalSurfaceStateFactoryForTest { surface }
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         runCurrent()
-        surface.setAlternateBufferActiveForTest(true)
-        vm.noteActivePaneAltBufferStateForTest()
+        vm.reconcilePaneAltBuffer(paneId = "%0", alternateOn = true)
         runCurrent()
         assertTrue("precondition: latched on the original pane id", "%0" in vm.altBufferAgentPaneIds.value)
 
-        // Reattach: same session $0, new pane id %7. No fresh alt-buffer read.
-        surface.setAlternateBufferActiveForTest(false)
-        vm.applyParsedPanesForTest(
-            listOf(
-                TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "work", paneIndex = 0, sessionName = "work"),
-            ),
-        )
+        // Reattach: same session $0, new pane id %7. The reconcile reports
+        // `#{alternate_on}=0` for the new pane (the agent may be idle-on-main by now),
+        // but the per-SESSION latch keeps the tab.
+        vm.reconcilePaneAltBuffer(paneId = "%7", alternateOn = false)
         runCurrent()
         assertTrue(
             "#1158 sticky: the new pane id under the latched session keeps the tab",
@@ -794,18 +816,14 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
     @Test
     fun plainShellOnMainBufferNeverLatchesNoFlap() = runTest(scheduler) {
         // #894/#815 no-flap adjacency: a plain interactive shell sitting at a prompt
-        // is on the MAIN buffer, so the alt-buffer poll never latches it → NO
-        // Conversation tab. The alt-buffer signal is POSITIVE-only.
-        val surface = TerminalSurfaceState()
+        // is on the MAIN buffer, so the tmux SERVER reports `#{alternate_on}=0` on
+        // every reconcile → the latch never fires → NO Conversation tab. The
+        // alt-buffer signal is POSITIVE-only.
         val vm = newVm()
-        vm.setTerminalSurfaceStateFactoryForTest { surface }
         vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
         vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
         runCurrent()
-        // Main buffer (the emulator override defaults to null → the real read, and a
-        // stub emulator with no alt-screen reports false; assert false explicitly).
-        surface.setAlternateBufferActiveForTest(false)
-        vm.noteActivePaneAltBufferStateForTest()
+        vm.reconcilePaneAltBuffer(paneId = "%0", alternateOn = false)
         runCurrent()
         assertTrue(
             "#894 no-flap: a main-buffer shell never latches → tab stays hidden",

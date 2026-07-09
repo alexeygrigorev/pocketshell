@@ -41,10 +41,14 @@ internal fun parsePaneRow(line: String): TmuxSessionViewModel.ParsedPane? {
         // skips this pane rather than fall back to a host-wide scan.
         paneTty = parts.getOrNull(paneIndexIndex + 3).orEmpty(),
         inCopyMode = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 4)),
-        // Epic #821 slice A2: `#{pane_pid}` is the LAST field. Older tmux
-        // (or unit tests on the legacy format) omit it -> 0, and the
-        // foreign-session kind guess simply skips the pane.
+        // Epic #821 slice A2: `#{pane_pid}` for the foreign-session kind guess.
+        // Older tmux (or unit tests on the legacy format) omit it -> 0.
         panePid = parts.getOrNull(paneIndexIndex + 5)?.trim()?.toLongOrNull() ?: 0L,
+        // Issue #1158: `#{alternate_on}` is the LAST field — the SERVER-TRUTH
+        // alternate-screen flag that drives the detection-independent alt-buffer
+        // agent latch. Older tmux / legacy-format tests omit it -> false (no
+        // latch), preserving the #894 no-flap invariant for a plain shell.
+        alternateOn = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 6)),
         sessionName = sessionName,
     )
 }

@@ -1974,38 +1974,6 @@ class FolderListViewModel internal constructor(
         }
     }
 
-    private fun TreeRemoteSource.TreeNode.toHydratedNode(): HostTreeModel.HydratedNode =
-        HostTreeModel.HydratedNode(
-            sessionName = session,
-            order = order,
-            folderPath = folderPath,
-            collapsed = collapsed,
-            foreignGuess = foreignKind.toSessionAgentKindOrNull(),
-        )
-
-    private fun HostTreeModel.HydratedNode.toTreeNode(): TreeRemoteSource.TreeNode =
-        TreeRemoteSource.TreeNode(
-            session = sessionName,
-            order = order,
-            folderPath = folderPath,
-            collapsed = collapsed,
-            foreignKind = foreignGuess?.toRegistryKindString(),
-        )
-
-    private fun String?.toSessionAgentKindOrNull(): SessionAgentKind? = when (this) {
-        "claude" -> SessionAgentKind.Claude
-        "codex" -> SessionAgentKind.Codex
-        "opencode" -> SessionAgentKind.OpenCode
-        else -> null
-    }
-
-    private fun SessionAgentKind.toRegistryKindString(): String? = when (this) {
-        SessionAgentKind.Claude -> "claude"
-        SessionAgentKind.Codex -> "codex"
-        SessionAgentKind.OpenCode -> "opencode"
-        else -> null
-    }
-
     /**
      * Issue #706: subscribe the held tree to the bound host's live `tmux -CC`
      * client's `%sessions-changed` (ControlEvent.SessionsChanged) event and treat
@@ -2501,27 +2469,6 @@ class FolderListViewModel internal constructor(
         } else {
             REFRESH_FAILED_MESSAGE
         }
-
-    private fun FolderSessionRow.toSessionEntry(): FolderSessionEntry =
-        FolderSessionEntry(
-            sessionName = sessionName,
-            lastActivity = lastActivity,
-            attached = attached,
-            agentKind = agentKind,
-            recordedProfile = recordedProfile,
-            tmuxSessionId = tmuxSessionId,
-            sessionCreated = sessionCreated,
-            windows = windows.map { window ->
-                FolderSessionWindowEntry(
-                    index = window.index,
-                    name = window.name,
-                    active = window.active,
-                    command = window.command,
-                    agentKind = window.agentKind,
-                    windowId = window.windowId,
-                )
-            },
-        )
 
     private fun preserveReadyOnRefresh(message: String): Boolean {
         if (_state.value !is FolderListUiState.Ready) return false

@@ -4240,65 +4240,10 @@ public class PromptComposerViewModel @Inject constructor(
     }
 }
 
-internal object UnavailableSpeechRecognitionProvider :
-    PromptComposerViewModel.SpeechRecognitionProvider {
-    override fun isAvailable(): Boolean = false
-
-    override fun start(
-        language: String?,
-        listener: PromptComposerViewModel.SpeechRecognitionListener,
-    ): PromptComposerViewModel.SpeechRecognitionSession? = null
-}
-
-/**
- * Issue #453: format an elapsed-recording duration (milliseconds) as a
- * zero-padded `mm:ss` timer (e.g. `00:17`, `01:05`, `12:34`). Minutes are
- * not capped at 99 — a very long dictation renders `120:00` rather than
- * rolling over — but in practice the silence watchdog stops well before
- * that. Exposed at file scope so the unit tests can pin the formatting
- * without composing the sheet.
- */
-internal fun formatElapsed(elapsedMs: Long): String {
-    val totalSeconds = (elapsedMs.coerceAtLeast(0L)) / 1000L
-    val minutes = totalSeconds / 60L
-    val seconds = totalSeconds % 60L
-    return "%02d:%02d".format(minutes, seconds)
-}
-
-internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {
-    if (paths.isEmpty()) return draft
-    val block = buildString {
-        append("Attached files:")
-        paths.forEach { path ->
-            append('\n')
-            append("- ")
-            append(path)
-        }
-    }
-    return when {
-        draft.isBlank() -> block
-        draft.endsWith("\n\n") -> draft + block
-        draft.endsWith("\n") -> draft + "\n" + block
-        else -> draft + "\n\n" + block
-    }
-}
-
 private fun appendTranscript(draft: String, transcript: String): String {
     if (transcript.isBlank()) return draft
     val sep = if (draft.isEmpty() || draft.endsWith(" ")) "" else " "
     return draft + sep + transcript
-}
-
-/**
- * Issue #544/#566: derive the short tile label from a staged remote path — the
- * last path segment (file name), never the full remote path. Trailing
- * slashes are trimmed first; a path that is all slashes or blank falls back
- * to the original string so the tile is never empty.
- */
-internal fun attachmentDisplayName(remotePath: String): String {
-    val trimmed = remotePath.trimEnd('/')
-    val segment = trimmed.substringAfterLast('/')
-    return segment.ifBlank { remotePath }
 }
 
 private fun attachmentErrorMessage(error: Throwable): String {
@@ -4309,42 +4254,4 @@ private fun attachmentErrorMessage(error: Throwable): String {
         raw.ifBlank { error.javaClass.simpleName }
     }
     return "Attachment upload failed: $detail. Your draft was kept; reconnect or choose a smaller/readable file."
-}
-
-/**
- * Issue #180: no-op [PromptComposerViewModel.PendingTranscriptionQueue]
- * implementation used when the ViewModel is constructed without the
- * real store — exclusively by host-JVM unit tests and connected tests
- * that pre-date the queue. The flow stays empty so the composer banner
- * never appears; every suspend method short-circuits. Production wiring
- * via Hilt never sees this object.
- */
-public object DisabledPendingTranscriptionQueue : PromptComposerViewModel.PendingTranscriptionQueue {
-    override val items: kotlinx.coroutines.flow.Flow<List<PendingTranscriptionItem>> =
-        kotlinx.coroutines.flow.flowOf(emptyList())
-
-    override suspend fun enqueueAudio(
-        audio: ByteArray,
-        destinationContext: String,
-        initialError: String?,
-    ): PendingTranscriptionItem? = null
-
-    override suspend fun snapshot(): List<PendingTranscriptionItem> = emptyList()
-    override suspend fun loadAudio(id: String): ByteArray? = null
-    override suspend fun markSucceeded(id: String) = Unit
-    override suspend fun markFailure(id: String, errorMessage: String): PendingTranscriptionItem? = null
-    override suspend fun discard(id: String) = Unit
-    override suspend fun saveAsAudioFile(id: String): String? = null
-    override suspend fun reconcile() = Unit
-}
-
-/**
- * Issue #180: always-online stub for
- * [PromptComposerViewModel.ConnectivityProbe]. Used by older tests that
- * predate #180 — every recording is treated as "device has network",
- * which matches the pre-#180 codepath (always try Whisper). Production
- * wiring always provides the real [ConnectivityObserver].
- */
-public object AlwaysOnlineConnectivityProbe : PromptComposerViewModel.ConnectivityProbe {
-    override fun refresh(): Boolean = true
 }

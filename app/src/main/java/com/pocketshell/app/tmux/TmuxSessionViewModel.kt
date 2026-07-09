@@ -11933,31 +11933,20 @@ public class TmuxSessionViewModel @Inject constructor(
         val nowMs = SystemClock.elapsedRealtime()
         val lastSeedAtMs = paneLastSeedAtMs[pane.paneId]
         val lastOutputAtMs = paneLastOutputAtMs[pane.paneId]
-        val state = pane.terminalState
-        val fields = mutableListOf<Pair<String, Any?>>(
-            "class" to blackClass,
-            "paneId" to pane.paneId,
-            "windowId" to pane.windowId,
-            "session" to activeTarget?.sessionName,
-            "renderedChars" to state.renderedNonBlankCharCount(),
-            // Byte count of the authoritative capture this observation was judged
-            // against; 0 when the capture was empty/errored (the capture_empty /
-            // never_seeded / heal_capture_unverified classes) or unavailable at the
-            // site (the reveal gate).
-            "captureBytes" to (captureText?.length ?: 0),
-            "visibleRows" to state.visibleRowCount(),
-            // -1 means the field is unavailable (never seeded / never streamed output).
-            "msSinceLastSeed" to (lastSeedAtMs?.let { nowMs - it } ?: -1L),
-            "msSinceLastOutput" to (lastOutputAtMs?.let { nowMs - it } ?: -1L),
-            "connectionStatus" to (_connectionStatus.value::class.simpleName ?: "unknown"),
-            "foreground" to isProcessForegroundForCleared(),
-            "screenOn" to isScreenInteractive(),
-            "partialBlank" to state.visibleScreenIsPartiallyBlank(),
+        val fields = buildBlackFrameObservedDiagnosticFields(
+            pane = pane,
+            blackClass = blackClass,
+            sessionName = activeTarget?.sessionName,
+            captureText = captureText,
+            nowMs = nowMs,
+            lastSeedAtMs = lastSeedAtMs,
+            lastOutputAtMs = lastOutputAtMs,
+            connectionStatusName = _connectionStatus.value::class.simpleName ?: "unknown",
+            foreground = isProcessForegroundForCleared(),
+            screenOn = isScreenInteractive(),
+            unverifiedStreak = unverifiedStreak,
         )
-        if (unverifiedStreak != null) {
-            fields += "unverifiedStreak" to unverifiedStreak
-        }
-        DiagnosticEvents.record("terminal", BLACK_FRAME_OBSERVED_EVENT, *fields.toTypedArray())
+        DiagnosticEvents.record("terminal", BLACK_FRAME_OBSERVED_EVENT, *fields)
     }
 
     /**
@@ -11995,21 +11984,21 @@ public class TmuxSessionViewModel @Inject constructor(
         tick: Int,
         backedOff: Boolean,
     ) {
+        val fields = buildWatchdogLivenessDiagnosticFields(
+            pane = pane,
+            sessionName = activeTarget?.sessionName,
+            generation = refreshGuard.generation,
+            clientHash = System.identityHashCode(refreshGuard.client),
+            atMs = SystemClock.elapsedRealtime(),
+            tick = tick,
+            foreground = isProcessForegroundForCleared(),
+            screenOn = isScreenInteractive(),
+            backedOff = backedOff,
+        )
         DiagnosticEvents.record(
             "terminal",
             WATCHDOG_LIVENESS_EVENT,
-            "paneId" to pane.paneId,
-            "windowId" to pane.windowId,
-            "session" to activeTarget?.sessionName,
-            // Runtime identity — the same (generation, client) pair the reconnect/heal trail
-            // carries, so an export can bind the heartbeat to a specific attached runtime.
-            "generation" to refreshGuard.generation,
-            "clientHash" to System.identityHashCode(refreshGuard.client),
-            "atMs" to SystemClock.elapsedRealtime(),
-            "tick" to tick,
-            "foreground" to isProcessForegroundForCleared(),
-            "screenOn" to isScreenInteractive(),
-            "backedOff" to backedOff,
+            *fields,
         )
     }
 

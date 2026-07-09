@@ -28,8 +28,6 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.LocalAttachmentSidecarRef
 import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.connectivity.TerminalNetworkChange
-import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
-import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
@@ -70,6 +68,8 @@ import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
 import com.pocketshell.app.tmux.connection.ForegroundReturnEffects
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
+import com.pocketshell.app.tmux.connection.NetworkChangeArm
+import com.pocketshell.app.tmux.connection.NetworkChangeEffects
 import com.pocketshell.app.tmux.connection.PassiveDropArm
 import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
@@ -77,6 +77,7 @@ import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
 import com.pocketshell.app.tmux.connection.TransportEffects
 import com.pocketshell.app.tmux.connection.hostKeyFor
+import com.pocketshell.app.tmux.connection.shouldReportValidatedHandoffToController
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
@@ -5089,39 +5090,51 @@ public class TmuxSessionViewModel @Inject constructor(
         // USER-VISIBLE disconnect glitch even when the inline reducer rides the flip
         // through. So the controller signal MUST honor the SAME liveness gate: when the
         // old transport is proven alive we report NO handoff to the controller, keeping
-        // it Live (no overlay), in lockstep with [reduceNetworkChanged].
+        // it Live (no overlay), in lockstep with [NetworkChangeEffects].
         // Issue #997: the bare-loss / restore signal is ORTHOGONAL to the #548
         // validated-identity handoff — it must NOT be reported to the controller
         // as a `validatedHandoff` (that flag is the identity-change overlay path).
         // The loss/restore arms drive the UI via the loss-hold + the restore's
         // own `scheduleAutoReconnect` → `setConnectionState`.
-        val realValidatedHandoff = change.kind == TerminalNetworkChangeKind.ValidatedIdentityChange &&
-            (change.previousValidated?.let { previous ->
-                !previous.hasSameNetworkIdentityAs(change.current)
-            } ?: false)
         connectionManager.observeNetworkChanged(
-            validatedHandoff = realValidatedHandoff && !isTransportKeepAliveProvenAliveRecently(),
+            validatedHandoff = shouldReportValidatedHandoffToController(
+                change = change,
+                transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },
+            ),
         )
-        when (reduceNetworkChanged(change)) {
-            ConnectionDecision.SuppressNetworkNotValidated ->
-                if (target != null) suppressNetworkNotValidated(change, target)
-            ConnectionDecision.SuppressNetworkCoalesced ->
-                if (target != null) suppressNetworkCoalesced(change, target)
-            ConnectionDecision.SuppressNetworkTransportProvenAlive ->
-                if (target != null) suppressNetworkTransportProvenAlive(change, target)
-            ConnectionDecision.ScheduleNetworkReconnect ->
-                if (target != null) scheduleNetworkReconnect(change, target)
-            // Issue #997: a bare network LOSS — hold the lease, suspend probes,
-            // surface "reconnecting"; do NOT churn or tear down (frequently
-            // transient). A RESTORE — drive a FAST reconnect even from a
-            // non-Connected (loss-suspended) state, bypassing the proven-alive
-            // gate (a real loss means the old socket is dead).
-            ConnectionDecision.HoldNetworkLost ->
-                if (target != null) holdNetworkLost(change, target)
-            ConnectionDecision.ScheduleNetworkReconnectOnRestore ->
-                if (target != null) scheduleNetworkReconnectOnRestore(change, target)
-            else -> Unit
-        }
+        NetworkChangeEffects(
+            appActive = { appActive },
+            hasTarget = { target != null },
+            hasClientOrSession = { clientRef != null || sessionRef != null },
+            autoReconnectActive = { autoReconnectJob?.isActive == true },
+            inlineConnected = { inlineConnectionStatus is ConnectionStatus.Connected },
+            lifecycleCoalesces = {
+                val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
+                lifecycleCoalesce != null &&
+                    target != null &&
+                    lifecycleCoalesce.generation == connectGeneration &&
+                    sameSessionIdentity(lifecycleCoalesce.target, target)
+            },
+            transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },
+            suppressNetworkNotValidated = {
+                if (target != null) suppressNetworkNotValidated(it, target)
+            },
+            suppressNetworkCoalesced = {
+                if (target != null) suppressNetworkCoalesced(it, target)
+            },
+            suppressNetworkTransportProvenAlive = {
+                if (target != null) suppressNetworkTransportProvenAlive(it, target)
+            },
+            scheduleNetworkReconnect = {
+                if (target != null) scheduleNetworkReconnect(it, target)
+            },
+            holdNetworkLost = {
+                if (target != null) holdNetworkLost(it, target)
+            },
+            scheduleNetworkReconnectOnRestore = {
+                if (target != null) scheduleNetworkReconnectOnRestore(it, target)
+            },
+        ).dispatch(change)
         // NOTE: the network-change reconnect/coalesce decision is INLINE EFFECT
         // machinery (the #548 suppression + the post-grace deferred-replay COALESCE)
         // that 1c-iv-b owns — it is NOT one of the two approved #685 display changes.
@@ -5136,7 +5149,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.SuppressNetworkNotValidated]
+     * EPIC #687 slice 1a: the [NetworkChangeArm.SuppressNetworkNotValidated]
      * body — formerly inline in [onNetworkChanged]. Unchanged behavior.
      */
     private fun suppressNetworkNotValidated(
@@ -5196,7 +5209,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.SuppressNetworkCoalesced]
+     * EPIC #687 slice 1a: the [NetworkChangeArm.SuppressNetworkCoalesced]
      * body — formerly inline in [onNetworkChanged]. Unchanged behavior. The
      * `realValidatedIdentityChange` flag is always `true` on this path (the
      * reducer reached here only past the validated-handoff gate), preserved as a
@@ -5259,7 +5272,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #981 / #1042 / #1078: the [ConnectionDecision.SuppressNetworkTransportProvenAlive]
+     * Issue #981 / #1042 / #1078: the [NetworkChangeArm.SuppressNetworkTransportProvenAlive]
      * body. A real validated identity change WAS observed (we are past the
      * `realValidatedIdentityChange` gate), and the live transport's keepalive
      * has seen inbound bytes within its ride-through window — so the old socket
@@ -5376,7 +5389,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1a: the [ConnectionDecision.ScheduleNetworkReconnect]
+     * EPIC #687 slice 1a: the [NetworkChangeArm.ScheduleNetworkReconnect]
      * body — formerly the tail of [onNetworkChanged]. Unchanged behavior. The
      * `realValidatedIdentityChange` flag is always `true` on this path (only a
      * real validated handoff reaches here), preserved as a literal for the
@@ -5444,7 +5457,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997: the [ConnectionDecision.HoldNetworkLost] body. A bare network
+     * Issue #997: the [NetworkChangeArm.HoldNetworkLost] body. A bare network
      * LOSS (`onLost` / airplane mode) was observed proactively. We do NOT tear the
      * lease down — a loss is frequently transient (pocket, elevator) — but we DO
      * surface the calm "reconnecting" band immediately so the user is not staring
@@ -5515,7 +5528,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997 / #1042: the [ConnectionDecision.ScheduleNetworkReconnectOnRestore]
+     * Issue #997 / #1042: the [NetworkChangeArm.ScheduleNetworkReconnectOnRestore]
      * body. Validation RETURNED after a loss. Unlike [scheduleNetworkReconnect] this
      * does NOT require a `Connected` status (it recovers a loss-suspended /
      * `Reconnecting` session — the whole point). `target` is the held
@@ -18413,105 +18426,6 @@ public class TmuxSessionViewModel @Inject constructor(
         override fun close() = queue.close()
     }
 
-    /**
-     * EPIC #687 slice 1a — VM-internal connection-lifecycle decision seam.
-     *
-     * The connection-lifecycle DECISIONS used to be inlined at the top of each
-     * lifecycle entry point ([onAppBackgrounded], [onAppForegrounded],
-     * [onNetworkChanged], and the foreground-runtime-probe gate). Background and
-     * foreground dispatch are now driven by controller edges, so the remaining
-     * inline classifier is the network-change decision that has not yet moved.
-     *
-     * This is a PURE classifier: it reads the current VM state and returns the
-     * branch the caller must take. It does NOT mutate state, schedule jobs, or
-     * touch [_connectionStatus] — the side-effect bodies stay at the call sites
-     * (slice 1a reshapes control flow, it does not replace the mechanism). The
-     * existing generation counter, grace clocks, and named jobs continue to back
-     * those side effects; later slices delete them.
-     */
-    /**
-     * The branch the lifecycle call site must take. Each variant names the
-     * existing side-effect path; the call site dispatches on it and runs the
-     * same code it ran inline before. (The richer `ConnectionState` surface that
-     * `:shared:core-connection` models — Reattaching/Reconnecting/Gone/etc — is
-     * mapped onto the existing [ConnectionStatus] writes inside those bodies,
-     * which slice 1a leaves byte-identical.)
-     */
-    private sealed interface ConnectionDecision {
-        /** No lifecycle action — the event is a no-op in the current state. */
-        data object Ignore : ConnectionDecision
-
-        // --- Background --- EPIC #687 Slice 1 (#1047): the pause-vs-detach arm decision
-        // moved into the connection core ([BackgroundEffects], the SINGLE background
-        // authority); the inline `reduceBackground()` + its two variants
-        // (`PauseReconnectForBackground` / `DetachForBackground`) are DELETED (D22 hard-cut).
-
-        // --- Foreground --- EPIC #687 Slice 0 (#1047): the replay-vs-resume arm decision
-        // moved into the connection core ([ForegroundReturnEffects]); the inline
-        // `reduceForeground()` + its two variants are DELETED (D22 hard-cut).
-
-        // --- NetworkChanged ---
-        /** Schedule a proactive reconnect for a real validated network handoff. */
-        data object ScheduleNetworkReconnect : ConnectionDecision
-
-        /**
-         * Issue #997: a bare availability LOSS (`onLost` / airplane mode). Hold
-         * the lease, surface the calm "reconnecting" band, and suspend the
-         * keepalive probe loop so it does not churn writes into a dead socket
-         * during the loss window. Does NOT tear the lease down — a loss is
-         * frequently transient (pocket, elevator); the matching
-         * [ScheduleNetworkReconnectOnRestore] drives recovery when validation
-         * returns. This replaces the pre-#997 behavior where a clean loss was
-         * invisible to the proactive path and only noticed ~90s later by the
-         * keepalive ride-through.
-         */
-        data object HoldNetworkLost : ConnectionDecision
-
-        /**
-         * Issue #997 / #1042: validation RETURNED after a loss. Recovers even from
-         * a non-Connected (loss-suspended / Reconnecting) state, which the
-         * [ScheduleNetworkReconnect] `Connected`-only gate would have ignored.
-         *
-         * Issue #1042 (cause #1) makes the recovery LIVENESS-FIRST. The pre-#1042
-         * body redialled UNCONDITIONALLY (bypassing the proven-alive gate on the
-         * assumption "a loss means the socket is dead"). On cellular that fires
-         * constantly even when the TCP socket survived a brief no-validated window
-         * (tunnel, elevator, RAT handover, congestion re-validation). The body now:
-         *   1. rides through with NO redial when the existing transport is proven
-         *      alive (transport keepalive within its window, or a single bounded
-         *      control-channel probe answers), and
-         *   2. forces the #997 fresh-lease redial ONLY when the transport does not
-         *      answer — a genuinely dead post-outage socket still reconnects.
-         */
-        data object ScheduleNetworkReconnectOnRestore : ConnectionDecision
-
-        /** Suppress: not a real validated handoff (#548). */
-        data object SuppressNetworkNotValidated : ConnectionDecision
-
-        /** Suppress: coalesced with an in-flight lifecycle reattach (#548). */
-        data object SuppressNetworkCoalesced : ConnectionDecision
-
-        /**
-         * Suppress: a real validated identity change WAS observed, but the live
-         * transport is provably alive within the keepalive ride-through window
-         * (#981). A new default-network identity does NOT mean the old socket
-         * died — if the keepalive has seen inbound bytes recently the link is
-         * healthy, so tearing it down + redialing is a spurious disconnect (the
-         * #974 stable-wifi drop). Mirrors the #964 probe deferral so both redial
-         * triggers honor ONE coherent liveness budget. A genuinely dead link
-         * ages out of the keepalive window, this gate stops suppressing, and
-         * recovery proceeds via the next change or the keepalive's own close.
-         */
-        data object SuppressNetworkTransportProvenAlive : ConnectionDecision
-
-        // --- TransportDropped (passive disconnect) --- EPIC #687 Slice 2 (#1047): the
-        // passive-drop classification moved into the connection core
-        // ([PassiveTransportDropEffects], the SINGLE passive-drop authority); the inline
-        // `classifyPassiveTransportDrop()` + its three variants (`SkipPassiveInAppNavigation`
-        // / `PausePassiveUntilForeground` / `SilentReattachWithinGrace`) are DELETED (D22
-        // hard-cut). The arms are now [com.pocketshell.app.tmux.connection.PassiveDropArm].
-    }
-
     // EPIC #687 Slice 1 (#1047): `reduceBackground()` is DELETED. The background
     // pause-vs-detach decision now lives in the connection core ([BackgroundEffects], the
     // SINGLE background authority), fed the injected `hasLiveControlChannel` liveness the
@@ -18522,68 +18436,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // foreground replay-vs-resume decision now lives in the connection core
     // ([ForegroundReturnEffects], the SINGLE foreground authority); the inline selector
     // was the second decision authority D28 exists to end (D22 hard-cut — no shadow).
-
-    private fun reduceNetworkChanged(change: TerminalNetworkChange): ConnectionDecision {
-        if (!appActive) return ConnectionDecision.Ignore
-
-        // Issue #997: the orthogonal bare-loss / restore signal, classified BEFORE
-        // the #548 validated-identity-change gates (which require a Connected
-        // status and would `Ignore` a loss-suspended session — the whole gap this
-        // closes). A loss/restore is only meaningful when there is a session to
-        // hold or recover.
-        when (change.kind) {
-            TerminalNetworkChangeKind.NetworkLost -> {
-                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
-                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
-                // Don't disturb an in-flight reconnect ladder; it already owns the UI.
-                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
-                return ConnectionDecision.HoldNetworkLost
-            }
-            TerminalNetworkChangeKind.NetworkRestored -> {
-                if (activeTarget == null && connectingTarget == null) return ConnectionDecision.Ignore
-                if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
-                // A reconnect ladder is already driving recovery — let it run.
-                if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
-                // Issue #1042 (cause #1): the body is LIVENESS-FIRST — it rides
-                // through with no redial when the existing transport is proven
-                // alive (the common brief-cellular-dip case) and only forces the
-                // #997 fresh-lease redial when the transport does not answer.
-                return ConnectionDecision.ScheduleNetworkReconnectOnRestore
-            }
-            TerminalNetworkChangeKind.ValidatedIdentityChange -> Unit
-        }
-
-        if (autoReconnectJob?.isActive == true) return ConnectionDecision.Ignore
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return ConnectionDecision.Ignore
-        val target = activeTarget ?: connectingTarget ?: return ConnectionDecision.Ignore
-        if (clientRef == null && sessionRef == null) return ConnectionDecision.Ignore
-        val previousValidated = change.previousValidated
-        val realValidatedIdentityChange = previousValidated != null &&
-            !previousValidated.hasSameNetworkIdentityAs(change.current)
-        if (!realValidatedIdentityChange) return ConnectionDecision.SuppressNetworkNotValidated
-        val lifecycleCoalesce = lifecycleReattachNetworkCoalesce
-        if (
-            lifecycleCoalesce != null &&
-            lifecycleCoalesce.generation == connectGeneration &&
-            sameSessionIdentity(lifecycleCoalesce.target, target)
-        ) {
-            return ConnectionDecision.SuppressNetworkCoalesced
-        }
-        // Issue #981: a real validated default-network identity change does NOT
-        // prove the old SSH socket died. If the transport keepalive has seen
-        // inbound bytes within its ride-through window the link is provably
-        // alive, so a teardown+redial here is a SPURIOUS disconnect — the #974
-        // stable-wifi drop, where a transient WIFI↔CELLULAR validation flip on
-        // an otherwise-healthy link tore down a live socket. Mirror the #964
-        // probe deferral and ride it through. A genuinely dead link stops
-        // bumping inbound activity, ages out of the window, this gate stops
-        // suppressing, and the next change (or the keepalive's own dead-close)
-        // recovers it.
-        if (isTransportKeepAliveProvenAliveRecently()) {
-            return ConnectionDecision.SuppressNetworkTransportProvenAlive
-        }
-        return ConnectionDecision.ScheduleNetworkReconnect
-    }
 
     // EPIC #687 Slice 2 (#1047): `classifyPassiveTransportDrop()` is DELETED. The passive
     // `-CC` drop classification now lives in the connection core

@@ -127,8 +127,6 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
-import com.pocketshell.app.projects.FolderListViewModel
-import com.pocketshell.app.projects.SessionTypePickerSheet
 import com.pocketshell.app.projects.conventionalRemoteHome
 import com.pocketshell.app.projects.defaultSessionBaseName
 import com.pocketshell.app.projects.derivedSessionName
@@ -153,7 +151,6 @@ import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.conversationLinkAction
 import com.pocketshell.app.session.conversationSyncStatusLabel
 import com.pocketshell.app.session.cwdForDetectedFilePath
-import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
@@ -2573,159 +2570,75 @@ public fun TmuxSessionScreen(
             )
         }
 
-        // Issue #898: the in-session "+ New session" rich sheet — the SAME
-        // SessionTypePickerSheet the host/session-list screen uses (Session type
-        // Shell/Agent, Agent CLI claude/codex/opencode, Skip permissions,
-        // Profile). The stripped-down name+folder dialog is gone (hard-cut D22 —
-        // one New-session UI). The Start folder defaults to the current
-        // session's pane cwd (preserving the one good behaviour of the old
-        // dialog); Create routes through viewModel.createSession — the SAME
-        // verified gateway path the host screen uses — so the created session
-        // honours type/CLI/skip-perms/profile identically, then navigates to the
-        // new session via onOpenTmuxSession (which attaches to the now-existing
-        // session).
-        if (showNewSessionSheet) {
-            val folderPath = currentPane?.cwd?.takeIf { it.isNotBlank() }
-                ?: DEFAULT_TMUX_START_DIRECTORY
-            SessionTypePickerSheet(
-                folderPath = folderPath,
-                folderLabel = FolderListViewModel.defaultLabelForPath(folderPath),
-                onDismiss = { showNewSessionSheet = false },
-                suggestStartDirectories = suggestStartDirectories,
-                claudeProfiles = newSessionClaudeProfiles,
-                codexProfiles = newSessionCodexProfiles,
-                // Issue #1184: prefill the editable "Session name" field with
-                // the directory-derived default for the chosen start folder.
-                deriveDefaultName = { dir ->
-                    defaultSessionBaseName(dir, conventionalRemoteHome(user))
-                },
-                onCreate = { choice ->
-                    showNewSessionSheet = false
-                    // Issue #898 (Finding 1): pass the host's already-known
-                    // session names into the deriver so a second "New session"
-                    // in the SAME folder gets a deterministic `-2`/`-3` suffix
-                    // instead of colliding with the existing same-named session
-                    // (the gateway/tmux has no server-side de-dupe, so a
-                    // duplicate name fails the create). This mirrors the host
-                    // screen, which passes `knownSessionNames(state)`.
-                    //
-                    // Issue #976: the de-dupe ONLY works when this list is
-                    // populated. If the picker is NOT `Ready` (a #974 connection
-                    // drop / still-loading list flips it to Loading/ConnectError),
-                    // the list collapses to ∅, the `-2`/`-3` suffix is skipped,
-                    // the derived name COLLIDES with the live same-folder session,
-                    // and the launch send-keys would type into that existing pane.
-                    // So do NOT proceed with a possibly-colliding name when the
-                    // list is unknown — block with a clear message and let the
-                    // user retry once the list is `Ready`. (The gateway's
-                    // has-session guard is the server-side safety net; this avoids
-                    // even attempting the collision-prone create.)
-                    val readyPicker =
-                        sessionPickerState as? HostTmuxSessionPickerState.Ready
-                    if (readyPicker == null) {
-                        Toast.makeText(
-                            context,
-                            "Session list isn't loaded yet — reconnect or wait " +
-                                "for it to finish, then start the new session again.",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    } else {
-                        val knownNames = readyPicker.rows.map { it.name }.toSet()
-                        val newName = derivedSessionName(
-                            choice = choice,
-                            homeDirectory = conventionalRemoteHome(user),
-                            existingNames = knownNames,
-                        )
-                        viewModel.createSession(
-                            name = newName,
-                            cwd = choice.startDirectory,
-                            startCommand = choice.startCommand(
-                                newSessionClaudeProfiles,
-                                newSessionCodexProfiles,
-                            ),
-                            chosenKind = choice.sessionAgentKind,
-                            onResolved = { resolved ->
-                                onOpenTmuxSession(resolved, choice.startDirectory)
-                            },
-                        )
-                    }
-                },
-            )
-        }
-
-        // Epic #821 Slice 1: the session-kind classify / change picker. Opens
-        // in the "unknown" prompt mode for a foreign session (no recorded
-        // kind), otherwise the "change kind" mode pre-selected on the current
-        // recorded kind. On Save it writes the durable host-side
-        // `@ps_agent_kind` via ManualKindWriter and re-reads it.
-        if (showKindPicker) {
-            com.pocketshell.app.projects.SessionKindPickerSheet(
-                sessionName = sessionName,
-                onDismiss = { showKindPicker = false },
-                onPick = { kind ->
-                    viewModel.setCurrentSessionKind(kind)
-                    showKindPicker = false
-                },
-                isUnknown = currentSessionRecordedKind == null,
-                currentKind = currentSessionRecordedKind,
-                // Option B today: no guess. A follow-up (Option A) passes a
-                // cgroup-based suggestion here with zero other change.
-                suggestedKind = null,
-                // Issue #858: the recorded non-default profile/provider, so a
-                // z.ai Claude reads differently from a default Claude here.
-                currentProfile = currentSessionRecordedProfile,
-            )
-        }
-
-        // Issue #497: in-app file viewer path-entry dialog. The active
-        // pane's cwd is threaded through so a relative path the agent
-        // referenced resolves server-side in the viewer.
-        if (showOpenFileDialog) {
-            val paneCwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
-            AlertDialog(
-                onDismissRequest = { showOpenFileDialog = false },
-                title = { Text("Open file") },
-                text = {
-                    Column {
-                        Text(
-                            text = if (paneCwd != null) {
-                                "Enter a path. Relative paths resolve against $paneCwd."
-                            } else {
-                                "Enter an absolute path, or a path relative to your home directory."
-                            },
-                            color = PocketShellColors.TextSecondary,
-                            fontSize = 12.sp,
-                        )
-                        OutlinedTextField(
-                            value = openFilePath,
-                            onValueChange = { openFilePath = it },
-                            singleLine = true,
-                            placeholder = { Text("e.g. out/report.png") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 8.dp)
-                                .testTag(TMUX_OPEN_FILE_DIALOG_FIELD_TAG),
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        enabled = openFilePath.isNotBlank(),
-                        onClick = {
-                            val path = openFilePath.trim()
-                            showOpenFileDialog = false
-                            if (path.isNotEmpty()) onOpenFile(path, paneCwd)
+        TmuxSessionAuxiliaryModals(
+            showNewSessionSheet = showNewSessionSheet,
+            currentPaneCwd = currentPane?.cwd,
+            suggestStartDirectories = suggestStartDirectories,
+            claudeProfiles = newSessionClaudeProfiles,
+            codexProfiles = newSessionCodexProfiles,
+            // Issue #1184: prefill the editable "Session name" field with the
+            // directory-derived default for the chosen start folder.
+            deriveDefaultName = { dir ->
+                defaultSessionBaseName(dir, conventionalRemoteHome(user))
+            },
+            onDismissNewSessionSheet = { showNewSessionSheet = false },
+            onCreateNewSession = { choice ->
+                showNewSessionSheet = false
+                // Issue #898/#976: do not create with an unknown session list;
+                // without known names the derived name can collide with the
+                // current same-folder session and route launch keys wrongly.
+                val readyPicker = sessionPickerState as? HostTmuxSessionPickerState.Ready
+                if (readyPicker == null) {
+                    Toast.makeText(
+                        context,
+                        "Session list isn't loaded yet — reconnect or wait " +
+                            "for it to finish, then start the new session again.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    val knownNames = readyPicker.rows.map { it.name }.toSet()
+                    val newName = derivedSessionName(
+                        choice = choice,
+                        homeDirectory = conventionalRemoteHome(user),
+                        existingNames = knownNames,
+                    )
+                    viewModel.createSession(
+                        name = newName,
+                        cwd = choice.startDirectory,
+                        startCommand = choice.startCommand(
+                            newSessionClaudeProfiles,
+                            newSessionCodexProfiles,
+                        ),
+                        chosenKind = choice.sessionAgentKind,
+                        onResolved = { resolved ->
+                            onOpenTmuxSession(resolved, choice.startDirectory)
                         },
-                        modifier = Modifier.testTag(TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG),
-                    ) {
-                        Text("Open")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showOpenFileDialog = false }) { Text("Cancel") }
-                },
-            )
-        }
+                    )
+                }
+            },
+            showKindPicker = showKindPicker,
+            sessionName = sessionName,
+            currentSessionRecordedKind = currentSessionRecordedKind,
+            currentSessionRecordedProfile = currentSessionRecordedProfile,
+            onDismissKindPicker = { showKindPicker = false },
+            onPickKind = { kind ->
+                viewModel.setCurrentSessionKind(kind)
+                showKindPicker = false
+            },
+            showOpenFileDialog = showOpenFileDialog,
+            openFilePath = openFilePath,
+            onOpenFilePathChange = { openFilePath = it },
+            onDismissOpenFileDialog = { showOpenFileDialog = false },
+            onOpenFileConfirmed = onOpenFile,
+            pendingLocalhostForward = pendingLocalhostForward,
+            localhostTargetHost = hostName.ifBlank { host },
+            onDismissLocalhostForward = { pendingLocalhostForward = null },
+            onConfirmLocalhostForward = { pending ->
+                val target = acceptedLocalhostForwardNavigation(pending)
+                pendingLocalhostForward = null
+                onOpenPortForwardingWithPort(target.remotePort, target.autoOpenLocalhostUrl)
+            },
+        )
 
         SessionSwitcherOverlay(
             visible = showSessionSwitcher,
@@ -2810,42 +2723,6 @@ public fun TmuxSessionScreen(
                 }
             },
             onDismiss = { viewModel.dismissDetectedPort() },
-        )
-    }
-
-    // Issue #488: confirm dialog for a tapped server-local URL whose remote
-    // port is not yet forwarded. Confirming routes through the existing
-    // port-forward flow (#447/#448 prefill) which opens the panel and sets up
-    // the tunnel, then opens the working local URL once the actual local port
-    // is known.
-    pendingLocalhostForward?.let { pending ->
-        val targetHost = hostName.ifBlank { host }
-        AlertDialog(
-            onDismissRequest = { pendingLocalhostForward = null },
-            title = { Text("Forward port ${pending.remotePort}?") },
-            text = {
-                Text(
-                    "${pending.remotePort} is a port on $targetHost, " +
-                        "not reachable directly from this phone. Forward it " +
-                        "to open it here.",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val target = acceptedLocalhostForwardNavigation(pending)
-                        pendingLocalhostForward = null
-                        onOpenPortForwardingWithPort(target.remotePort, target.autoOpenLocalhostUrl)
-                    },
-                ) {
-                    Text("Forward")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingLocalhostForward = null }) {
-                    Text("Cancel")
-                }
-            },
         )
     }
 

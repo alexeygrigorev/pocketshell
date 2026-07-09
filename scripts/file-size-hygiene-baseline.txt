@@ -10,7 +10,7 @@
 180197 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
 226939 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
 950083 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
-290559 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
+278779 app/src/test/java/com/pocketshell/app/composer/PromptComposerViewModelTest.kt
 167942 app/src/test/java/com/pocketshell/app/session/AgentConversationRepositoryTest.kt
 757167 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png

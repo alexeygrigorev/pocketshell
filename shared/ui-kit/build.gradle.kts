@@ -43,15 +43,15 @@ android {
 
 dependencies {
     // Compose pulled from the same BOM as `:app`. Everything `PocketShellTheme`
-    // and the palette `@Preview`s need: ui (Composable runtime + graphics),
-    // material3 (MaterialTheme / ColorScheme / Typography / Shapes), and
-    // tooling-preview (the `@Preview` annotation). `compose-ui-tooling` is
-    // debug-only because it pulls in the inspector / preview renderer that
-    // we never want shipped in release.
+    // needs: ui (Composable runtime + graphics) and material3 (MaterialTheme /
+    // ColorScheme / Typography / Shapes). The IDE-only `@Preview` composables
+    // were deleted (#1449, hard-cut D22) in favour of the sanctioned
+    // DesignRenders fast-render path (#555), so the `ui-tooling-preview`
+    // runtime dep they required is gone too. `compose-ui-tooling` stays
+    // debug-only for the inspector; it never ships in release.
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
-    implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     debugImplementation(libs.compose.ui.tooling)
 

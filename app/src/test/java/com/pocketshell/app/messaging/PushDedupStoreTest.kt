@@ -28,9 +28,9 @@ class PushDedupStoreTest {
     fun markNotifiedIfNew_returnsTrueOnlyOncePerKey() {
         val store = PushDedupStore(context)
         assertTrue(store.markNotifiedIfNew("codex|short_term|reset-A"))
-        // #619 don't-renotify: a re-delivery of the SAME reset is suppressed.
+        // #619 don't-renotify: a re-delivery of the SAME reset is suppressed
+        // (a subsequent markNotifiedIfNew returns false because the key is known).
         assertFalse(store.markNotifiedIfNew("codex|short_term|reset-A"))
-        assertTrue(store.hasNotified("codex|short_term|reset-A"))
     }
 
     @Test
@@ -63,8 +63,8 @@ class PushDedupStoreTest {
         store.markNotifiedIfNew("k2")
         store.markNotifiedIfNew("k3")
         store.markNotifiedIfNew("k4") // evicts k1
-        assertFalse(store.hasNotified("k1"))
-        assertTrue(store.hasNotified("k4"))
+        // k4 is still tracked, so a re-delivery is suppressed.
+        assertFalse(store.markNotifiedIfNew("k4"))
         // k1 having aged out, it can notify again — acceptable for a bounded log.
         assertTrue(store.markNotifiedIfNew("k1"))
     }

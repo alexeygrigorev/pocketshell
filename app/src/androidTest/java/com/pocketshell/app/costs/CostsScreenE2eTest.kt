@@ -140,8 +140,6 @@ class CostsScreenE2eTest {
 
         override fun getAll(): Flow<List<AiApiCallEntry>> = flow
 
-        override fun getSince(sinceMillis: Long): Flow<List<AiApiCallEntry>> = flow
-
         override suspend fun insert(entry: AiApiCallEntry): Long {
             flow.value = (flow.value + entry).sortedByDescending { it.timestampMillis }
             return entry.id

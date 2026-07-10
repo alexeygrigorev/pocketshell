@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -68,8 +69,9 @@ class MessagingStoresOffMainTest {
     @Test
     fun push_dedup_round_trips_after_offmain_build() {
         assertTrue(PushDedupStore(context).markNotifiedIfNew("codex|short_term|reset-A"))
-        // A fresh instance (process restart) still sees the persisted key.
-        assertTrue(PushDedupStore(context).hasNotified("codex|short_term|reset-A"))
+        // A fresh instance (process restart) still sees the persisted key, so it
+        // does not re-notify (markNotifiedIfNew returns false for the known key).
+        assertFalse(PushDedupStore(context).markNotifiedIfNew("codex|short_term|reset-A"))
     }
 
     @Test

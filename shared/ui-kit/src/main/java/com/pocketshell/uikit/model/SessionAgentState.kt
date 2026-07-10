@@ -52,9 +52,6 @@ enum class SessionAgentState {
     Unknown,
     ;
 
-    /** True when there is an authoritative state to show a chip for. */
-    val isKnown: Boolean get() = this != Unknown
-
     /**
      * Short chip label, or `null` for [Unknown] (render no chip). Kept here so
      * the host-card chip and the session-row chip stay consistent.

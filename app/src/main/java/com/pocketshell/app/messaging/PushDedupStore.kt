@@ -53,8 +53,6 @@ public class PushDedupStore internal constructor(
         return true
     }
 
-    public fun hasNotified(resetKey: String): Boolean = readOrder().contains(resetKey.trim())
-
     private fun readOrder(): List<String> {
         val raw = prefs.getString(KEY_ORDER, "")?.trim().orEmpty()
         if (raw.isEmpty()) return emptyList()

@@ -138,6 +138,54 @@ class Issue926SeedIoOffMainTest {
         return vm
     }
 
+    /**
+     * Roadmap slice S6 (#1329), criterion 4: the SAME-HOST FAST SWITCH must not block Main with
+     * its attach/seed IO. This is the switch-specific sibling of
+     * [seedCaptureAndListPanesRunOffMainWithTheShortCeiling]: connect to `work`, then fast-switch
+     * to `other` on the same warm SSH lease, and assert the SWITCH client's `list-panes` reconcile
+     * and `capture-pane` seed both ran OFF the Main (UI) thread — the #895 switch-while-black
+     * freeze was attach/seed IO parking Main during exactly this window.
+     */
+    @Test
+    fun fastSwitchReconcileAndSeedRunOffMain() {
+        val workClient = FakeTmuxClient().withSinglePaneRowButEmptyCapture("work", "%1")
+        val switchClient = FakeTmuxClient().withSinglePaneRowButEmptyCapture("other", "%2")
+        val vm = connectVm(workClient)
+
+        // Route the fast-switch attach to a DISTINCT client so its recorded execution threads
+        // are attributable to the switch, not the initial attach.
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            if (sessionName == "other") switchClient else workClient
+        }
+
+        runBlocking(mainDispatcher) {
+            vm.connect(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                passphrase = null,
+                sessionName = "other",
+            )
+        }
+        waitUntil("switched to other") {
+            vm.panes.value.any { it.paneId == "%2" }
+        }
+
+        assertNotNull("the fast switch must run a list-panes round-trip", switchClient.lastListPanesThreadName)
+        assertRanOffMain(
+            "the SAME-HOST FAST SWITCH `list-panes` IO",
+            switchClient.lastListPanesThreadName,
+        )
+        assertNotNull("the fast switch must run a seed capture round-trip", switchClient.lastCaptureThreadName)
+        assertRanOffMain(
+            "the SAME-HOST FAST SWITCH seed `capture-pane` IO",
+            switchClient.lastCaptureThreadName,
+        )
+    }
+
     @Test
     fun seedCaptureAndListPanesRunOffMainWithTheShortCeiling() {
         // A single-pane session whose attach-time capture came back EMPTY, so the

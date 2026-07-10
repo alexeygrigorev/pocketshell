@@ -1321,6 +1321,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * Switching window still surfaces an escapable band (no swallow gate).
      */
     internal fun forceAttachingStateForTest(host: String, port: Int, user: String) {
+        // S6 (#1329): drive Attaching via the same-host Switch intent (retired Attaching arm).
+        val (ctrlHost, ctrlTarget) = controllerHostAndTarget()
+        if (ctrlHost != null && ctrlTarget != null) connectionManager.switchTo(ctrlHost, ctrlTarget)
         setConnectionState(ConnectionState.Attaching(host, port, user))
     }
 
@@ -1618,33 +1621,24 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * EPIC #687 slice 1c-iii / EPIC #792 Slice A: drive the controller's INTENT
-     * directly from the inline transition. Previously this built an inline state NAME
-     * string and mirrored it through `observeInlineTransition` (a string round-trip the
-     * facade re-derived events from). Now it calls the [connectionManager]'s TYPED intent
-     * entrypoints directly — the controller drives the intent state machine. This is NET-NEUTRAL with
-     * the deleted string mirror: each inline state maps to the SAME controller event it
-     * mirrored before (`Connecting`→Enter, warm `Attaching`→Switch/Enter, `Live`/
-     * `Backgrounded`→reveal-Live, `Reattaching`/`Reconnecting`→drop-escalation,
-     * `Gone`→TargetGone, `Unreachable`→exhaust-ladder, `Idle`→no-op).
-     * Never mutates VM state, never reads the controller state back.
+     * EPIC #687 slice 1c-iii / EPIC #792 Slice A: drive the controller's INTENT.
+     *
+     * Roadmap slice **S6 (#1329)**: the OPEN / SWITCH / REVEAL arms are RETIRED — open/switch
+     * SUBMIT `Enter`/`Switch` at the flow edges so the controller DECIDES the transition, and
+     * the reveal edge submits `revealLive` at each `setConnectionState(Live)` (D28: controller
+     * is authority, not a mirror). This drives ONLY the remaining reconnect/gone/unreachable arms.
      */
     private fun driveControllerIntent(state: ConnectionState) {
         val (host, target) = controllerHostAndTarget()
         when (state) {
-            is ConnectionState.Idle -> Unit // controller stays Idle; nothing to drive.
-            is ConnectionState.Connecting ->
-                if (host != null && target != null) connectionManager.enter(host, target)
-            is ConnectionState.Attaching ->
-                if (host != null && target != null) connectionManager.switchTo(host, target)
-            // Backgrounded keeps the prior live surface in the inline VM — same as Live
-            // (the deleted mirror mapped both to the "Live" reveal branch).
+            // S6 (#1329): open/switch/reveal are controller-decided at the flow edges;
+            // these inline states are display-payload carriers only now.
+            is ConnectionState.Idle,
+            is ConnectionState.Connecting,
+            is ConnectionState.Attaching,
             is ConnectionState.Live,
             is ConnectionState.Backgrounded,
-            ->
-                if (host != null && target != null) connectionManager.revealLive(host, target)
-            // Reattaching and Reconnecting both mirrored to the "Reconnecting"
-            // drop-escalation branch.
+            -> Unit
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
             ->
@@ -1655,6 +1649,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (target != null) connectionManager.markGone(target)
             is ConnectionState.Unreachable -> connectionManager.escalateUnreachable()
         }
+    }
+
+    /** S6 (#1329): OPEN intent — controller decides warm→Attaching / cold→Connecting. */
+    private fun submitControllerOpen(target: ConnectionTarget) {
+        connectionManager.enter(controllerHostKey(target), controllerSessionId(target))
+    }
+
+    /** S6 (#1329): same-host fast SWITCH intent (→ Attaching, no re-handshake). */
+    private fun submitControllerSwitch(target: ConnectionTarget) {
+        connectionManager.switchTo(controllerHostKey(target), controllerSessionId(target))
+    }
+
+    /** S6 (#1329): REVEAL intent at each `setConnectionState(Live)` edge (retired `Live` arm). */
+    private fun revealControllerLive() {
+        val (host, target) = controllerHostAndTarget()
+        if (host != null && target != null) connectionManager.revealLive(host, target)
     }
 
     /**
@@ -2614,6 +2624,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // connection path the screen can never paint `(old session's panes, new
         // target id)`, the wrong-session-on-switch race (#686/#658).
         navigateRevealTo(target)
+
+        // S6 (#1329): submit the open/switch event — the controller decides the transition.
+        if (willFastSwitch) submitControllerSwitch(target) else submitControllerOpen(target)
 
         // Issue #145: deterministic reconnect-loop signal. Every accepted
         // connect attempt increments a process-wide counter and emits a
@@ -5449,6 +5462,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         // Clear the loss-hold "reconnecting" band: the surviving transport is alive,
         // so flip back to Live (the -CC client was never torn down).
+        revealControllerLive()
         setConnectionState(
             ConnectionState.Live(
                 target.host,
@@ -5981,6 +5995,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // (otherwise the NEW-path reveal gate would stay held and the surface would
         // never mount on a switch back to a cached session).
         promoteRevealLiveForActiveTarget()
+        revealControllerLive()
         setConnectionState(
             ConnectionState.Live(
                 target.host,
@@ -6362,6 +6377,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // reveals the target's surface — promote the reveal machine to Live for
             // the target so the NEW-path reveal gate releases in lockstep.
             if (activePaneSeeded) promoteRevealLiveForActiveTarget()
+            revealControllerLive()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -6679,6 +6695,7 @@ public class TmuxSessionViewModel @Inject constructor(
         autoReconnectJob = null
         connectingTarget = target
         refreshReconnectAvailability()
+        submitControllerOpen(target)
         setConnectionState(ConnectionState.Connecting(host, port, user))
         connectJob = viewModelScope.launch {
             val leaseTarget = target.toSshLeaseTarget()
@@ -6816,6 +6833,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     runCatching { lease.release() }
                 }
                 sessionRef = null
+                submitControllerOpen(target)
                 setConnectionState(
                     ConnectionState.Connecting(
                         target.host,
@@ -6901,6 +6919,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // promote the reveal machine to Live for the target so the NEW-path reveal
             // gate releases in the same mutation (never holds on a warm switch).
             if (activePaneSeeded) promoteRevealLiveForActiveTarget()
+            revealControllerLive()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -6995,6 +7014,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 refreshReconnectAvailability()
                 // Escalate from the keep-frame [Switching] to the full-screen
                 // [Connecting] overlay: we are now doing a real fresh handshake.
+                submitControllerOpen(target)
                 setConnectionState(
                     ConnectionState.Connecting(
                         target.host,
@@ -8266,6 +8286,7 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
+            revealControllerLive()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -8510,6 +8531,7 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
+            revealControllerLive()
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -9004,6 +9026,9 @@ public class TmuxSessionViewModel @Inject constructor(
         setConnectionState(ConnectionState.Live("test", 0, "test"))
     }
 
+    /** S6 (#1329): the AUTHORITATIVE controller state — a test asserts it DECIDED the transition. */
+    internal fun connectionControllerStateForTest(): CoreConnectionState = connectionManager.state
+
     internal fun attachSessionForAgentRetryForTest(session: SshSession) {
         sessionRef = session
         activeTarget = ConnectionTarget(
@@ -9078,6 +9103,7 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         refreshReconnectAvailability()
         bindProjectRootsForHost(hostId)
+        revealControllerLive()
         setConnectionState(ConnectionState.Live(host, port, user))
         maybeRefreshControlClientSize()
     }
@@ -9154,6 +9180,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         connectingTarget = target
         refreshReconnectAvailability()
+        submitControllerSwitch(target)
         // Issue #437 (slice A) / #661: mirror production — a same-host fast
         // switch enters [Switching] (inline indicator), NOT the blanking
         // full-screen [Connecting] overlay; per #661 the reveal machine holds the
@@ -9223,6 +9250,7 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         // Issue #661: reveal the new session's surface at the Connected flip
         // (the reveal machine promotes to Live via the seed/promote path).
+        revealControllerLive()
         setConnectionState(ConnectionState.Live(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -9302,6 +9330,7 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = target
         activeTarget = target
         refreshReconnectAvailability()
+        submitControllerOpen(target)
         setConnectionState(ConnectionState.Connecting(host, port, user))
         recordWarmSwitchMilestone(
             attempt = attempt,
@@ -9343,6 +9372,7 @@ public class TmuxSessionViewModel @Inject constructor(
             reseedAllVisiblePanes()
             connectingTarget = null
             refreshReconnectAvailability()
+            revealControllerLive()
             setConnectionState(ConnectionState.Live(host, port, user))
             markSuccessfulAttachForNetworkCoalescing(target, trigger)
             recordWarmSwitchMilestone(

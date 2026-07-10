@@ -327,14 +327,6 @@ class WatchedFoldersViewModel @Inject constructor(
             }.getOrThrow()
         }
 
-    /**
-     * Test seam — drive [runDiscover] without going through the
-     * Flow + view-model state machine. Internal so test code in the
-     * same package can call it.
-     */
-    internal suspend fun parseDiscoverForTest(stdout: String): List<DiscoveredFolder> =
-        parseDiscoverOutput(stdout)
-
     data class SshCredentials(
         val hostname: String,
         val port: Int,

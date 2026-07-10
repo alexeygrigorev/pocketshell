@@ -644,9 +644,6 @@ public class AgentConversationRepository internal constructor(
         return RecordedAgentSourceOption(source = value, generationScoped = false)
     }
 
-    internal fun recordedAgentSourceFromOption(raw: String?, generation: String? = null): String? =
-        recordedAgentSourceOptionFromRaw(raw, generation).source
-
     /**
      * Epic #821 slice #3 (#825): map a raw `@ps_agent_kind` option value to an
      * [AgentKind]. The launch wrapper writes the lowercase engine token

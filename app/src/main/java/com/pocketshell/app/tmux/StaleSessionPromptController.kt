@@ -160,16 +160,6 @@ class StaleSessionPromptController internal constructor(
         )
     }
 
-    /**
-     * Test-only injection of a stale session, bypassing the signal subscription,
-     * for JVM tests that assert `MainActivity`'s dialog wiring off the [prompt]
-     * state without a live [SessionLifecycleSignals].
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun offerForTest(stale: StaleSession) {
-        _prompt.value = stale
-    }
-
     private companion object {
         /**
          * Fallback create directory for a gone session with no known folder — the

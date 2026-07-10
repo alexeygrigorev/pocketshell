@@ -3,14 +3,12 @@ package com.pocketshell.app.projects
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -28,11 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.ConfirmDialog
@@ -40,7 +34,6 @@ import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -154,52 +147,6 @@ internal fun TreeChildRow(
 
 /** Round a px value to the nearest whole device pixel (for crisp 1 dp hairlines). */
 private fun snapToPixel(px: Float): Float = kotlin.math.round(px)
-
-// docs/design-system.md: this compact tree chrome keeps sub-ladder glyph geometry
-// that predates the token sweep, but names it so the drift guard can ratchet by file.
-private val CompactTreeAddGlyphSize = 18.sp
-
-@Composable
-internal fun CompactTreeIconButton(
-    label: String,
-    contentDescription: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    testTag: String? = null,
-    accent: Boolean = false,
-    size: Dp = PocketShellDensity.tapTargetMin,
-) {
-    val background = if (accent) {
-        PocketShellColors.AccentSoft
-    } else {
-        PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
-    }
-    val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
-    val pillSize = (size.value - 4f).coerceAtLeast(24f).dp
-    Box(
-        modifier = modifier
-            .size(size)
-            .semantics { this.contentDescription = contentDescription }
-            .clickable(role = Role.Button, onClick = onClick)
-            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(pillSize)
-                .background(background, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = label,
-                color = foreground,
-                fontSize = if (label == "+") CompactTreeAddGlyphSize else 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-            )
-        }
-    }
-}
 
 @Composable
 internal fun StatusDot(active: Boolean, modifier: Modifier = Modifier) {
@@ -327,30 +274,6 @@ internal fun sessionWindowEntryTitle(
         ?: window.name?.trim()?.takeIf { it.isNotEmpty() }
     val base = "$sessionName $suffix"
     return if (hint == null) base else "$base $hint"
-}
-
-// docs/design-system.md: the watched pill is a dense row annotation, so its
-// sub-ladder radius and caption size stay named while this screen is migrated.
-private val WatchedPinRadius = 6.dp
-private val WatchedPinFontSize = 10.sp
-
-@Composable
-internal fun WatchedPin() {
-    Box(
-        modifier = Modifier
-            .background(
-                color = PocketShellColors.Purple.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(WatchedPinRadius),
-            )
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    ) {
-        Text(
-            text = "Watched",
-            color = PocketShellColors.Purple,
-            fontSize = WatchedPinFontSize,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
 }
 
 internal fun SessionAgentKind.isAgent(): Boolean = when (this) {

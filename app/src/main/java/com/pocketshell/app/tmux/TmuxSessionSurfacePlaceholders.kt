@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -26,19 +25,6 @@ import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
-
-@Composable
-private fun StatusLine(text: String) {
-    Text(
-        text = text,
-        color = PocketShellColors.TextSecondary,
-        style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    )
-}
 
 /**
  * Issue #778: lightweight Conversation-tab placeholder shown when the user has

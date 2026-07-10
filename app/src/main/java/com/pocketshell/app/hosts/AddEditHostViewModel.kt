@@ -207,6 +207,27 @@ class AddEditHostViewModel @Inject constructor(
     }
 
     /**
+     * Consume the one-shot [HostFormState.saved] navigation signal after the
+     * screen has acted on it. This ViewModel is Activity-scoped (a single
+     * `hiltViewModel()` store owner backs every add/edit-host destination), so
+     * a `saved = true` left over from a prior save would otherwise persist and
+     * re-fire `LaunchedEffect(state.saved)` the next time the form is entered.
+     *
+     * Concretely (issue #1243 guided first-run): after "Add host" saves the
+     * first host and navigates to the test-connect step, tapping "Edit" on a
+     * failed connect re-enters this same ViewModel — with `saved` still `true`
+     * — and the form would immediately bounce straight back to test-connect,
+     * making the Edit recovery a dead end. Consuming the flag on navigate keeps
+     * the save signal a true one-shot event.
+     */
+    fun consumeSaved() {
+        val s = _state.value
+        if (s.saved || s.savedHostId != null) {
+            _state.value = s.copy(saved = false, savedHostId = null)
+        }
+    }
+
+    /**
      * Persist the form. On success [HostFormState.saved] flips to `true`
      * so the screen can pop back; on failure the per-field
      * [HostFormState.fieldErrors] are populated and

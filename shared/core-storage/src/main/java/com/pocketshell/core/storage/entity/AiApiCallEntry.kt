@@ -33,8 +33,7 @@ import androidx.room.PrimaryKey
  * Field semantics:
  *
  * - [provider] discriminates the upstream API (e.g. `"openai"`). String
- *   for the same migration-friendliness reason as
- *   [SnippetEntity.kind] / [AgentSessionEntity.agent].
+ *   for the same migration-friendliness reason as [SnippetEntity.kind].
  * - [feature] identifies the model / endpoint within the provider, e.g.
  *   `"whisper"`. Future: `"gpt4o"`, `"gpt4o-mini"`, `"tts-hd"`.
  * - [inputUnits] is the priced input quantity in the model's native unit:

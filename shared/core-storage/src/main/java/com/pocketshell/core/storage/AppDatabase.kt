@@ -4,7 +4,6 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.pocketshell.core.storage.dao.AgentSessionDao
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.CommandTemplateDao
 import com.pocketshell.core.storage.dao.HostDao
@@ -12,10 +11,8 @@ import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
-import com.pocketshell.core.storage.dao.SessionDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
-import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.HostEntity
@@ -23,11 +20,10 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.PortUsageEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
-import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 16
+const val APP_DATABASE_SCHEMA_VERSION = 17
 
 /**
  * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
@@ -45,9 +41,9 @@ val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
  * bump this number and add a matching [Migration] to [APP_DATABASE_MIGRATIONS]
  * before it ships; otherwise upgraded installs fail Room validation instead of
  * silently deleting hosts, keys, snippets, costs, or pending transcription
- * metadata. Bumped to 12 because issue #328 persists the remote pocketshell
- * daemon running/enabled result so the host setup cache cannot route on CLI
- * readiness alone.
+ * metadata. Bumped to 17 because issue #1447 drops the never-populated
+ * `sessions` / `agent_sessions` stub tables (superseded by the host-side
+ * daemon session registry, epic #821); see [MIGRATION_16_17].
  *
  * `exportSchema = true` (Room writes the versioned schema JSON to the
  * `room.schemaLocation` dir configured in this module's `build.gradle.kts`).
@@ -63,9 +59,7 @@ val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
         PortRemappingEntity::class,
         PortUsageEntity::class,
         ProjectRootEntity::class,
-        SessionEntity::class,
         SnippetEntity::class,
-        AgentSessionEntity::class,
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
         CommandTemplateEntity::class,
@@ -79,9 +73,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun portRemappingDao(): PortRemappingDao
     abstract fun portUsageDao(): PortUsageDao
     abstract fun projectRootDao(): ProjectRootDao
-    abstract fun sessionDao(): SessionDao
     abstract fun snippetDao(): SnippetDao
-    abstract fun agentSessionDao(): AgentSessionDao
     abstract fun aiApiCallLogDao(): AiApiCallLogDao
     abstract fun pendingTranscriptionDao(): PendingTranscriptionDao
     abstract fun commandTemplateDao(): CommandTemplateDao
@@ -263,6 +255,25 @@ val MIGRATION_15_16: Migration = object : Migration(15, 16) {
     }
 }
 
+/**
+ * Issue #1447 (#684 code-health, hard-cut per D22): drop the never-populated
+ * `sessions` and `agent_sessions` stub tables. Both were forward-compatibility
+ * placeholders (`SessionEntity` / `AgentSessionEntity`) that no production code
+ * ever read or wrote — the durable session tree and per-pane agent-kind state
+ * now live host-side in the `pocketshell` daemon registry (epic #821), not a
+ * client Room table. `DROP TABLE IF EXISTS` is safe even though the tables were
+ * empty; older installs (v1–v16) legitimately carried both tables, so this
+ * migration removes them cleanly on the next update. Every live table
+ * (`hosts` + its FK-scoped children, `ai_api_call_log`, `pending_transcriptions`,
+ * `command_templates`, …) is untouched.
+ */
+val MIGRATION_16_17: Migration = object : Migration(16, 17) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS sessions")
+        db.execSQL("DROP TABLE IF EXISTS agent_sessions")
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_2_8,
     MIGRATION_3_8,
@@ -278,6 +289,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_13_14,
     MIGRATION_14_15,
     MIGRATION_15_16,
+    MIGRATION_16_17,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

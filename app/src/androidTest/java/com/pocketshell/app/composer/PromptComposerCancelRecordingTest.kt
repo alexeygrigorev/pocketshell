@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -130,7 +131,14 @@ class PromptComposerCancelRecordingTest {
 
         // Idle: no Cancel; the mic trigger + (disabled) Send are shown.
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertDoesNotExist()
-        compose.onNodeWithContentDescription("Start dictation. Swipe up to lock recording")
+        // Issue #1245 (#357aeaa6) removed the hands-free recording Lock — both the
+        // pill and the swipe-up-to-lock gesture — so the mic disc's content
+        // description was shortened from "Start dictation. Swipe up to lock
+        // recording" to just "Start dictation". This assertion tracks the CURRENT
+        // description; asserting the removed swipe-up copy made this whole test
+        // fail with a misleading "component is not displayed" (a not-found node)
+        // and blocked the v0.4.25 release gate (#1463).
+        compose.onNodeWithContentDescription("Start dictation")
             .assertIsDisplayed()
 
         // Recording: explicit Discard is visible inside the recording panel,
@@ -144,7 +152,13 @@ class PromptComposerCancelRecordingTest {
                 liveTranscript = "android partial words",
             )
         }
-        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        // Issue #1463 / #657 F2-F3: assert viewport CONTAINMENT, not a bare
+        // assertIsDisplayed(). "displayed" is satisfied by layout participation, so
+        // a Discard pushed off the right edge of the balanced [Discard · Insert ·
+        // Send] action row (e.g. a future width regression at font scale) would
+        // still report "displayed" while the user cannot reach it. Containment
+        // catches that — the exact off-screen/clipped class this issue feared.
+        compose.assertNodeFullyWithinRoot(COMPOSER_CANCEL_RECORDING_TAG)
         compose.onNodeWithContentDescription("Discard recording without transcribing").assertIsDisplayed()
         val discardBounds = compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG)
             .getUnclippedBoundsInRoot()
@@ -152,6 +166,10 @@ class PromptComposerCancelRecordingTest {
             "Discard recording touch target must be at least 48dp tall",
             discardBounds.bottom - discardBounds.top >= 48.dp,
         )
+        // The sibling recording controls (Insert / Send / timer / live transcript)
+        // stay intact and reachable alongside Discard.
+        compose.assertNodeFullyWithinRoot(COMPOSER_TO_FIELD_TAG)
+        compose.assertNodeFullyWithinRoot(COMPOSER_STOP_SEND_TAG)
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()

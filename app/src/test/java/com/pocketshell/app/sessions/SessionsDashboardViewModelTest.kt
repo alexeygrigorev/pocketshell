@@ -1,5 +1,8 @@
 package com.pocketshell.app.sessions
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.storage.entity.HostEntity
@@ -1003,6 +1006,128 @@ class SessionsDashboardViewModelTest {
         assertNotNull(vm.createError.value)
         vm.clearCreateError()
         assertNull(vm.createError.value)
+    }
+
+    /**
+     * Issue #1164 (battery/heat) — load-bearing battery property, driven
+     * through the REAL [SessionsDashboardViewModel.observeProcessLifecycle]
+     * path: while the whole process is backgrounded (`ON_STOP`) the
+     * `list-sessions` poll MUST stop firing SSH round-trips, and it MUST
+     * resume promptly on `ON_START`.
+     *
+     * Reproduces the pre-fix gap: without the foreground gate, the poller
+     * keeps issuing `list-sessions` on cadence forever while the app is
+     * backgrounded / screen off — the audit's "clearest small win". The
+     * red case (fix reverted) fails the "no polls while backgrounded"
+     * assertEquals below; the fix parks the loop so it holds.
+     */
+    @Test
+    fun pollParksWhenBackgroundedAndResumesPromptlyOnForeground() = runTest {
+        val registry = newRegistry()
+        val vm = newVm(registry = registry, pollMs = 50L)
+
+        // FakeTmuxClient with no queued responses returns an empty success
+        // per poll, so every poll still records a `list-sessions` command.
+        val client = FakeTmuxClient()
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.STARTED) }
+        vm.observeProcessLifecycle(owner)
+        runCurrent()
+
+        register(registry, host(1L, "h"), "/k", client)
+        runCurrent()
+
+        fun listSessionsPolls() = client.sentCommands.count { it.startsWith("list-sessions") }
+
+        // Foreground: the immediate first poll fired and the cadence keeps ticking.
+        val afterRegister = listSessionsPolls()
+        assertTrue("foreground poll must fire on register", afterRegister >= 1)
+        advanceTimeBy(50L * 3)
+        runCurrent()
+        val foregroundPolls = listSessionsPolls()
+        assertTrue(
+            "foreground poll must keep ticking on cadence (was $afterRegister, now $foregroundPolls)",
+            foregroundPolls > afterRegister,
+        )
+
+        // Background (ON_STOP): the poller parks.
+        owner.moveTo(Lifecycle.State.CREATED) // dispatches ON_STOP
+        runCurrent()
+        // Flush any in-flight cadence delay so the loop reaches its park point.
+        advanceTimeBy(50L)
+        runCurrent()
+        val atBackground = listSessionsPolls()
+
+        // Advance well past many cadences while backgrounded — the
+        // load-bearing battery assertion: ZERO further polls.
+        advanceTimeBy(50L * 20)
+        runCurrent()
+        assertEquals(
+            "backgrounded dashboard must issue NO further list-sessions polls (battery #1164)",
+            atBackground,
+            listSessionsPolls(),
+        )
+
+        // Foreground again (ON_START): poll resumes with a prompt refresh.
+        owner.moveTo(Lifecycle.State.STARTED) // dispatches ON_START
+        runCurrent()
+        assertTrue(
+            "returning to foreground must promptly resume the poll (was $atBackground)",
+            listSessionsPolls() > atBackground,
+        )
+        vm.stopForTest()
+    }
+
+    /**
+     * Issue #1164 — focused proof of the poll gate itself, isolated from
+     * the lifecycle plumbing via [SessionsDashboardViewModel.setProcessStartedForTest].
+     * A backgrounded process (flag false) must never issue a
+     * `list-sessions`, even across many cadences; flipping to foreground
+     * fires the parked poll immediately.
+     */
+    @Test
+    fun pollIsSuppressedWhileProcessBackgroundedAndFiresOnForeground() = runTest {
+        val registry = newRegistry()
+        val vm = newVm(registry = registry, pollMs = 50L)
+        // Enter the backgrounded state BEFORE the host registers.
+        vm.setProcessStartedForTest(false)
+        val client = FakeTmuxClient()
+        register(registry, host(1L, "h"), "/k", client)
+        runCurrent()
+        advanceTimeBy(50L * 10)
+        runCurrent()
+        assertEquals(
+            "no list-sessions may fire while the process is backgrounded",
+            0,
+            client.sentCommands.count { it.startsWith("list-sessions") },
+        )
+
+        // Flip to foreground — the parked poller fires promptly.
+        vm.setProcessStartedForTest(true)
+        runCurrent()
+        assertTrue(
+            "the poll must fire promptly once the process is foreground",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        vm.stopForTest()
+    }
+
+    /**
+     * Manual [LifecycleOwner] backed by [LifecycleRegistry.createUnsafe] so
+     * the registry does NOT enforce the main thread — this test class runs
+     * without Robolectric (no real main looper), and `createUnsafe` lets
+     * `addObserver` / `currentState =` dispatch synchronously on the test
+     * thread. Tests drive transitions via [moveTo]; the dashboard's
+     * lifecycle observer then fires deterministically.
+     */
+    private class ManualLifecycleOwner : LifecycleOwner {
+        private val registry = LifecycleRegistry.createUnsafe(this).apply {
+            currentState = Lifecycle.State.INITIALIZED
+        }
+        override val lifecycle: Lifecycle = registry
+
+        fun moveTo(state: Lifecycle.State) {
+            registry.currentState = state
+        }
     }
 
     /**

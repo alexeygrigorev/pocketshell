@@ -177,14 +177,6 @@ class StartDirectoryAutocompleteController(
         _state.value = StartDirectoryAutocompleteUiState()
     }
 
-    fun moveHighlight(delta: Int) {
-        val current = _state.value
-        if (current.suggestions.isEmpty()) return
-        val next = (current.highlightedIndex + delta)
-            .coerceIn(0, current.suggestions.lastIndex)
-        _state.value = current.copy(highlightedIndex = next)
-    }
-
     fun dispose() {
         job?.cancel()
         _state.value = StartDirectoryAutocompleteUiState()

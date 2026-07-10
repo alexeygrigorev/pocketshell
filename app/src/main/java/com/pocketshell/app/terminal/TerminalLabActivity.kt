@@ -441,8 +441,5 @@ fun TerminalLabScreen(
 }
 
 const val TERMINAL_LAB_SCREEN_TAG: String = "terminal-lab:screen"
-const val TERMINAL_LAB_INPUT_TAG: String = "terminal-lab:input"
-const val TERMINAL_LAB_SEND_TAG: String = "terminal-lab:send"
-const val TERMINAL_LAB_SEND_ENTER_TAG: String = "terminal-lab:send-enter"
 
 private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)

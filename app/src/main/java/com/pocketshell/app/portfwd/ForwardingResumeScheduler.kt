@@ -120,15 +120,6 @@ public class ForwardingResumeScheduler @Inject constructor(
     private val resuming: MutableSet<Long> = mutableSetOf()
 
     /**
-     * Monotonically-increasing counter incremented every time a resume
-     * sweep runs (passes the lifecycle gate), exposed purely as a test
-     * seam so a test can prove the foreground trigger fired.
-     */
-    private val _sweepCount = AtomicLong(0L)
-    public val sweepCount: Long
-        get() = _sweepCount.get()
-
-    /**
      * Monotonically-increasing counter incremented every time a host's
      * forwarding is actually (re-)started by this scheduler (i.e. an
      * enabled, not-already-active host with a usable key connected and was
@@ -181,7 +172,6 @@ public class ForwardingResumeScheduler @Inject constructor(
      */
     internal suspend fun resumeEnabledHosts(trigger: String = TRIGGER_MANUAL) {
         mutex.withLock {
-            _sweepCount.incrementAndGet()
             val enabled = runCatching { hostDao.getEnabled().first() }.getOrElse { emptyList() }
             StartupTiming.markOnce(
                 "forwarding-resume-sweep",

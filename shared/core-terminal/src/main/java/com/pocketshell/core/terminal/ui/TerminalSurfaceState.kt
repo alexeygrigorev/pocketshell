@@ -974,15 +974,6 @@ class TerminalSurfaceState(
     private var pixelProbeDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     /**
-     * Test-only (#1443): override the dispatcher the pixel sample runs on so a JVM
-     * test can assert the sample is dispatched OFF the caller/UI thread. Production
-     * always uses [Dispatchers.IO].
-     */
-    fun setPixelProbeDispatcherForTest(dispatcher: CoroutineDispatcher) {
-        pixelProbeDispatcher = dispatcher
-    }
-
-    /**
      * Test-only (#1443): how many pixel-black-while-model-has-content observations
      * have fired. `public` (not `internal`) so the app-module tmux tests — a
      * different Gradle module — can assert the fingerprint, mirroring

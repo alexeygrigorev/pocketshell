@@ -87,12 +87,32 @@ class ReleaseCheckerNetworkTest {
         repeat(10) {
             val result = checker.checkForUpdate("0.1.0")
             assertTrue("expected a Failed result on 403", result is ReleaseCheckResult.Failed)
+            // Issue #1456: the user sees a human category, never the raw
+            // "GitHub returned HTTP 403". A 403 rate-limit is NOT auto-retried
+            // (see requestCount assertion below), so exactly one request per poll.
             assertEquals(
-                "GitHub returned HTTP 403",
+                "rate-limited, try again later",
                 (result as ReleaseCheckResult.Failed).reason,
             )
         }
-        assertEquals("every poll must reach the server", 10, requestCount.get())
+        // 10 polls -> exactly 10 requests proves the 403 rate-limit path does
+        // NOT auto-retry (issue #1456: don't hammer GitHub).
+        assertEquals("every poll must reach the server exactly once (403 not retried)", 10, requestCount.get())
+    }
+
+    @Test
+    fun serverError500_surfacesHumanReason_andIsNotRetried() = runBlocking {
+        // A non-403 non-200 (e.g. a GitHub 5xx) maps to a human "server error"
+        // banner naming the code, and — like 403 — is a returned Failed, not a
+        // thrown exception, so it is NOT auto-retried (issue #1456).
+        startServer(500, "Internal Server Error", """{"message":"oops"}""")
+        val checker = ReleaseChecker(latestReleaseUrl = url())
+
+        val result = checker.checkForUpdate("0.1.0")
+
+        assertTrue("expected a Failed result on 500", result is ReleaseCheckResult.Failed)
+        assertEquals("server error (HTTP 500)", (result as ReleaseCheckResult.Failed).reason)
+        assertEquals("a non-200 must be a single attempt (not retried)", 1, requestCount.get())
     }
 
     @Test

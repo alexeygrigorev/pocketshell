@@ -2,10 +2,16 @@ package com.pocketshell.app.release
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
+import java.security.GeneralSecurityException
+import javax.net.ssl.SSLException
 
 /**
  * Metadata about a GitHub Release that PocketShell can offer the user as
@@ -77,12 +83,19 @@ sealed interface ReleaseCheckResult {
  */
 open class ReleaseChecker(
     private val latestReleaseUrl: String = API_URL,
+    /**
+     * Backoff before the single auto-retry of a transient network/TLS blip
+     * (issue #1456). Injectable so unit tests can drive the retry path with
+     * zero wall-clock cost.
+     */
+    private val retryBackoffMs: Long = RETRY_BACKOFF_MS,
 ) {
     companion object {
         private const val REPO = "alexeygrigorev/pocketshell"
         private const val API_URL = "https://api.github.com/repos/$REPO/releases/latest"
         private const val USER_AGENT = "pocketshell"
         private const val TIMEOUT_MS = 10_000
+        private const val RETRY_BACKOFF_MS = 400L
         private const val TAG = "PsReleaseCheck"
     }
 
@@ -107,54 +120,153 @@ open class ReleaseChecker(
     open suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult =
         withContext(Dispatchers.IO) {
             try {
-                val conn = (URL(latestReleaseUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = TIMEOUT_MS
-                    readTimeout = TIMEOUT_MS
-                    setRequestProperty("Accept", "application/vnd.github+json")
-                    setRequestProperty("User-Agent", USER_AGENT)
-                }
-
-                // A single `disconnect()` in the finally releases the socket no
-                // matter which branch runs (or throws). Without it the keep-alive
-                // socket leaks — repeated cold-launch polls pile up half-open
-                // connections. The input/error streams are additionally closed
-                // (via `use`) so the body is drained; on a non-200 (the common
-                // GitHub 403 rate-limit) an unread + unclosed `errorStream`
-                // otherwise leaks the connection back-pressure too.
-                try {
-                    val code = conn.responseCode
-                    if (code != 200) {
-                        // GitHub returns 403 with a rate-limit body for
-                        // unauthenticated bursts — the single most likely cause
-                        // of "the banner never showed at cold launch". Naming the
-                        // code makes that diagnosable. Drain + close the error
-                        // stream so the socket is reusable rather than leaked.
-                        conn.errorStream?.use { runCatching { it.readBytes() } }
-                        val reason = "GitHub returned HTTP $code"
-                        Log.w(TAG, "release check failed: $reason (current=$currentVersion)")
-                        ReleaseCheckResult.Failed(reason)
-                    } else {
-                        val body = conn.inputStream.bufferedReader().use { it.readText() }
-                        when (val outcome = parseReleaseOutcome(body, currentVersion)) {
-                            is ParsedReleaseOutcome.UpdateAvailable ->
-                                ReleaseCheckResult.UpdateAvailable(outcome.info)
-                            ParsedReleaseOutcome.UpToDate ->
-                                ReleaseCheckResult.UpToDate
-                            is ParsedReleaseOutcome.Failed -> {
-                                Log.w(TAG, "release check failed: ${outcome.reason} (current=$currentVersion)")
-                                ReleaseCheckResult.Failed(outcome.reason)
-                            }
-                        }
-                    }
-                } finally {
-                    conn.disconnect()
-                }
+                // A returned non-200 (e.g. the GitHub 403 rate-limit) never throws
+                // — it comes back as a [ReleaseCheckResult.Failed] here and is NOT
+                // retried (issue #1456: don't hammer GitHub on a rate-limit).
+                fetchRelease(currentVersion)
             } catch (e: Exception) {
-                val reason = "${e.javaClass.simpleName}: ${e.message ?: "no message"}"
-                Log.w(TAG, "release check failed: $reason (current=$currentVersion)", e)
-                ReleaseCheckResult.Failed(reason)
+                // Issue #1456: the raw exception chain (e.g. the cryptic conscrypt
+                // `SocketException: NoSuchAlgorithmException ... DefaultSSLContextImpl`)
+                // stays in logcat for diagnosis, but the user only ever sees the
+                // classified human category — never a class name or stack.
+                val failure = classifyFailure(e)
+                Log.w(
+                    TAG,
+                    "release check failed: ${e.javaClass.simpleName}: ${e.message ?: "no message"} " +
+                        "-> \"${failure.message}\" (transient=${failure.transient}, current=$currentVersion)",
+                    e,
+                )
+                if (failure.transient) {
+                    // The conscrypt SSLContext-construction failure and other
+                    // transient network/TLS blips commonly succeed on a fresh
+                    // connection. Retry ONCE before surfacing the banner; only a
+                    // both-attempts-failed result nags the user (issue #515's
+                    // visible-failure contract is preserved for a persistent fault).
+                    delay(retryBackoffMs)
+                    try {
+                        fetchRelease(currentVersion)
+                    } catch (retry: Exception) {
+                        val retryFailure = classifyFailure(retry)
+                        Log.w(
+                            TAG,
+                            "release check retry failed: ${retry.javaClass.simpleName}: " +
+                                "${retry.message ?: "no message"} -> \"${retryFailure.message}\" " +
+                                "(current=$currentVersion)",
+                            retry,
+                        )
+                        ReleaseCheckResult.Failed(retryFailure.message)
+                    }
+                } else {
+                    ReleaseCheckResult.Failed(failure.message)
+                }
             }
         }
+
+    /**
+     * One network attempt against the GitHub Releases API. Returns the outcome
+     * for the non-throwing cases (update / up-to-date / non-200 / unparseable
+     * body) and lets a genuine network/TLS exception PROPAGATE so
+     * [checkForUpdate] can classify + retry it (issue #1456).
+     *
+     * `internal open` so unit tests can subclass and inject a throw-then-succeed
+     * sequence to exercise the auto-retry orchestration without real sockets.
+     */
+    internal open fun fetchRelease(currentVersion: String): ReleaseCheckResult {
+        val conn = (URL(latestReleaseUrl).openConnection() as HttpURLConnection).apply {
+            connectTimeout = TIMEOUT_MS
+            readTimeout = TIMEOUT_MS
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", USER_AGENT)
+        }
+
+        // A single `disconnect()` in the finally releases the socket no
+        // matter which branch runs (or throws). Without it the keep-alive
+        // socket leaks — repeated cold-launch polls pile up half-open
+        // connections. The input/error streams are additionally closed
+        // (via `use`) so the body is drained; on a non-200 (the common
+        // GitHub 403 rate-limit) an unread + unclosed `errorStream`
+        // otherwise leaks the connection back-pressure too.
+        return try {
+            val code = conn.responseCode
+            if (code != 200) {
+                // GitHub returns 403 with a rate-limit body for unauthenticated
+                // bursts — the single most likely cause of "the banner never
+                // showed at cold launch". Drain + close the error stream so the
+                // socket is reusable rather than leaked. The concrete code is
+                // logged; the user sees a human category (issue #1456).
+                conn.errorStream?.use { runCatching { it.readBytes() } }
+                val userReason = if (code == HttpURLConnection.HTTP_FORBIDDEN) {
+                    "rate-limited, try again later"
+                } else {
+                    "server error (HTTP $code)"
+                }
+                Log.w(TAG, "release check failed: GitHub returned HTTP $code (current=$currentVersion)")
+                ReleaseCheckResult.Failed(userReason)
+            } else {
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                when (val outcome = parseReleaseOutcome(body, currentVersion)) {
+                    is ParsedReleaseOutcome.UpdateAvailable ->
+                        ReleaseCheckResult.UpdateAvailable(outcome.info)
+                    ParsedReleaseOutcome.UpToDate ->
+                        ReleaseCheckResult.UpToDate
+                    is ParsedReleaseOutcome.Failed -> {
+                        Log.w(TAG, "release check failed: ${outcome.reason} (current=$currentVersion)")
+                        ReleaseCheckResult.Failed(outcome.reason)
+                    }
+                }
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /**
+     * Maps a caught network/TLS exception to a short, human-readable banner
+     * category and whether it is worth an automatic retry (issue #1456). The
+     * user NEVER sees the class name or `message`; the raw exception stays in
+     * logcat. The whole cause chain is inspected because conscrypt surfaces its
+     * default-`SSLContext` construction failure as a plain [SocketException]
+     * *caused by* a `NoSuchAlgorithmException` mentioning `DefaultSSLContextImpl`.
+     */
+    internal fun classifyFailure(e: Throwable): FailureClassification {
+        var cause: Throwable? = e
+        val seen = HashSet<Throwable>()
+        while (cause != null && seen.add(cause)) {
+            when (cause) {
+                // A connect/read timeout — a transient slow-network blip.
+                is SocketTimeoutException ->
+                    return FailureClassification("timed out", transient = true)
+                // DNS/connectivity failure: retrying immediately won't help.
+                is UnknownHostException ->
+                    return FailureClassification("no network connection", transient = false)
+                // TLS handshake / SSLContext construction faults (incl. the
+                // conscrypt NoSuchAlgorithmException, a GeneralSecurityException)
+                // are the classic transient case this fix heals.
+                is SSLException, is GeneralSecurityException ->
+                    return FailureClassification("connection problem", transient = true)
+                // Covers ConnectException / the conscrypt-wrapped SocketException.
+                is SocketException ->
+                    return FailureClassification("connection problem", transient = true)
+            }
+            val message = cause.message ?: ""
+            if (message.contains("DefaultSSLContextImpl") || message.contains("NoSuchAlgorithmException")) {
+                return FailureClassification("connection problem", transient = true)
+            }
+            cause = cause.cause
+        }
+        // Anything unclassified: show a generic connection category and do NOT
+        // retry blindly (avoid hammering on an unknown persistent fault).
+        return FailureClassification("connection problem", transient = false)
+    }
+
+    /**
+     * The user-facing banner category ([message]) plus whether [checkForUpdate]
+     * should auto-retry once before surfacing it ([transient]). Issue #1456.
+     */
+    internal data class FailureClassification(
+        val message: String,
+        val transient: Boolean,
+    )
 
     internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? =
         (parseReleaseOutcome(body, currentVersion) as? ParsedReleaseOutcome.UpdateAvailable)?.info

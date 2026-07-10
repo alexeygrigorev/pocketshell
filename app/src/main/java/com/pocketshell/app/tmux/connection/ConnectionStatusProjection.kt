@@ -112,10 +112,9 @@ internal object ConnectionStatusProjection {
                 // authoritative "panes are seeded, safe to reveal" gate
                 // (`awaitPanesReadyForAttach`/`awaitActivePaneSeededOrLoading`); follow
                 // it so the full-screen Connecting overlay stays up until those panes
-                // land. This is the OPEN-direction sibling of [terminalOrInlineStatus]'s
-                // "don't show a premature scary Failed while the inline ladder is still
-                // recovering" guard — here: don't show a premature blank Connected while
-                // the inline open is still handshaking. Every normal cold open reaches
+                // land. This is the OPEN-direction sibling of the (now deleted, #1328)
+                // terminal over-exhaust guard — here: don't show a premature blank
+                // Connected while the inline open is still handshaking. Every normal cold open reaches
                 // controller `Live` only via the SeedLanded feed (which lands AT the
                 // inline reveal), so the inline status is already past `Connecting`
                 // there and this guard is a no-op for them.
@@ -137,55 +136,49 @@ internal object ConnectionStatusProjection {
             -> inlineStatus
             // APPROVED #685 divergence #1 (silent recovery): a recoverable drop leaves
             // the controller Reattaching/Reconnecting → a CALM Reconnecting band, NOT
-            // the scary Failed. The display payload (attempt/reason) is the inline
-            // reconnect bookkeeping.
+            // the scary Failed. Issue #1328 (S5): the displayed attempt/maxAttempts/
+            // retryDelayMs come from the controller's SINGLE-counter `Reconnecting`
+            // state (null for the pre-numbered Reattaching heal → calm attempt-1
+            // default); only the human reason string still rides the inline payload.
             is ConnectionState.Reattaching ->
-                reconnectingStatusFor(inlineStatus, hpu)
+                reconnectingStatusFor(controllerRecon = null, inlineStatus, hpu)
             is ConnectionState.Reconnecting ->
-                reconnectingStatusFor(inlineStatus, hpu)
+                reconnectingStatusFor(controllerRecon = controllerState, inlineStatus, hpu)
             is ConnectionState.Gone ->
-                terminalOrInlineStatus(inlineStatus, hpu)
+                ConnectionStatus.Failed(failedMessageFor(inlineStatus))
             is ConnectionState.Unreachable ->
-                // #720: the ONLY honest error. The CAUSE message is preserved (it is
-                // already a curated, user-facing string — never raw
-                // `TransportException`/SSH text); the CALM, tappable "Tap to reconnect"
-                // affordance + the dropped "Open the session again" instruction live in
-                // the screen band ([FailedConnectionRow]). "Failed only after retries
-                // truly exhaust" tracks the INLINE ladder (see [terminalOrInlineStatus]).
-                terminalOrInlineStatus(inlineStatus, hpu)
+                // #720: the ONLY honest error. Issue #1328 (S5): the controller is now the
+                // SINGLE reconnect ladder — its exhaustion IS the authoritative "retries
+                // truly exhausted" signal, so an `Unreachable` controller ALWAYS surfaces
+                // Failed. The old over-exhaust reconcile branch (follow the inline ladder
+                // when the controller "over-exhausted") is DELETED: with one ladder there
+                // is no second counter to over-run. The curated CAUSE message (never raw
+                // `TransportException`/SSH text) rides the inline Failed payload; the calm
+                // tappable "Tap to reconnect" affordance lives in the screen band.
+                ConnectionStatus.Failed(failedMessageFor(inlineStatus))
         }
     }
 
-    /**
-     * Project a controller TERMINAL state (Unreachable/Gone). The brief's approved
-     * #685 change is "Failed/Unreachable only AFTER retries truly exhaust". The
-     * authoritative "retries exhausted" signal is the INLINE reconnect ladder (the
-     * effect machinery 1c-iv-b owns) — the controller's own drop-ladder counter can
-     * over-exhaust because the bridge mirrors each inline reconnect transition as a
-     * drop. So: surface Failed ONLY when the inline state is ALSO terminal
-     * (the inline-projected status is `Failed`). While the inline ladder is still
-     * recovering (the inline status is `Reconnecting`) OR back live, follow the inline
-     * status — a calm Reconnecting band or Connected, never a premature scary Failed.
-     */
-    private fun terminalOrInlineStatus(
-        inlineStatus: ConnectionStatus,
-        hpu: HostPortUser,
-    ): ConnectionStatus =
-        when (inlineStatus) {
-            is ConnectionStatus.Failed ->
-                ConnectionStatus.Failed(inlineStatus.message)
-            is ConnectionStatus.Reconnecting ->
-                reconnectingStatusFor(inlineStatus, hpu)
-            // Inline already recovered (Connected) or is mid-open: the controller
-            // over-exhausted; follow the inline truth, not a premature Failed.
-            else -> inlineStatus
-        }
+    /** The curated failure message for a terminal controller state. It rides the inline
+     *  Failed payload (the VM sets the inline Unreachable/Gone message in lockstep with
+     *  the controller reaching it — one ladder, #1328); a generic calm default backstops
+     *  the transient window before the inline message lands. */
+    private fun failedMessageFor(inlineStatus: ConnectionStatus): String =
+        (inlineStatus as? ConnectionStatus.Failed)?.message
+            ?: "Disconnected. Tap Reconnect to retry."
 
-    /** Build the view [ConnectionStatus.Reconnecting], preserving the inline
-     *  reconnect payload (attempt/maxAttempts/retryDelayMs/reason) when the inline
-     *  status is itself a reconnect; otherwise (the approved recoverable-drop
-     *  divergence, where the inline status is `Failed`/`Connected`) a calm default. */
+    /**
+     * Build the view [ConnectionStatus.Reconnecting]. Issue #1328 (S5): the numbered
+     * ladder payload (attempt/maxAttempts/retryDelayMs) comes from the controller's
+     * SINGLE-counter [controllerRecon] when present (the numbered reconnect ladder);
+     * for the pre-numbered silent heal ([controllerRecon] null → controller Reattaching)
+     * a calm attempt-1 default. The human [ConnectionStatus.Reconnecting.reason] string
+     * still rides the inline payload (it is a VM-classified display string, not a
+     * counter — reading it from the inline path does NOT reintroduce a parallel attempt
+     * counter, which is what S5 forbids).
+     */
     private fun reconnectingStatusFor(
+        controllerRecon: ConnectionState.Reconnecting?,
         inlineStatus: ConnectionStatus,
         hpu: HostPortUser,
     ): ConnectionStatus.Reconnecting {
@@ -194,10 +187,10 @@ internal object ConnectionStatusProjection {
             host = hpu.host,
             port = hpu.port,
             user = hpu.user,
-            attempt = inlineReconnect?.attempt ?: 1,
-            maxAttempts = inlineReconnect?.maxAttempts
+            attempt = controllerRecon?.attempt ?: 1,
+            maxAttempts = controllerRecon?.maxAttempts
                 ?: ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
-            retryDelayMs = inlineReconnect?.retryDelayMs ?: 0L,
+            retryDelayMs = controllerRecon?.retryDelayMs ?: 0L,
             reason = inlineReconnect?.reason ?: "Reconnecting…",
         )
     }

@@ -189,15 +189,18 @@ class ConnectionStatusProjectionTest {
     // ---------------------------------------------------------------------------
 
     @Test
-    fun reattachingController_withReconnectingInline_preservesReconnectPayload() {
+    fun reattachingController_takesAttemptFromController_reasonFromInline() {
+        // Issue #1328 (S5): the numbered ladder payload (attempt/max/delay) now comes
+        // from the CONTROLLER. Reattaching is the pre-numbered silent heal → calm
+        // attempt-1 default; only the human reason still rides the inline payload.
         assertEquals(
             ConnectionStatus.Reconnecting(
                 host = HOST,
                 port = PORT,
                 user = USER,
-                attempt = 3,
-                maxAttempts = 7,
-                retryDelayMs = 1_500L,
+                attempt = 1,
+                maxAttempts = ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+                retryDelayMs = 0L,
                 reason = "Network changed",
             ),
             project(ConnectionState.Reattaching(host, sid), inlineReconnecting),
@@ -205,18 +208,28 @@ class ConnectionStatusProjectionTest {
     }
 
     @Test
-    fun reconnectingController_withReconnectingInline_preservesReconnectPayload() {
+    fun reconnectingController_takesAttemptFromController_reasonFromInline() {
+        // Issue #1328 (S5) — G6 wrong-source guard: the DISTINCT controller values
+        // (attempt=2, budget=4, backoff=2000ms) differ on EVERY field from the inline
+        // payload (attempt=3, max=7, delay=1500). A wrong-source read (still reading the
+        // inline attempt/max/delay) would fail loudly here — the displayed numbers MUST
+        // come from the CONTROLLER's single counter; only the reason rides the inline path.
         assertEquals(
             ConnectionStatus.Reconnecting(
                 host = HOST,
                 port = PORT,
                 user = USER,
-                attempt = 3,
-                maxAttempts = 7,
-                retryDelayMs = 1_500L,
+                attempt = 2,
+                maxAttempts = 4,
+                retryDelayMs = 2_000L,
                 reason = "Network changed",
             ),
-            project(ConnectionState.Reconnecting(host, sid, attempt = 3), inlineReconnecting),
+            project(
+                ConnectionState.Reconnecting(
+                    host, sid, attempt = 2, maxAttempts = 4, retryDelayMs = 2_000L,
+                ),
+                inlineReconnecting,
+            ),
         )
     }
 
@@ -281,44 +294,45 @@ class ConnectionStatusProjectionTest {
     }
 
     // ---------------------------------------------------------------------------
-    // terminalOrInlineStatus guard — BOTH ways, for Gone AND Unreachable
+    // Terminal controller states → Failed. Issue #1328 (S5): the OVER-EXHAUST
+    // reconcile guard is DELETED — with one ladder the controller's Unreachable IS
+    // authoritative, so it ALWAYS surfaces Failed (never "follow the inline ladder").
     // ---------------------------------------------------------------------------
 
     @Test
-    fun unreachableController_withFailedInline_surfacesFailed_onlyWhenInlineTrulyExhausted() {
-        // The honest error: surface Failed ONLY when the inline ladder is ALSO terminal
-        // (the inline-projected status is Failed). The curated cause message is
-        // preserved (never raw SSH text).
+    fun unreachableController_withFailedInline_surfacesFailed_withCuratedMessage() {
+        // The honest error carries the curated inline cause message (never raw SSH text).
         assertEquals(
             ConnectionStatus.Failed("Host unreachable"),
             project(ConnectionState.Unreachable(host, sid), inlineFailed),
         )
     }
 
+    /**
+     * Issue #1328 (S5) REPRODUCE-FIRST characterization: the projection over-exhaust
+     * guard divergence. On BASE (the deleted guard) a controller `Unreachable` while the
+     * inline ladder was STILL `Reconnecting` projected to a CALM Reconnecting band —
+     * because the controller's own drop-ladder counter could over-exhaust past the
+     * inline ladder (two counters, one exhaustion decision). This test asserts the
+     * SINGLE-ladder truth: an `Unreachable` controller ALWAYS surfaces `Failed`. It FAILS
+     * on base (returns the calm Reconnecting) and PASSES with the guard deleted — the
+     * deletability of that guard is the acceptance signal that ONE ladder remains.
+     */
     @Test
-    fun unreachableController_withReconnectingInline_staysCalmReconnecting_notPrematureFailed() {
-        // The controller's drop-ladder over-exhausted while the inline ladder is STILL
-        // recovering: follow the inline reconnect, NOT a premature scary Failed.
+    fun unreachableController_withReconnectingInline_surfacesFailed_notCalmReconnecting_singleLadder() {
+        val result = project(ConnectionState.Unreachable(host, sid), inlineReconnecting)
         assertEquals(
-            ConnectionStatus.Reconnecting(
-                host = HOST,
-                port = PORT,
-                user = USER,
-                attempt = 3,
-                maxAttempts = 7,
-                retryDelayMs = 1_500L,
-                reason = "Network changed",
-            ),
-            project(ConnectionState.Unreachable(host, sid), inlineReconnecting),
+            ConnectionStatus.Failed("Disconnected. Tap Reconnect to retry."),
+            result,
         )
     }
 
     @Test
-    fun unreachableController_withConnectedInline_followsInline_controllerOverExhausted() {
-        // Inline already recovered (Connected): the controller over-exhausted; follow
-        // the inline truth, not a premature Failed.
+    fun unreachableController_withConnectedInline_surfacesFailed_singleLadder() {
+        // With one ladder the controller cannot be Unreachable while the inline is live;
+        // if that impossible-under-S5 pair is ever projected, the controller wins → Failed.
         assertEquals(
-            inlineConnected,
+            ConnectionStatus.Failed("Disconnected. Tap Reconnect to retry."),
             project(ConnectionState.Unreachable(host, sid), inlineConnected),
         )
     }
@@ -332,25 +346,17 @@ class ConnectionStatusProjectionTest {
     }
 
     @Test
-    fun goneController_withReconnectingInline_staysCalmReconnecting() {
+    fun goneController_withReconnectingInline_surfacesFailed_singleLadder() {
         assertEquals(
-            ConnectionStatus.Reconnecting(
-                host = HOST,
-                port = PORT,
-                user = USER,
-                attempt = 3,
-                maxAttempts = 7,
-                retryDelayMs = 1_500L,
-                reason = "Network changed",
-            ),
+            ConnectionStatus.Failed("Disconnected. Tap Reconnect to retry."),
             project(ConnectionState.Gone(host, sid), inlineReconnecting),
         )
     }
 
     @Test
-    fun goneController_withConnectedInline_followsInline() {
+    fun goneController_withConnectedInline_surfacesFailed_singleLadder() {
         assertEquals(
-            inlineConnected,
+            ConnectionStatus.Failed("Disconnected. Tap Reconnect to retry."),
             project(ConnectionState.Gone(host, sid), inlineConnected),
         )
     }

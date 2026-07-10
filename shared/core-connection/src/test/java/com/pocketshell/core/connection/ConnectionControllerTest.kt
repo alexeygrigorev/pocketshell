@@ -260,13 +260,15 @@ class ConnectionControllerTest {
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportDropped("d2"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 2), controller.state.value)
 
-        controller.submit(ConnectionEvent.TransportDropped("d3"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2), controller.state.value)
+        // Issue #1328 (S5): within the numbered ladder, advancement is the effect's
+        // ReconnectFailed (one per real rung failure) — raw drops no longer escalate.
+        controller.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2, maxAttempts = 2), controller.state.value)
 
         // Exhausts the budget -> the ONLY honest error.
-        controller.submit(ConnectionEvent.TransportDropped("d4"))
+        controller.submit(ConnectionEvent.ReconnectFailed)
         assertEquals(ConnectionState.Unreachable(host, a), controller.state.value)
     }
 

@@ -1407,6 +1407,15 @@ public class TmuxSessionViewModel @Inject constructor(
      * while the app is BACKGROUNDED.
      */
     private fun shouldSuppressTransportDropsForSingleGraceOwner(): Boolean {
+        // Issue #1328 (S5): while the auto-reconnect ladder is in flight, the
+        // [scheduleAutoReconnectBody] loop OWNS the controller's SINGLE reconnect counter
+        // (it advances exactly one rung per real dial via [ConnectionManager.advanceReconnectLadder]).
+        // The `-CC` teardown/re-dial churn of each rung flips the disconnect oracle, so the
+        // driver would submit EXTRA `TransportDropped`s that double-advance the one counter
+        // and exhaust the ladder early. Suppress the driver's oracle drops for the duration
+        // of the ladder — the loop is the sole advancer. (The Live promotion / `Up` feed is
+        // never suppressed, so a real re-`Connected` still lands.)
+        if (autoReconnectJob?.isActive == true) return true
         // The app is backgrounded at the PROCESS level (ProcessLifecycle below STARTED).
         // We deliberately do NOT use [appActive] here: within the App-level background
         // grace window the `-CC` connection is held and `onAppBackgrounded()` (which
@@ -6726,12 +6735,33 @@ public class TmuxSessionViewModel @Inject constructor(
                     // The probe exec itself failed (transport hiccup) — a TRANSIENT
                     // condition, not a confirmed-gone. Fail open (attach as normal;
                     // no recreate prompt).
-                    Log.i(
-                        ISSUE_145_RECONNECT_TAG,
-                        "tmux-existence-preflight-probe-error session=$sessionName " +
-                            "trigger=${originalTrigger.logValue} " +
-                            "cause=${probe.exceptionOrNull()?.javaClass?.simpleName} — failing open",
-                    )
+                    //
+                    // Issue #1328 (S5, #1321 §1b): a `transport is closed` probe error
+                    // means the reused warm lease's SSH transport was silently torn down
+                    // while backgrounded. Failing open would re-attach on that SAME closed
+                    // pooled lease and hard-`Failed` the beyond-grace reconnect (the
+                    // maintainer's #1321 break). EVICT the poisoned lease first so the
+                    // re-entered connect dials a FRESH transport and the same session heals
+                    // silently — dial fresh, never declare Unreachable on the first preflight.
+                    val probeError = probe.exceptionOrNull()
+                    if (isStaleChannelSymptom(probeError)) {
+                        withContext(NonCancellable) {
+                            runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                        }
+                        Log.i(
+                            ISSUE_145_RECONNECT_TAG,
+                            "tmux-existence-preflight-transport-closed session=$sessionName " +
+                                "trigger=${originalTrigger.logValue} — evicted poisoned lease, " +
+                                "re-dialing FRESH (issue #1321)",
+                        )
+                    } else {
+                        Log.i(
+                            ISSUE_145_RECONNECT_TAG,
+                            "tmux-existence-preflight-probe-error session=$sessionName " +
+                                "trigger=${originalTrigger.logValue} " +
+                                "cause=${probeError?.javaClass?.simpleName} — failing open",
+                        )
+                    }
                     proceed()
                 }
                 result.exitCode != 0 -> {
@@ -7341,6 +7371,18 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget =
             if (preserveReconnectTarget || staleChannelSymptom || coalescedCancel) target else null
         refreshReconnectAvailability()
+        // Issue #1328 (S5): when this failure is a rung of the auto-reconnect ladder
+        // (the [scheduleAutoReconnectBody] loop is the active [autoReconnectJob]), do
+        // NOT terminalize here. The loop + the controller's SINGLE reconnect counter own
+        // the advance-vs-exhaust decision: a retryable rung advances the one ladder
+        // (honest drop), and the ONLY honest Unreachable surfaces when the reducer's
+        // budget genuinely exhausts — or when the loop classifies a non-retryable
+        // failure. Terminalizing here was the premature "controller Unreachable on rung
+        // 1" that the deleted projection over-exhaust guard papered over. A single-shot
+        // connect (no active ladder) still terminalizes in lockstep, as before.
+        if (autoReconnectJob?.isActive == true) {
+            return
+        }
         setConnectionState(ConnectionState.Unreachable(message))
         // Issue #1185 (two-holder safety net): drive the reveal machine DIRECTLY
         // to a terminal error for THIS exact target instead of relying solely on
@@ -8754,6 +8796,11 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = null
         refreshReconnectAvailability()
         val delays = autoReconnectDelaysMs.ifEmpty { listOf(0L) }
+        // Issue #1328 (S5): install the SINGLE reconnect ladder into the controller —
+        // it OWNS the attempt count, the per-attempt backoff, and the exhaustion
+        // decision. This effect body only TIMES the backoff and dials; it reads the
+        // attempt/delay off the controller and feeds honest drops, never a parallel count.
+        connectionManager.setReconnectLadder(delays)
         recordAutoReconnectDecision(
             decision = "scheduled",
             target = target,
@@ -8768,20 +8815,37 @@ public class TmuxSessionViewModel @Inject constructor(
         // the death cascade; attach the safety-net handler so an unexpected
         // throw mid-ladder degrades to a recorded non-fatal instead of crashing.
         autoReconnectJob = viewModelScope.launch(bridgeExceptionHandler) {
-            for ((index, delayMs) in delays.withIndex()) {
+            // Issue #1328 (S5): drive the controller into the numbered reconnect ladder
+            // (attempt 1). From here the controller's `Reconnecting.attempt` is the SOLE
+            // counter; the loop reads attempt/backoff off it and stops when the reducer
+            // decides exhaustion (→ Unreachable) — no VM-side `index`/`delays.size` count.
+            connectionManager.enterReconnectLadder(
+                controllerHostKey(target),
+                controllerSessionId(target),
+            )
+            while (true) {
+                val recon = connectionManager.state as? CoreConnectionState.Reconnecting ?: break
+                val attemptNo = recon.attempt
+                val maxAttempts = recon.maxAttempts
+                val delayMs = recon.retryDelayMs
                 val generation = nextConnectGeneration()
                 latestConnectIntent = ConnectIntent(
                     target = target,
                     trigger = trigger,
                     generation = generation,
                 )
+                // Carry the human reason onto the inline payload (the displayed attempt/
+                // maxAttempts/retryDelayMs are projected from the CONTROLLER's single
+                // counter — `attemptNo`/`maxAttempts`/`delayMs` here MIRROR it, they do
+                // not count a parallel ladder). driveControllerIntent's Reconnecting
+                // mirror is idempotent (#1328) so this never advances the counter.
                 setConnectionState(
                     ConnectionState.Reconnecting(
                         host = target.host,
                         port = target.port,
                         user = target.user,
-                        attempt = index + 1,
-                        maxAttempts = delays.size,
+                        attempt = attemptNo,
+                        maxAttempts = maxAttempts,
                         retryDelayMs = delayMs,
                         reason = reason,
                     ),
@@ -8789,8 +8853,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 DiagnosticEvents.record(
                     "connection",
                     "reconnect_start",
-                    "attempt" to (index + 1),
-                    "maxAttempts" to delays.size,
+                    "attempt" to attemptNo,
+                    "maxAttempts" to maxAttempts,
                     "retryDelayMs" to delayMs,
                     "hostId" to target.hostId,
                     "host" to target.host,
@@ -8811,8 +8875,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     outcome = "scheduled",
                     cause = "auto_reconnect_loop",
                     trigger = trigger.logValue,
-                    "attempt" to (index + 1),
-                    "maxAttempts" to delays.size,
+                    "attempt" to attemptNo,
+                    "maxAttempts" to maxAttempts,
                     "retryDelayMs" to delayMs,
                     "hostId" to target.hostId,
                     "generation" to generation,
@@ -8825,8 +8889,8 @@ public class TmuxSessionViewModel @Inject constructor(
                         trigger = trigger,
                         reason = reason,
                         cause = "app_background_after_delay",
-                        "attempt" to (index + 1),
-                        "maxAttempts" to delays.size,
+                        "attempt" to attemptNo,
+                        "maxAttempts" to maxAttempts,
                     )
                     return@launch
                 }
@@ -8872,8 +8936,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     cause = "auto_reconnect_loop",
                     trigger = trigger.logValue,
                     "attempt" to attempt,
-                    "retryAttempt" to (index + 1),
-                    "maxAttempts" to delays.size,
+                    "retryAttempt" to attemptNo,
+                    "maxAttempts" to maxAttempts,
                     "hostId" to target.hostId,
                     "generation" to generation,
                     "previousClientPresent" to (clientRef != null),
@@ -8900,10 +8964,14 @@ public class TmuxSessionViewModel @Inject constructor(
                         ISSUE_145_RECONNECT_TAG,
                         "tmux-auto-reconnect-abort reason=non-retryable " +
                             "cause=${failureCause?.javaClass?.simpleName} " +
-                            "attempt=${index + 1} " + targetLogFields(target),
+                            "attempt=$attemptNo " + targetLogFields(target),
                     )
                     connectingTarget = target
                     refreshReconnectAvailability()
+                    // Issue #1328 (S5): honest give-up — the controller reducer decides
+                    // Unreachable (NOT the VM forcing it). setConnectionState then carries
+                    // the curated message onto the inline Failed payload the band renders.
+                    connectionManager.escalateUnreachable()
                     setConnectionState(
                         ConnectionState.Unreachable(
                             "$reason Auto reconnect stopped: ${nonRetryableReason(failureCause)}. " +
@@ -8917,36 +8985,50 @@ public class TmuxSessionViewModel @Inject constructor(
                         reason = reason,
                         cause = "non_retryable_connect_failure",
                         "failureClass" to failureCause?.javaClass?.simpleName,
-                        "attempt" to (index + 1),
-                        "maxAttempts" to delays.size,
+                        "attempt" to attemptNo,
+                        "maxAttempts" to maxAttempts,
                     )
                     autoReconnectJob = null
                     return@launch
                 }
+                // Issue #1328 (S5): runConnect itself may have terminalized the controller
+                // with a SPECIFIC honest error (session ended / tmux server restarted →
+                // Unreachable). That is not a ladder rung — stop and keep that message.
+                if (connectionManager.state is CoreConnectionState.Unreachable) break
+                // A retryable rung failed — report it. The controller reducer advances its
+                // SINGLE churn-surviving counter (re-asserting Reconnecting at the next
+                // attempt even from the transient Reattaching/Live the failed dial left) or,
+                // at the ladder budget, decides exhaustion itself → Unreachable and the loop
+                // exits on the next read.
+                connectionManager.reconnectRungFailed()
             }
+            // Issue #1328 (S5): the loop exits when the controller left the numbered
+            // ladder. If the reducer EXHAUSTED it (→ Unreachable) and no specific terminal
+            // message was already set, surface the clear, unified "Disconnected from
+            // <user>@<host>:<port>. Tap Reconnect to retry." band (#1098/#145) — never the
+            // jargon-y "Auto reconnect failed after N attempts". A specific terminal error
+            // (session ended / server restarted, inline already Failed) is preserved, and a
+            // concurrent real-feedback recovery back to Live paints no spurious band.
             connectingTarget = target
             refreshReconnectAvailability()
-            // Issue #1098 item 3 / #145: once the bounded auto-reconnect ladder
-            // genuinely EXHAUSTS against an unreachable host, surface the CLEAR,
-            // unified "Disconnected from <user>@<host>:<port>. Tap Reconnect to retry."
-            // band — never the jargon-y, self-contradictory "Transport EOF …;
-            // reconnecting. Auto reconnect failed after N attempts." The cause is
-            // captured in the diagnostics below; the user sees a calm, honest,
-            // tappable disconnect state instead of a frozen-but-live screen.
-            setConnectionState(
-                ConnectionState.Unreachable(
-                    "Disconnected from ${target.user}@${target.host}:${target.port}. " +
-                        "Tap Reconnect to retry.",
-                ),
-            )
-            recordAutoReconnectDecision(
-                decision = "exhausted",
-                target = target,
-                trigger = trigger,
-                reason = reason,
-                cause = "max_attempts",
-                "maxAttempts" to delays.size,
-            )
+            if (connectionManager.state is CoreConnectionState.Unreachable &&
+                inlineConnectionStatus !is ConnectionStatus.Failed
+            ) {
+                setConnectionState(
+                    ConnectionState.Unreachable(
+                        "Disconnected from ${target.user}@${target.host}:${target.port}. " +
+                            "Tap Reconnect to retry.",
+                    ),
+                )
+                recordAutoReconnectDecision(
+                    decision = "exhausted",
+                    target = target,
+                    trigger = trigger,
+                    reason = reason,
+                    cause = "max_attempts",
+                    "maxAttempts" to delays.size,
+                )
+            }
             autoReconnectJob = null
         }
     }

@@ -363,7 +363,22 @@ fun TerminalSurface(
                 { policy -> view.prepareForRawTerminalInput(policy.toTerminalViewPolicy()) }
             },
         )
-        onDispose { state.setSmartTextStagingBridge(null) }
+        // Issue #1443: bind the DIAGNOSTIC pixel-truth sampler to the live View's
+        // bounded PixelCopy. The tmux watchdog's suspicion tick calls
+        // state.probePixelBlackWhileModelHasContent() (rate-bounded, off the render
+        // path) which invokes this to detect a genuine pixel/GPU-layer black the
+        // MODEL-derived detectors cannot see. Diagnostics only — no heal is wired.
+        state.setSurfacePixelSampler(
+            if (view == null) {
+                null
+            } else {
+                TerminalSurfaceState.SurfacePixelSampler { view.sampleSurfaceNearUniformBlack() }
+            },
+        )
+        onDispose {
+            state.setSmartTextStagingBridge(null)
+            state.setSurfacePixelSampler(null)
+        }
     }
 
     LaunchedEffect(state, terminalView, coalescedRenderRequests) {

@@ -209,6 +209,24 @@ internal const val BLACK_FRAME_CLASS_PARTIAL_BLANK: String = "partial_blank"
 internal const val BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT: String = "surface_black_model_intact"
 
 /**
+ * Issue #1443 — the pixel-truth class. Distinct from [BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT]:
+ * that #1192 class is still MODEL-derived (the paint-confirmation seam reports
+ * `paintedEmulatorContent` from `hasNonBlankVisibleRow()`, an emulator-model check with NO
+ * pixel readback — the explicit #1296 non-goal). A GENUINE pixel/GPU-layer black — the
+ * composited surface is black while the model still carries the frame (a lost HWUI hardware
+ * layer, a RenderNode that stopped compositing, a Compose layer that dropped the child View's
+ * buffer) — reads HEALTHY on every model-derived detector, so it is un-detected, un-healed,
+ * AND un-fingerprinted (spike #874, the last code-confirmed blind spot). This class is
+ * emitted ONLY when a bounded, rate-limited `PixelCopy` sample
+ * ([TerminalSurfaceState.probePixelBlackWhileModelHasContent], off the render path) confirms
+ * the surface pixels are (near-)uniformly black while the model carries content. DIAGNOSTICS
+ * ONLY (maintainer decision 2026-07-10): it wires NO heal — if it fires in the wild the heal
+ * decision is deferred to #1353 with the captured data; if it never fires it exonerates
+ * pixel-black. Kept a SEPARATE class so the two are attributable and never conflated.
+ */
+internal const val BLACK_FRAME_CLASS_PIXEL_BLACK_MODEL_HAS_CONTENT: String = "pixel_black_model_has_content"
+
+/**
  * Issue #1294 — a watchdog heal tick whose authoritative `capture-pane` could NOT confirm the
  * render (a [HealOutcome.Unverified] outcome: timeout / error / empty-on-live-transport /
  * mutex-starved). Carries an `unverifiedStreak` field (the run of consecutive such ticks) so a

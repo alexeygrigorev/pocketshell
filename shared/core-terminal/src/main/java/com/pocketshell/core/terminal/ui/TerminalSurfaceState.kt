@@ -851,6 +851,146 @@ class TerminalSurfaceState(
     fun recordSurfaceFramePaintedForTest(paintedEmulatorContent: Boolean, atMs: Long) =
         onSurfaceFramePainted(paintedEmulatorContent, atMs)
 
+    // -------------------------------------------------------------------------
+    // Issue #1443 — PIXEL-TRUTH surface-black probe (the last code-confirmed
+    // black-screen blind spot).
+    //
+    // Every surface-black signal above ([surfaceIsBlackWhileModelHasContent], fed
+    // by the #1192 paint-confirmation seam) is derived from the emulator MODEL:
+    // `TerminalView.onDraw` reports `paintedEmulatorContent = getWidth() > 0 &&
+    // getHeight() > 0 && hasNonBlankVisibleRow()` — a MODEL check with NO pixel
+    // readback (the explicit #1296 non-goal). So a GENUINE pixel/GPU-layer black —
+    // the composited surface is black while the model still carries the frame (a
+    // lost HWUI hardware layer, a RenderNode that stopped compositing, a Compose
+    // layer that dropped the child View's buffer) — is INVISIBLE: `onDraw` runs,
+    // the model has content, so a CONTENT paint is recorded,
+    // [surfaceIsBlackWhileModelHasContent] returns false, the model-vs-tmux oracle
+    // reads healthy, and NONE of the black-frame classes fire. It is un-detected,
+    // un-healed, AND un-fingerprinted.
+    //
+    // This is a DIAGNOSTIC-ONLY probe (maintainer decision 2026-07-10, #1443):
+    //  - Fingerprint, do NOT heal. It records an OBSERVATION so the occurrence
+    //    stops being invisible; it wires NO new heal/recovery/reattach trigger (a
+    //    13th mechanism is exactly the D28 patches-on-patches condition the #1353
+    //    consolidation epic exists to end). If it ever fires in the wild, the HEAL
+    //    decision is deferred to #1353 with that data.
+    //  - Off the render path, rate-bounded. [probePixelBlackWhileModelHasContent]
+    //    is invoked ONLY from the app's stale-render watchdog suspicion tick when
+    //    the MODEL reports content-present — NEVER from `onDraw`/the per-frame
+    //    render loop — and it internally rate-limits the actual pixel sample to at
+    //    most one per [PIXEL_PROBE_MIN_INTERVAL_MS]. That is why it does NOT
+    //    reinstate the per-frame PixelCopy cost #1296 rejected.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Issue #1443 — the surface PIXEL sampler seam. Production ([TerminalSurface])
+     * binds this to a bounded `PixelCopy` sample of the live
+     * [com.termux.view.TerminalView]'s window surface (see
+     * [com.termux.view.TerminalView.sampleSurfaceNearUniformBlack]); a unit test
+     * injects a synthetic sample (the #780 model — the CI JVM cannot run a real GPU
+     * `PixelCopy`). [sampleNearUniformBlack] returns `true` when the sampled surface
+     * pixels are (near-)uniformly the background colour, `false` when they carry
+     * visible content, and `null` when the surface could not be sampled (no bound
+     * view, 0-size, PixelCopy error/timeout) — a `null` is "no evidence" and is
+     * never fingerprinted.
+     */
+    fun interface SurfacePixelSampler {
+        fun sampleNearUniformBlack(): Boolean?
+    }
+
+    @Volatile
+    private var pixelSampler: SurfacePixelSampler? = null
+
+    /**
+     * Issue #1443 — install/replace the surface pixel sampler. [TerminalSurface]
+     * binds the production `PixelCopy`-backed sampler while a [TerminalView] is
+     * attached and clears it (`null`) on dispose (the probe then no-ops). Tests
+     * inject a synthetic sampler.
+     */
+    fun setSurfacePixelSampler(sampler: SurfacePixelSampler?) {
+        pixelSampler = sampler
+    }
+
+    @Volatile
+    private var lastPixelProbeAtMs: Long = 0L
+
+    @Volatile
+    private var pixelBlackModelHasContentObservedCount: Int = 0
+
+    /**
+     * Issue #1443 — the pixel-truth probe. DIAGNOSTICS ONLY: returns `true` (and
+     * increments [pixelBlackModelHasContentObservedCountForTest]) exactly when a
+     * suspicion-triggered pixel sample proves the surface is (near-)uniformly black
+     * WHILE the model carries content — the one black-screen class the model-derived
+     * detectors are blind to by construction. It wires NO heal; the caller only
+     * fingerprints the observation.
+     *
+     * Invoked ONLY from the app's stale-render watchdog suspicion path (never from
+     * `onDraw`/the render loop), and internally RATE-BOUNDED to at most one real
+     * pixel sample per [PIXEL_PROBE_MIN_INTERVAL_MS] so it can never become a
+     * hot-path cost even if the caller ticks faster.
+     *
+     * `suspend` + off-main by construction: the watchdog runs on the ViewModel's
+     * `Dispatchers.Main.immediate` scope, and the underlying `PixelCopy` readback
+     * blocks its calling thread on an async callback (`latch.await`). Running that
+     * on the UI thread would stall the render path for up to the PixelCopy timeout —
+     * WORST case exactly during a wedged/black surface, making the freeze worse. So
+     * the sample is dispatched to [pixelProbeDispatcher] ([Dispatchers.IO]); the UI
+     * thread is never blocked. A diagnostic must never destabilise rendering (#1443).
+     *
+     * Returns `false` (no observation) when: the model carries no content (nothing
+     * could be lost — the probe requires content-present, so it is never vacuously
+     * true); the rate-limit window has not yet elapsed; no sampler is bound; the
+     * sample could not be taken (`null`); or the sampled pixels carry visible
+     * content (the healthy case — proving the probe is not just always-firing).
+     *
+     * @param nowMs a monotonic `elapsedRealtime()` stamp supplied by the caller
+     *   (parameterised so a JVM test can drive the rate-limit deterministically —
+     *   the #780 synthetic model).
+     */
+    suspend fun probePixelBlackWhileModelHasContent(nowMs: Long): Boolean {
+        // Content-present gate: a black surface over a model with NO content is not
+        // this class (it is the ordinary blank pane the model detectors already see).
+        if (renderedNonBlankCharCount() <= 0) return false
+        // Rate bound: at most one real pixel sample per window, so a fast-ticking
+        // caller can never turn this into a hot-path PixelCopy cost (#1296/#1164).
+        // Checked BEFORE dispatch so a rate-limited tick spawns no off-main work.
+        if (lastPixelProbeAtMs != 0L && nowMs - lastPixelProbeAtMs < PIXEL_PROBE_MIN_INTERVAL_MS) {
+            return false
+        }
+        lastPixelProbeAtMs = nowMs
+        val sampler = pixelSampler ?: return false
+        // The PixelCopy readback blocks its thread on the async result — NEVER run it
+        // on the caller's (UI) thread; move it to the IO dispatcher (#1443).
+        val nearUniformBlack = withContext(pixelProbeDispatcher) {
+            sampler.sampleNearUniformBlack()
+        } ?: return false
+        if (!nearUniformBlack) return false
+        pixelBlackModelHasContentObservedCount += 1
+        return true
+    }
+
+    @Volatile
+    private var pixelProbeDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    /**
+     * Test-only (#1443): override the dispatcher the pixel sample runs on so a JVM
+     * test can assert the sample is dispatched OFF the caller/UI thread. Production
+     * always uses [Dispatchers.IO].
+     */
+    fun setPixelProbeDispatcherForTest(dispatcher: CoroutineDispatcher) {
+        pixelProbeDispatcher = dispatcher
+    }
+
+    /**
+     * Test-only (#1443): how many pixel-black-while-model-has-content observations
+     * have fired. `public` (not `internal`) so the app-module tmux tests — a
+     * different Gradle module — can assert the fingerprint, mirroring
+     * [surfaceRepaintRequestCountForTest].
+     */
+    public fun pixelBlackModelHasContentObservedCountForTest(): Int =
+        pixelBlackModelHasContentObservedCount
+
     /**
      * Issue #989 — the NON-DESTRUCTIVE-swap guard for the manual Redraw / attach
      * reseed. The seed path repaints `capture-pane` into the live buffer with a
@@ -1383,6 +1523,18 @@ class TerminalSurfaceState(
          * pass, but a user who pauses for half a second sees fresh matches.
          */
         private const val MATCH_DEBOUNCE_MS = 250L
+
+        /**
+         * Issue #1443 — minimum spacing between real surface PIXEL samples in
+         * [probePixelBlackWhileModelHasContent]. The probe is already invoked only
+         * from the app stale-render watchdog's per-tick suspicion path (4s–30s
+         * cadence), so at the normal cadence one sample lands per watchdog cycle;
+         * this bound is a hard defensive ceiling so even a pathologically fast
+         * caller cannot turn the bounded `PixelCopy` into a hot-path cost (the
+         * #1296-rejected per-frame readback, #1164 battery). 2s < the 4s hot
+         * watchdog tick, so a legitimate per-cycle probe is never suppressed.
+         */
+        private const val PIXEL_PROBE_MIN_INTERVAL_MS = 2_000L
 
         /**
          * Issue #1300: the heal capture is issued with `capture-pane -e` (`TmuxClient.kt`),

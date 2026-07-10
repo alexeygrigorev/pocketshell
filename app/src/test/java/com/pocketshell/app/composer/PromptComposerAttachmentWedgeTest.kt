@@ -114,6 +114,7 @@ class PromptComposerAttachmentWedgeTest {
     }
 
     private fun newSidecarStore(
+        ioDispatcher: TestDispatcher,
         context: Context = ApplicationProvider.getApplicationContext(),
     ): OutboundAttachmentSidecarStore {
         context.getSharedPreferences(OutboundAttachmentSidecarStore.PREFS_NAME, Context.MODE_PRIVATE)
@@ -125,6 +126,12 @@ class PromptComposerAttachmentWedgeTest {
         return OutboundAttachmentSidecarStore(context).also { store ->
             store.idGenerator = { "sidecar-${++nextId}" }
             store.clock = { nextId.toLong() }
+            // Issue #1461: confine the store's file/prefs IO hop to the same
+            // `testScheduler` the VM's sampler/outbound-queue dispatchers use, so
+            // no coroutine on the send path resumes on a real IO worker and then
+            // dispatches back onto the unconfined test-Main — the thread-race that
+            // flaked the `_shellPane` variant.
+            store.ioDispatcher = ioDispatcher
         }
     }
 
@@ -222,9 +229,10 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun attachmentDropMidUploadDoesNotWedgeSubsequentPlainSend_shellPane() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
@@ -244,9 +252,10 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun attachmentDropMidUploadDoesNotWedgeSubsequentPlainSend_agentPane() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
@@ -268,9 +277,10 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun attachmentUploadTimeoutDoesNotWedgeSubsequentPlainSend() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
@@ -293,9 +303,10 @@ class PromptComposerAttachmentWedgeTest {
         val queue = object : InMemoryOutboundQueueStore() {
             override fun claim(id: String): OutboundItem? = null
         }
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
@@ -317,9 +328,10 @@ class PromptComposerAttachmentWedgeTest {
         val queue = object : InMemoryOutboundQueueStore() {
             override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
         }
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
@@ -339,9 +351,10 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun successfulAttachmentSendThenPlainSendBothReachSession() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(ioDispatcher = dispatcher)
         val vm = newVm(
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            samplerDispatcher = dispatcher,
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )

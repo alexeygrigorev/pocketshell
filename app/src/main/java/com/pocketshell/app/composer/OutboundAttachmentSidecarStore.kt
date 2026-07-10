@@ -9,6 +9,7 @@ import com.pocketshell.app.prefs.DeferredPrefs
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -42,29 +43,40 @@ class OutboundAttachmentSidecarStore @Inject constructor(
     internal var idGenerator: () -> String = { UUID.randomUUID().toString() }
     internal var clock: () -> Long = { System.currentTimeMillis() }
 
+    // Issue #1461: the IO dispatcher these blocking file/prefs methods hop onto,
+    // injectable so a `runTest` unit test can confine the hop to its
+    // `testScheduler`. Without this seam the `withContext(Dispatchers.IO)` below
+    // resumes its caller — a `viewModelScope.launch {}` on the test's unconfined
+    // Main — from a REAL IO worker thread, and that background→unconfined-Main
+    // resume calls `UnconfinedTestDispatcher.dispatch`, which throws
+    // ("can only be used by the yield function"), a coroutines-test thread-race
+    // that flaked `PromptComposerAttachmentWedgeTest`. Defaults to
+    // `Dispatchers.IO`, so production behaviour is unchanged.
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
     suspend fun stage(
         outboundItemId: String,
         uris: List<Uri>,
         attachmentIndices: List<Int> = emptyList(),
-    ): List<LocalAttachmentSidecarRef> = withContext(Dispatchers.IO) {
+    ): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
         if (outboundItemId.isBlank() || uris.isEmpty()) return@withContext emptyList()
         uris.mapIndexedNotNull { index, uri ->
             stageOne(outboundItemId, uri, attachmentIndices.getOrNull(index))
         }
     }
 
-    suspend fun refsFor(outboundItemId: String): List<LocalAttachmentSidecarRef> = withContext(Dispatchers.IO) {
+    suspend fun refsFor(outboundItemId: String): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
         refsForBlocking(outboundItemId)
     }
 
-    suspend fun removeOutboundItem(outboundItemId: String) = withContext(Dispatchers.IO) {
+    suspend fun removeOutboundItem(outboundItemId: String) = withContext(ioDispatcher) {
         refsForBlocking(outboundItemId).forEach { ref -> runCatching { File(ref.localPath).delete() } }
         val remaining = allRefsBlocking().filterNot { it.outboundItemId == outboundItemId }
         persistAll(remaining)
         runCatching { File(rootDir(), outboundItemId).deleteRecursively() }
     }
 
-    suspend fun remove(refId: String) = withContext(Dispatchers.IO) {
+    suspend fun remove(refId: String) = withContext(ioDispatcher) {
         val refs = allRefsBlocking()
         refs.firstOrNull { it.id == refId }?.let { ref ->
             runCatching { File(ref.localPath).delete() }
@@ -72,7 +84,7 @@ class OutboundAttachmentSidecarStore @Inject constructor(
         persistAll(refs.filterNot { it.id == refId })
     }
 
-    suspend fun reconcile() = withContext(Dispatchers.IO) {
+    suspend fun reconcile() = withContext(ioDispatcher) {
         val liveRefs = allRefsBlocking().filter { File(it.localPath).exists() }
         persistAll(liveRefs)
         val livePaths = liveRefs.mapTo(mutableSetOf()) { File(it.localPath).absolutePath }

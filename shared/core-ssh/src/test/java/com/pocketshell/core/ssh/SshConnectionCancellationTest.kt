@@ -1,13 +1,15 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -41,13 +43,24 @@ class SshConnectionCancellationTest {
         assertTrue(connector.client.closed)
     }
 
+    // Runs on REAL dispatchers + a REAL wall-clock join bound (runBlocking),
+    // NOT runTest. #1474: the old form wrapped `job.join()` — which parks on the
+    // real Dispatchers.IO connect worker — in a `withTimeout(1_000L)` whose delay
+    // ran on runTest's VIRTUAL clock. runTest auto-advances that virtual clock
+    // when the test dispatcher is idle, racing it against the real IO thread
+    // resuming the join. On a busy CI runner the IO threads starve, the virtual
+    // clock advances to the deadline first, and the timeout fires
+    // (`TimeoutCancellationException`) even though the cancel actually returned
+    // promptly — a load-sensitive false failure. Real dispatchers remove the
+    // virtual-clock race entirely; the property below is proven by ordering, not
+    // by a tight timing bound.
     @Test
-    fun `cancel during handshake does not wait for a blocking disconnect cleanup`() = runTest {
+    fun `cancel during handshake does not wait for a blocking disconnect cleanup`() = runBlocking(Dispatchers.Default) {
         val connector = FakeConnector(
             connectMode = ConnectMode.HangUntilCancelled,
             blockDisconnect = true,
         )
-        val job = launch {
+        val job = launch(Dispatchers.IO) {
             SshConnection.connect(
                 host = "example.test",
                 port = 22,
@@ -60,9 +73,35 @@ class SshConnectionCancellationTest {
         connector.connectEntered.await()
         job.cancel()
 
-        withTimeout(1_000L) {
+        // The blocking disconnect cleanup is held on `allowDisconnectToFinish`,
+        // which this test does NOT release until the end. If cancel routed that
+        // blocking cleanup ONTO the cancellation path (the regression), `job.join()`
+        // would block here until FakeClient's 30s latch timeout. The load-bearing
+        // property is that the cancel returns promptly WITHOUT waiting for the
+        // cleanup — so join completes long before the latch is released. The 10s
+        // bound is a generous safety net: the correct path resumes in well under a
+        // second even under heavy load, while a regressed path blocks for ~30s, so
+        // the two regimes are ~30x apart and this is robust to a busy runner.
+        val joined = withTimeoutOrNull(10_000L) {
             job.join()
-        }
+            true
+        } ?: false
+
+        assertTrue(
+            "cancel during handshake must not block on the blocking disconnect cleanup",
+            joined,
+        )
+        // Deterministic ordering proof of "did not wait for the cleanup": the
+        // cancel path (job.join) returned while the blocking disconnect is STILL
+        // blocked on the un-released latch, so the disconnect has NOT finished
+        // (disconnectCount is still 0). If cancel had waited for the cleanup, the
+        // only way join could have returned is the latch being released — which
+        // has not happened.
+        assertEquals(
+            "blocking disconnect cleanup must not have completed on the cancel path",
+            0,
+            connector.client.disconnectCount,
+        )
         assertTrue(
             "disconnect cleanup should be running off the cancellation path",
             connector.client.disconnectEntered.await(5, TimeUnit.SECONDS),

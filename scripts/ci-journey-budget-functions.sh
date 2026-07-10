@@ -65,16 +65,30 @@ run_bounded() {
   to_pid=$!
 
   exec {rfd}<"$fifo"
+  # Issue #1458: tee every streamed line to a DURABLE capture file so the
+  # workflow "Classify emulator-journey result" step can count the
+  # `Failed to start Emulator console` storm (a CPU/RAM-starved swiftshader
+  # symptom, ~100×/shard) AFTER this emulator step has ended and its stdout is
+  # gone. Live streaming (the `printf` to stdout) is UNCHANGED. The fd is opened
+  # in append mode ONCE per class attempt (cheap) and only when
+  # JOURNEY_CONSOLE_LOG is set + openable, so the budget self-test and any
+  # non-CI caller that leaves it unset behave exactly as before.
+  local cfd=-1
+  if [[ -n "${JOURNEY_CONSOLE_LOG:-}" ]]; then
+    exec {cfd}>>"$JOURNEY_CONSOLE_LOG" || cfd=-1
+  fi
   read_rc=0
   while :; do
     if IFS= read -r -t "$no_output" -u "$rfd" line; then
       printf '%s\n' "$line"
+      (( cfd >= 0 )) && printf '%s\n' "$line" >&"$cfd"
     else
       read_rc=$?
       break
     fi
   done
   exec {rfd}<&-
+  (( cfd >= 0 )) && exec {cfd}>&-
 
   if (( read_rc > 128 )); then
     echo "JOURNEY_NO_OUTPUT_WATCHDOG: no output for ${no_output}s — hard-killing wedged connectedDebugAndroidTest (issue #1056)" >&2

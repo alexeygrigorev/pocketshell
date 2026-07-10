@@ -99,6 +99,33 @@ class ConnectionController(
      */
     private var graceDeadlineMs: Long? = null
 
+    /**
+     * Issue #1328 (S5): the reconnect backoff ladder — the SINGLE source of the
+     * attempt budget ([effectiveMaxAttempts]) and per-attempt backoff
+     * ([retryDelayForAttempt]). Injected by the VM ([ConnectionManager.setReconnectLadder])
+     * from its `autoReconnectDelaysMs`, so the controller's ladder and the VM effect's
+     * backoff timing are ONE ladder, not two. Empty (the default until the VM sets it,
+     * and in the many controller unit tests) means "flat: [maxReconnectAttempts]
+     * attempts, 0 ms delay" — byte-identical to the pre-S5 counter.
+     *
+     * A plain `var` mutated only from the confining dispatcher (via [setReconnectLadder]),
+     * same single-confining-dispatcher contract as [graceDeadlineMs].
+     */
+    private var reconnectLadderMs: List<Long> = emptyList()
+
+    /**
+     * Issue #1328 (S5): the SINGLE reconnect-attempt counter. It lives HERE, in the
+     * controller, decoupled from the transient [ConnectionState] — because the VM's
+     * re-dial IO walks the state through Connecting/Attaching/Live on every rung
+     * (even one that then fails an attach), which would otherwise reset an in-state
+     * counter. 0 means "no ladder in flight"; a ladder arms it to 1
+     * ([ConnectionEvent.ReconnectLadderEntered] / a heal-failed drop) and each failed
+     * rung ([ConnectionEvent.ReconnectFailed]) advances it until the budget exhausts.
+     * A plain `var` mutated only from the confining dispatcher (same contract as
+     * [graceDeadlineMs]).
+     */
+    private var reconnectAttempt: Int = 0
+
     /** Current target id — the drop-by-id reference for events and seeds. */
     private val currentTargetId: SessionId?
         get() = _state.value.targetIdOrNull()
@@ -142,6 +169,51 @@ class ConnectionController(
         _seeds.tryEmit(seed)
     }
 
+    /**
+     * Issue #1328 (S5): install the reconnect backoff ladder (from the VM's
+     * `autoReconnectDelaysMs`). The ladder size is the attempt budget and each
+     * entry the per-attempt backoff, so the controller's SINGLE counter/exhaustion
+     * decision uses the exact same ladder the VM effect times its dials against.
+     *
+     * A confined mutator (shares the single-dispatcher contract with [submit]).
+     */
+    fun setReconnectLadder(delaysMs: List<Long>) = confinement.guarded("setReconnectLadder") {
+        reconnectLadderMs = delaysMs
+        // If a reconnect is already in flight when the ladder is (re)installed — the
+        // proactive network-handoff / passive-drop paths enter [ConnectionState.Reconnecting]
+        // BEFORE the VM effect installs its `autoReconnectDelaysMs` — re-stamp the current
+        // attempt's maxAttempts/retryDelayMs from the new ladder so the SINGLE displayed
+        // ladder reflects the real backoff, not the stale flat default (issue #1328).
+        val current = _state.value
+        if (current is ConnectionState.Reconnecting) {
+            _state.value = reconnectingAt(current.host, current.targetId, current.attempt)
+        }
+    }
+
+    /** The attempt budget for the current ladder — the ONE exhaustion boundary. */
+    private val effectiveMaxAttempts: Int
+        get() = reconnectLadderMs.size.takeIf { it > 0 } ?: maxReconnectAttempts
+
+    /** Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step. */
+    private fun retryDelayForAttempt(attempt: Int): Long {
+        if (reconnectLadderMs.isEmpty()) return 0L
+        val index = (attempt - 1).coerceIn(0, reconnectLadderMs.lastIndex)
+        return reconnectLadderMs[index]
+    }
+
+    /** Build a [ConnectionState.Reconnecting] for [attempt] from the single ladder,
+     *  syncing the churn-surviving [reconnectAttempt] counter to it. */
+    private fun reconnectingAt(host: HostKey, target: SessionId, attempt: Int): ConnectionState.Reconnecting {
+        reconnectAttempt = attempt
+        return ConnectionState.Reconnecting(
+            host = host,
+            targetId = target,
+            attempt = attempt,
+            maxAttempts = effectiveMaxAttempts,
+            retryDelayMs = retryDelayForAttempt(attempt),
+        )
+    }
+
     private fun reduce(current: ConnectionState, event: ConnectionEvent): ConnectionState =
         when (event) {
             is ConnectionEvent.Enter -> onEnter(current, event)
@@ -155,6 +227,9 @@ class ConnectionController(
             ConnectionEvent.NetworkRestored -> current
             is ConnectionEvent.TargetGone -> onTargetGone(current, event)
             is ConnectionEvent.SeedLanded -> onSeedLanded(current, event)
+            ConnectionEvent.ReconnectLadderEntered -> onReconnectLadderEntered(current)
+            ConnectionEvent.ReconnectFailed -> onReconnectFailed(current)
+            ConnectionEvent.ReconnectGaveUp -> onReconnectGaveUp(current)
         }
 
     /**
@@ -164,8 +239,9 @@ class ConnectionController(
      */
     private fun onEnter(current: ConnectionState, event: ConnectionEvent.Enter): ConnectionState {
         // A genuine open clears any prior grace window — we are foregrounded and
-        // re-targeting.
+        // re-targeting. It also disarms any stale reconnect counter (#1328).
         graceDeadlineMs = null
+        reconnectAttempt = 0
         return if (transport.isWarm(event.host)) {
             ConnectionState.Attaching(event.host, event.targetId)
         } else {
@@ -182,6 +258,7 @@ class ConnectionController(
     private fun onSwitch(current: ConnectionState, event: ConnectionEvent.Switch): ConnectionState {
         val host = current.hostOrNull() ?: return current
         graceDeadlineMs = null
+        reconnectAttempt = 0
         return ConnectionState.Attaching(host, event.targetId)
     }
 
@@ -223,7 +300,7 @@ class ConnectionController(
         return if (withinGrace) {
             ConnectionState.Reattaching(current.host, current.targetId)
         } else {
-            ConnectionState.Reconnecting(current.host, current.targetId, attempt = 1)
+            reconnectingAt(current.host, current.targetId, attempt = 1)
         }
     }
 
@@ -246,17 +323,22 @@ class ConnectionController(
             -> ConnectionState.Reattaching(host, target)
 
             is ConnectionState.Reattaching ->
-                // The silent heal failed once; start the silent reconnect ladder.
-                ConnectionState.Reconnecting(host, target, attempt = 1)
+                // The silent heal failed once; start (or, if a re-dial churn briefly
+                // dropped an in-flight ladder back through Reattaching, RESUME at) the
+                // silent reconnect ladder. Preserving [reconnectAttempt] here keeps the
+                // SINGLE counter churn-safe (#1328).
+                reconnectingAt(host, target, attempt = if (reconnectAttempt > 0) reconnectAttempt else 1)
 
-            is ConnectionState.Reconnecting -> {
-                val nextAttempt = current.attempt + 1
-                if (nextAttempt > maxReconnectAttempts) {
-                    ConnectionState.Unreachable(host, target)
-                } else {
-                    ConnectionState.Reconnecting(host, target, attempt = nextAttempt)
-                }
-            }
+            is ConnectionState.Reconnecting ->
+                // Issue #1328 (S5): a raw transport drop while ALREADY in the numbered
+                // ladder does NOT advance the counter. The reconnect effect's re-dial IO
+                // legitimately closes/evicts the transport on every rung (force-fresh
+                // lease, poisoned-half-open evict), which flips the drop oracle — counting
+                // those incidental churn drops would exhaust the ladder before the rung's
+                // real dial even resolves (fatal on a 1-rung ladder). Advancement is owned
+                // SOLELY by [ConnectionEvent.ReconnectFailed], reported once per real rung
+                // failure by the effect. So hold the current attempt here (idempotent).
+                current
 
             // Backgrounded/Idle/Gone/Unreachable: a drop is irrelevant.
             else -> current
@@ -293,11 +375,85 @@ class ConnectionController(
         if (!event.validatedHandoff) return current
         return when (current) {
             is ConnectionState.Live ->
-                ConnectionState.Reconnecting(current.host, current.targetId, attempt = 1)
+                reconnectingAt(current.host, current.targetId, attempt = 1)
             // Connecting/Attaching/Reattaching/Reconnecting already have a
             // dial/heal in flight; Backgrounded/Idle/Gone/Unreachable have no live
             // channel to proactively replace. Suppress in all of them.
             else -> current
+        }
+    }
+
+    /**
+     * Issue #1328 (S5): the reconnect effect gave up early (a non-retryable failure
+     * or explicit abort). Surface the honest [ConnectionState.Unreachable] from any
+     * live-ish / recovering state. Idempotent on an already-terminal state, and a
+     * no-op with no live channel (Idle/Backgrounded/NetworkLossSuspended). This is
+     * NOT the exhaustion path — the reducer decides exhaustion itself in
+     * [onTransportDropped]; this is the VM's honest "stop retrying" signal.
+     */
+    private fun onReconnectGaveUp(current: ConnectionState): ConnectionState {
+        val host = current.hostOrNull() ?: return current
+        val target = current.targetIdOrNull() ?: return current
+        return when (current) {
+            is ConnectionState.Live,
+            is ConnectionState.Connecting,
+            is ConnectionState.Attaching,
+            is ConnectionState.Reattaching,
+            is ConnectionState.Reconnecting,
+            -> {
+                reconnectAttempt = 0
+                ConnectionState.Unreachable(host, target)
+            }
+            // Idle/Backgrounded/NetworkLossSuspended/Gone/Unreachable: nothing to fail.
+            else -> current
+        }
+    }
+
+    /**
+     * Issue #1328 (S5): the VM effect entered its numbered reconnect ladder. Arm the
+     * SINGLE counter at attempt 1 and move any live-ish / recovering state to
+     * [ConnectionState.Reconnecting] attempt 1. A no-op from Idle/Gone/Unreachable
+     * (there is no channel to reconnect).
+     */
+    private fun onReconnectLadderEntered(current: ConnectionState): ConnectionState {
+        val host = current.hostOrNull() ?: return current
+        val target = current.targetIdOrNull() ?: return current
+        return when (current) {
+            is ConnectionState.Idle,
+            is ConnectionState.Gone,
+            is ConnectionState.Unreachable,
+            -> current
+            else -> reconnectingAt(host, target, attempt = 1)
+        }
+    }
+
+    /**
+     * Issue #1328 (S5): one reconnect rung's real dial failed retryably. Advance the
+     * SINGLE churn-surviving counter and re-assert [ConnectionState.Reconnecting] at
+     * the new attempt — REGARDLESS of the transient state the failed dial churned to
+     * (Reattaching/Live/Attaching/Connecting) — or, once past the ladder budget,
+     * decide exhaustion here → [ConnectionState.Unreachable]. This is the ONLY place
+     * the VM effect advances the ladder; it never counts its own.
+     */
+    private fun onReconnectFailed(current: ConnectionState): ConnectionState {
+        val host = current.hostOrNull() ?: return current
+        val target = current.targetIdOrNull() ?: return current
+        return when (current) {
+            is ConnectionState.Idle,
+            is ConnectionState.Gone,
+            is ConnectionState.Unreachable,
+            is ConnectionState.Backgrounded,
+            is ConnectionState.NetworkLossSuspended,
+            -> current
+            else -> {
+                val nextAttempt = (if (reconnectAttempt > 0) reconnectAttempt else 1) + 1
+                if (nextAttempt > effectiveMaxAttempts) {
+                    reconnectAttempt = 0
+                    ConnectionState.Unreachable(host, target)
+                } else {
+                    reconnectingAt(host, target, attempt = nextAttempt)
+                }
+            }
         }
     }
 

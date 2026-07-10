@@ -51,11 +51,15 @@ class FailureReasonTest {
     }
 
     @Test
-    fun closedTransportPreflightDefaultsToRetryableUnreachable_1321Repro() {
-        // The #1321 leak: a `TmuxClientException: failed to preflight tmux has-session
-        // ... transport is closed`. It has none of the non-retryable signatures, so it
-        // classifies to the CALM, retryable Unreachable — the "Tap Reconnect" state,
-        // never a scary raw exception surfaced to the UI.
+    fun closedTransportClassifiesToRetryableUnreachable() {
+        // CLASSIFICATION ONLY: a `transport is closed` preflight error has none of the
+        // non-retryable signatures, so it classifies to the CALM, retryable Unreachable
+        // (never a scary raw exception). NOTE: this is a pure classifier assertion — the
+        // load-bearing #1321 BEHAVIOR (a beyond-grace reconnect preflight that hits a
+        // closed transport SILENTLY DIALS A FRESH TRANSPORT rather than surfacing
+        // Unreachable) is proven end-to-end by
+        // `TmuxSessionViewModelReconnectTest.beyondGraceReconnectPreflightClosedTransportRedialsFreshNotUnreachable`
+        // (issue #1328 S5), NOT here.
         val closedTransport = IOException("failed to preflight tmux has-session -t work: transport is closed")
         val reason = classifyFailure(closedTransport)
         assertEquals(FailureReason.Unreachable(retryable = true), reason)

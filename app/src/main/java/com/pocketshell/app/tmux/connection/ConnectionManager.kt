@@ -144,24 +144,74 @@ class ConnectionManager(
      * [observeSeedLanded] / driver-fed `TransportLive` feeds REMAIN (idempotent).
      */
     fun revealLive(host: HostKey, targetId: SessionId) {
+        // Issue #1328 (S5): a reveal is the authoritative "we ARE connected" moment. If a
+        // prior failed attempt for this target left the controller in a TERMINAL state
+        // (Unreachable/Gone), that state ABSORBS TransportLive/SeedLanded — so promoting
+        // would leave the controller wrongly Unreachable while the pane is live on screen
+        // (a stuck-Failed band the deleted projection over-exhaust guard used to mask).
+        // A successful reveal RESURRECTS it: re-Enter resets it onto the live path first.
+        val state = controller.state.value
+        if (state is ConnectionState.Unreachable || state is ConnectionState.Gone) {
+            controller.submit(ConnectionEvent.Enter(host, targetId))
+        }
         ensureTargeting(host, targetId)
         promoteToLive(host, targetId)
     }
 
     /**
-     * INTENT: the drop-escalation / beyond-grace silent reconnect ladder. Models the inline
-     * escalation as a transport drop from a live-ish state so the controller walks the same
-     * reconnect ladder.
+     * INTENT: ENTER the silent-recovery ladder (idempotently). Drives a live-ish
+     * controller into [ConnectionState.Reattaching] so the displayed status becomes the
+     * calm Reconnecting band, but does NOT advance the numbered attempt counter — issue
+     * #1328 (S5) made the [ConnectionController] the SINGLE reconnect counter, so once it
+     * is already Reattaching/Reconnecting this is a NO-OP. Attempt ADVANCEMENT is owned
+     * solely by the reconnect effect via [advanceReconnectLadder]; this entrypoint (the
+     * inline-transition mirror in `driveControllerIntent`) must never double-count.
      */
     fun escalateReconnecting(host: HostKey, targetId: SessionId) {
         ensureTargeting(host, targetId)
+        val state = controller.state.value
+        if (state is ConnectionState.Reattaching || state is ConnectionState.Reconnecting) return
         controller.submit(ConnectionEvent.TransportDropped("reconnect"))
     }
 
-    /** INTENT: the inline honest error. Drives the reconnect ladder past its budget so the
-     *  controller surfaces [ConnectionState.Unreachable]. */
+    /**
+     * Issue #1328 (S5): install the reconnect backoff ladder into the controller — the
+     * SINGLE source of the attempt budget + per-attempt backoff. Called by the VM effect
+     * from its `autoReconnectDelaysMs` before it walks the ladder.
+     */
+    fun setReconnectLadder(delaysMs: List<Long>) {
+        controller.setReconnectLadder(delaysMs)
+    }
+
+    /**
+     * Issue #1328 (S5): the reconnect effect ENTERS the numbered ladder (attempt 1).
+     * Arms the controller's SINGLE churn-surviving counter and moves the tracked target
+     * to [ConnectionState.Reconnecting] attempt 1 via [ConnectionEvent.ReconnectLadderEntered]
+     * — one honest intent, not a stack of synthetic drops.
+     */
+    fun enterReconnectLadder(host: HostKey, targetId: SessionId) {
+        ensureTargeting(host, targetId)
+        controller.submit(ConnectionEvent.ReconnectLadderEntered)
+    }
+
+    /**
+     * Issue #1328 (S5): report that ONE reconnect ladder rung's real dial failed
+     * (retryably). The reducer advances the single churn-surviving counter and re-asserts
+     * [ConnectionState.Reconnecting] at the next attempt — even from the transient
+     * Reattaching/Live/Attaching state the just-failed dial churned to — or, at the ladder
+     * budget, decides exhaustion itself → [ConnectionState.Unreachable]. The VM never
+     * counts a parallel ladder.
+     */
+    fun reconnectRungFailed() {
+        controller.submit(ConnectionEvent.ReconnectFailed)
+    }
+
+    /** INTENT: the honest give-up. The reconnect effect hit a non-retryable failure (or an
+     *  explicit abort) — submit [ConnectionEvent.ReconnectGaveUp] so the reducer surfaces
+     *  [ConnectionState.Unreachable]. NOT the exhaustion path — the reducer decides
+     *  exhaustion itself in [advanceReconnectLadder] (#1328). */
     fun escalateUnreachable() {
-        exhaustToUnreachable()
+        controller.submit(ConnectionEvent.ReconnectGaveUp)
     }
 
     /** INTENT: a target deleted elsewhere. Submits [ConnectionEvent.TargetGone]; the controller
@@ -224,16 +274,6 @@ class ConnectionManager(
         if (controller.state.value.targetIdOrNull() != targetId) return
         controller.submit(ConnectionEvent.TransportLive)
         controller.submit(ConnectionEvent.SeedLanded(targetId, paneId = "inline-reveal"))
-    }
-
-    private fun exhaustToUnreachable() {
-        var guard = 0
-        while (controller.state.value !is ConnectionState.Unreachable && guard < 16) {
-            val before = controller.state.value
-            controller.submit(ConnectionEvent.TransportDropped("unreachable"))
-            if (controller.state.value === before) break
-            guard++
-        }
     }
 
     /**

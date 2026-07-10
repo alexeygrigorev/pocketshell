@@ -6,7 +6,32 @@ internal object TmuxSessionFailureClassifiers {
             isTmuxCommandTimeout(cause) ||
             isTmuxEofWriteFailure(cause) ||
             isTransportDisconnected(cause) ||
-            isControlChannelClosed(cause)
+            isControlChannelClosed(cause) ||
+            isTransportClosed(cause)
+
+    /**
+     * Issue #1328 (S5, #1321 §1b): true when [cause] is the "transport is closed"
+     * shape a beyond-grace reconnect PREFLIGHT (`tmux has-session`) hits when the
+     * reused warm lease's SSH transport was silently torn down while backgrounded.
+     * It is TRANSIENT — the fix (evict the poisoned lease + dial a FRESH transport)
+     * heals the same session, so it must NOT hard-`Failed`/"Tap Reconnect" on the
+     * first preflight (the beyond-grace break the maintainer hit). Matched on
+     * message text (walking the cause chain) so the app module needs no sshj dep.
+     */
+    private fun isTransportClosed(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                message.contains("transport is closed", ignoreCase = true)
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
 
     /**
      * Issue #685 (Bug B): true when [cause] is the "control channel closed"

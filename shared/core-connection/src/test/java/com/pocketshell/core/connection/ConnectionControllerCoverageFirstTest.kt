@@ -144,19 +144,19 @@ class ConnectionControllerCoverageFirstTest {
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportDropped("drop 2"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 3), controller.state.value)
         assertEquals(a, controller.state.value.targetIdOrNull())
 
         controller.submit(ConnectionEvent.SeedLanded(b, "%1"))
         controller.submit(ConnectionEvent.TargetGone(b))
         assertEquals(
             "late events for B must not corrupt or switch the recovery target",
-            ConnectionState.Reconnecting(host, a, attempt = 1),
+            ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 3),
             controller.state.value,
         )
 
-        controller.submit(ConnectionEvent.TransportDropped("drop 3"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2), controller.state.value)
+        controller.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2, maxAttempts = 3), controller.state.value)
         assertEquals(a, controller.state.value.targetIdOrNull())
 
         controller.submit(ConnectionEvent.TransportLive)
@@ -179,14 +179,14 @@ class ConnectionControllerCoverageFirstTest {
 
         // Heal failed -> silent reconnect ladder (attempt 1).
         controller.submit(ConnectionEvent.TransportDropped("drop 2"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 2), controller.state.value)
 
-        // attempt 2 (still silent — no band).
-        controller.submit(ConnectionEvent.TransportDropped("drop 3"))
-        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2), controller.state.value)
+        // attempt 2 (still silent — no band). #1328: ReconnectFailed advances the ladder.
+        controller.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(ConnectionState.Reconnecting(host, a, attempt = 2, maxAttempts = 2), controller.state.value)
 
         // Budget exhausted -> the ONLY honest error band.
-        controller.submit(ConnectionEvent.TransportDropped("drop 4"))
+        controller.submit(ConnectionEvent.ReconnectFailed)
         assertEquals(ConnectionState.Unreachable(host, a), controller.state.value)
     }
 }

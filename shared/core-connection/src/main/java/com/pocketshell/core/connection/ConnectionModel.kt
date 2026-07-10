@@ -138,6 +138,42 @@ sealed interface ConnectionEvent {
 
     /** A capture completed for ([targetId], [paneId]) — feeds the reseed gate. */
     data class SeedLanded(val targetId: SessionId, val paneId: String) : ConnectionEvent
+
+    /**
+     * The VM reconnect effect ENTERED its numbered ladder (attempt 1). The reducer
+     * arms the SINGLE churn-surviving reconnect counter and moves any live-ish /
+     * recovering state to [ConnectionState.Reconnecting] attempt 1 (issue #1328, S5).
+     *
+     * A dedicated intent (not a raw drop) so the effect's re-dial IO — which
+     * transiently walks the controller through Connecting/Attaching/Live before an
+     * attach may still fail — cannot reset the counter: the count lives in the
+     * controller, decoupled from the transient [ConnectionState] the dial churns.
+     */
+    data object ReconnectLadderEntered : ConnectionEvent
+
+    /**
+     * One reconnect ladder RUNG's real dial failed (retryably). The reducer advances
+     * the SINGLE churn-surviving counter and re-asserts [ConnectionState.Reconnecting]
+     * at the new attempt — REGARDLESS of the transient state the just-failed dial left
+     * behind (Reattaching/Live/Attaching) — or, once the counter passes the ladder
+     * budget, decides exhaustion itself → [ConnectionState.Unreachable] (issue #1328).
+     * The VM never counts a parallel ladder; it only reports "this rung failed".
+     */
+    data object ReconnectFailed : ConnectionEvent
+
+    /**
+     * The reconnect effect GAVE UP early — a non-retryable failure (bad auth,
+     * unknown host, missing key) that waiting/retrying cannot fix (#440), or an
+     * explicit abort. The reducer surfaces the honest [ConnectionState.Unreachable]
+     * from any live-ish / recovering state.
+     *
+     * This is DISTINCT from ladder EXHAUSTION: when the reconnect budget runs out,
+     * the reducer decides that itself — a [TransportDropped] that pushes
+     * [ConnectionState.Reconnecting.attempt] past `maxAttempts` transitions to
+     * [ConnectionState.Unreachable] (issue #1328, S5 single-ladder). The VM effect
+     * never counts attempts; it only feeds honest drops and this abort signal.
+     */
+    data object ReconnectGaveUp : ConnectionEvent
 }
 
 /**
@@ -197,11 +233,21 @@ sealed interface ConnectionState {
     /**
      * Beyond grace / heal exhausted: silent auto-reconnect + reseed. Brief
      * loading only, NO manual "Tap Reconnect".
+     *
+     * Issue #1328 (S5): this is the SINGLE reconnect-attempt counter and the SINGLE
+     * exhaustion point. [attempt] is the 1-based attempt number, [maxAttempts] the
+     * ladder budget (from the injected [ConnectionController.setReconnectLadder]),
+     * and [retryDelayMs] the backoff the VM effect waits before this attempt's dial.
+     * The reducer owns every increment and the `attempt > maxAttempts → Unreachable`
+     * decision; the VM never counts a parallel ladder. [maxAttempts]/[retryDelayMs]
+     * default to the flat pre-S5 shape so the many 3-arg test call sites keep working.
      */
     data class Reconnecting(
         val host: HostKey,
         val targetId: SessionId,
         val attempt: Int,
+        val maxAttempts: Int = ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+        val retryDelayMs: Long = 0L,
     ) : ConnectionState
 
     /**

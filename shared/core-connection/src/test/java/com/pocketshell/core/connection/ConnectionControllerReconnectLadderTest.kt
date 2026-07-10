@@ -1,0 +1,155 @@
+package com.pocketshell.core.connection
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Issue #1328 (S5) — the SINGLE reconnect ladder now lives entirely in the
+ * [ConnectionController] reducer: one attempt counter, one exhaustion point, the
+ * per-attempt backoff read straight off the injected ladder. These pure-JVM
+ * virtual-clock tests pin that:
+ *
+ *  1. An injected ladder sets [ConnectionState.Reconnecting.maxAttempts] to the
+ *     ladder size and [retryDelayMs] to each ladder step (clamped to the last).
+ *  2. Exhaustion is decided ONCE, in the reducer: a [ConnectionEvent.TransportDropped]
+ *     that pushes `attempt` past `maxAttempts` transitions to [ConnectionState.Unreachable].
+ *  3. The honest [ConnectionEvent.ReconnectGaveUp] abort surfaces [Unreachable] from
+ *     any live-ish / recovering state, and is a no-op with no live channel.
+ *
+ * The VM effect (`TmuxSessionViewModel.scheduleAutoReconnectBody`) reads the attempt /
+ * delay off this state and feeds honest drops; it never counts a parallel ladder.
+ */
+class ConnectionControllerReconnectLadderTest {
+
+    private val host = HostKey("alice@host:22")
+    private val a = SessionId("A")
+
+    private fun controller(ladder: List<Long> = emptyList()): Pair<ConnectionController, FakeTransportPort> {
+        val transport = FakeTransportPort()
+        val c = ConnectionController(FakeClock(), transport)
+        if (ladder.isNotEmpty()) c.setReconnectLadder(ladder)
+        return c to transport
+    }
+
+    /** Live -> Reattaching -> Reconnecting(1): enter the numbered ladder. */
+    private fun ConnectionController.bringToReconnecting(transport: FakeTransportPort) {
+        transport.setWarm(host, false)
+        submit(ConnectionEvent.Enter(host, a))
+        transport.setWarm(host, true)
+        submit(ConnectionEvent.TransportLive)
+        submit(ConnectionEvent.SeedLanded(a, "%0")) // Live
+        submit(ConnectionEvent.TransportDropped("d")) // Live -> Reattaching
+        submit(ConnectionEvent.TransportDropped("d")) // Reattaching -> Reconnecting(1)
+    }
+
+    @Test
+    fun `injected ladder drives maxAttempts and per-attempt retry delay`() {
+        val (c, transport) = controller(ladder = listOf(0L, 1_000L, 2_000L, 5_000L))
+        c.bringToReconnecting(transport)
+
+        assertEquals(
+            ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 4, retryDelayMs = 0L),
+            c.state.value,
+        )
+        // Advancement is EXCLUSIVELY ReconnectFailed (one per real rung failure).
+        c.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(
+            ConnectionState.Reconnecting(host, a, attempt = 2, maxAttempts = 4, retryDelayMs = 1_000L),
+            c.state.value,
+        )
+        c.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(
+            ConnectionState.Reconnecting(host, a, attempt = 3, maxAttempts = 4, retryDelayMs = 2_000L),
+            c.state.value,
+        )
+        c.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(
+            ConnectionState.Reconnecting(host, a, attempt = 4, maxAttempts = 4, retryDelayMs = 5_000L),
+            c.state.value,
+        )
+    }
+
+    @Test
+    fun `a raw transport drop while Reconnecting does NOT advance the ladder`() {
+        // Issue #1328: incidental re-dial churn drops must not count — only ReconnectFailed
+        // advances. Otherwise a 1-rung ladder would exhaust before its dial resolves.
+        val (c, transport) = controller(ladder = listOf(0L, 0L, 0L))
+        c.bringToReconnecting(transport)
+        assertEquals(1, (c.state.value as ConnectionState.Reconnecting).attempt)
+        c.submit(ConnectionEvent.TransportDropped("incidental churn"))
+        c.submit(ConnectionEvent.TransportDropped("incidental churn"))
+        assertEquals(
+            "raw drops while already Reconnecting hold the attempt (loop owns advancement)",
+            1,
+            (c.state.value as ConnectionState.Reconnecting).attempt,
+        )
+    }
+
+    @Test
+    fun `exhaustion is decided once in the reducer at the ladder budget`() {
+        val (c, transport) = controller(ladder = listOf(0L, 0L)) // budget 2
+        c.bringToReconnecting(transport)
+
+        assertEquals(1, (c.state.value as ConnectionState.Reconnecting).attempt)
+        c.submit(ConnectionEvent.ReconnectFailed) // -> attempt 2
+        assertEquals(2, (c.state.value as ConnectionState.Reconnecting).attempt)
+        c.submit(ConnectionEvent.ReconnectFailed) // 3 > 2 -> exhausted
+        assertEquals(ConnectionState.Unreachable(host, a), c.state.value)
+    }
+
+    @Test
+    fun `retry delay clamps to the last ladder step past the budget`() {
+        // A 1-step ladder: every attempt reuses the single step's delay.
+        val (c, transport) = controller(ladder = listOf(750L))
+        c.bringToReconnecting(transport)
+        assertEquals(
+            ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 1, retryDelayMs = 750L),
+            c.state.value,
+        )
+        // attempt 2 > budget 1 -> exhausted (no over-run of the ladder).
+        c.submit(ConnectionEvent.ReconnectFailed)
+        assertEquals(ConnectionState.Unreachable(host, a), c.state.value)
+    }
+
+    @Test
+    fun `empty ladder falls back to the flat default budget with zero delay`() {
+        val (c, transport) = controller(ladder = emptyList())
+        c.bringToReconnecting(transport)
+        val recon = c.state.value as ConnectionState.Reconnecting
+        assertEquals(1, recon.attempt)
+        assertEquals(ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS, recon.maxAttempts)
+        assertEquals(0L, recon.retryDelayMs)
+    }
+
+    @Test
+    fun `ReconnectGaveUp surfaces Unreachable from the reconnect ladder before exhaustion`() {
+        val (c, transport) = controller(ladder = listOf(0L, 0L, 0L, 0L))
+        c.bringToReconnecting(transport)
+        assertTrue(c.state.value is ConnectionState.Reconnecting)
+        // A non-retryable failure aborts the ladder early — honest, reducer-owned.
+        c.submit(ConnectionEvent.ReconnectGaveUp)
+        assertEquals(ConnectionState.Unreachable(host, a), c.state.value)
+    }
+
+    @Test
+    fun `ReconnectGaveUp aborts a live channel too`() {
+        val (c, transport) = controller()
+        transport.setWarm(host, false)
+        c.submit(ConnectionEvent.Enter(host, a))
+        transport.setWarm(host, true)
+        c.submit(ConnectionEvent.TransportLive)
+        c.submit(ConnectionEvent.SeedLanded(a, "%0"))
+        assertTrue(c.state.value is ConnectionState.Live)
+        c.submit(ConnectionEvent.ReconnectGaveUp)
+        assertEquals(ConnectionState.Unreachable(host, a), c.state.value)
+    }
+
+    @Test
+    fun `ReconnectGaveUp is a no-op with no live channel`() {
+        val (c, _) = controller()
+        assertTrue(c.state.value is ConnectionState.Idle)
+        c.submit(ConnectionEvent.ReconnectGaveUp)
+        assertEquals(ConnectionState.Idle, c.state.value)
+    }
+}

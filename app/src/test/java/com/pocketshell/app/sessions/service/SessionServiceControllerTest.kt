@@ -213,6 +213,74 @@ class SessionServiceControllerTest {
     }
 
     @Test
+    fun `deadline elapsing while still backgrounded flips the snapshot to reconnecting (issue 1440)`() = runTest {
+        // Issue #1440 (scope 3 + 4): the system count-down chronometer is fire-and-forget (#1123
+        // posts it once). When the grace deadline passes while a live client is STILL registered
+        // (reconnecting / hung), nothing re-posts — so the timer drifts past zero into a negative
+        // value and the copy stays frozen on the grace-hold. The controller must arm a wakeup at
+        // the deadline that re-emits a RECONNECTING snapshot (no live count-down deadline).
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        val deadline = 5_000L
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = deadline)
+        runCurrent()
+
+        // Within grace: a live count-down, NOT reconnecting.
+        val holding = controller.flowOfSnapshot().value
+        assertTrue(holding.isHoldingConnection)
+        assertFalse("within grace the snapshot must not be reconnecting", holding.reconnecting)
+        assertEquals(
+            SessionConnectionSnapshot.Phase.HOLDING_GRACE,
+            holding.phaseAt(testScheduler.currentTime),
+        )
+
+        // The deadline elapses while the session is still held → re-post as reconnecting.
+        testScheduler.advanceTimeBy(deadline + 1)
+        runCurrent()
+
+        val expired = controller.flowOfSnapshot().value
+        assertTrue("the session is still held while reconnecting", expired.isHoldingConnection)
+        assertTrue(
+            "an elapsed grace deadline with a live client must flip the snapshot to reconnecting",
+            expired.reconnecting,
+        )
+        assertEquals(
+            SessionConnectionSnapshot.Phase.RECONNECTING,
+            expired.phaseAt(testScheduler.currentTime),
+        )
+    }
+
+    @Test
+    fun `returning to the foreground before the deadline cancels the reconnecting flip (issue 1440)`() = runTest {
+        // Class coverage (G2): if the app returns to the foreground within grace, the scheduled
+        // deadline flip must be cancelled — the FGS stops (Activity holds the connection) and no
+        // stale reconnecting notification is ever posted.
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
+        runCurrent()
+        drainStartedServices()
+
+        controller.onAppForegrounded()
+        runCurrent()
+        // Advance well past the original deadline — the cancelled flip must not fire.
+        testScheduler.advanceTimeBy(10_000L)
+        runCurrent()
+
+        val snapshot = controller.flowOfSnapshot().value
+        assertFalse("foreground handoff stops the hold", snapshot.isHoldingConnection)
+        assertFalse("a cancelled deadline flip must not leave a reconnecting snapshot", snapshot.reconnecting)
+    }
+
+    @Test
     fun `disconnecting the last live tmux client stops the backgrounded service`() = runTest {
         val activeClients = ActiveTmuxClients()
         val client = FakeTmuxClient()
@@ -347,6 +415,9 @@ class SessionServiceControllerTest {
     ): SessionServiceController {
         return SessionServiceController(context, activeClients).apply {
             scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler))
+            // Issue #1440: tie the deadline-flip clock to the virtual scheduler so the scheduled
+            // `delay(deadline - now)` and the deadline value agree under virtual time.
+            nowMillis = { scheduler.currentTime }
         }
     }
 

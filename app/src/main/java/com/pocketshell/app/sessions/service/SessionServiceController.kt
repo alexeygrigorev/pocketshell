@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -58,8 +59,17 @@ class SessionServiceController @Inject constructor(
     @VisibleForTesting
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * Issue #1440: wall clock used to compute the scheduled grace-expiry re-post delay. Injected
+     * in tests so a virtual-time [kotlinx.coroutines.test.TestCoroutineScheduler] and the delay
+     * math agree (a real [System.currentTimeMillis] vs a virtual `delay` would never line up).
+     */
+    @VisibleForTesting
+    internal var nowMillis: () -> Long = { System.currentTimeMillis() }
+
     private val _snapshot = MutableStateFlow(SessionConnectionSnapshot.Empty)
     private var observeJob: Job? = null
+    private var deadlineFlipJob: Job? = null
     private var holdStoppedByUser: Boolean = false
 
     /**
@@ -78,6 +88,12 @@ class SessionServiceController @Inject constructor(
     // into every emitted snapshot so a client-liveness update never drops the count-down
     // mid-window. Null while a port-forward pins the connection (#1159 Part 3 — no teardown).
     private val graceDisconnectAtWallClockMillis = MutableStateFlow<Long?>(null)
+
+    // Issue #1440: flips true when the scheduled deadline fires while the session is still held —
+    // the bounded grace window has elapsed but a live client is still registered (reconnecting /
+    // hung), so the notification must re-post as RECONNECTING (no count-down) instead of freezing
+    // on the grace-hold copy with a count-down that drifts past zero into a negative timer.
+    private val graceExpired = MutableStateFlow(false)
 
     fun flowOfSnapshot(): StateFlow<SessionConnectionSnapshot> = _snapshot.asStateFlow()
 
@@ -107,11 +123,12 @@ class SessionServiceController @Inject constructor(
                 appForegrounded,
                 portForwardActive,
                 graceDisconnectAtWallClockMillis,
-            ) { rawSnapshot, foreground, pfActive, deadline ->
-                EffectiveInputs(rawSnapshot, foreground, pfActive, deadline)
+                graceExpired,
+            ) { rawSnapshot, foreground, pfActive, deadline, expired ->
+                EffectiveInputs(rawSnapshot, foreground, pfActive, deadline, expired)
             }
                 .distinctUntilChanged()
-                .collect { (rawSnapshot, foreground, pfActive, deadline) ->
+                .collect { (rawSnapshot, foreground, pfActive, deadline, expired) ->
                     if (!rawSnapshot.isHoldingConnection) {
                         holdStoppedByUser = false
                     }
@@ -137,7 +154,15 @@ class SessionServiceController @Inject constructor(
                         // held session notification always shows the normal bounded-grace
                         // count-down — never the port-forward wording (that is now owned solely
                         // by ForwardingService).
-                        rawSnapshot.copy(disconnectAtWallClockMillis = deadline)
+                        //
+                        // Issue #1440: [expired] flips true when the scheduled deadline fires while
+                        // the session is still held, so the notification re-posts as RECONNECTING
+                        // (no count-down) instead of freezing on the grace-hold copy with a
+                        // negative-drifting timer.
+                        rawSnapshot.copy(
+                            disconnectAtWallClockMillis = deadline,
+                            reconnecting = expired,
+                        )
                     }
                     val wasHolding = _snapshot.value.isHoldingConnection
                     _snapshot.value = snapshot
@@ -159,7 +184,10 @@ class SessionServiceController @Inject constructor(
      */
     fun onAppBackgrounded(disconnectAtWallClockMillis: Long) {
         graceDisconnectAtWallClockMillis.value = disconnectAtWallClockMillis
+        // Issue #1440: a fresh grace window — clear any prior expiry and (re)schedule the flip.
+        graceExpired.value = false
         appForegrounded.value = false
+        scheduleDeadlineFlip(disconnectAtWallClockMillis)
     }
 
     /**
@@ -167,8 +195,31 @@ class SessionServiceController @Inject constructor(
      * connection, so the FGS + its tray notification are stopped and the count-down cleared.
      */
     fun onAppForegrounded() {
+        cancelDeadlineFlip()
         graceDisconnectAtWallClockMillis.value = null
         appForegrounded.value = true
+    }
+
+    /**
+     * Issue #1440: schedule the re-post at the grace deadline. The system count-down chronometer
+     * is fire-and-forget (issue #1123 posts it once), so nothing re-posts when the deadline
+     * passes — the timer drifts past zero into a negative value and the copy stays frozen. This
+     * arms a wakeup at the deadline that flips [graceExpired] true, forcing a fresh emission the
+     * FGS re-posts as RECONNECTING (no count-down) at the right moment.
+     */
+    private fun scheduleDeadlineFlip(disconnectAtWallClockMillis: Long) {
+        deadlineFlipJob?.cancel()
+        deadlineFlipJob = scope.launch {
+            val wait = (disconnectAtWallClockMillis - nowMillis()).coerceAtLeast(0L)
+            delay(wait)
+            graceExpired.value = true
+        }
+    }
+
+    private fun cancelDeadlineFlip() {
+        deadlineFlipJob?.cancel()
+        deadlineFlipJob = null
+        graceExpired.value = false
     }
 
     /**
@@ -198,6 +249,7 @@ class SessionServiceController @Inject constructor(
         if (holdStoppedByUser) return
         if (!currentSnapshot().isHoldingConnection) return
         holdStoppedByUser = true
+        cancelDeadlineFlip()
         graceDisconnectAtWallClockMillis.value = null
         _snapshot.value = SessionConnectionSnapshot.Empty
         if (requestServiceStop) {
@@ -210,5 +262,6 @@ class SessionServiceController @Inject constructor(
         val foreground: Boolean,
         val portForwardActive: Boolean,
         val disconnectDeadline: Long?,
+        val graceExpired: Boolean,
     )
 }

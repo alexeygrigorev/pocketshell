@@ -71,6 +71,128 @@ class SessionConnectionServiceTest {
     }
 
     @Test
+    fun `grace-expired past deadline shows reconnecting copy and NO count-down (issue 1440)`() {
+        // Issue #1440 — the reported frame: the maintainer returned to the app while it was
+        // RECONNECTING (expected), but the FGS notification was frozen on the grace-hold copy
+        // with a system count-down chronometer that had drifted PAST ZERO into a NEGATIVE timer
+        // (−06:51), still titled "Session connected" / "disconnecting in". Reproduce it: a
+        // holding snapshot whose bounded-grace deadline is now ~6:51 in the PAST.
+        val deadline = 1_000_000L
+        val now = deadline + (6 * 60_000L + 51_000L) // 06:51 past the deadline — the −06:51 frame
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = deadline,
+            ),
+            nowMillis = now,
+        )
+
+        // No count-down chronometer at all — the system must not render a negative timer.
+        assertFalse(
+            "an elapsed grace deadline must NOT render a count-down chronometer (it would go " +
+                "negative — the reported −06:51)",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertFalse(
+            notification.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN),
+        )
+        // Copy tracks the lifecycle phase: reconnecting, not the frozen grace-hold.
+        assertEquals(
+            "Reconnecting…",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertFalse(
+            "an elapsed deadline must NOT keep the frozen 'disconnecting in' grace-hold copy: '$body'",
+            body.contains("disconnecting in"),
+        )
+        assertTrue(
+            "reconnecting body must read as reconnecting: '$body'",
+            body.contains("Reconnecting to alpha"),
+        )
+    }
+
+    @Test
+    fun `explicit reconnecting flag shows reconnecting copy even before the deadline elapses (issue 1440)`() {
+        // Class coverage (G2): the controller flips the reconnecting flag at the scheduled
+        // deadline. Even if the wall-clock `when` anchor were still nominally in the future, the
+        // explicit flag forces RECONNECTING — the display never depends on a single racy `now`.
+        val deadline = 5_000_000L
+        val now = deadline - 30_000L // still 30s before the anchor
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = deadline,
+                reconnecting = true,
+            ),
+            nowMillis = now,
+        )
+
+        assertFalse(
+            "reconnecting must never render a count-down chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertEquals(
+            "Reconnecting…",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertFalse("no grace-hold copy while reconnecting: '$body'", body.contains("disconnecting in"))
+    }
+
+    @Test
+    fun `holding within grace with a future deadline still shows the live count-down (no 1123 regression)`() {
+        // Regression guard for #1123: a STRICTLY FUTURE deadline is a live count-down.
+        val deadline = 2_000_000L
+        val now = deadline - 90_000L // 90s before the deadline — comfortably in grace
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(
+                liveSessionCount = 1,
+                primaryHostName = "alpha",
+                disconnectAtWallClockMillis = deadline,
+            ),
+            nowMillis = now,
+        )
+
+        assertTrue(
+            "an in-grace future deadline must still render the count-down chronometer",
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertTrue(notification.extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN))
+        assertEquals(deadline, notification.`when`)
+        assertEquals(
+            "Session connected",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue("in-grace body counts down: '$body'", body.contains("disconnecting in"))
+    }
+
+    @Test
+    fun `connected with no deadline shows the plain background hold and NO count-down (issue 1440 phase)`() {
+        // Class coverage (G2): the null-deadline / missing-data phase.
+        val notification = buildServiceNotification(
+            SessionConnectionSnapshot(liveSessionCount = 1, primaryHostName = "alpha"),
+            nowMillis = 5_000_000L,
+        )
+
+        assertFalse(
+            notification.extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER),
+        )
+        assertEquals(
+            "Session connected",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "no-deadline body reads as a plain background hold: '$body'",
+            body.contains("Keeping alpha connected in the background"),
+        )
+    }
+
+    @Test
     fun `foreground notification has no count-down chronometer`() {
         val notification = buildServiceNotification(
             SessionConnectionSnapshot(liveSessionCount = 1, primaryHostName = "alpha"),
@@ -167,8 +289,11 @@ class SessionConnectionServiceTest {
         )
     }
 
-    private fun buildServiceNotification(snapshot: SessionConnectionSnapshot): Notification {
+    private fun buildServiceNotification(
+        snapshot: SessionConnectionSnapshot,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Notification {
         val service = Robolectric.buildService(SessionConnectionService::class.java).get()
-        return service.buildNotification(snapshot)
+        return service.buildNotification(snapshot, nowMillis = nowMillis)
     }
 }

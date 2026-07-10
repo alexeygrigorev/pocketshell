@@ -190,6 +190,7 @@ class SessionConnectionService : Service() {
     internal fun buildNotification(
         snapshot: SessionConnectionSnapshot,
         contentTextOverride: String? = null,
+        nowMillis: Long = System.currentTimeMillis(),
     ): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
@@ -225,24 +226,38 @@ class SessionConnectionService : Service() {
         // notification ONCE and never schedules a per-second update / wakeup. A
         // contentTextOverride (the initial "Connecting session") never counts down.
         //
+        // Issue #1440: the count-down chronometer is used ONLY while the deadline is STRICTLY in
+        // the FUTURE (Phase.HOLDING_GRACE). Once grace has elapsed the system chronometer would
+        // otherwise count PAST ZERO into a NEGATIVE timer (the reported −06:51), and the frozen
+        // "Session connected / disconnecting in" copy would misrepresent a connection that has
+        // actually moved on to reconnecting. So a past/elapsed deadline (or the controller's
+        // explicit reconnecting flag) resolves to Phase.RECONNECTING: reconnecting copy, NO
+        // count-down. [SessionServiceController] re-posts at the deadline so this flip happens
+        // at the right moment instead of the notification drifting negative.
+        //
         // Issue #1202 + #1198 (hard-cut, D22): this session FGS is SUPPRESSED while a
         // port-forward is active (see [SessionServiceController.setPortForwardActive]) — the
         // ForwardingService FGS is the single owner of the port-forward notification. So this
         // notification NEVER renders the port-forward wording anymore; the #1159 Part 3
-        // "Port forwarding active" branch is deleted. This FGS only ever shows the plain
-        // "Session connected" hold with its bounded-grace count-down.
+        // "Port forwarding active" branch is deleted.
+        val phase = if (contentTextOverride == null) snapshot.phaseAt(nowMillis) else null
+
         val countdownDeadline =
-            if (contentTextOverride == null) {
+            if (phase == SessionConnectionSnapshot.Phase.HOLDING_GRACE) {
                 snapshot.disconnectAtWallClockMillis
             } else {
                 null
             }
 
-        val title = "Session connected"
+        val title = when (phase) {
+            SessionConnectionSnapshot.Phase.RECONNECTING -> "Reconnecting…"
+            else -> "Session connected"
+        }
 
         val detail = contentTextOverride
-            ?: when {
-                countdownDeadline != null -> "Holding $hostLabel — disconnecting in"
+            ?: when (phase) {
+                SessionConnectionSnapshot.Phase.HOLDING_GRACE -> "Holding $hostLabel — disconnecting in"
+                SessionConnectionSnapshot.Phase.RECONNECTING -> "Reconnecting to $hostLabel…"
                 else -> "Keeping $hostLabel connected in the background"
             }
 

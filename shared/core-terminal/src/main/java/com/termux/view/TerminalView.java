@@ -6,10 +6,15 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.Editable;
@@ -23,9 +28,11 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MotionEvent;
+import android.view.PixelCopy;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewTreeObserver;
+import android.view.Window;
 import android.view.accessibility.AccessibilityManager;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
@@ -42,6 +49,9 @@ import com.termux.terminal.KeyHandler;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
 import com.termux.view.textselection.TextSelectionCursorController;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /** View displaying and interacting with a {@link TerminalSession}. */
 public final class TerminalView extends View {
@@ -240,6 +250,174 @@ public final class TerminalView extends View {
         }
         invalidate();
     }
+
+    /**
+     * Issue #1443 — DIAGNOSTIC pixel-truth sample of the on-screen surface, for the
+     * one black-screen class the MODEL-derived detectors are blind to.
+     *
+     * <p>Every other surface-black signal (the #1192 paint-confirmation seam →
+     * {@link com.pocketshell.core.terminal.ui.TerminalSurfaceState#surfaceIsBlackWhileModelHasContent})
+     * is derived from the emulator MODEL: {@link #onDraw} reports
+     * {@code paintedEmulatorContent} from {@code hasNonBlankVisibleRow()}, a MODEL
+     * check with NO pixel readback (the explicit #1296 non-goal). A GENUINE
+     * pixel/GPU-layer black — the composited surface is black while the model still
+     * carries the frame (a lost HWUI hardware layer, a RenderNode that stopped
+     * compositing, a Compose layer that dropped this View's buffer) — is invisible
+     * to all of them. This bounded {@link PixelCopy} of the actual window surface is
+     * the only way to see it.
+     *
+     * <p><b>This is called ONLY on a suspicion trigger</b> — the app's stale-render
+     * watchdog tick when the MODEL reports content-present, via
+     * {@link com.pocketshell.core.terminal.ui.TerminalSurfaceState#probePixelBlackWhileModelHasContent}
+     * (itself rate-bounded). It is NEVER called from {@link #onDraw} / the per-frame
+     * render loop, so it does NOT reinstate the per-frame PixelCopy cost #1296
+     * rejected. It samples the whole view region SCALED into a small fixed
+     * {@value #PIXEL_SAMPLE_DIM}×{@value #PIXEL_SAMPLE_DIM} bitmap, so the readback
+     * cost is O({@value #PIXEL_SAMPLE_DIM}²) regardless of the view size.
+     *
+     * <p><b>Diagnostics only</b>: this NEVER heals/reseeds/reattaches anything and
+     * NEVER throws into a caller — any failure returns {@code null} ("no evidence").
+     *
+     * @return {@code Boolean.TRUE} when the sampled surface pixels are
+     *   (near-)uniformly the default background colour (a dead/black surface),
+     *   {@code Boolean.FALSE} when they carry visible content (a healthy surface),
+     *   and {@code null} when the surface could not be sampled (no host window,
+     *   0-size, PixelCopy error/timeout) — never fingerprinted by the caller.
+     */
+    @Nullable
+    public Boolean sampleSurfaceNearUniformBlack() {
+        try {
+            final int width = getWidth();
+            final int height = getHeight();
+            if (width <= 0 || height <= 0) return null;
+            final Window window = findHostWindow();
+            if (window == null || window.peekDecorView() == null) return null;
+
+            final int[] loc = new int[2];
+            getLocationInWindow(loc);
+            final Rect src = new Rect(loc[0], loc[1], loc[0] + width, loc[1] + height);
+
+            // PixelCopy scales srcRect INTO the destination bitmap, so a fixed small
+            // dest bounds the whole readback to O(dim^2) pixels regardless of the
+            // view's on-screen size — never a per-pixel full-surface scan (#1296/#1164).
+            final Bitmap dest =
+                Bitmap.createBitmap(PIXEL_SAMPLE_DIM, PIXEL_SAMPLE_DIM, Bitmap.Config.ARGB_8888);
+            try {
+                final CountDownLatch latch = new CountDownLatch(1);
+                final int[] status = {PixelCopy.ERROR_UNKNOWN};
+                // Reuse ONE process-wide handler thread for every probe (rate-limited to
+                // ≤1 per watchdog cycle) instead of spinning a HandlerThread up per call.
+                PixelCopy.request(window, src, dest, copyResult -> {
+                    status[0] = copyResult;
+                    latch.countDown();
+                }, pixelProbeHandler());
+                if (!latch.await(PIXEL_SAMPLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    return null;
+                }
+                if (status[0] != PixelCopy.SUCCESS) {
+                    return null;
+                }
+                return Boolean.valueOf(isBitmapNearUniformBackground(dest));
+            } finally {
+                // Always recycle — including the timeout / error / exception paths — so a
+                // probe failure never leaks the sample bitmap.
+                dest.recycle();
+            }
+        } catch (Throwable t) {
+            // A diagnostic probe must NEVER destabilise the terminal: any failure
+            // (no window, permission, driver refusal, interruption) is "no evidence".
+            return null;
+        }
+    }
+
+    /** Issue #1443 — one shared, lazily-started handler thread for all pixel probes. */
+    private static volatile Handler sPixelProbeHandler;
+
+    private static Handler pixelProbeHandler() {
+        Handler handler = sPixelProbeHandler;
+        if (handler == null) {
+            synchronized (TerminalView.class) {
+                handler = sPixelProbeHandler;
+                if (handler == null) {
+                    final HandlerThread thread = new HandlerThread("ps-pixel-probe");
+                    thread.start();
+                    handler = new Handler(thread.getLooper());
+                    sPixelProbeHandler = handler;
+                }
+            }
+        }
+        return handler;
+    }
+
+    /**
+     * Issue #1443 — walk the View's context chain to the hosting {@link Activity}'s
+     * {@link Window}, needed by {@link PixelCopy#request} (a plain HWUI View has no
+     * Surface of its own; the composited pixels live on the window surface). Returns
+     * {@code null} when the View is not hosted by an Activity window.
+     */
+    @Nullable
+    private Window findHostWindow() {
+        Context ctx = getContext();
+        while (ctx instanceof ContextWrapper) {
+            if (ctx instanceof Activity) {
+                return ((Activity) ctx).getWindow();
+            }
+            ctx = ((ContextWrapper) ctx).getBaseContext();
+        }
+        return null;
+    }
+
+    /**
+     * Issue #1443 — true when (near-)all sampled pixels are within
+     * {@value #PIXEL_BG_CHANNEL_TOLERANCE} per channel of the default background
+     * colour, i.e. the surface is (near-)uniformly the background (a dead/black
+     * surface) rather than carrying rendered glyphs.
+     *
+     * <p>The threshold ({@value #PIXEL_BG_UNIFORM_PERMILLE}‰) is deliberately very
+     * high: a genuine GPU-layer black is 100% background, while even a sparse but
+     * HEALTHY terminal frame lights up several of the {@value #PIXEL_SAMPLE_DIM}²
+     * sampled cells with glyph coverage. It is a conservative first cut for on-device
+     * tuning — a false positive here only emits a diagnostic event (never a heal), and
+     * the model-content gate in the caller already excludes the ordinary blank pane.
+     */
+    private boolean isBitmapNearUniformBackground(Bitmap bmp) {
+        final int bg = mDefaultBackgroundColor;
+        final int bgR = Color.red(bg);
+        final int bgG = Color.green(bg);
+        final int bgB = Color.blue(bg);
+        final int w = bmp.getWidth();
+        final int h = bmp.getHeight();
+        final int total = w * h;
+        if (total <= 0) return false;
+        int backgroundPixels = 0;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                final int p = bmp.getPixel(x, y);
+                if (Math.abs(Color.red(p) - bgR) <= PIXEL_BG_CHANNEL_TOLERANCE
+                        && Math.abs(Color.green(p) - bgG) <= PIXEL_BG_CHANNEL_TOLERANCE
+                        && Math.abs(Color.blue(p) - bgB) <= PIXEL_BG_CHANNEL_TOLERANCE) {
+                    backgroundPixels++;
+                }
+            }
+        }
+        return (long) backgroundPixels * 1000L >= (long) total * PIXEL_BG_UNIFORM_PERMILLE;
+    }
+
+    /** Issue #1443 — the fixed downscaled dimension the surface is PixelCopy'd into. */
+    private static final int PIXEL_SAMPLE_DIM = 16;
+
+    /** Issue #1443 — max wait for the single-shot async PixelCopy callback. */
+    private static final long PIXEL_SAMPLE_TIMEOUT_MS = 250L;
+
+    /** Issue #1443 — per-channel tolerance for "this pixel equals the background". */
+    private static final int PIXEL_BG_CHANNEL_TOLERANCE = 16;
+
+    /**
+     * Issue #1443 — the ‰ of sampled pixels that must match the background for the
+     * surface to count as (near-)uniformly black. 990‰ (99%) targets a genuine
+     * full-black surface while leaving headroom for antialiasing fringe.
+     */
+    private static final int PIXEL_BG_UNIFORM_PERMILLE = 990;
 
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;

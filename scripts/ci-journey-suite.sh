@@ -87,6 +87,20 @@ ARTIFACT_DIR="$REPO_ROOT/artifacts/ci-journey"
 mkdir -p "$ARTIFACT_DIR"
 SUMMARY="$ARTIFACT_DIR/summary.md"
 
+# Issue #1458: durable capture of the journey run's streamed gradle/ddmlib output.
+# run_bounded appends every streamed line here (while still streaming live) so the
+# workflow "Classify emulator-journey result" step can count the
+# `Failed to start Emulator console` storm — the signature of a CPU/RAM-starved
+# swiftshader AVD (~100×/shard) — AFTER this emulator step has ended and its stdout
+# is gone. A degraded-emulator storm is then classified as an INFRA-ABORT (re-run),
+# never a "genuine test failure" reading, so a starved emulator can no longer make
+# `main`'s emulator-level health unreadable. Truncated once per suite run so the
+# capture reflects THIS attempt only — mirroring how summary.md is overwritten per
+# cold-boot attempt (the classifier reads the last attempt's artifacts).
+JOURNEY_CONSOLE_LOG="$ARTIFACT_DIR/journey-console.log"
+export JOURNEY_CONSOLE_LOG
+: > "$JOURNEY_CONSOLE_LOG"
+
 GRADLEW="$REPO_ROOT/gradlew"
 
 FQCN_PREFIX="com.pocketshell.app.proof"

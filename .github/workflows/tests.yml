@@ -914,6 +914,26 @@ jobs:
           first_timeout="${{ steps.journey_summary.outputs.first_timeout }}"
           first_failure="${{ steps.journey_summary.outputs.first_failure }}"
           summary="artifacts/ci-journey/summary.md"
+          # Issue #1458: count the `Failed to start Emulator console` storm from
+          # the durable journey-console capture (teed by run_bounded). On a
+          # CPU/RAM-starved swiftshader AVD this ddmlib line repeats ~100×/shard
+          # and is the signature of a DEGRADED emulator, NOT a product defect. A
+          # storm makes the whole run's JOURNEY_FAILED verdict untrustworthy, so
+          # it is routed to an INFRA-ABORT (re-run) BELOW — but ONLY where a
+          # genuine test-failure would otherwise be reported. A HEALTHY-console
+          # JOURNEY_FAILED (low/zero count) STAYS a genuine red: masking a real
+          # regression behind "infra" is the #657/#844 flake-masks-real trap, the
+          # exact inverse of what this guard exists to prevent. The #835 timeout
+          # and #771 never-booted branches are intentionally NOT gated by the
+          # storm — their behavior is unchanged.
+          console_log="artifacts/ci-journey/journey-console.log"
+          console_storm_threshold=25
+          console_storm_count=0
+          if [[ -f "$console_log" ]]; then
+            console_storm_count="$(grep -c 'Failed to start Emulator console' "$console_log" 2>/dev/null || true)"
+          fi
+          [[ "$console_storm_count" =~ ^[0-9]+$ ]] || console_storm_count=0
+          echo "console-storm 'Failed to start Emulator console' count: $console_storm_count (INFRA-ABORT threshold: >= $console_storm_threshold)"
           echo "first attempt outcome:  $first"
           echo "retry attempt outcome:  ${retry:-<skipped>}"
           echo "first attempt conclusion:  $first_concl"
@@ -929,6 +949,10 @@ jobs:
             exit 0
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then
+            if (( console_storm_count >= console_storm_threshold )); then
+              echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::The first cold boot wrote a JOURNEY_FAILED summary, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict, so this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
+              exit 1
+            fi
             echo "::error title=Emulator journey FAILED — first attempt genuine failure::The first cold boot wrote a JOURNEY_FAILED / Failed BOTH attempts summary, and the retry did not pass cleanly. Refusing to downgrade this run to advisory timeout even if the retry overwrote summary.md with a timeout-only artifact."
             exit 1
           fi
@@ -948,6 +972,16 @@ jobs:
           fi
           # Both attempts failed — classify from the suite's own summary artifact.
           if [[ -f "$summary" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary"; then
+            # Issue #1458: before reading this as a genuine regression, gate on the
+            # console storm. If the emulator was storming (>= threshold), the
+            # JOURNEY_FAILED was produced on a DEGRADED emulator and is an infra
+            # abort (re-run), NOT a product verdict. A HEALTHY-console
+            # JOURNEY_FAILED (count below threshold) falls through to the genuine
+            # test-failure verdict below — a real regression is NEVER swallowed.
+            if (( console_storm_count >= console_storm_threshold )); then
+              echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::A load-bearing journey class failed on both cold-boot attempts, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A both-attempts JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict; this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine test regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
+              exit 1
+            fi
             # The emulator booted and the suite ran to a verdict: a journey class
             # failed twice. This is a GENUINE test failure (app-code regression),
             # NOT the #771 emulator-infra abort.

@@ -192,7 +192,6 @@ class CostsViewModelTest {
     private class FakeDao : AiApiCallLogDao {
         val flow = MutableStateFlow<List<AiApiCallEntry>>(emptyList())
         override fun getAll(): Flow<List<AiApiCallEntry>> = flow
-        override fun getSince(sinceMillis: Long): Flow<List<AiApiCallEntry>> = flow
         override suspend fun insert(entry: AiApiCallEntry): Long = 0L
         override suspend fun deleteAll() {
             flow.value = emptyList()

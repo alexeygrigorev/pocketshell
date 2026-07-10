@@ -245,14 +245,6 @@ internal fun formatResetAbsolute(resetAt: Instant?, zoneId: ZoneId): String? {
 }
 
 /**
- * Retained name kept for the existing call sites / tests: same as
- * [formatResetRelative] but for a non-null instant. Issue #501 widened
- * the behavior past 24h from a bare date to a relative "in N days".
- */
-internal fun formatResetTime(now: Instant, resetAt: Instant, zoneId: ZoneId): String =
-    formatResetRelative(now, resetAt, zoneId)
-
-/**
  * The soonest (smallest non-null `resetAt`) across a provider's windows,
  * for the host-list summary strip. Null when the provider reports no
  * reset times at all.

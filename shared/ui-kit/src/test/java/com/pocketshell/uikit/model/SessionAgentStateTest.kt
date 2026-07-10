@@ -49,14 +49,6 @@ class SessionAgentStateTest {
         assertNull(SessionAgentState.Unknown.chipLabel)
     }
 
-    @Test
-    fun `isKnown is true for every state except Unknown`() {
-        assertEquals(true, SessionAgentState.Idle.isKnown)
-        assertEquals(true, SessionAgentState.WaitingForInput.isKnown)
-        assertEquals(true, SessionAgentState.Working.isKnown)
-        assertEquals(false, SessionAgentState.Unknown.isKnown)
-    }
-
     // --- resolveSessionAgentState: staleness ------------------------------
 
     @Test

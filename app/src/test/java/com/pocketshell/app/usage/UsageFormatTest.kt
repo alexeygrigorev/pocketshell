@@ -12,10 +12,10 @@ import org.junit.Test
 class UsageFormatTest {
 
     @Test
-    fun formatResetTime_usesCountdownForSameDayReset() {
+    fun formatResetRelative_usesCountdownForSameDayReset() {
         assertEquals(
             "in 2h 34m",
-            formatResetTime(
+            formatResetRelative(
                 now = Instant.parse("2026-05-21T11:49:00Z"),
                 resetAt = Instant.parse("2026-05-21T14:23:00Z"),
                 zoneId = ZoneId.of("UTC"),
@@ -24,10 +24,10 @@ class UsageFormatTest {
     }
 
     @Test
-    fun formatResetTime_normalizesRoundedMinutes() {
+    fun formatResetRelative_normalizesRoundedMinutes() {
         assertEquals(
             "in 2h",
-            formatResetTime(
+            formatResetRelative(
                 now = Instant.parse("2026-05-21T00:00:00Z"),
                 resetAt = Instant.parse("2026-05-21T01:59:59Z"),
                 zoneId = ZoneId.of("UTC"),

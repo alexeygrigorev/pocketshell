@@ -228,11 +228,6 @@ class AppDatabaseTest {
         assertEquals(120L, all[1].computedCostUsdMillicents)
         assertEquals("""{"requestId":"abc"}""", all[0].metadataJson)
 
-        // Range query: only the second row falls inside (timestamp >= 2_000).
-        val recent = dao.getSince(2_000L).first()
-        assertEquals(1, recent.size)
-        assertEquals(secondId, recent[0].id)
-
         dao.deleteAll()
         assertEquals(0, dao.getAll().first().size)
     }

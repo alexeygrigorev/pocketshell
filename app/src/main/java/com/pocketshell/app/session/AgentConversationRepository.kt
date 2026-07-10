@@ -1658,32 +1658,51 @@ public class AgentConversationRepository internal constructor(
         // same exec is what lets the cold-open path drop the standalone
         // `lineCount` round-trip without losing the tail-start position.
         val sentinel = "@@PS_CODEX_WINDOW@@"
-        // Issue #1267: byte-bound the Codex cold-open read the same way #1225
-        // bounded the Claude flat-JSONL tail. The Codex read goes through
-        // `pocketshell agent-log`, so the clamp lives there (`--max-line-bytes`):
-        // a multi-MB rollout line (inline base64 image / huge tool_result) is
-        // replaced server-side by a compact truncation marker, so its bytes never
-        // cross SSH into the phone's heap. The marker is rendered as a visible
-        // note by [parseTranscriptTailLines] below.
-        val output = session.exec(
+        // Issue #1267: byte-bound the Codex read the same way #1225 bounded the
+        // Claude flat-JSONL tail — the clamp lives in `pocketshell agent-log`
+        // (`--max-line-bytes`). Issue #1467: retry ONCE without the clamp when the
+        // clamped read yields no envelope, so an OLDER host CLI that rejects
+        // `--max-line-bytes` (→ empty stdout behind `2>/dev/null || true`) does
+        // not silently blank the paged Codex window (see [readCodexAgentLogEnvelope]).
+        fun windowCommand(clampBytes: Int?): String =
             "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0; " +
                 "printf '%s\\n' $sentinel; " +
-                "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
-                "--json --tail $boundedMaxLines --max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES 2>/dev/null || true",
-        ).stdout
-        val splitLines = output.split("\n")
-        val sentinelIndex = splitLines.indexOf(sentinel)
-        val sourceLineCount = if (sentinelIndex >= 0) {
-            splitLines.take(sentinelIndex).joinToString("").trim().toLongOrNull() ?: 0L
-        } else {
-            0L
+                codexAgentLogCommand(sessionId, boundedMaxLines, clampBytes)
+
+        fun splitWindow(output: String): Pair<Long, String> {
+            val splitLines = output.split("\n")
+            val sentinelIndex = splitLines.indexOf(sentinel)
+            val sourceLineCount = if (sentinelIndex >= 0) {
+                splitLines.take(sentinelIndex).joinToString("").trim().toLongOrNull() ?: 0L
+            } else {
+                0L
+            }
+            val envelopeOutput = if (sentinelIndex >= 0) {
+                splitLines.drop(sentinelIndex + 1).joinToString("\n")
+            } else {
+                output
+            }
+            return sourceLineCount to envelopeOutput
         }
-        val envelopeOutput = if (sentinelIndex >= 0) {
-            splitLines.drop(sentinelIndex + 1).joinToString("\n")
-        } else {
-            output
+
+        var (sourceLineCount, envelopeOutput) = splitWindow(session.exec(windowCommand(MAX_TRANSCRIPT_LINE_BYTES)).stdout)
+        var envelope = agentLogEnvelopeOrNull(envelopeOutput)
+        if (envelope == null) {
+            val (plainCount, plainEnvelopeOutput) = splitWindow(session.exec(windowCommand(clampBytes = null)).stdout)
+            sourceLineCount = plainCount
+            envelopeOutput = plainEnvelopeOutput
+            envelope = agentLogEnvelopeOrNull(plainEnvelopeOutput)
         }
-        val lines = parseAgentLogEnvelopeLines(envelopeOutput)
+        if (envelope == null) {
+            if (envelopeOutput.isNotBlank()) {
+                diagnostic(
+                    "agent-log output had non-blank lines but no JSON envelope carrying " +
+                        "`lines` (preamble/format drift) — returning no messages",
+                )
+            }
+            return CodexWindow(emptyList(), 0, sourceLineCount)
+        }
+        val lines = agentLogEnvelopeLines(envelope)
         // Issue #1267: route the envelope lines through the truncation-aware
         // parser so an over-cap line (clamped to a marker by `--max-line-bytes`)
         // becomes a VISIBLE SystemNote instead of a line the CodexParser silently
@@ -2044,16 +2063,54 @@ public class AgentConversationRepository internal constructor(
         val boundedMaxLines = (maxLines * JSONL_RAW_LINES_PER_EVENT)
             .coerceAtLeast(maxLines)
             .coerceAtLeast(1)
-        // Issue #1267: byte-bound the Codex cold-open read via the tool-side
-        // `--max-line-bytes` clamp (the Codex counterpart of #1225's Claude
-        // flat-JSONL clamp), then render any resulting truncation marker as a
-        // visible note through [parseTranscriptTailLines].
-        val output = session.exec(
-            "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
-                "--json --tail $boundedMaxLines --max-line-bytes $MAX_TRANSCRIPT_LINE_BYTES 2>/dev/null || true",
+        val envelope = readCodexAgentLogEnvelope(session, sessionId, boundedMaxLines) ?: return emptyList()
+        // Issue #1267: route the envelope lines through the truncation-aware
+        // parser so an over-cap line (clamped to a marker by `--max-line-bytes`)
+        // becomes a VISIBLE SystemNote instead of a line the CodexParser silently
+        // drops.
+        return parseTranscriptTailLines(
+            CodexParser(),
+            AgentKind.Codex,
+            agentLogEnvelopeLines(envelope).asSequence(),
+        )
+    }
+
+    /**
+     * Issue #1467: read the Codex agent-log JSON envelope, byte-clamped by
+     * default (#1267). If the CLAMPED read yields NO envelope, retry ONCE
+     * WITHOUT the `--max-line-bytes` clamp.
+     *
+     * The clamped-then-plain retry closes a silent version-skew blank: a host
+     * `pocketshell` CLI OLDER than #1267 does not know `--max-line-bytes`,
+     * rejects it as an unknown option, and exits non-zero — but behind
+     * `2>/dev/null || true` that leaves EMPTY stdout, indistinguishable from
+     * "no messages" so the entire Codex conversation view rendered blank (the
+     * v0.4.25 release-gate symptom against the stale Docker fixture CLI, and a
+     * real risk on any host whose installed CLI lags the app). The clamp is a
+     * large-line safeguard, not a correctness requirement, so dropping it on the
+     * fallback is acceptable; a CURRENT CLI parses the clamped read and never
+     * reaches the fallback.
+     */
+    private suspend fun readCodexAgentLogEnvelope(
+        session: SshSession,
+        sessionId: String,
+        boundedMaxLines: Int,
+    ): JSONObject? {
+        val clampedOutput = session.exec(
+            codexAgentLogCommand(sessionId, boundedMaxLines, MAX_TRANSCRIPT_LINE_BYTES),
         ).stdout
-        val lines = parseAgentLogEnvelopeLines(output)
-        return parseTranscriptTailLines(CodexParser(), AgentKind.Codex, lines.asSequence())
+        agentLogEnvelopeOrNull(clampedOutput)?.let { return it }
+        val plainOutput = session.exec(
+            codexAgentLogCommand(sessionId, boundedMaxLines, clampBytes = null),
+        ).stdout
+        val envelope = agentLogEnvelopeOrNull(plainOutput)
+        if (envelope == null && (clampedOutput.isNotBlank() || plainOutput.isNotBlank())) {
+            diagnostic(
+                "agent-log output had non-blank lines but no JSON envelope carrying " +
+                    "`lines` (preamble/format drift) — returning no messages",
+            )
+        }
+        return envelope
     }
 
     /**
@@ -2071,11 +2128,7 @@ public class AgentConversationRepository internal constructor(
      * than a silent empty view.
      */
     internal fun parseAgentLogEnvelopeLines(output: String): List<String> {
-        val envelope = output.lineSequence()
-            .filter { it.isNotBlank() }
-            .firstNotNullOfOrNull { line ->
-                runCatching { JSONObject(line) }.getOrNull()?.takeIf { it.has("lines") }
-            }
+        val envelope = agentLogEnvelopeOrNull(output)
         if (envelope == null) {
             if (output.isNotBlank()) {
                 diagnostic(
@@ -2085,12 +2138,46 @@ public class AgentConversationRepository internal constructor(
             }
             return emptyList()
         }
+        return agentLogEnvelopeLines(envelope)
+    }
+
+    /**
+     * Scan [output] for the FIRST line that parses as a JSON object carrying a
+     * `lines` array (the `pocketshell agent-log --json` envelope), skipping any
+     * non-JSON / non-envelope preamble (#1227). Returns `null` when no envelope
+     * is present — the signal the caller uses to distinguish "no envelope in the
+     * output at all" (a failed / version-skewed CLI read, #1467) from a valid
+     * envelope that simply carries zero `lines` ("no messages yet").
+     */
+    internal fun agentLogEnvelopeOrNull(output: String): JSONObject? =
+        output.lineSequence()
+            .filter { it.isNotBlank() }
+            .firstNotNullOfOrNull { line ->
+                runCatching { JSONObject(line) }.getOrNull()?.takeIf { it.has("lines") }
+            }
+
+    /** Extract the non-blank raw JSONL strings from a resolved agent-log envelope. */
+    private fun agentLogEnvelopeLines(envelope: JSONObject): List<String> {
         val lines = envelope.optJSONArray("lines") ?: return emptyList()
         return buildList {
             for (index in 0 until lines.length()) {
                 lines.optString(index).takeIf { it.isNotBlank() }?.let(::add)
             }
         }
+    }
+
+    /**
+     * Build the `pocketshell agent-log --engine codex` invocation. When
+     * [clampBytes] is non-null the read is byte-bounded server-side via
+     * `--max-line-bytes` (#1267), degrading any multi-MB rollout line to a
+     * compact truncation marker so its bytes never cross SSH into the phone's
+     * heap. When null the flag is omitted — the pre-#1267 command shape an
+     * OLDER host CLI understands (the #1467 version-skew fallback).
+     */
+    private fun codexAgentLogCommand(sessionId: String, boundedMaxLines: Int, clampBytes: Int?): String {
+        val clamp = clampBytes?.let { " --max-line-bytes $it" }.orEmpty()
+        return "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
+            "--json --tail $boundedMaxLines$clamp 2>/dev/null || true"
     }
 
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {

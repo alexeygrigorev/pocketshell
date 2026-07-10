@@ -66,6 +66,173 @@ class AgentConversationRepositoryTest {
         assertFalse(session.execCommands.single().contains("tail -n"))
     }
 
+    // ----------------------------------------------------------------
+    // Issue #1467: a payload-wrapped Codex JSONL transcript (the exact
+    // `tests/docker/agent-fixtures/codex-session.jsonl` shape the
+    // EmulatorDockerSshSmokeTest seeds, timestamps and all) must parse to
+    // non-empty conversation events. The v0.4.25 release gate caught
+    // `readInitialEvents(... Codex ...)` returning [] for this form, so a
+    // Codex session whose transcript is payload-wrapped rendered an EMPTY
+    // conversation view. Reproduce it at the JVM level so the per-push Unit
+    // gate catches this class WITHOUT the emulator (#1458 blind spot).
+    // ----------------------------------------------------------------
+    @Test
+    fun codexReadInitialEventsParsesTheExactDockerPayloadWrappedFixture() = runTest {
+        // Byte-identical to tests/docker/agent-fixtures/codex-session.jsonl.
+        val codexLines = listOf(
+            """{"type":"session_meta","timestamp":"2026-05-22T10:00:59Z","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}""",
+            """{"type":"event_msg","timestamp":"2026-05-22T10:01:00Z","payload":{"type":"user_message","message":"add a smoke test"}}""",
+            """{"type":"response_item","timestamp":"2026-05-22T10:01:01Z","payload":{"type":"function_call","call_id":"codex-call-1","name":"shell","arguments":"./gradlew test"}}""",
+            """{"type":"response_item","timestamp":"2026-05-22T10:01:02Z","payload":{"type":"function_call_output","call_id":"codex-call-1","output":"BUILD SUCCESSFUL"}}""",
+            """{"type":"response_item","timestamp":"2026-05-22T10:01:03Z","payload":{"type":"message","id":"codex-message-1","role":"assistant","content":[{"type":"output_text","text":"The deterministic Codex fixture is ready."}]}}""",
+        )
+        val session = FakeSshSession(
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxLines = 20,
+        )
+
+        assertTrue(
+            "expected the payload-wrapped Codex fixture to parse into non-empty events, got $events",
+            events.isNotEmpty(),
+        )
+        assertTrue(
+            "expected the assistant message text, got ${events.map { it }}",
+            events.any {
+                it is ConversationEvent.Message &&
+                    it.text.contains("deterministic Codex fixture")
+            },
+        )
+        // The user prompt + the assistant reply both surface, in order.
+        assertEquals(
+            listOf(
+                ConversationRole.User to "add a smoke test",
+                ConversationRole.Assistant to "The deterministic Codex fixture is ready.",
+            ),
+            events.filterIsInstance<ConversationEvent.Message>().map { it.role to it.text },
+        )
+        // The function-call + its output render too.
+        assertTrue(events.any { it is ConversationEvent.ToolCall && it.name == "shell" })
+        assertTrue(events.any { it is ConversationEvent.ToolResult && it.output.contains("BUILD SUCCESSFUL") })
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #1467 (ROOT CAUSE / red->green): #1267 added `--max-line-bytes`
+    // to the Codex agent-log read, but a host CLI OLDER than #1267 rejects
+    // that unknown option and (behind `2>/dev/null || true`) returns EMPTY
+    // stdout — so `readInitialEvents` parsed [] and the whole Codex
+    // conversation view blanked. This is the exact failure the v0.4.25
+    // release gate caught end-to-end against the stale Docker fixture CLI.
+    // The repository must retry the read WITHOUT the clamp flag so a
+    // version-skewed host still renders its conversation.
+    // Without the fallback this test is RED (events == []).
+    // ----------------------------------------------------------------
+    @Test
+    fun codexReadInitialEventsFallsBackWhenHostCliRejectsMaxLineBytes() = runTest {
+        val codexLines = listOf(
+            """{"type":"session_meta","timestamp":"2026-05-22T10:00:59Z","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}""",
+            """{"type":"event_msg","timestamp":"2026-05-22T10:01:00Z","payload":{"type":"user_message","message":"add a smoke test"}}""",
+            """{"type":"response_item","timestamp":"2026-05-22T10:01:03Z","payload":{"type":"message","id":"codex-message-1","role":"assistant","content":[{"type":"output_text","text":"The deterministic Codex fixture is ready."}]}}""",
+        )
+        val session = FakeSshSession(
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+            agentLogRejectsMaxLineBytes = true,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxLines = 20,
+        )
+
+        assertTrue(
+            "expected the version-skew fallback to still parse the Codex conversation, got $events",
+            events.any {
+                it is ConversationEvent.Message &&
+                    it.text.contains("deterministic Codex fixture")
+            },
+        )
+        // The fallback: the clamped read (rejected → empty) THEN a retry
+        // without `--max-line-bytes` (the pre-#1267 shape the stale CLI parses).
+        val agentLogCommands = session.execCommands.filter { it.contains("pocketshell agent-log") }
+        assertEquals(2, agentLogCommands.size)
+        assertTrue(agentLogCommands.first().contains("--max-line-bytes"))
+        assertFalse(agentLogCommands.last().contains("--max-line-bytes"))
+    }
+
+    @Test
+    fun codexReadEventsWindowFallsBackWhenHostCliRejectsMaxLineBytes() = runTest {
+        // Class coverage (G2): the PAGED window read (readEventsWindow) shares
+        // the same `--max-line-bytes` agent-log invocation and the same
+        // version-skew blank; the fallback must protect it too.
+        val codexLines = listOf(
+            """{"type":"event_msg","timestamp":"2026-05-22T10:01:00Z","payload":{"type":"user_message","message":"add a smoke test"}}""",
+            """{"type":"response_item","timestamp":"2026-05-22T10:01:03Z","payload":{"type":"message","id":"codex-message-1","role":"assistant","content":[{"type":"output_text","text":"The deterministic Codex fixture is ready."}]}}""",
+        )
+        val session = FakeSshSession(
+            wcOutput = "2\n",
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+            agentLogRejectsMaxLineBytes = true,
+        )
+
+        val window = AgentConversationRepository().readEventsWindow(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxMessages = 20,
+        )
+
+        assertTrue(
+            "expected the paged window fallback to still parse the Codex conversation, got ${window.events}",
+            window.events.any {
+                it is ConversationEvent.Message &&
+                    it.text.contains("deterministic Codex fixture")
+            },
+        )
+    }
+
     @Test
     fun tailEventsFromLineReturnsNullWhenSshTailStartThrowsDisconnected() = runTest {
         val session = FakeSshSession(
@@ -2193,6 +2360,12 @@ class AgentConversationRepositoryTest {
         private val tailLines: List<String> = emptyList(),
         private val tailFailure: Throwable? = null,
         private val agentLogOutput: String = "",
+        // Issue #1467: simulate a host `pocketshell` CLI OLDER than #1267 that
+        // does not know `--max-line-bytes` — it rejects the unknown option and
+        // exits non-zero, which behind the repository's `2>/dev/null || true`
+        // surfaces as EMPTY stdout. The repository must retry the read WITHOUT
+        // the clamp flag rather than silently blanking the Codex conversation.
+        private val agentLogRejectsMaxLineBytes: Boolean = false,
         private val jsonlTailOutput: String = "",
         private val recordedKindOutput: String = "",
         private val recordedSourceGenerationOutput: String = "",
@@ -2269,9 +2442,9 @@ class AgentConversationRepositoryTest {
                 // raw-file line count (the follow cursor) without a separate
                 // lineCount exec.
                 command.contains("@@PS_CODEX_WINDOW@@") ->
-                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n${applyAgentLogEnvelopeClamp(command, agentLogOutput)}"
+                    "${wcOutput.trim()}\n@@PS_CODEX_WINDOW@@\n${agentLogEnvelopeFor(command)}"
                 command.contains("wc -l < ") -> wcOutput
-                command.contains("pocketshell agent-log") -> applyAgentLogEnvelopeClamp(command, agentLogOutput)
+                command.contains("pocketshell agent-log") -> agentLogEnvelopeFor(command)
                 command.trimStart().startsWith("tail -n") -> applyLineClamp(command, jsonlTailOutput)
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
@@ -2313,6 +2486,16 @@ class AgentConversationRepositoryTest {
         // `--max-line-bytes` (base code), the envelope is returned unchanged and a
         // multi-MB line balloons the read exactly as on-device — a genuine
         // red->green. A blank/unparseable envelope is passed through untouched.
+        // Issue #1467: an OLD host CLI rejects `--max-line-bytes` and, behind
+        // `2>/dev/null || true`, returns empty stdout. Otherwise the envelope is
+        // emitted (with the server-side clamp applied when the flag is present).
+        private fun agentLogEnvelopeFor(command: String): String =
+            if (agentLogRejectsMaxLineBytes && command.contains("--max-line-bytes")) {
+                ""
+            } else {
+                applyAgentLogEnvelopeClamp(command, agentLogOutput)
+            }
+
         private fun applyAgentLogEnvelopeClamp(command: String, envelope: String): String {
             val cap = Regex("--max-line-bytes (\\d+)").find(command)
                 ?.groupValues?.get(1)?.toIntOrNull() ?: return envelope

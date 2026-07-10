@@ -8,7 +8,7 @@
 177524 app/src/main/java/com/pocketshell/app/composer/PromptComposerViewModel.kt
 147448 app/src/main/java/com/pocketshell/app/projects/FolderListViewModel.kt
 149516 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreen.kt
-907894 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
+907779 app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt
 148633 app/src/test/java/com/pocketshell/app/tmux/TmuxSessionViewModelTest.kt
 1146350 docs/mockups/feedback/folder-tree-target-20260604.png
 182790 docs/screenshots/readme-settings.png

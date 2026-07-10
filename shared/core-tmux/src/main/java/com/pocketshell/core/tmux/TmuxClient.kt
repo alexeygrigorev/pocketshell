@@ -244,6 +244,42 @@ public interface TmuxClient : AutoCloseable {
     ): CommandResponse = sendCommand(listPanesCommand)
 
     /**
+     * Issue #1460: run an interactive INPUT-INJECTION tmux command (`send-keys`
+     * in all its flavours — `-l` literal, named-key, `-H` hex bracketed-paste
+     * body, `-X … cancel` copy-mode exit) on a DEDICATED [SshSession.exec]
+     * channel — the SAME independent lane [listPanesViaExec] (#1316) and
+     * [captureWithCursor] (#1297) use — NOT the shared per-host `-CC`
+     * control-mode channel that [sendCommand] awaits `%begin`/`%end` on.
+     *
+     * The send path was the residual [sendCommand] SPOF the #1459 Codex-freeze
+     * audit found after #1316 fixed the attach side. When the user types a
+     * message and hits Send to a live agent mid-`%output`-burst, the send's
+     * `%begin`/`%end` reply was HEAD-OF-LINE-BLOCKED behind the burst on the ONE
+     * sshj transport reader (`sendCommand` awaits its reply on that reader), so
+     * the UI action wedged — the maintainer's "app froze, had to restart". The
+     * exec lane reads its OWN channel's stdout OUTSIDE the transport dispatcher,
+     * so `send-keys` returns while a burst saturates `-CC`.
+     *
+     * [sendKeysCommand] is the `-CC`-form command WITHOUT the leading `tmux`
+     * (e.g. `send-keys -l -t '%0' -- 'hi'`), so the caller's command string is
+     * preserved unchanged. Interactive input is ordered by awaiting each call
+     * sequentially, exactly as the `-CC` path did — `send-keys` is synchronous
+     * server-side, so a completed exec has queued its keys before the next runs.
+     * [timeoutMs] bounds the round-trip so a genuinely wedged/half-open
+     * transport surfaces a [TmuxClientException] fast (and the composer keeps
+     * the unsent draft) instead of parking the send. `send-keys` prints nothing
+     * on success (empty [CommandResponse.output], non-error); a non-zero exit
+     * (pane/session gone) surfaces as an error response carrying stderr.
+     *
+     * The default implementation falls back to a `-CC` [sendCommand] for
+     * [TmuxClient] doubles that do not model an exec lane.
+     */
+    public suspend fun sendKeysViaExec(
+        sendKeysCommand: String,
+        timeoutMs: Long? = null,
+    ): CommandResponse = sendCommand(sendKeysCommand)
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -1309,6 +1345,59 @@ internal class RealTmuxClient(
             )
         }
         return parseListPanesExecResult(execResult)
+    }
+
+    /**
+     * Issue #1460: run an interactive `send-keys` input-injection command on the
+     * DEDICATED [SshSession.exec] channel — the same independent lane
+     * [listPanesViaExec] (#1316) / [captureWithCursor] (#1297) use — NOT the
+     * shared per-host `-CC` control-mode [sendMutex].
+     *
+     * The send path was the residual `sendCommand` SPOF (#1459 audit): a Send to
+     * a live agent mid-`%output`-burst head-of-line-blocked its `%begin`/`%end`
+     * reply behind the burst on the ONE sshj transport reader, wedging the UI
+     * action (the maintainer's "app froze, had to restart"). The exec lane reads
+     * its OWN channel's stdout OUTSIDE the transport dispatcher, so `send-keys`
+     * returns while a burst saturates `-CC`. [sendKeysCommand] is the `-CC`-form
+     * command (no leading `tmux`); [timeoutMs] bounds the round-trip so a
+     * genuinely wedged/half-open transport surfaces a [TmuxClientException] fast
+     * instead of parking the send (cancelling the exec closes its OWN channel,
+     * never `-CC`).
+     */
+    override suspend fun sendKeysViaExec(
+        sendKeysCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
+        val command = "tmux $sendKeysCommand"
+        val execResult =
+            try {
+                // Independent of the busy `-CC` channel, so this returns fast under
+                // a burst. The ceiling is the safety bound for a genuinely
+                // wedged/half-open transport; cancelling the exec closes its OWN
+                // channel (RealSshSession.exec cancellation handler), never `-CC`.
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux send-keys exec (interactive send lane) failed: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux sendKeysViaExec exec timed out >${effectiveTimeoutMs}ms " +
+                    "(interactive send lane); surfacing a best-effort failure.",
+            )
+            throw TmuxClientException(
+                "tmux send-keys (exec interactive send lane) timed out after ${effectiveTimeoutMs}ms",
+            )
+        }
+        return parseSendKeysExecResult(execResult)
     }
 
     /**

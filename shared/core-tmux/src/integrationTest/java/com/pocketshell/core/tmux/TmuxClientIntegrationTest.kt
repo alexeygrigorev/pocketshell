@@ -706,4 +706,111 @@ class TmuxClientIntegrationTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun `sendKeysViaExec delivers keys to a real pane and returns fast during a -CC burst`() = runBlocking {
+        // Issue #1460 (G10 real-path, no emulator): the residual SEND-side wedge
+        // #1459 found after #1316 fixed the attach side — typing a message and
+        // hitting Send to a live agent mid-`%output`-burst head-of-line-blocked
+        // the send's `%begin`/`%end` reply on the ONE sshj reader (the
+        // maintainer's "app froze, had to restart"). The fix moves the
+        // interactive `send-keys` off `-CC` onto the exec lane.
+        //
+        // Two real-tmux assertions:
+        //   Phase A — FUNCTIONAL: `sendKeysViaExec` (a fresh `tmux send-keys`
+        //     exec client) actually injects keys into the pane; the echoed
+        //     marker appears in an authoritative `capture-pane`.
+        //   Phase B — LIVENESS: during a `-CC` %output burst the exec-lane send
+        //     returns fast + non-error (it does not wait on the busy `-CC`
+        //     reader). Note: the DETERMINISTIC red→green discriminator for the
+        //     head-of-line wedge is the JVM `TmuxClientExecLaneTest` (a held
+        //     `-CC` sendMutex) — a fast Docker host flushes a bounded burst's
+        //     `%begin`/`%end` between frames faster than the phone's
+        //     throughput-bound reader, so this Phase B is real-path GREEN
+        //     confirmation, not the RED discriminator (same as the #1316
+        //     precedent above).
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                val sessionName = "it-${System.nanoTime()}"
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = sessionName,
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val paneId = withTimeout(10_000) {
+                        it.sendCommand("display-message -p \"#{pane_id}\"")
+                    }.output.firstOrNull()?.trim().orEmpty()
+                    assertTrue("pane id must resolve; got '$paneId'", paneId.startsWith("%"))
+
+                    // Phase A — FUNCTIONAL: inject `echo <marker>` + Enter via the
+                    // exec lane into an idle pane and confirm the echoed marker
+                    // appears. Proves a fresh `tmux send-keys` exec client really
+                    // delivers keys to the pane (the whole point of the send move).
+                    val marker = "PS1460MARK${System.nanoTime()}"
+                    withTimeout(10_000) {
+                        it.sendKeysViaExec("send-keys -l -t $paneId -- 'echo $marker'", timeoutMs = 5_000L)
+                    }
+                    withTimeout(10_000) {
+                        it.sendKeysViaExec("send-keys -t $paneId Enter", timeoutMs = 5_000L)
+                    }
+                    val delivered = withTimeout(15_000) {
+                        var seen = false
+                        val deadline = System.currentTimeMillis() + 12_000
+                        while (System.currentTimeMillis() < deadline && !seen) {
+                            val capture = it.capturePaneTextViaExec(paneId, timeoutMs = 4_000L)
+                            // The echoed line (command result) must appear, not just
+                            // the typed command — assert the marker shows at least
+                            // twice (typed + echoed) OR on its own output line.
+                            if (capture.output.count { line -> line.contains(marker) } >= 2) seen = true
+                            if (!seen) delay(200)
+                        }
+                        seen
+                    }
+                    assertTrue(
+                        "the exec-lane send-keys must actually deliver '$marker' to the real pane",
+                        delivered,
+                    )
+
+                    // Phase B — LIVENESS: drive a `-CC` %output burst and confirm
+                    // the exec-lane send returns fast + non-error during it.
+                    val burstBytes = java.util.concurrent.atomic.AtomicLong(0)
+                    val collector = scope.launch {
+                        it.outputFor(paneId).collect { evt -> burstBytes.addAndGet(evt.data.size.toLong()) }
+                    }
+                    delay(200)
+                    withTimeout(10_000) {
+                        it.sendCommand("send-keys -t $paneId 'seq 1 400000' Enter")
+                    }
+                    val burstDeadline = System.currentTimeMillis() + 10_000
+                    while (System.currentTimeMillis() < burstDeadline && burstBytes.get() < 50_000L) {
+                        delay(20)
+                    }
+                    assertTrue(
+                        "the -CC channel must actually be streaming a burst; sawBytes=${burstBytes.get()}",
+                        burstBytes.get() >= 50_000L,
+                    )
+                    val startedAt = System.currentTimeMillis()
+                    val sendResponse = withTimeout(10_000) {
+                        it.sendKeysViaExec("send-keys -H -t $paneId 20", timeoutMs = 6_000L)
+                    }
+                    val elapsed = System.currentTimeMillis() - startedAt
+                    collector.cancel()
+                    assertFalse(
+                        "exec-lane send must succeed during a -CC burst; got ${sendResponse.output}",
+                        sendResponse.isError,
+                    )
+                    assertTrue(
+                        "exec-lane send must return within the short ceiling during a burst " +
+                            "(elapsed ${elapsed}ms)",
+                        elapsed < 5_000L,
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
 }

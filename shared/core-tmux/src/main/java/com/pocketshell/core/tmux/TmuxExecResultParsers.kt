@@ -70,6 +70,19 @@ internal fun parseListPanesExecResult(result: ExecResult): CommandResponse {
 }
 
 /**
+ * Issue #1460: turn a `send-keys` (or other input-injection) [ExecResult] from
+ * the interactive send exec lane into a [CommandResponse]. `send-keys` prints
+ * nothing on success, so a zero exit yields an empty, non-error response (the
+ * caller's `throwIfTmuxError` treats it as success); a non-zero exit
+ * (pane/session gone) surfaces as an error response carrying the stderr, so a
+ * failed send still fails honestly and the composer keeps the unsent draft. The
+ * parse rule is identical to [parseListPanesExecResult] (empty-stdout success /
+ * stderr-on-error), so it delegates.
+ */
+internal fun parseSendKeysExecResult(result: ExecResult): CommandResponse =
+    parseListPanesExecResult(result)
+
+/**
  * Split the `capture-pane` payload into lines, dropping the single trailing
  * empty line the terminal newline produces so the output matches the per-line
  * list the old `-CC` block drain returned.

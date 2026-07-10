@@ -14056,11 +14056,11 @@ public class TmuxSessionViewModel @Inject constructor(
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
-                client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(payload)}'")
+                sendLiteralTextKeys(client, paneId, payload)
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
             awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
-            client.sendCommand("send-keys -t $paneId Enter")
+            sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
             // Issue #941 (black-screen B1): the maintainer's "I sent a message and
             // everything became black" symptom. After the submit Enter, a full-screen
@@ -15652,11 +15652,11 @@ public class TmuxSessionViewModel @Inject constructor(
             when (token) {
                 is TmuxInputToken.Literal -> {
                     if (token.text.isNotEmpty()) {
-                        client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(token.text)}'")
+                        sendLiteralTextKeys(client, paneId, token.text)
                     }
                 }
                 is TmuxInputToken.NamedKey -> {
-                    client.sendCommand("send-keys -t $paneId ${token.name}")
+                    sendNamedKeyToPane(client, paneId, token.name)
                 }
             }
         }
@@ -15664,7 +15664,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private suspend fun ensurePaneAcceptsInput(client: TmuxClient, paneId: String) {
         if (paneRows[paneId]?.inCopyMode != true) return
-        client.sendCommand("send-keys -X -t $paneId cancel")
+        sendCancelCopyMode(client, paneId)
             .throwIfTmuxError("exit copy-mode for pane $paneId")
         markPaneCopyMode(paneId, false)
     }
@@ -15692,7 +15692,7 @@ public class TmuxSessionViewModel @Inject constructor(
         bridgeScope.launch {
             runCatching {
                 ensurePaneAcceptsInput(client, paneId)
-                client.sendCommand("send-keys -t $paneId $key")
+                sendNamedKeyToPane(client, paneId, key)
             }
         }
     }

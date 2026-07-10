@@ -4,6 +4,40 @@ import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 
+/**
+ * Issue #1460: type a literal UTF-8 string into [paneId] via `send-keys -l` on
+ * the interactive send EXEC lane (not the shared `-CC` channel), so it does not
+ * head-of-line-block behind a live agent `%output` burst.
+ */
+internal suspend fun sendLiteralTextKeys(
+    client: TmuxClient,
+    paneId: String,
+    text: String,
+): CommandResponse =
+    client.sendKeysViaExec("send-keys -l -t $paneId -- '${escapeSingleQuoted(text)}'")
+
+/**
+ * Issue #1460: send a tmux named key (`Enter`, `Tab`, `BSpace`, `Up`, a
+ * `C-<letter>` modifier, …) to [paneId] on the interactive send exec lane.
+ */
+internal suspend fun sendNamedKeyToPane(
+    client: TmuxClient,
+    paneId: String,
+    key: String,
+): CommandResponse =
+    client.sendKeysViaExec("send-keys -t $paneId $key")
+
+/**
+ * Issue #1460: exit copy-mode in [paneId] (`send-keys -X … cancel`) on the
+ * interactive send exec lane so a pane in copy-mode can accept input without
+ * wedging behind a burst.
+ */
+internal suspend fun sendCancelCopyMode(
+    client: TmuxClient,
+    paneId: String,
+): CommandResponse =
+    client.sendKeysViaExec("send-keys -X -t $paneId cancel")
+
 internal suspend fun sendRawInputBytes(
     client: TmuxClient,
     paneId: String,
@@ -11,7 +45,10 @@ internal suspend fun sendRawInputBytes(
 ) {
     val hex = BracketedPaste.hex(bytes)
     if (hex.isEmpty()) return
-    client.sendCommand("send-keys -H -t $paneId $hex")
+    // Issue #1460: the `-H` raw-byte injection rides the interactive send exec
+    // lane, not the shared `-CC` channel, so it does not head-of-line-block
+    // behind a live agent `%output` burst.
+    client.sendKeysViaExec("send-keys -H -t $paneId $hex")
 }
 
 /**
@@ -36,7 +73,11 @@ internal suspend fun sendBracketedPaste(
 ) {
     if (bytes.isEmpty()) return
     for (hex in BracketedPaste.hexChunks(bytes, TMUX_PASTE_BODY_CHUNK_BYTES)) {
-        client.sendCommand("send-keys -H -t $paneId $hex")
+        // Issue #1460: each bracketed-paste body chunk rides the interactive send
+        // exec lane (awaited sequentially, so ordering is preserved) instead of
+        // the shared `-CC` channel — a multi-chunk paste to a live agent mid-burst
+        // no longer wedges behind the burst's `%output` on the one sshj reader.
+        client.sendKeysViaExec("send-keys -H -t $paneId $hex")
             .throwIfTmuxError("paste chunk into pane $paneId")
     }
 }

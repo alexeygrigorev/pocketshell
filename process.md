@@ -365,6 +365,16 @@ Minimum pre-push gate:
   asserted synchronous post-`close()` state that the new async contract broke.
   Reviewer briefs for connection-core contract changes must call out running the
   integration suite.
+- **A change to a hygiene-ratcheted file (esp. `TmuxSessionViewModel.kt`) MUST
+  run the `Unit` job's file-size / VM-ratchet guards locally before push —
+  `scripts/check-file-size-hygiene.sh` and `scripts/check-connection-vm-ratchet.sh`.**
+  These downward-only guards run in the per-PR `Unit tests` job but are NOT
+  ordinary Gradle tests, so a change that passes `:app:testDebugUnitTest` locally
+  can still be red on CI. S5/#1328 shipped review-approved but bounced on this
+  guard (VM grew +4823 bytes) because it wasn't run pre-push. Growing a
+  god-object past its baseline is itself a D28 smell — the fix is a real
+  reduction (delete dead old-path code or extract to a sibling `*Effects`/
+  diagnostics file), never raising the baseline.
 - A verifier/reviewer agent independently inspects the diff and reruns the
   relevant local checks from the implementer's worktree before the orchestrator
   integrates it. Treat this verifier as a required local gatekeeper before any

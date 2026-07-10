@@ -238,21 +238,6 @@ private fun MessageBody(
     }
 }
 
-/**
- * A streaming cursor indicator for use at the end of a streaming message.
- */
-@Composable
-internal fun StreamingCursor(
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        text = "▌",
-        color = PocketShellColors.Purple,
-        fontSize = 14.sp,
-        modifier = modifier,
-    )
-}
-
 internal val LocalConversationFontSizeSp: ProvidableCompositionLocal<Float> =
     staticCompositionLocalOf { PocketShellType.bodyDense.fontSize.value }
 

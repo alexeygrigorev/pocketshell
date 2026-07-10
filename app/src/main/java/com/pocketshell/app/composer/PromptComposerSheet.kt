@@ -2135,17 +2135,6 @@ internal const val SEND_ENTER_TOOLTIP_LABEL: String =
     "Send the draft and submit it with Enter"
 
 /**
- * Issue #153 fix 3: stable test tag for the long-press tooltip popup
- * surface. The tag derives from the tooltip copy so the OutlineSend and
- * Primary Send tooltips get distinct tags without an extra parameter
- * threaded through. Connected tests can long-press the button and
- * assert the popup surfaced with the expected copy.
- */
-internal fun composerSendTooltipTestTag(label: String): String =
-    "prompt-composer-send-tooltip:" + label.hashCode().toString(16)
-
-
-/**
  * Issue #174: test tag for the recording discard control. It only appears in
  * `Recording`, where it stops the mic and drops the buffer before Whisper.
  */

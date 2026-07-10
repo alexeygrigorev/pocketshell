@@ -146,7 +146,7 @@ private fun TabsRowWithPulse(
  *
  * The host segment is intentionally not surfaced - the host name is
  * already visible on the host list, the pre-session status line, and on
- * [StatusLine]/[FailedConnectionRow] when not connected.
+ * [FailedConnectionRow] when not connected.
  */
 @Composable
 internal fun ConsolidatedTopChrome(

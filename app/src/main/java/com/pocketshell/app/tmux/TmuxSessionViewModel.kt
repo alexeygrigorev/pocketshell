@@ -1737,19 +1737,6 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private val staleRenderSparseWakeBaselines = StaleRenderSparseWakeBaselines()
 
-    /**
-     * Issue #1166 test seam: fire the stale-render watchdog wake directly, so a
-     * JVM test can assert that a backed-off watchdog snaps to the hot cadence on a
-     * fresh `%output` wake WITHOUT standing up the real `-CC` output stream. The
-     * production wake is fired from [recordVisiblePaneOutput] on every active-pane
-     * output chunk (see [recordPaneOutputActivityForTest], which drives that real
-     * path end-to-end).
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun signalStaleRenderWatchdogWakeForTest() {
-        staleRenderWatchdogWake.trySend(Unit)
-    }
-
     // Issue #1166: a test override for [PowerManager.isInteractive] (screen-on).
     // Null → read the real PowerManager (or default on when no context). A JVM
     // test drives the foreground/screen gate deterministically without an AVD.
@@ -13102,18 +13089,6 @@ public class TmuxSessionViewModel @Inject constructor(
             return true
         }
         return shouldDeferAgentDowngrade(paneId)
-    }
-
-    /**
-     * Issue #819 (A2): true when a REMEMBERED-agent resolving placeholder is
-     * currently up for [paneId] — the #495 reattach seed, now detection-less,
-     * holding "Loading conversation…" while live `detectRecordedSessionForPane`
-     * re-anchors the route-true source. False once a real detection lands (the
-     * flag is cleared) or the row is gone.
-     */
-    private fun isRememberedAgentPlaceholderUp(paneId: String): Boolean {
-        val row = _agentConversations.value[paneId] ?: return false
-        return row.rememberedAgentPlaceholder && row.detection == null
     }
 
     /**

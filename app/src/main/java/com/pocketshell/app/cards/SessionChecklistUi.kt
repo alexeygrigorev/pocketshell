@@ -39,7 +39,6 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 internal const val SESSION_CHECKLIST_CHIP_TAG: String = "session:checklist-chip"
-internal const val SESSION_CHECKLIST_SHEET_TAG: String = "session:checklist:sheet"
 internal const val SESSION_CHECKLIST_CARD_TAG_PREFIX: String = "session:checklist:card:"
 internal const val SESSION_CHECKLIST_ITEM_TAG_PREFIX: String = "session:checklist:item:"
 internal const val SESSION_CHECKLIST_CLOSE_TAG: String = "session:checklist:close"
@@ -197,37 +196,6 @@ internal fun SessionCardFeedContent(
                 Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Checklist-only sheet — kept for the current single-checklist wiring, but now
-// renders through the registry's [ChecklistCardRenderer] so there is no
-// checklist-specific row layout duplicated outside the renderer (hard-cut D22).
-// ---------------------------------------------------------------------------
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun ChecklistCardsSheet(
-    cards: List<SessionCardsRemoteSource.ChecklistCard>,
-    onToggle: (cardId: String, itemId: String, checked: Boolean) -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = PocketShellColors.Surface,
-        contentColor = PocketShellColors.Text,
-        modifier = modifier,
-    ) {
-        ChecklistCardsContent(
-            cards = cards,
-            onToggle = onToggle,
-            onClose = onDismiss,
-            modifier = Modifier.testTag(SESSION_CHECKLIST_SHEET_TAG),
-        )
     }
 }
 

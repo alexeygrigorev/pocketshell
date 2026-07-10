@@ -205,17 +205,6 @@ class SessionServiceController @Inject constructor(
         }
     }
 
-    @VisibleForTesting
-    internal fun stopObservingForTest() {
-        observeJob?.cancel()
-        observeJob = null
-        holdStoppedByUser = false
-        graceDisconnectAtWallClockMillis.value = null
-        appForegrounded.value = true
-        portForwardActive.value = false
-        _snapshot.value = SessionConnectionSnapshot.Empty
-    }
-
     private data class EffectiveInputs(
         val rawSnapshot: SessionConnectionSnapshot,
         val foreground: Boolean,

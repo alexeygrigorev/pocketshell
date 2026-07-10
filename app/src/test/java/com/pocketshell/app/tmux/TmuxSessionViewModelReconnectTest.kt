@@ -188,6 +188,83 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
+    fun beyondGraceReconnectPreflightClosedTransportRedialsFreshNotUnreachable() = runTest(scheduler) {
+        // Issue #1328 (S5, #1321 §1b) — the BEHAVIORAL red→green (NOT the classifier
+        // proxy). The maintainer's beyond-grace reconnect hit a `transport is closed`
+        // failure: the reused warm lease's SSH transport was silently torn down while
+        // backgrounded, so the reconnect's first dial fails with "transport is closed".
+        // The BROKEN behavior surfaced a hard Unreachable / "Tap Reconnect" on that first
+        // failure. The FIX: a closed transport is TRANSIENT — evict the poisoned lease and
+        // SILENTLY DIAL A FRESH transport, healing the SAME session.
+        //
+        // The load-bearing GREEN assertion is the FRESH SECOND DIAL + recovery to
+        // Connected (NOT a Failed band), and that the FIRST (poisoned) session was evicted.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val closedSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(closedSession, freshSession)
+        val manager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L)
+
+        // First client: connect() succeeds but list-panes throws the exact
+        // `transport is closed` shape #1321 hit (the silently-dead backgrounded lease).
+        val closedClient = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "list-panes"
+            closeAndThrowException = TmuxClientException(
+                "failed to preflight tmux has-session -t work: transport is closed",
+            )
+        }
+        val freshClient = FakeTmuxClient().withSinglePane("work", "%1")
+
+        val vm = newVm(registry = registry, sshLeaseManager = manager)
+        vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+            assertEquals("work", sessionName)
+            if (session === closedSession) closedClient else freshClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+
+        // Trigger the reconnect (a validated network handoff drives the beyond-grace
+        // proactive reconnect through the SAME single ladder the maintainer's reconnect used).
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "validated-default-network-changed"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "a `transport is closed` reconnect must dial TWICE: the closed transport, " +
+                "then a FRESH one — never hard-fail on the first (the #1321 break)",
+            2,
+            connector.connectCount,
+        )
+        assertTrue(
+            "the poisoned (closed-transport) SSH session must be evicted, not reused",
+            closedSession.closed,
+        )
+        assertSame(
+            "the SAME session must recover onto the fresh client",
+            freshClient,
+            registry.clients.value[1L]?.client,
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "a closed-transport reconnect must SILENTLY heal to Connected, not surface " +
+                "a Failed/Unreachable 'Tap Reconnect' band; got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
+    @Test
     fun lifecycleReattachEvictsConnectedIdleLeaseBeforeReattaching() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val staleSession = FakeSshSession()

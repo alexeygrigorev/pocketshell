@@ -786,7 +786,6 @@ fun envRowItemKey(row: EnvKeyUiRow): String = row.id
 
 fun envKeyRowTestTag(key: String): String = "env:key:$key"
 fun envKeyMenuTestTag(key: String): String = "env:menu:$key"
-fun envKeyValueTestTag(key: String): String = "env:value:$key"
 fun envKeyRevealTestTag(key: String): String = "env:reveal:$key"
 fun envKeyHideTestTag(key: String): String = "env:hide:$key"
 fun envKeyEditTestTag(key: String): String = "env:edit:$key"

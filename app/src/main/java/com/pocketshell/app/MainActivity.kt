@@ -2341,5 +2341,4 @@ internal fun AppDestination.crashReportContext(): CrashReportContext = when (thi
     )
 }
 
-private const val DefaultTmuxSessionName = "pocketshell"
 private const val LAST_SESSION_ACTIVITY_LOG_TAG = "PsLastSession"

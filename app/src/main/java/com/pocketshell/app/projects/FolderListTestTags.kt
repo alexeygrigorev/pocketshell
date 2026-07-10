@@ -57,9 +57,6 @@ fun folderListFlatRowAgentStateChipTestTag(sessionName: String): String =
 fun folderListFlatRowActionsTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:stop"
 
-/** Back-compat alias for tests/tools that still use the pre-#598 stop-specific name. */
-fun folderListFlatRowStopTestTag(sessionName: String): String =
-    folderListFlatRowActionsTestTag(sessionName)
 fun folderListFlatRowOpenMenuItemTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:open:item"
 fun folderListFlatRowRenameMenuItemTestTag(sessionName: String): String =
@@ -92,9 +89,6 @@ fun folderSessionAgentStateChipTestTag(folderPath: String, sessionName: String):
 fun folderSessionActionsTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:stop"
 
-/** Back-compat alias for tests/tools that still use the pre-#598 stop-specific name. */
-fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
-    folderSessionActionsTestTag(folderPath, sessionName)
 fun folderSessionOpenMenuItemTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:open:item"
 fun folderSessionRenameMenuItemTestTag(folderPath: String, sessionName: String): String =

@@ -3,14 +3,12 @@ package com.pocketshell.core.storage
 import androidx.room.Room
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
-import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.CommandTemplateEntity
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
-import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.flow.first
@@ -111,21 +109,6 @@ class AppDatabaseTest {
         assertEquals(1, remappings.size)
         assertEquals(5432, remappings[0].remotePort)
         assertEquals(15432, remappings[0].localPort)
-    }
-
-    @Test
-    fun session_insert_then_read_by_host() = runTest {
-        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
-        val hostId = db.hostDao().insert(
-            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
-        )
-        db.sessionDao().insert(
-            SessionEntity(hostId = hostId, name = "main", lastSeenAt = 1_000L, tags = "work"),
-        )
-        val sessions = db.sessionDao().getByHostId(hostId).first()
-        assertEquals(1, sessions.size)
-        assertEquals("main", sessions[0].name)
-        assertEquals("work", sessions[0].tags)
     }
 
     @Test
@@ -252,37 +235,6 @@ class AppDatabaseTest {
 
         dao.deleteAll()
         assertEquals(0, dao.getAll().first().size)
-    }
-
-    @Test
-    fun agentSession_upsert_then_read_by_paneRef() = runTest {
-        val paneRef = "host1:main:0:0"
-        db.agentSessionDao().upsert(
-            AgentSessionEntity(
-                paneRef = paneRef,
-                agent = "claude",
-                jsonlPath = "/home/alexey/.claude/projects/foo/abc.jsonl",
-                detectedAt = 42L,
-            ),
-        )
-        val read = db.agentSessionDao().getByPaneRef(paneRef)
-        assertNotNull(read)
-        assertEquals("claude", read!!.agent)
-        assertEquals(42L, read.detectedAt)
-
-        // Re-upsert with new state should replace, not duplicate.
-        db.agentSessionDao().upsert(
-            AgentSessionEntity(
-                id = read.id,
-                paneRef = paneRef,
-                agent = "codex",
-                jsonlPath = null,
-                detectedAt = 100L,
-            ),
-        )
-        val updated = db.agentSessionDao().getByPaneRef(paneRef)
-        assertEquals("codex", updated!!.agent)
-        assertNull(updated.jsonlPath)
     }
 
     @Test
@@ -1129,9 +1081,6 @@ class AppDatabaseTest {
             val roots = migratedDb.projectRootDao().getByHostId(1).first()
             assertEquals(listOf("~/git/pocketshell-v8"), roots.map { it.path })
 
-            val sessions = migratedDb.sessionDao().getByHostId(1).first()
-            assertEquals(listOf("main-v8"), sessions.map { it.name })
-
             val snippets = migratedDb.snippetDao().getByHostId(1).first()
             assertEquals(listOf("echo preserved from v8"), snippets.map { it.body })
 
@@ -1182,9 +1131,6 @@ class AppDatabaseTest {
 
             val roots = migratedDb.projectRootDao().getByHostId(1).first()
             assertEquals(listOf("~/git/pocketshell"), roots.map { it.path })
-
-            val sessions = migratedDb.sessionDao().getByHostId(1).first()
-            assertEquals(listOf("main"), sessions.map { it.name })
 
             val snippets = migratedDb.snippetDao().getByHostId(1).first()
             assertEquals(listOf("echo preserved"), snippets.map { it.body })
@@ -1262,9 +1208,6 @@ class AppDatabaseTest {
             val roots = migratedDb.projectRootDao().getByHostId(1).first()
             assertEquals(listOf("~/git/pocketshell"), roots.map { it.path })
 
-            val sessions = migratedDb.sessionDao().getByHostId(1).first()
-            assertEquals(listOf("main"), sessions.map { it.name })
-
             // The two profile columns are gone.
             assertColumnMissing(databaseName, "hosts", "claudeProfilesJson")
             assertColumnMissing(databaseName, "hosts", "codexProfilesJson")
@@ -1272,6 +1215,148 @@ class AppDatabaseTest {
             migratedDb.close()
         }
         context.deleteDatabase(databaseName)
+    }
+
+    // --- Issue #1447 (#684 code-health, hard-cut per D22): v16 -> v17 drops the
+    // never-populated `sessions` and `agent_sessions` stub tables (superseded by
+    // the host-side daemon session registry, epic #821). Older installs (v1-v16)
+    // legitimately carried both tables — the migration must drop them cleanly
+    // while every live table (hosts + FK-scoped children, ai_api_call_log,
+    // pending_transcriptions, command_templates) survives.
+
+    /**
+     * MIGRATION_16_17 drops the two dead session tables and preserves everything
+     * else. Seeds a real on-disk v16 database that still HAS `sessions` +
+     * `agent_sessions` (with rows), then forces Room to run the migration chain
+     * to [APP_DATABASE_SCHEMA_VERSION] and asserts both tables are GONE at v17
+     * while the host row + its children remain.
+     *
+     * The load-bearing assertions are the two `assertTableMissing` checks: if
+     * MIGRATION_16_17's `DROP TABLE` statements are omitted (a no-op migration),
+     * Room still opens fine (it ignores unknown extra tables), so the tables
+     * survive and these assertions go RED — the migration genuinely runs against
+     * a real DB file rather than being a vacuous version bump.
+     */
+    @Test
+    fun migrationFromVersionSixteen_dropsDeadSessionTablesPreservingOtherTables() = runTest {
+        val databaseName = "v16-to-current-${System.nanoTime()}.db"
+        seedVersionSixteenDatabaseWithUserRows(databaseName)
+
+        // Pre-condition: the two dead tables (and the live ones) exist at v16.
+        assertTableExists(databaseName, "sessions")
+        assertTableExists(databaseName, "agent_sessions")
+        assertTableExists(databaseName, "hosts")
+        assertTableExists(databaseName, "snippets")
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            // Forces Room to run MIGRATION_16_17 to APP_DATABASE_SCHEMA_VERSION.
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            // Every live table + its rows survive the migration.
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("prod", hosts[0].name)
+            assertEquals("example.com", hosts[0].hostname)
+            assertEquals(true, hosts[0].enabled)
+
+            val key = migratedDb.sshKeyDao().getById(1)
+            assertNotNull(key)
+            assertEquals("deploy-key", key!!.name)
+
+            val roots = migratedDb.projectRootDao().getByHostId(1).first()
+            assertEquals(listOf("~/git/pocketshell"), roots.map { it.path })
+
+            val snippets = migratedDb.snippetDao().getByHostId(1).first()
+            assertEquals(listOf("echo preserved"), snippets.map { it.body })
+        } finally {
+            migratedDb.close()
+        }
+
+        // The two dead stub tables are GONE at v17 (load-bearing).
+        assertTableMissing(databaseName, "sessions")
+        assertTableMissing(databaseName, "agent_sessions")
+        // ...while the live tables remain.
+        assertTableExists(databaseName, "hosts")
+        assertTableExists(databaseName, "snippets")
+        assertTableExists(databaseName, "project_roots")
+        context.deleteDatabase(databaseName)
+    }
+
+    private fun seedVersionSixteenDatabaseWithUserRows(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionSixteenSchema(it)
+            it.execSQL(
+                """
+                INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt)
+                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v16', 1, 100)
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    pocketshellCliVersion, pocketshellExpectedCliVersion,
+                    pocketshellVersionCompatible, pocketshellDaemonRunning,
+                    pocketshellDaemonEnabled, usageCommandOverride
+                ) VALUES(
+                    1, 'prod', 'example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, '0.3.14', '0.3.14', 1, 1, 1,
+                    'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+            it.execSQL(
+                "INSERT INTO project_roots(id, hostId, label, path, createdAt) " +
+                    "VALUES(1, 1, 'repo', '~/git/pocketshell', 110)"
+            )
+            it.execSQL(
+                "INSERT INTO snippets(id, hostId, label, body, kind) " +
+                    "VALUES(1, 1, 'preserve', 'echo preserved', 'command')"
+            )
+            // Seed the two dead stub tables with rows so the migration is proven
+            // to drop non-empty tables, not just declared-but-empty ones.
+            it.execSQL(
+                "INSERT INTO sessions(id, hostId, name, lastSeenAt, tags) " +
+                    "VALUES(1, 1, 'main', 120, 'work')"
+            )
+            it.execSQL(
+                "INSERT INTO agent_sessions(id, paneRef, agent, jsonlPath, detectedAt) " +
+                    "VALUES(1, 'prod:main:0:0', 'codex', '/logs/codex.jsonl', 140)"
+            )
+            it.execSQL("PRAGMA user_version = 16")
+        }
+    }
+
+    private fun createVersionSixteenSchema(db: SQLiteDatabase) {
+        // v16 = v15 schema with the profile JSON columns dropped (MIGRATION_15_16).
+        createVersionFifteenSchema(db)
+        applyMigration15To16Schema(db)
+    }
+
+    private fun assertTableMissing(databaseName: String, tableName: String) {
+        val sqlite = SQLiteDatabase.openDatabase(
+            context.getDatabasePath(databaseName).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        )
+        sqlite.use {
+            it.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                arrayOf(tableName),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    throw AssertionError("Expected table '$tableName' to be dropped, but it still exists")
+                }
+            }
+        }
     }
 
     private fun openOnDiskDatabase(databaseName: String): AppDatabase =

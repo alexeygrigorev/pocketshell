@@ -264,7 +264,10 @@ class PromptComposerOutboundSendQueueViewModelTest {
         return collected
     }
 
-    private fun newSidecarStore(context: Context = ApplicationProvider.getApplicationContext()): OutboundAttachmentSidecarStore {
+    private fun newSidecarStore(
+        ioDispatcher: TestDispatcher,
+        context: Context = ApplicationProvider.getApplicationContext(),
+    ): OutboundAttachmentSidecarStore {
         context.getSharedPreferences(OutboundAttachmentSidecarStore.PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .clear()
@@ -274,6 +277,15 @@ class PromptComposerOutboundSendQueueViewModelTest {
         return OutboundAttachmentSidecarStore(context).also { store ->
             store.idGenerator = { "sidecar-${++nextId}" }
             store.clock = { nextId.toLong() }
+            // Issue #1465: pin the store's `withContext(Dispatchers.IO)` file work
+            // onto the caller's `testScheduler` (the same one `samplerDispatcher` /
+            // `outboundQueueDispatcher` use). Without this the fire-and-forget
+            // `launchSidecarRemoval` viewModelScope.launch{} hops real
+            // `Dispatchers.IO` and resumes cross-thread onto `MainDispatcherRule`'s
+            // `UnconfinedTestDispatcher`, whose `dispatch` throws
+            // `UnsupportedOperationException` — the #1461-class coroutines-test race
+            // that flaked `:app:testReleaseUnitTest` in the release gate.
+            store.ioDispatcher = ioDispatcher
         }
     }
 
@@ -679,7 +691,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
-            outboundAttachmentSidecarStore = newSidecarStore(),
+            outboundAttachmentSidecarStore = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler)),
         )
         var removalAttempts = 0
         vm.sidecarRemovalForTest = { _ ->
@@ -729,7 +741,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun requestSendWithLocalAttachmentStagesSidecarUploadsBeforeClaimAndDispatchesUploadedRefs() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val uploadedSidecarBytes = mutableListOf<String>()
         val uploadFinished = CompletableDeferred<Unit>()
         val vm = newVm(
@@ -793,7 +805,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
         // leave a Failed row. Canonical behaviour is the same as text: the row
         // stays queued, the composer stays clear, and reconnect flush retries it.
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
@@ -855,7 +867,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
                 return super.requeueForRetry(id)
             }
         }
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val item = OutboundItem(
             id = "queued-no-live-uploader",
             sessionKey = "1/session-a",
@@ -894,7 +906,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun retryNextOutboundItemUploadsPersistedSidecarsBeforeClaimingQueuedRow() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val item = OutboundItem(
             id = "queued-local",
             sessionKey = "1/session-a",
@@ -952,7 +964,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun retryNextOutboundItemReplacesOnlyIndexedSidecarAttachmentWhenRemoteNameCollides() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val remoteRef = DurableAttachmentRef(
             remotePath = "~/.pocketshell/attachments/current/conflict.txt",
             displayName = "conflict.txt",
@@ -1015,7 +1027,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun concurrentSidecarRetriesOnlyOneUploadAndSendOwnsTheQueuedRow() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val item = OutboundItem(
             id = "race-local",
             sessionKey = "1/session-a",
@@ -1056,7 +1068,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun sidecarUploadBlocksSecondQueuedSidecarRowUntilFirstSendResolves() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val first = OutboundItem(
             id = "sidecar-first",
             sessionKey = "1/session-a",
@@ -1115,7 +1127,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
     @Test
     fun deliveredAndDeletedOutboundItemsCleanUpSidecars() = runTest {
         val queue = InMemoryOutboundQueueStore()
-        val sidecars = newSidecarStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
         val delivered = OutboundItem(
             id = "delivered-local",
             sessionKey = "1/session-a",

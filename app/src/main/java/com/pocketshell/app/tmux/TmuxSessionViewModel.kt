@@ -10939,7 +10939,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // pane); [healActivePaneIfStaleRender] then confirms against tmux's authoritative
                 // capture with [TerminalSurfaceState.visibleRenderLostFrameVsCapture] and heals
                 // ONLY if the frame is truly lost — bounded to ONE capture, no reveal thrash.
-                if (activePane.terminalState.visibleRenderMayHaveLostFrame()) {
+                if (activePane.terminalState.renderLooksSuspect()) {
                     healActivePaneIfStaleRender(client, activePane, refreshGuard)
                 }
                 return true
@@ -11395,7 +11395,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * while a confidently-dense HEALTHY streaming pane's output is ignored so it reaps
      * the back-off (the #1164 steady-heat lever).
      *
-     * It reuses [TerminalSurfaceState.visibleRenderMayHaveLostFrame] — the SAME cheap
+     * It reuses [TerminalSurfaceState.renderLooksSuspect] — the SAME cheap
      * local pre-check the switch-reveal / no-op-resize heals (#1176/#1214) already run
      * to decide whether an authoritative `capture-pane` diff is worthwhile — so this
      * wake gate covers the whole fragments-over-black class (fully blank, ≤3-line
@@ -11830,7 +11830,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // the target class is the idle non-repainting pane with NO concurrent deltas —
         // free there; a busy suspect pane briefly buffers then flushes in order).
         val quiesceLiveDeltas =
-            surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+            surfaceBlack || pane.terminalState.renderLooksSuspect()
         if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
         try {
         val combined = runCatching {
@@ -11853,7 +11853,7 @@ public class TmuxSessionViewModel @Inject constructor(
             //
             // The scoring turns on whether the LOCAL render currently looks LOST (black /
             // partial-black / mostly-empty / surface-black — the same cheap local pre-check
-            // [visibleRenderMayHaveLostFrame] the suspect-wake gate uses):
+            // [renderLooksSuspect] the suspect-wake gate uses):
             //  - render LOOKS LOST → this is the #1294 UNVERIFIED case: we NEEDED this capture
             //    to heal a suspect pane and could not get it. The watchdog MUST keep the hot
             //    cadence (never throttle) so a black pane whose heal captures are wedged by a
@@ -11862,7 +11862,7 @@ public class TmuxSessionViewModel @Inject constructor(
             //  - render looks HEALTHY → a momentarily-empty/failed capture over a confidently-
             //    dense render is a non-urgent no-op; scoring it HEALTHY preserves the #1219 /
             //    #1164 battery back-off (criterion 3 — do not regress the steady-heat lever).
-            val renderLooksLost = surfaceBlack || pane.terminalState.visibleRenderMayHaveLostFrame()
+            val renderLooksLost = surfaceBlack || pane.terminalState.renderLooksSuspect()
             // Issue #1175: fingerprint the observed frame when it is degenerate so an export
             // sees WHICH class of black it was — no new round-trip, it rides this same (failed)
             // capture tick. A surface-only-black whose capture failed is the #1192 class
@@ -14099,7 +14099,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *     redraw is still caught and a re-overpaint after an early heal is re-healed.
      *
      * A DENSE, normally-painted response is a no-op: each tick pays only the cheap LOCAL
-     * [TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] pre-check and pays for the
+     * [TerminalSurfaceState.renderLooksSuspect] pre-check and pays for the
      * authoritative `capture-pane` diff ONLY when the render looks sparse enough to possibly be
      * a lost frame. The heal is guarded by a [RuntimeRefreshGuard] keyed to the current
      * generation + target + client so a late heal can never paint a switched-away session, and
@@ -14129,7 +14129,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // Cheap LOCAL pre-check: skip the capture round-trip on a dense, normally-painted
                 // response (its live rows sit above the sparse ceiling). Only a fully-blank /
                 // partial-black / >3-line half-black render pays for the authoritative diff.
-                if (!activePane.terminalState.visibleScreenLooksSparseForSendHeal()) return@repeat
+                if (!activePane.terminalState.renderLooksSuspect()) return@repeat
                 Log.i(
                     ISSUE_145_RECONNECT_TAG,
                     "tmux-send-overpaint-active-pane-heal-check pane=${activePane.paneId} " +
@@ -15953,11 +15953,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #1176 (GAP C): a keyboard/resize toggle can leave the idle agent's redraw as a
         // >3-line half-black BAND (the GAP-A dead-zone) that reads NON-blank and NON-partial-black
         // locally — the pre-#1176 gate SKIPPED it and left the band until the ~4s watchdog. Widen
-        // the local capture-gate to [visibleRenderMayHaveLostFrame] (a superset of blank/partial
+        // the local capture-gate to [renderLooksSuspect] (a superset of blank/partial
         // that also catches the band), then route the non-blank band through the unified
         // capture-diff oracle so a correct-but-sparse pane never flickers.
-        val mayHaveLostFrame = activePane.terminalState.visibleRenderMayHaveLostFrame()
-        if (!mayHaveLostFrame) return
+        val suspect = activePane.terminalState.renderLooksSuspect()
+        if (!suspect) return
         val attachGeneration = connectGeneration
         Log.i(
             ISSUE_145_RECONNECT_TAG,

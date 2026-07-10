@@ -390,7 +390,7 @@ class VoiceSendSameGridRevealHealTest {
         )
         // Issue #1214: a GENUINELY DENSE pane — enough live lines to fill the visible grid well
         // above the 0.75 live-fraction ceiling, so the #1214-widened reveal/resize pre-check
-        // ([TerminalSurfaceState.visibleRenderMayHaveLostFrame]) reads it confidently-full and
+        // ([TerminalSurfaceState.renderLooksSuspect]) reads it confidently-full and
         // skips the capture. A merely-sparse "painted" frame (a handful of lines on a tall grid)
         // now legitimately pays ONE authoritative capture under #1214 — the point of THIS test is
         // the #285 "a healthy DENSE pane must not spam tmux" no-op, which a dense frame models.

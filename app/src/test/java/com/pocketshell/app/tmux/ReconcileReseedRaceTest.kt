@@ -139,7 +139,7 @@ class ReconcileReseedRaceTest {
         advanceUntilIdle()
         assertTrue(
             "precondition: the render must look SUSPECT so the reconciler quiesces + heals it",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
         assertFalse(
             "precondition: the newer delta marker must NOT already be on the visible screen",
@@ -212,7 +212,7 @@ class ReconcileReseedRaceTest {
         advanceUntilIdle()
         assertFalse(
             "precondition: the pane is confidently HEALTHY (not suspect)",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         // The heal capture confirms the render (matches the dense frame) → HEALTHY, no apply.
@@ -311,7 +311,7 @@ class ReconcileReseedRaceTest {
         advanceUntilIdle()
         assertTrue(
             "precondition: the render must look SUSPECT so the reconciler quiesces + heals it",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
         assertTrue(
             "precondition: the seed gate starts OPEN before the heal",
@@ -427,7 +427,7 @@ class ReconcileReseedRaceTest {
         )
         assertTrue(
             "precondition: the mid-session render lost the frame (fragments-over-black)",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
         assertFalse(
             "precondition: tmux's authoritative frame is NOT yet on the visible screen",

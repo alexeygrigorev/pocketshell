@@ -108,7 +108,7 @@ class HealCaptureUnverifiedWatchdogTest {
         advanceUntilIdle()
         assertTrue(
             "precondition: the pane looks LOST/suspect (black) so a failed capture is UNVERIFIED",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         // Every heal capture-pane now FAILS (throws) — models a Claude burst holding the shared

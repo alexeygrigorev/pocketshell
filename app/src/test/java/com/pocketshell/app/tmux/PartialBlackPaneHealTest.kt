@@ -294,7 +294,7 @@ class PartialBlackPaneHealTest {
 
         // A normal multi-line agent response: a DENSE viewport (well over half the 40 rows
         // live) -> neither blank, nor partial-black, nor sparse-half-black
-        // ([TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] false) -> the post-send
+        // ([TerminalSurfaceState.renderLooksSuspect] false) -> the post-send
         // heal must correctly no-op and never pay for a `capture-pane` diff (#1153).
         val fullFrame = buildString {
             append(CLEAR_ONLY)
@@ -482,7 +482,7 @@ class PartialBlackPaneHealTest {
         )
         assertFalse(
             "after the heal the pane is no longer sparse/half-black",
-            pane.terminalState.visibleScreenLooksSparseForSendHeal(),
+            pane.terminalState.renderLooksSuspect(),
         )
     }
 
@@ -523,7 +523,7 @@ class PartialBlackPaneHealTest {
                 "the pane must heal too (same bracketed-paste + submit branch as with-attachment)",
             client.healCaptureCount() > healCapturesBefore,
         )
-        assertFalse(pane.terminalState.visibleScreenLooksSparseForSendHeal())
+        assertFalse(pane.terminalState.renderLooksSuspect())
     }
 
     // -------------------------------------------------------------------------
@@ -564,7 +564,7 @@ class PartialBlackPaneHealTest {
                 "a multi-line paste that half-blacks the pane must now trigger the heal too",
             client.healCaptureCount() > healCapturesBefore,
         )
-        assertFalse(pane.terminalState.visibleScreenLooksSparseForSendHeal())
+        assertFalse(pane.terminalState.renderLooksSuspect())
     }
 
     // -------------------------------------------------------------------------
@@ -817,7 +817,7 @@ class PartialBlackPaneHealTest {
         add(RECOVERED_FRAME)
         // Issue #1153: a DENSE recovered frame (well over half the 40-row viewport) so that
         // after the heal the restored pane reads NON-sparse
-        // ([TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] false) and the bounded
+        // ([TerminalSurfaceState.renderLooksSuspect] false) and the bounded
         // send-heal poll stops paying for further `capture-pane` diffs — mirroring production,
         // where tmux's authoritative frame fills the viewport.
         repeat(27) { add("recovered context row $it") }

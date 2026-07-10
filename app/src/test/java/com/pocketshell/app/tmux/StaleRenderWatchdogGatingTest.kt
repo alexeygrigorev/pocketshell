@@ -238,7 +238,7 @@ class StaleRenderWatchdogGatingTest {
         assertFalse(
             "precondition: the idle pane is confidently DENSE (not suspect), so an empty " +
                 "capture scores HEALTHY and the pane backs off",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
@@ -288,7 +288,7 @@ class StaleRenderWatchdogGatingTest {
         advanceUntilIdle()
         assertFalse(
             "precondition: the idle pane is confidently DENSE (not suspect), so it cools",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
@@ -347,7 +347,7 @@ class StaleRenderWatchdogGatingTest {
         assertFalse(
             "precondition: a dense pane must NOT read as a possible lost frame " +
                 "(else the wake gate would keep it hot)",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
@@ -432,14 +432,14 @@ class StaleRenderWatchdogGatingTest {
         // clear then a handful of scattered live lines (the #966/#1214 class) — while
         // tmux still holds the authoritative rich frame. On device this redraw arrives
         // AS %output, which must WAKE the backed-off watchdog because the render is now
-        // locally suspect ([visibleRenderMayHaveLostFrame]).
+        // locally suspect ([renderLooksSuspect]).
         pane.terminalState.appendRemoteOutput(
             fragmentsOverBlackFrame().toByteArray(Charsets.US_ASCII),
         )
         assertTrue(
             "precondition: a fragments-over-black render must read as a possible lost " +
                 "frame so the wake gate honors it",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
         client.capturePaneResponses.addLast(
             CommandResponse(number = 90L, output = richFrameLines(), isError = false),
@@ -520,7 +520,7 @@ class StaleRenderWatchdogGatingTest {
     // -------------------------------------------------------------------------
     // (5d) A SPARSE-BUT-HEALTHY streaming pane's %output also does NOT cut a
     //      BACKED-OFF wait short. This is the issue #1164 false-positive audit:
-    //      [visibleRenderMayHaveLostFrame] deliberately pre-flags >3-line sparse
+    //      [renderLooksSuspect] deliberately pre-flags >3-line sparse
     //      panes for reveal/resize, but the steady watchdog must not treat a pane
     //      that the authoritative capture just confirmed HEALTHY as genuinely
     //      suspect and keep it in the 4s hot path.
@@ -544,9 +544,9 @@ class StaleRenderWatchdogGatingTest {
         advanceUntilIdle()
         assertTrue(
             "precondition: this pane is locally sparse enough to be pre-flagged by " +
-                "visibleRenderMayHaveLostFrame(), so a pure local wake gate would " +
+                "renderLooksSuspect(), so a pure local wake gate would " +
                 "mistake it for suspect",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
         assertFalse(
             "precondition: the authoritative capture matches the sparse render, so " +
@@ -781,7 +781,7 @@ class StaleRenderWatchdogGatingTest {
     /**
      * A DENSE, confidently-healthy viewport (32 of the 80x40 pty's rows live) — a
      * normally-painted streaming agent pane. Its live fraction (0.8) sits ABOVE the
-     * [visibleRenderMayHaveLostFrame] ceiling, so the #1219 wake gate reads it HEALTHY
+     * [renderLooksSuspect] ceiling, so the #1219 wake gate reads it HEALTHY
      * and lets the watchdog back off.
      */
     private fun denseHealthyFrame(): String = buildString {
@@ -792,7 +792,7 @@ class StaleRenderWatchdogGatingTest {
     /**
      * A FRAGMENTS-OVER-BLACK viewport (#966/#1214): a CSI 2J clear then a handful of
      * scattered live lines (>3 so it exercises the VISIBLE-only line-fraction leg of
-     * [visibleRenderMayHaveLostFrame], the class the ≤3-line partial-black misses) over
+     * [renderLooksSuspect], the class the ≤3-line partial-black misses) over
      * an otherwise-black 40-row grid. Reads as a possible lost frame so the #1219 wake
      * gate honors its %output and heals it within the hot bound. Modelled on the
      * maintainer's #966 alt-screen pane — no dense scrollback masks the visible sparsity.

@@ -1183,36 +1183,49 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Issue #1176 (GAP C) — the CHEAP, LOCAL-ONLY capture-gate the switch-reveal
-     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.awaitActivePaneSeededOrLoading]) and the
-     * no-op-resize heal ([com.pocketshell.app.tmux.TmuxSessionViewModel.maybeHealActivePaneOnNoOpResize])
-     * run to decide whether paying for an authoritative `capture-pane` diff (the unified
-     * [visibleRenderLostFrameVsCapture] oracle) is worthwhile before revealing / after a keyboard
-     * toggle. It is TRUE when the rendered viewport is NOT confidently dense — POSSIBLY a lost
-     * frame: fully blank, the ≤3-line partial-black, OR any >3-line pane whose live share of the
-     * visible rows is at most [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION].
+     * The SINGLE local "is this pane suspect?" authority (epic #1353 slice R1). It is the ONE cheap,
+     * LOCAL-ONLY pre-gate EVERY render-heal launcher runs to decide whether paying for an
+     * authoritative `capture-pane` diff (the unified [visibleRenderLostFrameVsCapture] oracle) is
+     * worthwhile: the post-send overpaint heal
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.scheduleSendOverpaintHeal]), the switch-reveal
+     * gate ([com.pocketshell.app.tmux.TmuxSessionViewModel.awaitActivePaneSeededOrLoading]), the
+     * no-op-resize heal ([com.pocketshell.app.tmux.TmuxSessionViewModel.maybeHealActivePaneOnNoOpResize]),
+     * the stale-render watchdog wake gate, and the M2 reconcile chokepoint
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.healActivePaneIfStaleRender]).
      *
-     * It fires for the SAME two states the pre-#1176 gates already captured for — fully blank OR
-     * the ≤3-line partial-black — PLUS every pane below the confidently-dense ceiling:
-     *  - the #1176 dead-zone BAND (a >3-line black band with MORE than half the visible rows live,
-     *    so the pre-#1176 gates read it "painted"), AND
-     *  - the #1214 mostly-empty MODEL (>3 scattered live lines but a live-fraction BELOW 0.5 — the
-     *    reveal-time leg of the photographed fragments-over-black).
+     * ## Why one authority (#1153 root cause)
      *
-     * The #1214 change DROPPED the old 0.5 lower bound: a mostly-empty model with >3 live lines
-     * used to read "healthy" here and reveal UNHEALED (only the ≤16s-later steady watchdog could
-     * catch it). Paying ONE authoritative capture at reveal/resize is the deliberate cost — the
-     * unified oracle self-guards a genuinely-sparse-but-correct short prompt (Gate 2: capture must
-     * carry materially MORE than the render) and the #807 near-empty alt-screen void (Gate 1:
-     * capture must carry a real frame), so a FALSE pre-flag costs one wasted capture, NEVER a wrong
-     * heal or clear-to-black. It does NOT confirm a lost frame — only the `capture-pane` diff can,
-     * since a sparse-but-correct pane looks identical locally — so a confidently-full pane (live
-     * rows ABOVE the ceiling) skips the capture entirely, and every flagged pane is confirmed
-     * against tmux by the unified oracle before any heal fires. The steady-state watchdog's
-     * foreground/screen/back-off gates (#1166) are untouched — this widening is the reveal/resize
-     * LOCAL pre-check only.
+     * Before R1 this was THREE divergent local pre-gates that did NOT move together:
+     * `visibleScreenLooksSparseForSendHeal` (a 0.5 send-only ceiling), `renderLooksSuspect`
+     * (a 0.75 reveal/resize ceiling, with a spurious `liveLines > 3` floor), and the blank/partial
+     * family. A pane could be judged "suspect, heal it" under one launcher and "healthy, skip" under
+     * another for the SAME state — so a fix landed in one layer (#1163) was silently invalidated when
+     * the oracle changed underneath it (#1300). #1153 broke on exactly that divergence: a >3-line,
+     * >50%-live half-black band was healed on reveal (0.75) but SKIPPED after a send (0.5). Collapsing
+     * to one predicate means a change to the oracle can never desync one launcher relative to another
+     * again — there is ONE "is this pane bad?" authority, and the oracle
+     * ([visibleRenderLostFrameVsCapture]) is the SOLE confirm-and-heal decision it gates.
+     *
+     * ## Semantics — a strict SUPERSET cost-gate (never narrower than any old launcher)
+     *
+     * TRUE when the rendered viewport is NOT confidently dense — POSSIBLY a lost frame:
+     *  - fully blank OR the ≤3-line partial-black ([visibleScreenIsBlankOrPartiallyBlank]);
+     *  - a viewport with NO live visible lines over a non-blank transcript; OR
+     *  - any pane whose live share of the visible rows is at most [RENDER_SUSPECT_MAX_LIVE_FRACTION].
+     *
+     * The 0.75 ceiling is the WIDER of the two old thresholds and the `liveLines > 3` floor is
+     * DROPPED, so this flags a strict SUPERSET of every state the old send (0.5), reveal (0.75), and
+     * blank gates flagged — NO launcher loses heal coverage, and dropping the floor also closes a
+     * latent reveal gap (a ≤3-line, >0.25-fraction band the floor used to exclude). It does NOT
+     * confirm a lost frame — only the `capture-pane` diff can, since a sparse-but-correct pane looks
+     * identical locally — so a confidently-full pane (live rows ABOVE the ceiling) skips the capture
+     * entirely, and every flagged pane is confirmed against tmux by [visibleRenderLostFrameVsCapture]
+     * before any heal fires. The oracle self-guards a genuinely-sparse-but-correct short prompt
+     * (Gate 2: capture must carry materially MORE than the render) and the #807 near-empty alt-screen
+     * void (Gate 1: capture must carry a real frame), so a FALSE pre-flag costs one wasted capture,
+     * NEVER a wrong heal or clear-to-black. Returns false when no emulator is attached.
      */
-    fun visibleRenderMayHaveLostFrame(): Boolean {
+    fun renderLooksSuspect(): Boolean {
         if (visibleScreenIsBlankOrPartiallyBlank()) return true
         val emulator = bridge?.emulator ?: _session?.emulator ?: return false
         val visibleRows = try {
@@ -1223,15 +1236,13 @@ class TerminalSurfaceState(
         if (visibleRows <= 0) return false
         val liveLines = renderedVisibleNonBlankLineCount()
         if (liveLines <= 0) return true
-        val liveFraction = liveLines.toDouble() / visibleRows.toDouble()
-        // Flag every >3-line pane that is NOT confidently dense — its live share sits at or below
-        // the [MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION] ceiling. This covers BOTH the #1176 dead-zone
-        // band (0.5..0.75) AND the #1214 mostly-empty model (>3 live lines below 0.5). A ≤3-line
-        // pane is already handled by [visibleScreenIsBlankOrPartiallyBlank] above; a confidently-
-        // full pane (fraction above the ceiling) skips the capture. Every flagged pane is confirmed
-        // against tmux's authoritative capture by [visibleRenderLostFrameVsCapture] before any heal.
-        return liveLines > PARTIAL_BLANK_MAX_LIVE_LINES &&
-            liveFraction <= MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION
+        // Flag every pane that is NOT confidently dense — its live share sits at or below the
+        // [RENDER_SUSPECT_MAX_LIVE_FRACTION] ceiling. This covers the #1176 dead-zone band, the
+        // #1214 mostly-empty model, AND the >0.5..0.75 band the old send-only 0.5 ceiling skipped.
+        // A confidently-full pane (fraction above the ceiling) skips the capture. Every flagged pane
+        // is confirmed against tmux's authoritative capture by [visibleRenderLostFrameVsCapture]
+        // before any heal.
+        return liveLines.toDouble() / visibleRows.toDouble() <= RENDER_SUSPECT_MAX_LIVE_FRACTION
     }
 
     /**
@@ -1239,7 +1250,7 @@ class TerminalSurfaceState(
      * currently VISIBLE viewport (scrollback excluded), the sibling of [renderedNonBlankCharCount]
      * measured in LINES. Used to judge the live-line FRACTION of the visible grid — how large the
      * black BAND left by a half-repainted send overpaint is — for [visibleRenderLostFrameVsCapture]
-     * case (c) and the cheap send-heal pre-check [visibleScreenLooksSparseForSendHeal].
+     * case (c) and the unified local suspect pre-gate [renderLooksSuspect].
      *
      * Returns 0 when no emulator is attached or the visible screen is blank.
      */
@@ -1252,34 +1263,6 @@ class TerminalSurfaceState(
         }
         if (text.isBlank()) return 0
         return text.split('\n').count { it.isNotBlank() }
-    }
-
-    /**
-     * Issue #1153 — a CHEAP, LOCAL-ONLY pre-check the post-send overpaint heal
-     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.scheduleSendOverpaintHeal]) runs each
-     * settle tick to decide whether paying for an authoritative `capture-pane` diff is
-     * worthwhile. It is TRUE when the rendered viewport is sparse enough to POSSIBLY be a
-     * half-repainted send overpaint: fully blank, the ≤3-line partial-black
-     * ([visibleScreenIsBlankOrPartiallyBlank]), OR a >3-line half-black band whose live share
-     * of the visible rows is at most [LOST_FRAME_MAX_LIVE_FRACTION].
-     *
-     * It does NOT confirm a lost frame — only the `capture-pane` diff ([visibleRenderLostFrameVsCapture])
-     * can, since a legitimately-sparse-but-correct pane looks identical locally. This gate exists
-     * only to keep a DENSE, normally-painted agent response (its live rows sit above the ceiling)
-     * from paying for a capture round-trip on every send.
-     */
-    fun visibleScreenLooksSparseForSendHeal(): Boolean {
-        if (visibleScreenIsBlankOrPartiallyBlank()) return true
-        val emulator = bridge?.emulator ?: _session?.emulator ?: return false
-        val visibleRows = try {
-            emulator.screen.visibleScreenRows
-        } catch (_: Throwable) {
-            return false
-        }
-        if (visibleRows <= 0) return false
-        val liveLines = renderedVisibleNonBlankLineCount()
-        if (liveLines <= 0) return false
-        return liveLines.toDouble() / visibleRows.toDouble() <= LOST_FRAME_MAX_LIVE_FRACTION
     }
 
     /**
@@ -1675,42 +1658,24 @@ class TerminalSurfaceState(
         private const val LINE_HASH_MIN_LOST_FRACTION = 0.25
 
         /**
-         * Issue #1153: the upper bound on the rendered live-line FRACTION of the visible rows for
-         * the cheap send-heal pre-check [visibleScreenLooksSparseForSendHeal]. The maintainer's
-         * composer Send (with-attachment, so multi-line → bracketed-paste + submit) left the
-         * alt-screen agent pane "partly redrew but still too black": a surviving input box + a few
-         * conversation lines + status (MORE than the ≤3 live lines
-         * [PARTIAL_BLANK_MAX_LIVE_LINES] caps at) over a large black BAND. Half-or-more of the
-         * visible rows black is "materially black"; a DENSE, normally-painted response paints
-         * well over half its rows and sits ABOVE this ceiling, so it never heals. It is HIGHER
-         * than [PARTIAL_BLANK_MAX_LIVE_FRACTION] (0.25) precisely to catch the >3-line band the
-         * narrow partial-black heuristic misses; the authoritative capture-diff gate
-         * ([visibleRenderLostFrameVsCapture]) still guards against healing a sparse-but-correct
-         * pane where the render already reproduces tmux's content lines.
+         * Epic #1353 slice R1 — the SINGLE live-line FRACTION ceiling of the one unified local
+         * suspect pre-gate [renderLooksSuspect] that EVERY render-heal launcher (send-overpaint,
+         * switch-reveal, no-op-resize, stale-render watchdog wake, M2 reconcile) shares. It replaces
+         * the two divergent thresholds that caused the #1153 desync: the send-only 0.5
+         * (`LOST_FRAME_MAX_LIVE_FRACTION`) and the reveal/resize 0.75
+         * (`MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION`).
          *
-         * NOTE: this is now ONLY the send-heal LOCAL cost-gate. The authoritative capture-vs-render
-         * decision moved to the [visibleRenderLostFrameVsCapture] per-line-hash content diff (#1300);
-         * this 0.5 line-fraction no longer bounds that oracle.
+         * At 0.75 — the WIDER of the two old ceilings — a confidently-full pane (live rows above the
+         * ceiling) skips the authoritative `capture-pane` diff while ANY pane that could be a
+         * dead-zone black band, a mostly-empty model, or a half-repainted send overpaint (live rows
+         * at or below it) is confirmed against tmux by [visibleRenderLostFrameVsCapture] before any
+         * heal. Picking the wider ceiling (and dropping the old `liveLines > 3` floor in
+         * [renderLooksSuspect]) makes the unified gate a strict SUPERSET of all three old pre-gates,
+         * so NO launcher loses heal coverage. The oracle's Gate 1/Gate 2 self-guard a
+         * genuinely-sparse-but-correct pane, so a false pre-flag costs one wasted capture, never a
+         * wrong heal.
          */
-        private const val LOST_FRAME_MAX_LIVE_FRACTION = 0.5
-
-        /**
-         * Issue #1176 (GAP C) — the live-line FRACTION ceiling of the LOCAL capture-gate
-         * [visibleRenderMayHaveLostFrame] used by the switch-reveal and no-op-resize heals. At 0.75
-         * a confidently-full pane (live rows above the ceiling) skips the authoritative
-         * `capture-pane` diff while ANY pane that could be a dead-zone black band (live rows below
-         * it) is confirmed against tmux by [visibleRenderLostFrameVsCapture] before any heal. It
-         * is deliberately HIGHER than the send-heal cost-gate's [LOST_FRAME_MAX_LIVE_FRACTION]
-         * (0.5) so the reveal/resize gates never MISS the #1176 dead-zone band the way the narrow
-         * pre-check did.
-         *
-         * Issue #1214: the pre-#1176 0.5 LOWER bound (`MAY_HAVE_LOST_FRAME_MIN_LIVE_FRACTION`) was
-         * DELETED here — a mostly-empty model (>3 live lines, live-fraction BELOW 0.5) used to read
-         * "healthy" and reveal UNHEALED, so the local gate now opens for EVERY >3-line pane at or
-         * below this ceiling. The unified oracle's Gate 1/Gate 2 self-guard a genuinely-sparse-but-
-         * correct pane, so a false pre-flag costs one wasted capture, never a wrong heal.
-         */
-        private const val MAY_HAVE_LOST_FRAME_MAX_LIVE_FRACTION = 0.75
+        private const val RENDER_SUSPECT_MAX_LIVE_FRACTION = 0.75
     }
 }
 

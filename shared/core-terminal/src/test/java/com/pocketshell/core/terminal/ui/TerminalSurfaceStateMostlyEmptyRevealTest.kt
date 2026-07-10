@@ -17,7 +17,7 @@ import java.io.OutputStream
 
 /**
  * Issue #1214 — the reveal/resize/switch LOCAL pre-check
- * [TerminalSurfaceState.visibleRenderMayHaveLostFrame] was BLIND to a mostly-empty model.
+ * [TerminalSurfaceState.renderLooksSuspect] was BLIND to a mostly-empty model.
  *
  * The authoritative steady-watchdog oracle [TerminalSurfaceState.visibleRenderLostFrameVsCapture]
  * is a char-count-fraction test that HEALS a mostly-empty-model-vs-full-tmux pane. But the cheap
@@ -33,7 +33,7 @@ import java.io.OutputStream
  *
  * [mostlyEmptyModelIsFlaggedSoTheRevealGatePaysTheAuthoritativeCapture] composes a >3-live-line
  * pane whose live-fraction is BELOW 0.5 (the mostly-empty model), against a full-tmux capture the
- * authoritative oracle WOULD heal. On base [visibleRenderMayHaveLostFrame] returns FALSE (reads
+ * authoritative oracle WOULD heal. On base [renderLooksSuspect] returns FALSE (reads
  * "healthy" — RED: the reveal gate skips the capture and reveals unhealed). With the fix it
  * returns TRUE (GREEN: the reveal gate pays ONE authoritative diff and heals AT reveal). The test
  * also asserts the authoritative oracle itself judges the pane LOST — proving the pre-check was
@@ -136,9 +136,9 @@ class TerminalSurfaceStateMostlyEmptyRevealTest {
             // base this returns FALSE (reads healthy, reveals unhealed) — the red→green
             // discriminator.
             assertTrue(
-                "GREEN (#1214): visibleRenderMayHaveLostFrame() must flag a >3-live-line pane with " +
+                "GREEN (#1214): renderLooksSuspect() must flag a >3-live-line pane with " +
                     "live-fraction < 0.5 so the reveal/resize gate pays the authoritative capture",
-                state.visibleRenderMayHaveLostFrame(),
+                state.renderLooksSuspect(),
             )
         }
 
@@ -166,7 +166,7 @@ class TerminalSurfaceStateMostlyEmptyRevealTest {
                 assertTrue(
                     "#1214 class coverage: a $liveRows-of-24 mostly-empty model must be flagged so " +
                         "the reveal/resize gate pays the authoritative capture",
-                    state.visibleRenderMayHaveLostFrame(),
+                    state.renderLooksSuspect(),
                 )
                 // And the authoritative oracle confirms the heal — the reveal is not paying for
                 // nothing across the class.
@@ -193,7 +193,7 @@ class TerminalSurfaceStateMostlyEmptyRevealTest {
 
         assertTrue(
             "the pre-check may pre-flag the sparse pane (one wasted capture is acceptable)",
-            state.visibleRenderMayHaveLostFrame(),
+            state.renderLooksSuspect(),
         )
         assertFalse(
             "Gate 2 self-guard: a sparse-but-correct prompt where capture ≈ render must NOT heal " +
@@ -230,7 +230,7 @@ class TerminalSurfaceStateMostlyEmptyRevealTest {
         assertFalse(
             "battery guard: a confidently-dense pane (live-fraction 0.92 > 0.75) must NOT be " +
                 "flagged — no per-reveal capture cost on a healthy pane",
-            state.visibleRenderMayHaveLostFrame(),
+            state.renderLooksSuspect(),
         )
     }
 }

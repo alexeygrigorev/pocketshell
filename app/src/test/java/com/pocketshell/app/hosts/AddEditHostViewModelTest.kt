@@ -118,6 +118,44 @@ class AddEditHostViewModelTest {
         assertNull(vm.state.value.savedHostId)
     }
 
+    /**
+     * Issue #1243 — the guided first-run wizard shares ONE Activity-scoped
+     * [AddEditHostViewModel] across every add/edit-host destination. After a
+     * save, `saved`/`savedHostId` must be consumable as a one-shot navigation
+     * signal so re-entering the form (e.g. tapping "Edit" on a failed guided
+     * test-connect) does not immediately re-fire `LaunchedEffect(state.saved)`
+     * and bounce the user straight back — which made the Edit recovery a dead
+     * end on-device. [AddEditHostViewModel.consumeSaved] clears the flag
+     * synchronously (unlike the async [AddEditHostViewModel.loadHost] reset,
+     * which the on-device navigation observer races).
+     */
+    @Test
+    fun consumeSaved_clearsSaveSignal_soFormReentryDoesNotAutoNavigate() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.updateState {
+            it.copy(
+                name = "prod",
+                hostname = "example.com",
+                username = "alexey",
+                selectedKeyId = keyId,
+            )
+        }
+        vm.save()
+        assertTrue(vm.state.value.saved)
+        assertNotNull(vm.state.value.savedHostId)
+
+        vm.consumeSaved()
+
+        assertFalse(vm.state.value.saved)
+        assertNull(vm.state.value.savedHostId)
+        // Idempotent — a second consume is a harmless no-op.
+        vm.consumeSaved()
+        assertFalse(vm.state.value.saved)
+    }
+
     @Test
     fun save_reportsPerFieldErrors_andFirstInvalid_whenRequiredFieldsBlank() = runTest {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())

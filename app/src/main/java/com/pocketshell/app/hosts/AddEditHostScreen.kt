@@ -136,6 +136,12 @@ fun AddEditHostScreen(
     LaunchedEffect(state.saved) {
         if (state.saved) {
             val savedHostId = state.savedHostId
+            // Consume the one-shot save signal BEFORE navigating so the
+            // Activity-scoped ViewModel doesn't re-fire this effect (with a
+            // stale `saved = true`) the next time this form is entered — e.g.
+            // tapping "Edit" on a failed guided test-connect, which would
+            // otherwise bounce straight back and make Edit a dead end (#1243).
+            viewModel.consumeSaved()
             if (firstRunGuided && savedHostId != null) {
                 onFirstRunHostSaved(savedHostId)
             } else {

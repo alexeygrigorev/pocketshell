@@ -132,6 +132,22 @@ class DesignRenders {
         TerminalHotkeysPanelCollapsedRender()
     }
 
+    /**
+     * Issue #1449: the design-token / hex swatch sheet — the ONE coverage gap
+     * ported over when the redundant IDE-only `@Preview` composables in
+     * `shared/ui-kit/src/main/.../preview/` were deleted (hard-cut D22;
+     * DesignRenders / #555 is the sanctioned fast-render path). Shows the
+     * Surface / Text / Accent / Status / Terminal colour ramps, each swatch
+     * labelled with its `0xAARRGGBB` hex, so a reviewer can cross-reference the
+     * palette in `theme/Color.kt` against the mockups without Android Studio's
+     * preview renderer. The other previews were already covered by the cases
+     * above/below in richer contexts, so only this sheet was recreated.
+     */
+    @Test
+    fun designTokenSwatches() = render("design-token-swatches") {
+        DesignTokenSwatchesRender()
+    }
+
     /** Host-list header (`ScreenHeader`) with a trailing status pill. */
     @Test
     fun screenHeader() = render("screen-header") {

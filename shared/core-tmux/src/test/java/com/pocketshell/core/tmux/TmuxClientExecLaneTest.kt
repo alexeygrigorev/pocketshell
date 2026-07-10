@@ -14,6 +14,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -368,6 +369,261 @@ class TmuxClientExecLaneTest {
                 client.close()
             }
         }
+
+    // ---------------------------------------------------------------------
+    // Issue #1460: the send-lane wedge — the residual `sendCommand` SPOF the
+    // #1459 Codex-freeze audit found after #1316 fixed the attach side. Typing
+    // a message and hitting Send to a live agent mid-`%output`-burst
+    // head-of-line-blocked the send's `%begin`/`%end` reply behind the burst on
+    // the ONE sshj reader (the maintainer's "app froze, had to restart"). The
+    // fix moves the interactive `send-keys` round-trips onto the exec lane.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `RED — send-keys on the shared -CC sendCommand wedges behind a held control channel`() =
+        runBlocking {
+            // Issue #1460 (reproduce-first): this is the BUG. When the shared
+            // per-host `-CC` sendMutex is held by an in-flight command whose
+            // reply is head-of-line-blocked behind a live agent's `%output`
+            // burst, a `send-keys` issued through `sendCommand` (the OLD send
+            // path) cannot acquire the mutex and wedges — exactly the composer
+            // Send freeze. Documents WHY the send lane moved off `-CC`; the
+            // sibling GREEN tests below prove `sendKeysViaExec` does NOT wedge.
+            val shell = FakeShell()
+            val session = FakeSession(shell, execHandler = sendKeysExecHandler())
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // Wedge `-CC`: this command never gets a `%begin`/`%end` reply
+                // (the FakeShell never answers), modelling a reply stuck behind
+                // a sustained `%output` burst on the single sshj reader. It holds
+                // the sendMutex.
+                val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+                withTimeout(2_000) {
+                    while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+                }
+
+                // The OLD send path (`sendCommand("send-keys …")`) must NOT
+                // complete within a generous budget — it is wedged behind the
+                // held mutex. This is the reproduced freeze.
+                val completed = withTimeoutOrNull(1_500) {
+                    client.sendCommand("send-keys -l -t %0 -- 'hello'")
+                }
+                assertNull(
+                    "BUG REPRO: send-keys on the shared -CC sendCommand must wedge " +
+                        "behind the held control channel (it returned $completed)",
+                    completed,
+                )
+                wedger.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `GREEN — literal send-keys completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            // Issue #1460: the FIX. The same held `-CC` mutex no longer blocks a
+            // literal `send-keys -l` — it rides the dedicated exec channel and
+            // returns fast. Same wedge as the RED test above; the only change is
+            // `sendCommand` → `sendKeysViaExec`.
+            assertSendKeysViaExecCompletesDuringCcWedge(
+                sendKeysCommand = "send-keys -l -t %0 -- 'hello'",
+                expectExecContains = "tmux send-keys -l -t %0 -- 'hello'",
+            )
+        }
+
+    @Test
+    fun `GREEN — named-key Enter send-keys completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            // Issue #1460 class coverage: the submit Enter (composer Send's final
+            // round-trip) is the round-trip most likely to be issued mid-burst.
+            assertSendKeysViaExecCompletesDuringCcWedge(
+                sendKeysCommand = "send-keys -t %0 Enter",
+                expectExecContains = "tmux send-keys -t %0 Enter",
+            )
+        }
+
+    @Test
+    fun `GREEN — hex bracketed-paste send-keys -H completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            // Issue #1460 class coverage: multi-line paste + raw-byte injection
+            // (write-stdin) both funnel through `send-keys -H`. It must not wedge
+            // behind a burst either.
+            assertSendKeysViaExecCompletesDuringCcWedge(
+                sendKeysCommand = "send-keys -H -t %0 1b 5b 32 30 30 7e",
+                expectExecContains = "tmux send-keys -H -t %0 1b 5b 32 30 30 7e",
+            )
+        }
+
+    @Test
+    fun `GREEN — copy-mode cancel send-keys -X completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            // Issue #1460 class coverage: `ensurePaneAcceptsInput` fires a
+            // `send-keys -X … cancel` before input when a pane is in copy-mode.
+            // It is on the send lane too, so it must not wedge behind a burst.
+            assertSendKeysViaExecCompletesDuringCcWedge(
+                sendKeysCommand = "send-keys -X -t %0 cancel",
+                expectExecContains = "tmux send-keys -X -t %0 cancel",
+            )
+        }
+
+    @Test
+    fun `sendKeysViaExec surfaces an error response when the pane is gone`() = runBlocking {
+        // Issue #1460: a non-zero exec exit (pane/session gone) must surface as
+        // an ERROR CommandResponse carrying stderr — so a failed send still
+        // fails honestly (the composer keeps the unsent draft), not a silent
+        // success.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = sendKeysExecHandler(
+                exitCode = 1,
+                stderr = "can't find pane: %9",
+            ),
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.sendKeysViaExec("send-keys -l -t %9 -- 'hi'")
+            }
+            assertTrue("a gone pane must surface as an error response", response.isError)
+            assertEquals(listOf("can't find pane: %9"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendKeysViaExec succeeds with an empty non-error response on a normal send`() = runBlocking {
+        // Issue #1460: `send-keys` prints nothing on success, so a zero exit must
+        // yield an empty, non-error response (the caller's `throwIfTmuxError`
+        // treats it as success).
+        val shell = FakeShell()
+        val session = FakeSession(shell, execHandler = sendKeysExecHandler())
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.sendKeysViaExec("send-keys -l -t %0 -- 'hi'")
+            }
+            assertFalse("a normal send must not be an error", response.isError)
+            assertTrue("send-keys prints nothing on success", response.output.isEmpty())
+            assertEquals(
+                "tmux send-keys -l -t %0 -- 'hi'",
+                session.execCommands.single { it.contains("send-keys") },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendKeysViaExec bounds itself and throws within the short ceiling on a wedged exec`() =
+        runBlocking {
+            // Issue #1460: a genuinely wedged/half-open transport (the exec never
+            // returns) must surface a TmuxClientException within the caller's
+            // SHORT ceiling, not hang to the full command ceiling — so a send
+            // against a dead link fails fast and the composer keeps the draft.
+            val shell = FakeShell()
+            val neverReturns = CompletableDeferred<ExecResult>()
+            val session = FakeSession(shell, execHandler = { neverReturns.await() })
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching {
+                    withTimeout(5_000) {
+                        client.sendKeysViaExec("send-keys -l -t %0 -- 'hi'", timeoutMs = 250L)
+                    }
+                }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+                assertTrue(
+                    "a wedged send-keys exec must surface a TmuxClientException from " +
+                        "the short ceiling, not hang to the command ceiling (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                assertTrue(
+                    "the send must time out within ~the short ceiling (elapsed ${elapsedMs}ms)",
+                    elapsedMs < 5_000L,
+                )
+                neverReturns.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
+    /**
+     * Issue #1460 shared driver: connect, wedge the shared `-CC` control channel
+     * with a never-answered command (modelling a reply stuck behind a live agent
+     * `%output` burst on the one sshj reader), then assert [sendKeysCommand] rides
+     * the dedicated exec channel and returns WELL under the `-CC` mutex ceiling —
+     * proving it did not wait on the wedged sendMutex. Verifies the exec carried
+     * the exact command via [expectExecContains].
+     */
+    private suspend fun assertSendKeysViaExecCompletesDuringCcWedge(
+        sendKeysCommand: String,
+        expectExecContains: String,
+    ) {
+        val shell = FakeShell()
+        val session = FakeSession(shell, execHandler = sendKeysExecHandler())
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+            }
+
+            val startedAtMs = System.currentTimeMillis()
+            val response = withTimeout(5_000) {
+                client.sendKeysViaExec(sendKeysCommand)
+            }
+            val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+            assertFalse("the send must succeed during a -CC burst", response.isError)
+            assertTrue(
+                "the send must complete well under the -CC mutex ceiling " +
+                    "(elapsed ${elapsedMs}ms) proving it did not wait on the wedged " +
+                    "-CC sendMutex",
+                elapsedMs < 2_000L,
+            )
+            assertEquals(
+                "the send-keys must ride the exec lane verbatim",
+                expectExecContains,
+                session.execCommands.single { it.contains("send-keys") },
+            )
+            // And the send-keys never reached the wedged -CC stdin.
+            assertFalse(
+                "the send-keys must NOT be written to the wedged -CC shell",
+                shell.stdinAsString().contains("send-keys"),
+            )
+            wedger.cancel()
+        } finally {
+            client.close()
+        }
+    }
+
+    private fun sendKeysExecHandler(
+        exitCode: Int = 0,
+        stderr: String = "",
+        delayMs: Long = 0L,
+    ): suspend (String) -> ExecResult = { _ ->
+        if (delayMs > 0L) delay(delayMs)
+        // `send-keys` prints nothing on success.
+        ExecResult(stdout = "", stderr = stderr, exitCode = exitCode)
+    }
 
     private fun healExecHandler(
         cursor: String?,

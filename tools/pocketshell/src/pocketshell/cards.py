@@ -572,6 +572,29 @@ def _require_session(explicit: Optional[str]) -> str:
     return session
 
 
+def _notify_card_pushed_best_effort(
+    session: str, card: dict[str, Any], *, card_paths: CardPaths
+) -> None:
+    """Fire a best-effort FCM push for a freshly upserted card (#859 Slice D/2).
+
+    The single notification path shared by EVERY card-creating ``push`` verb
+    (``checklist``, ``note``, and any future card type). Centralising it here is
+    the durable class fix for #1446: a new ``push <cardtype>`` verb that upserts
+    a card just calls this one helper, so it can't silently forget to notify the
+    phone the way ``push note`` originally did.
+
+    Fail-soft — the push deps are imported lazily so a host without them still
+    pushes the card, and any failure is swallowed so a card write never wedges
+    the CLI. De-dup + configuration guards live in :func:`notify_card_pushed`.
+    """
+    try:
+        from pocketshell.agent_card_push import notify_card_pushed
+
+        notify_card_pushed(session, card, card_paths=card_paths)
+    except Exception:
+        pass
+
+
 def register_push_card_commands(push_group: click.Group) -> None:
     """Register the typed-card verbs onto the existing ``push`` click group.
 
@@ -635,14 +658,8 @@ def register_push_card_commands(push_group: click.Group) -> None:
         card_paths = resolve_paths()
         path = upsert_card(target, card, paths=card_paths)
         # Slice D (#859): fire a best-effort FCM push so the phone surfaces a
-        # heads-up notification opening this session's card feed. Fail-soft —
-        # imported lazily so a host without the push deps still pushes the card.
-        try:
-            from pocketshell.agent_card_push import notify_card_pushed
-
-            notify_card_pushed(target, card, card_paths=card_paths)
-        except Exception:
-            pass
+        # heads-up notification opening this session's card feed.
+        _notify_card_pushed_best_effort(target, card, card_paths=card_paths)
         click.echo(
             f"checklist {card_id!r} ({len(parsed)} items) -> session {target!r} ({path})"
         )
@@ -652,6 +669,8 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
     def push_get(as_json: bool, session: Optional[str]) -> None:
         """Return the session's cards (human/YAML by default, --json for the app)."""
+        # No notify (#1446 audit): read-only query, upserts no card. The app is
+        # the caller here; there is nothing new to surface.
         target = _require_session(session)
         cards = read_cards(target, paths=resolve_paths())
         if as_json:
@@ -677,6 +696,7 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
     def push_status(card_id: Optional[str], as_json: bool, session: Optional[str]) -> None:
         """Report interaction state — which checklist items the human has ticked."""
+        # No notify (#1446 audit): read-only query, upserts no card.
         target = _require_session(session)
         cards = read_cards(target, paths=resolve_paths())
         if card_id is not None:
@@ -712,6 +732,9 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
     def push_check(card_id: str, item_id: str, done: bool, session: Optional[str]) -> None:
         """Set a checklist item's checked state (this is what the app's tick calls)."""
+        # No notify (#1446 audit): this is the APP writing back the human's tick,
+        # not an agent pushing a new card. Notifying would push the phone about
+        # its own action (and could loop). It mutates state, never upserts a card.
         target = _require_session(session)
         try:
             card = apply_interaction(
@@ -771,7 +794,13 @@ def register_push_card_commands(push_group: click.Group) -> None:
             title=title,
             build_kwargs={"text": body_text},
         )
-        path = upsert_card(target, card, paths=resolve_paths())
+        card_paths = resolve_paths()
+        path = upsert_card(target, card, paths=card_paths)
+        # #1446: a pushed note is a card the human must see, just like a
+        # checklist — fire the same best-effort FCM push so the phone surfaces a
+        # heads-up notification opening this session's card feed. (Slice D/#859
+        # shipped this only on `checklist`; `push note` was silently omitted.)
+        _notify_card_pushed_best_effort(target, card, card_paths=card_paths)
         click.echo(f"note {card_id!r} -> session {target!r} ({path})")
 
     @push_group.command("read")
@@ -780,6 +809,8 @@ def register_push_card_commands(push_group: click.Group) -> None:
     @click.option("--session", "session", default=None, help="Override the auto-detected tmux session.")
     def push_read(card_id: str, read: bool, session: Optional[str]) -> None:
         """Set a note's read state (this is what the app's "mark read" calls)."""
+        # No notify (#1446 audit): this is the APP writing back "human read it",
+        # not an agent pushing a new card. Same rationale as `push check`.
         target = _require_session(session)
         try:
             card = apply_interaction(

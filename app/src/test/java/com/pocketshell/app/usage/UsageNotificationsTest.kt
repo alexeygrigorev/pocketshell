@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -68,12 +69,11 @@ class UsageNotificationsTest {
             ),
             state = UsageThresholdState.Approaching,
             warnPercent = 80.0,
-            now = Instant.parse("2026-06-08T10:00:00Z"),
             zoneId = ZoneId.of("UTC"),
         )
 
         assertEquals("Codex usage: 86% used", event.title)
-        assertEquals("Approaching limit · resets in 2h · Tap to open Usage.", event.text)
+        assertEquals("Approaching limit · resets Jun 8, 12:00 · Tap to open Usage.", event.text)
         assertFalse(event.title.contains("blocked", ignoreCase = true))
         assertFalse(event.text.contains("blocked", ignoreCase = true))
     }
@@ -126,7 +126,6 @@ class UsageNotificationsTest {
             context = context,
             settingsRepository = SettingsRepository(context),
             stateStore = FakeStateStore(),
-            now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
@@ -180,7 +179,6 @@ class UsageNotificationsTest {
             context = context,
             settingsRepository = SettingsRepository(context),
             stateStore = FakeStateStore(),
-            now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
@@ -202,7 +200,6 @@ class UsageNotificationsTest {
             context = context,
             settingsRepository = SettingsRepository(context),
             stateStore = FakeStateStore(),
-            now = { Instant.parse("2026-06-08T10:00:00Z") },
             zoneId = { ZoneId.of("UTC") },
             poster = { events += it },
         )
@@ -238,10 +235,147 @@ class UsageNotificationsTest {
         )
         assertEquals(
             listOf(
-                "agent-box · Approaching limit · resets in 5h · Tap to open Usage.",
+                "agent-box · Approaching limit · resets Jun 8, 15:00 · Tap to open Usage.",
             ),
             events.map { it.text },
         )
+    }
+
+    @Test
+    fun notificationUsesAbsoluteResetTimeNotDriftingRelative() {
+        // Issue #1441 (drift): the fire-and-forget notification must bake an
+        // ABSOLUTE reset time, not a "resets in Xh Ym" relative countdown that
+        // goes stale as wall-clock time passes (reads "resets in 2h" hours after
+        // the reset already happened).
+        val event = usageNotificationEvent(
+            record = UsageProviderRecord(
+                provider = "codex",
+                status = UsageStatus.Ok,
+                rawStatus = "ok",
+                windows = listOf(
+                    UsageWindow(
+                        "7d",
+                        86.0,
+                        100.0,
+                        "percent",
+                        Instant.parse("2026-06-08T12:00:00Z"),
+                    ),
+                ),
+            ),
+            state = UsageThresholdState.Approaching,
+            warnPercent = 80.0,
+            zoneId = ZoneId.of("UTC"),
+        )
+
+        assertFalse(
+            "reset line must not bake a drifting relative time: ${event.text}",
+            event.text.contains("resets in"),
+        )
+        assertTrue(
+            "reset line must show an absolute (non-drifting) time: ${event.text}",
+            event.text.contains("resets Jun 8, 12:00"),
+        )
+    }
+
+    @Test
+    fun resetClearsCrossingCancelsStaleNotificationAndReArmsLedger() {
+        // Issue #1441 (stale lingering): a warning is posted, then the quota
+        // RESETS (record no longer warrants a warning). The stale tray
+        // notification must be cancelled — not left with a now-false "resets …"
+        // line — and the persisted ledger entry cleared so a later breach
+        // re-notifies. On base (no cancel path) the notification lingers.
+        val store = FakeStateStore()
+        val cancelled = mutableListOf<Int>()
+        val events = mutableListOf<UsageNotificationEvent>()
+
+        // T0: breach -> posts, records the crossing.
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+        assertEquals(1, events.size)
+        val postedId = events.single().notificationId
+        assertEquals(setOf(events.single().key), store.notifiedKeys())
+
+        // T0+: quota reset -> provider back below threshold (no warning).
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to snapshot(percent = 12.0)))
+
+        // The stale notification is cancelled and the ledger re-armed.
+        assertEquals(listOf(postedId), cancelled)
+        assertEquals(emptySet<UsageNotificationKey>(), store.notifiedKeys())
+
+        // A later genuine breach re-notifies (ledger really cleared).
+        val reNotify = mutableListOf<UsageNotificationEvent>()
+        notifier(store, cancelled) { reNotify += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+        assertEquals(listOf("Codex weekly quota exceeded"), reNotify.map { it.title })
+    }
+
+    @Test
+    fun crossingIntoHigherSeverityRePostsAndDoesNotCancelFreshNotification() {
+        // Class coverage: Approaching -> Exceeded on the SAME host+provider
+        // re-posts the new severity and reuses the SAME notificationId. The
+        // cleared Approaching key must NOT cancel the freshly-posted Exceeded
+        // notification (same slot).
+        val store = FakeStateStore()
+        val cancelled = mutableListOf<Int>()
+        val events = mutableListOf<UsageNotificationEvent>()
+
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to snapshot(percent = 80.0)))
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+
+        assertEquals(
+            listOf("Codex usage: 80% used", "Codex weekly quota exceeded"),
+            events.map { it.title },
+        )
+        // Same slot reused; the re-post replaces it, nothing is cancelled.
+        assertEquals(events[0].notificationId, events[1].notificationId)
+        assertEquals(emptyList<Int>(), cancelled)
+    }
+
+    @Test
+    fun stillInSameWarningDoesNotRePostOrCancel() {
+        // Class coverage: an unchanged same-severity crossing across ticks must
+        // neither re-post (existing de-dupe) nor cancel the live notification.
+        val store = FakeStateStore()
+        val cancelled = mutableListOf<Int>()
+        val events = mutableListOf<UsageNotificationEvent>()
+
+        repeat(3) {
+            notifier(store, cancelled) { events += it }
+                .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+        }
+
+        assertEquals(listOf("Codex weekly quota exceeded"), events.map { it.title })
+        assertEquals(emptyList<Int>(), cancelled)
+    }
+
+    @Test
+    fun clearingCrossingWithUnknownResetTimeStillCancels() {
+        // Class coverage (missing-data): a provider with NO reset_at still posts
+        // a warning (body omits the reset line), and clearing it must still
+        // cancel the stale notification — the cancel path must not depend on a
+        // reset time being present.
+        val store = FakeStateStore()
+        val cancelled = mutableListOf<Int>()
+        val events = mutableListOf<UsageNotificationEvent>()
+
+        // exceededSnapshot() has a null reset_at window.
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to exceededSnapshot()))
+        assertEquals(1, events.size)
+        assertFalse(
+            "no reset line when reset_at is unknown: ${events.single().text}",
+            events.single().text.contains("resets"),
+        )
+        val postedId = events.single().notificationId
+
+        notifier(store, cancelled) { events += it }
+            .onSnapshotsChanged(mapOf(1L to snapshot(percent = 5.0)))
+
+        assertEquals(listOf(postedId), cancelled)
+        assertEquals(emptySet<UsageNotificationKey>(), store.notifiedKeys())
     }
 
     @Test
@@ -348,14 +482,15 @@ class UsageNotificationsTest {
 
     private fun notifier(
         store: UsageNotificationStateStore,
+        cancelled: MutableList<Int> = mutableListOf(),
         poster: (UsageNotificationEvent) -> Unit,
     ): DefaultUsageNotifier = DefaultUsageNotifier(
         context = context,
         settingsRepository = SettingsRepository(context),
         stateStore = store,
-        now = { Instant.parse("2026-06-08T10:00:00Z") },
         zoneId = { ZoneId.of("UTC") },
         poster = poster,
+        canceller = { cancelled += it },
     )
 
     private fun exceededSnapshot(): UsageSnapshot.Records = UsageSnapshot.Records(

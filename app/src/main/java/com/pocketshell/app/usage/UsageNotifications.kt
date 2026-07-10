@@ -15,7 +15,6 @@ import com.pocketshell.app.R
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
-import java.time.Instant
 import java.time.ZoneId
 
 public interface UsageNotifier {
@@ -30,10 +29,12 @@ public class DefaultUsageNotifier(
     context: Context,
     private val settingsRepository: SettingsRepository,
     private val stateStore: UsageNotificationStateStore,
-    private val now: () -> Instant = { Instant.now() },
     private val zoneId: () -> ZoneId = { ZoneId.systemDefault() },
     private val poster: (UsageNotificationEvent) -> Unit = { event ->
         UsageNotifications.show(context.applicationContext, event)
+    },
+    private val canceller: (Int) -> Unit = { id ->
+        UsageNotifications.cancel(context.applicationContext, id)
     },
 ) : UsageNotifier {
 
@@ -58,7 +59,6 @@ public class DefaultUsageNotifier(
                             record = record,
                             state = state,
                             warnPercent = warnPercent,
-                            now = now(),
                             zoneId = zoneId(),
                             hostName = snapshot.hostName,
                             hostId = snapshot.hostId,
@@ -67,6 +67,26 @@ public class DefaultUsageNotifier(
                     )
                 }
             }
+        }
+        // Issue #1441: a fire-and-forget usage warning was never cancelled, so
+        // when the quota reset (or usage dropped below threshold) the stale
+        // "quota exceeded · resets …" notification lingered in the tray with a
+        // now-false reset time. Any previously-notified crossing that is no
+        // longer in `current` has cleared — cancel its tray notification so it
+        // is dismissed, not left lying. Pruning it from the persisted set below
+        // also re-arms the crossing for a future genuine breach.
+        //
+        // A severity change on the SAME host+provider (e.g. Approaching ->
+        // Exceeded) re-uses the SAME notificationId, and the new crossing has
+        // already been re-posted above, so guard against cancelling that
+        // freshly-posted notification: only cancel ids that no current crossing
+        // still owns.
+        val activeIds = current.mapTo(mutableSetOf()) {
+            usageNotificationId(it.hostId, it.provider)
+        }
+        (alreadyNotified - current).forEach { cleared ->
+            val id = usageNotificationId(cleared.hostId, cleared.provider)
+            if (id !in activeIds) canceller(id)
         }
         stateStore.setNotifiedKeys(current)
     }
@@ -83,7 +103,6 @@ internal fun usageNotificationEvent(
     record: UsageProviderRecord,
     state: UsageThresholdState,
     warnPercent: Double,
-    now: Instant = Instant.now(),
     zoneId: ZoneId = ZoneId.systemDefault(),
     hostName: String? = null,
     hostId: Long? = null,
@@ -100,9 +119,13 @@ internal fun usageNotificationEvent(
         UsageThresholdState.Ok ->
             "${record.displayName} usage"
     }
-    val resetText = record.mostConstrainedWindow?.resetAt?.let { reset ->
-        "resets ${formatResetRelative(now, reset, zoneId)}"
-    }
+    // Issue #1441: show an ABSOLUTE reset time, not a relative "resets in Xh Ym"
+    // computed once against `now`. A notification is fire-and-forget — a value
+    // baked in at post time must stay correct as wall-clock time passes, and a
+    // relative countdown drifts wrong (reads "resets in 2h" long after the reset
+    // already happened). The absolute local time never goes stale.
+    val resetText = formatResetAbsolute(record.mostConstrainedWindow?.resetAt, zoneId)
+        ?.let { "resets $it" }
     val hostText = hostName?.trim()?.takeIf { it.isNotEmpty() }
     val stateText = when (state) {
         UsageThresholdState.Approaching -> "Approaching limit"
@@ -115,10 +138,20 @@ internal fun usageNotificationEvent(
     return UsageNotificationEvent(
         title = title,
         text = body,
-        notificationId = 27_000 + "${record.provider.lowercase()}:${hostId ?: 0L}".hashCode().and(0x0fff),
+        notificationId = usageNotificationId(hostId ?: 0L, record.provider),
         key = key,
     )
 }
+
+/**
+ * Stable tray notification id for a host+provider usage warning. Derived only
+ * from host id + provider so the same slot is reused as severity climbs (the
+ * re-post replaces the prior card) and so a cleared crossing can be cancelled
+ * from its persisted [UsageNotificationKey] alone (issue #1441). The provider
+ * is lowercased to match [usageNotificationKey], which stores it lowercased.
+ */
+internal fun usageNotificationId(hostId: Long, provider: String): Int =
+    27_000 + "${provider.lowercase()}:$hostId".hashCode().and(0x0fff)
 
 private fun usageNotificationKey(
     hostId: Long,
@@ -172,6 +205,18 @@ internal object UsageNotifications {
 
         appContext.getSystemService(NotificationManager::class.java)
             .notify(event.notificationId, notification)
+    }
+
+    /**
+     * Dismiss a previously-posted usage warning (issue #1441). Called when a
+     * notified crossing clears (quota reset / usage dropped below threshold) so
+     * a fire-and-forget warning with a now-stale reset time does not linger in
+     * the tray.
+     */
+    fun cancel(context: Context, notificationId: Int) {
+        context.applicationContext
+            .getSystemService(NotificationManager::class.java)
+            ?.cancel(notificationId)
     }
 
     private fun usagePendingIntent(context: Context): PendingIntent {

@@ -258,7 +258,6 @@ class UsageThresholdNotificationE2eTest {
         context = context,
         settingsRepository = SettingsRepository(context),
         stateStore = store,
-        now = { Instant.parse("2026-06-08T10:00:00Z") },
         zoneId = { ZoneId.of("UTC") },
         // default poster -> UsageNotifications.show(context, event) -> real post
     )
@@ -290,7 +289,6 @@ class UsageThresholdNotificationE2eTest {
             state = UsageThresholdState.Exceeded,
             warnPercent = SettingsRepository(context)
                 .settings.value.usageWarnThresholdPercent.toDouble(),
-            now = Instant.parse("2026-06-08T10:00:00Z"),
             zoneId = ZoneId.of("UTC"),
             hostName = "agent-box",
             hostId = HOST_ID,

@@ -364,6 +364,14 @@ fun HostListScreen(
     LaunchedEffect(Unit) {
         viewModel.refreshResumableSession()
     }
+    // Issue #1164 (battery/heat): gate the cross-host `list-sessions` poll
+    // on the whole-process foreground state so it stops firing SSH
+    // round-trips while the app is backgrounded / the screen is off. The
+    // ViewModel parks each per-host poller on ProcessLifecycleOwner's
+    // STARTED state and resumes with a prompt refresh on return.
+    LaunchedEffect(Unit) {
+        sessionsViewModel.observeProcessLifecycle()
+    }
 
     // Fire navigation once the ViewModel marks the pending route ready.
     // The ViewModel handles the cache-hit fast path (immediate ready)

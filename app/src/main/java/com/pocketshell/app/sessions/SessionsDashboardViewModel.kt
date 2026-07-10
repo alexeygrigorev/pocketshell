@@ -2,6 +2,10 @@ package com.pocketshell.app.sessions
 
 import android.content.Context
 import android.util.Log
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.systemsurfaces.ActiveSessionsWidgetProvider
@@ -24,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
@@ -72,6 +77,25 @@ import javax.inject.Inject
  * navigation away and back. Per-host poller [Job]s are cancelled and
  * restarted as the registry's snapshot changes, and all of them tear
  * down when [onCleared] cancels `viewModelScope`.
+ *
+ * ## Foreground-gated polling (battery — issue #1164)
+ *
+ * The `list-sessions` poll only exists to keep the visible dashboard's
+ * relative timestamps + agent chips fresh, so it must not run while the
+ * app is backgrounded / the screen is off — a backgrounded dashboard
+ * nobody is looking at that keeps firing an SSH `list-sessions` round-trip
+ * per host every 10s is pure battery/heat waste (the audit's "clearest
+ * small win", #1164). Each per-host [pollLoop] parks on [processStarted]
+ * (`first { it }`) at the top of every iteration: while the whole process
+ * is below [Lifecycle.State.STARTED] (the user has backgrounded the app,
+ * `ON_STOP`) no poll fires; on `ON_START` the loop resumes with an
+ * immediate fetch so the dashboard is never stale on return.
+ *
+ * [processStarted] is driven by [ProcessLifecycleOwner] via
+ * [observeProcessLifecycle], which the host landing screen calls once on
+ * composition. The mechanism mirrors
+ * [com.pocketshell.app.usage.UsageScheduler] — the dashboard's sibling
+ * periodic poll, already foreground-gated for the same D21 reason.
  *
  * ## Testability
  *
@@ -140,6 +164,38 @@ class SessionsDashboardViewModel @Inject constructor(
     private val perHostSnapshots: MutableMap<Long, List<SessionSummary>> = mutableMapOf()
     private var registryJob: Job? = null
 
+    /**
+     * Whole-process foreground signal (issue #1164). `true` while the
+     * process is at least [Lifecycle.State.STARTED] — an Activity is
+     * visible to the user. Each [pollLoop] parks on this flag so no
+     * `list-sessions` round-trip fires while the app is backgrounded /
+     * the screen is off.
+     *
+     * Defaults to `true` so a view model that is never attached to a
+     * lifecycle (the unit-test seams that construct it directly) polls
+     * exactly as before. Production wiring calls [observeProcessLifecycle]
+     * from the host landing screen, which seeds the flag from the owner's
+     * current state and flips it on every `ON_START` / `ON_STOP`.
+     */
+    private val _processStarted = MutableStateFlow(true)
+    val processStarted: StateFlow<Boolean> = _processStarted.asStateFlow()
+
+    /**
+     * The attached process lifecycle + its observer. Kept as fields so
+     * [onCleared] can detach cleanly and a second [observeProcessLifecycle]
+     * with the same owner is a no-op (a different owner detaches the
+     * previous one first — the [com.pocketshell.app.usage.UsageScheduler]
+     * / [com.pocketshell.app.portfwd.PortForwardPanelViewModel] pattern).
+     */
+    private var attachedLifecycle: Lifecycle? = null
+    private val lifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
+        when (event) {
+            Lifecycle.Event.ON_START -> _processStarted.value = true
+            Lifecycle.Event.ON_STOP -> _processStarted.value = false
+            else -> Unit
+        }
+    }
+
     init {
         // One supervising coroutine watches the registry. When the
         // snapshot of clients changes we diff against [pollerJobs] and
@@ -203,6 +259,17 @@ class SessionsDashboardViewModel @Inject constructor(
         // possible after register; subsequent polls back off to the
         // configured cadence.
         while (currentCoroutineContext().isActive) {
+            // Issue #1164 (battery/heat): gate every poll on the
+            // whole-process foreground state. While the app is
+            // backgrounded / screen off (`ON_STOP` -> processStarted
+            // false) `first { it }` parks the loop, so no `list-sessions`
+            // SSH round-trip fires — the dashboard nobody is looking at
+            // stops draining battery. On `ON_START` the flag flips true,
+            // the loop resumes here and immediately fetches, so the list
+            // is never stale on return. When no lifecycle is attached
+            // (unit-test seams) the flag defaults true and this returns
+            // instantly — unchanged behaviour.
+            processStarted.first { it }
             val rows = runCatching { fetchSessions(entry) }.getOrNull()
             if (rows != null) {
                 perHostSnapshots[entry.hostId] = rows
@@ -272,7 +339,49 @@ class SessionsDashboardViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Attach the whole-process lifecycle so the `list-sessions` poll is
+     * gated on foreground state (issue #1164). Called once from the host
+     * landing screen's composition. Seeds [processStarted] from the
+     * owner's current state so a screen that mounts while already visible
+     * doesn't have to wait for the next `ON_START`, then flips it on every
+     * subsequent `ON_START` / `ON_STOP`.
+     *
+     * Idempotent: a second call with the same owner is a no-op; a
+     * different owner detaches the previous one first so tests can
+     * re-attach to a fresh `LifecycleRegistry`. Mirrors
+     * [com.pocketshell.app.usage.UsageScheduler.observeProcessLifecycle]
+     * and [com.pocketshell.app.portfwd.PortForwardPanelViewModel.observeProcessLifecycle].
+     */
+    fun observeProcessLifecycle(owner: LifecycleOwner = ProcessLifecycleOwner.get()) {
+        val lifecycle = owner.lifecycle
+        if (attachedLifecycle === lifecycle) return
+        attachedLifecycle?.removeObserver(lifecycleObserver)
+        attachedLifecycle = lifecycle
+        // `Lifecycle.addObserver` + reading `currentState` require the
+        // main thread; hop there explicitly so a call from any dispatcher
+        // is safe. The observer then runs on whatever thread the lifecycle
+        // dispatches on (always Main in production).
+        viewModelScope.launch {
+            withContext(Dispatchers.Main) {
+                _processStarted.value =
+                    lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                lifecycle.addObserver(lifecycleObserver)
+            }
+        }
+    }
+
+    /**
+     * Visible-for-testing seam: flip the foreground flag without a real
+     * lifecycle owner. Production wiring uses [observeProcessLifecycle].
+     */
+    internal fun setProcessStartedForTest(started: Boolean) {
+        _processStarted.value = started
+    }
+
     override fun onCleared() {
+        attachedLifecycle?.removeObserver(lifecycleObserver)
+        attachedLifecycle = null
         stopPolling()
         super.onCleared()
     }

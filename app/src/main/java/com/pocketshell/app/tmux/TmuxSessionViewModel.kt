@@ -156,6 +156,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.coroutineContext
@@ -1796,6 +1797,9 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val panesSeedInFlightThisAttach: MutableSet<String> =
         java.util.Collections.newSetFromMap(ConcurrentHashMap())
+
+    /** Issue #1353 R3 — per-pane single-flight owner for the heal chokepoint (spike §3 race). */
+    private val renderHealCoordinator = RenderHealCoordinator()
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
@@ -11715,28 +11719,46 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
+        force: Boolean = false,
+        recordMilestone: Boolean = false,
+        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
+    ): HealOutcome =
+        // Issue #1353 R3 — SINGLE-FLIGHT per pane. Serialize the whole close→capture→apply→open
+        // seed-gate (M9) window so a sibling launcher (L1 send / L2 watchdog / L5 reveal) on the
+        // SAME pane can't cross into it and open the gate early, clobbering a buffered newer
+        // `%output` delta (spike §3 race). Keyed per pane, so different panes heal concurrently.
+        // `withLock` is inline (early returns stay non-local, the mutex ALWAYS unlocks — bounded).
+        renderHealCoordinator.paneHealMutex(pane.paneId).withLock {
+            healActivePaneIfStaleRenderLocked(
+                client, pane, refreshGuard, force, recordMilestone, maxAttempts,
+            )
+        }
+
+    private suspend fun healActivePaneIfStaleRenderLocked(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
         // Issue #1353 R2 — the single reseed authority's UNCONDITIONAL (force) mode,
         // folded in from the deleted parallel `seedPaneFromCapture` sink (M4). A caller
         // that needs a GUARANTEED reseed (cold-open attach seed, blank-pane heal, reveal
         // handoff, reattach) passes `force = true`: the capture→[appendRemoteOutput] fires
         // WITHOUT consulting the #1300 divergence oracle. A non-forced call stays
         // oracle-gated (the M2 stale-render heal below). ONE capture→append authority.
-        force: Boolean = false,
+        force: Boolean,
         // Force-mode only: warm-switch capture milestone (the cold-open active-pane seed).
-        recordMilestone: Boolean = false,
+        recordMilestone: Boolean,
         // Force-mode only: bound on the empty/near-blank capture retry loop (#693/#662).
         // Ignored on the oracle-gated (non-force) path, which pays exactly one capture.
-        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
+        maxAttempts: Int,
     ): HealOutcome {
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
         if (client.disconnected.value) return HealOutcome.Unverified
-        // Issue #1353 R2 — the UNCONDITIONAL reseed (seed mode). Folded in from the old
+        // Issue #1353 R2 — the UNCONDITIONAL reseed (seed mode), folded in from the old
         // `seedPaneFromCapture`: capture tmux's authoritative grid and apply it WITHOUT the
-        // oracle gate, RETRYING a transiently empty/near-blank capture on a flaky link
-        // (bounded); the non-destructive swap in [captureAndApplyPaneSnapshot] keeps the last
-        // good frame so a momentary drop never repaints black. Returns [HealOutcome.Healed]
-        // when a snapshot landed, [HealOutcome.Unverified] otherwise (so a force caller reads
-        // `== HealOutcome.Healed` exactly where it previously read the seed's Boolean `true`).
+        // oracle gate, RETRYING a transiently empty/near-blank capture (bounded); the
+        // non-destructive swap in [captureAndApplyPaneSnapshot] keeps the last good frame so a
+        // momentary drop never repaints black. Returns [HealOutcome.Healed] when a snapshot
+        // landed, [HealOutcome.Unverified] otherwise (a force caller reads `== Healed`).
         if (force) {
             // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
             // round-trip so a concurrent reseed net (the pager-settle
@@ -11765,26 +11787,20 @@ public class TmuxSessionViewModel @Inject constructor(
                 panesSeedInFlightThisAttach.remove(pane.paneId)
             }
         }
-        // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
-        // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
-        // decision: it only fires when tmux's grid HAS substantial content while
-        // the rendered VISIBLE viewport shows almost none of it — which is a stale
-        // render regardless of whether the residue is zero glyphs (fully black),
-        // a few scattered fragments (#966), or a post-burst clear. The heal is
-        // idempotent (a full clear+repaint of tmux's authoritative grid), so even
-        // if the blank watchdog also fires it just re-paints identical content.
+        // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The divergence oracle
+        // ([visibleScreenDivergesFromCapture]) is the single decision: it fires only when
+        // tmux's grid HAS substantial content while the VISIBLE viewport shows almost none of
+        // it — a stale render whether the residue is zero glyphs, scattered fragments (#966), or
+        // a post-burst clear. The heal is idempotent (a full clear+repaint of tmux's grid).
         //
-        // Issue #1294: the SURFACE-BLACK detector/heal runs FIRST — BEFORE and
-        // INDEPENDENT of the `capture-pane` round-trip below. A surface-only black (the
-        // MODEL grid is intact but the on-screen SURFACE is confirmed black, spike #874
-        // GAP-1) recovers with a PURE surface repaint that needs NO tmux content — so a
-        // wedged / timed-out capture must never gate it. Before #1294 this #1203 auto-heal
-        // sat INSIDE the capture-success branch, behind the empty/errored early-return, so
-        // a Claude burst that starved the shared capture mutex (the exact window a pane
-        // goes black) blocked the one recovery that never needed a capture at all. The
-        // repaint fires here on the surface-black signal; its exportable FINGERPRINT is
-        // recorded below where the authoritative captureBytes is known (or, when the
-        // capture then fails, in the capture-failed branch with captureBytes unknown).
+        // Issue #1294: the SURFACE-BLACK detector/heal runs FIRST — BEFORE and INDEPENDENT of
+        // the `capture-pane` round-trip below. A surface-only black (MODEL grid intact but the
+        // on-screen SURFACE confirmed black, spike #874 GAP-1) recovers with a PURE surface
+        // repaint that needs NO tmux content, so a wedged/timed-out capture must never gate it
+        // (before #1294 it sat behind the capture's empty/errored early-return and a
+        // capture-mutex-starving Claude burst blocked the one recovery needing no capture). Its
+        // exportable FINGERPRINT is recorded below where captureBytes is known (or, on capture
+        // failure, in the capture-failed branch).
         val surfaceBlack = pane.terminalState.surfaceIsBlackWhileModelHasContent()
         if (surfaceBlack) {
             Log.i(
@@ -11796,22 +11812,16 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             pane.terminalState.requestSurfaceRepaint()
         }
-        // Issue #1301 (capture-clobbers-newer-delta race): QUIESCE live `%output`
-        // delivery around the reconcile capture+apply — but ONLY for a pane whose render
-        // already looks SUSPECT (black / partial-black / mostly-empty / surface-black),
-        // i.e. one we are about to reseed. Closing the seed gate buffers any NEWER
-        // in-flight delta (in arrival order) instead of letting it paint the emulator and
-        // then be wiped by the (older) snapshot's `CSI 2J` clear; [appendRemoteOutput]'s
-        // `seedThenOpenGate` re-applies the buffered deltas ON TOP of the snapshot
-        // (newest-wins). A HEALTHY (dense, correctly-rendering) pane is NOT quiesced — its
-        // gate stays OPEN so its steady live output never buffers, preserving the
-        // #1219/#1164 steady-heat back-off with zero added stutter. The gate is REOPENED
-        // in the `finally` on EVERY exit (healthy / unverified / healed), flushing any
-        // buffered delta so live output is never swallowed (#468 fail-safe). This is the
-        // #1298 design §5 "quiesce-around-apply" widened to the whole capture+apply window
-        // for a suspect pane (strictly stronger, deterministically testable, and — since
-        // the target class is the idle non-repainting pane with NO concurrent deltas —
-        // free there; a busy suspect pane briefly buffers then flushes in order).
+        // Issue #1301 (capture-clobbers-newer-delta race): QUIESCE live `%output` delivery
+        // around the capture+apply — but ONLY for a pane whose render already looks SUSPECT
+        // (one we are about to reseed). Closing the seed gate buffers any NEWER in-flight delta
+        // (in arrival order); [appendRemoteOutput]'s `seedThenOpenGate` re-applies it ON TOP of
+        // the snapshot (newest-wins) so the snapshot's `CSI 2J` clear can't clobber it. A
+        // HEALTHY pane is NOT quiesced (gate stays open — #1219/#1164 steady-heat back-off
+        // untouched); the `finally` REOPENS the gate on EVERY exit so live output is never
+        // swallowed (#468 fail-safe). Issue #1353 R3 wraps this WHOLE window in the per-pane
+        // single-flight ([renderHealCoordinator]) so a sibling launcher can't cross into it and
+        // open the gate early (the concurrent premature-open clobber — see the coordinator).
         val quiesceLiveDeltas =
             surfaceBlack || pane.terminalState.renderLooksSuspect()
         if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
@@ -11829,29 +11839,19 @@ public class TmuxSessionViewModel @Inject constructor(
         val captureResponse = combined?.capture
         if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
             // Issue #1294: the `capture-pane` round-trip could NOT confirm the render against
-            // tmux's grid — it timed out, errored, or came back EMPTY on a live transport (or
-            // was starved out by a concurrent burst holding the shared capture mutex). The
-            // surface repaint above already fired if the surface was black, so a
-            // surface-only-black recovers even on this path.
-            //
-            // The scoring turns on whether the LOCAL render currently looks LOST (black /
-            // partial-black / mostly-empty / surface-black — the same cheap local pre-check
-            // [renderLooksSuspect] the suspect-wake gate uses):
-            //  - render LOOKS LOST → this is the #1294 UNVERIFIED case: we NEEDED this capture
-            //    to heal a suspect pane and could not get it. The watchdog MUST keep the hot
-            //    cadence (never throttle) so a black pane whose heal captures are wedged by a
-            //    Claude burst keeps retrying at 4s until the mutex frees — instead of scoring
-            //    the failure as a healthy tick and backing off to 16s (the exact bug).
-            //  - render looks HEALTHY → a momentarily-empty/failed capture over a confidently-
-            //    dense render is a non-urgent no-op; scoring it HEALTHY preserves the #1219 /
-            //    #1164 battery back-off (criterion 3 — do not regress the steady-heat lever).
+            // tmux's grid (timed out / errored / EMPTY on a live transport / starved by a
+            // capture-mutex-holding burst). The surface repaint above already fired if black.
+            // Scoring turns on whether the LOCAL render looks LOST ([renderLooksSuspect]):
+            //  - LOOKS LOST → UNVERIFIED: we needed this capture to heal a suspect pane and
+            //    couldn't; the watchdog keeps the HOT cadence (retry at 4s) instead of scoring
+            //    the failure as healthy and backing off to 16s while the pane is black (the bug).
+            //  - looks HEALTHY → a momentary empty/failed capture over a dense render is a
+            //    no-op; scoring HEALTHY preserves the #1219/#1164 battery back-off.
             val renderLooksLost = surfaceBlack || pane.terminalState.renderLooksSuspect()
-            // Issue #1175: fingerprint the observed frame when it is degenerate so an export
-            // sees WHICH class of black it was — no new round-trip, it rides this same (failed)
-            // capture tick. A surface-only-black whose capture failed is the #1192 class
-            // (captureBytes unknown → 0); an empty capture over a degenerate render is the
-            // server-side `capture_empty`, or `never_seeded` when no seed ever landed. A healthy
-            // pane whose capture momentarily blipped stays silent here.
+            // Issue #1175: fingerprint the observed frame when degenerate so an export sees
+            // WHICH class of black it was (rides this same failed capture — no new round-trip):
+            // surface-only-black → #1192 class; empty capture over a degenerate render →
+            // `capture_empty`, or `never_seeded` if no seed ever landed. Healthy pane: silent.
             if (surfaceBlack) {
                 recordBlackFrameObserved(pane, BLACK_FRAME_CLASS_SURFACE_BLACK_MODEL_INTACT, captureText = null)
             } else if (pane.terminalState.renderedNonBlankCharCount() == 0 ||

@@ -15,14 +15,11 @@ import org.junit.Test
 /**
  * Pure-JVM coverage of [TerminalSurfaceState.emitOutputForTesting].
  *
- * The helper exists for two reasons:
+ * The helper lets unit tests exercise the flow plumbing without coupling to
+ * the Termux JNI subprocess machinery — a caller can push synthetic output
+ * bytes into the state's [output] flow without standing up a real PTY.
  *
- * 1. Previews can push synthetic output bytes into the state's [output]
- *    flow without standing up a real PTY (see `TerminalSurfacePreview.kt`).
- * 2. Unit tests can exercise the flow plumbing without coupling to the
- *    Termux JNI subprocess machinery.
- *
- * These tests verify the second use case: a caller can subscribe to
+ * These tests verify that use case: a caller can subscribe to
  * [TerminalSurfaceState.output], push bytes via `emitOutputForTesting`,
  * and observe them on the other side. They also verify side-effects: each
  * emission ticks `bufferTicks` (debounced by [TerminalSurfaceState.flowOfMatches])

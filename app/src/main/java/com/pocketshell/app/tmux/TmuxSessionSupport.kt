@@ -97,7 +97,7 @@ internal const val BLANK_PANE_RESEED_DELAY_MS: Long = 350L
 internal const val REVEAL_LIVE_SENTINEL_FRAME: String = "reveal-live"
 
 /**
- * Issue #693/#662: how many times [seedPaneFromCapture] re-issues a
+ * Issue #693/#662: how many times [healActivePaneIfStaleRender] re-issues a
  * `capture-pane` when it comes back empty/error/null on a flaky link before
  * giving up for this pass. A transiently-empty capture on a degraded-but-
  * connected channel is the root of the green-dot-but-black-pane symptom; a few
@@ -109,7 +109,7 @@ internal const val SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS: Int = 4
 
 /**
  * Issue #693/#662: backoff between empty-capture re-tries inside
- * [seedPaneFromCapture]. Short so a flaky-link empty capture re-tries promptly
+ * [healActivePaneIfStaleRender]. Short so a flaky-link empty capture re-tries promptly
  * without stalling a genuinely-empty pane's reveal.
  */
 internal const val SEED_CAPTURE_EMPTY_RETRY_DELAY_MS: Long = 120L

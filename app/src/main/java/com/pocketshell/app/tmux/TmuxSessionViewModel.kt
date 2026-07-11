@@ -394,7 +394,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #926: the SHORT ceiling (ms) applied to each attach/switch/reattach
-     * SEED `capture-pane` round-trip ([seedPaneFromCaptureOnce] →
+     * SEED `capture-pane` round-trip ([captureAndApplyPaneSnapshot] →
      * [TmuxClient.captureWithCursor]). Far below the full per-command
      * `commandTimeoutMs` (10 s) so a wedged-but-alive control channel makes the
      * seed surface a best-effort failure FAST and fall through to the blank
@@ -1772,7 +1772,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #640: pane IDs already seeded (via [seedPaneFromCapture]) during
+     * Issue #640: pane IDs already seeded (via [healActivePaneIfStaleRender]) during
      * the current attach. The cold-open reveal uses this to skip the redundant
      * second full reseed for panes the preload pass already painted, so a fresh
      * connect pays exactly one capture per visible pane and only *reused*
@@ -1783,7 +1783,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #830: pane IDs whose attach-time seed `capture-pane` round-trip is
-     * currently IN FLIGHT (marked the instant [seedPaneFromCapture] starts, before
+     * currently IN FLIGHT (marked the instant [healActivePaneIfStaleRender] starts, before
      * the wire exchange, and cleared when it returns). [panesSeededThisAttach] only
      * becomes true AFTER the snapshot has been appended — too late to dedup a
      * CONCURRENT reseed net (the pager-settle [reseedVisiblePaneIfBlank] launches a
@@ -2216,7 +2216,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private val paneLastOutputAtMs: MutableMap<String, Long> = ConcurrentHashMap()
     // Issue #1175: the wall-clock (elapsedRealtime) of the last time a `capture-pane`
     // seed successfully LANDED into this pane's emulator (stamped in
-    // [seedPaneFromCaptureOnce] at the same point [panesSeededThisAttach] records the
+    // [captureAndApplyPaneSnapshot] at the same point [panesSeededThisAttach] records the
     // seed). An ABSENT entry means "no seed has ever landed for this pane" — the
     // discriminator between the `never_seeded` and `capture_empty` black-frame classes —
     // and its age (now - stamp) is the `msSinceLastSeed` fingerprint field on the
@@ -3710,7 +3710,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * We force ONE unconditional full-viewport reseed over the WARM `-CC` client, REUSING the
      * exact #553/#721/#892 reseed chokepoint ([reseedActivePaneForReattach] →
-     * [seedPaneFromCapture] → `_fullRepaintRequests` full clear+repaint) that manual Redraw
+     * [healActivePaneIfStaleRender] → `_fullRepaintRequests` full clear+repaint) that manual Redraw
      * and the within-grace reattach already use. `skipWhenFreshlySeeded = false` FORCES the
      * recapture even though the pane is still in [panesSeededThisAttach] from the original
      * attach (the live client never re-attached) — otherwise the model-intact "already seeded,
@@ -3919,7 +3919,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * dogfood screenshot: ~100% black with only a lone stray cursor cell). This forces
      * a FULL-viewport reseed of the active pane over the WARM session — it REUSES the
      * exact #553/#879 full-reseed machinery ([reseedActivePaneForReattach] →
-     * [seedPaneFromCapture] → [TerminalSurfaceState.appendRemoteOutput], which fires the
+     * [healActivePaneIfStaleRender] → [TerminalSurfaceState.appendRemoteOutput], which fires the
      * #721 `_fullRepaintRequests` full clear+repaint) and the other-pane blank net.
      *
      * D21/D28 contract (a warm-session reseed ONLY — NO reconnect, detach, or new lease):
@@ -4008,7 +4008,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * visible pane from a fresh `capture-pane` and feeds the full grid back into the
      * emulator — so a PARTIALLY-blank pane (one live line present, the static content
      * above it gone) is restored to the FULL prior viewport, not left "only a timer,
-     * rest blank" (#553). [seedPaneFromCapture] → [TerminalSurfaceState.appendRemoteOutput]
+     * rest blank" (#553). [healActivePaneIfStaleRender] → [TerminalSurfaceState.appendRemoteOutput]
      * repaints the whole grid (a full clear+restore), so the live line is preserved
      * within the restored frame, not duplicated.
      *
@@ -4065,15 +4065,16 @@ public class TmuxSessionViewModel @Inject constructor(
             // foreground-return. In `-CC` control mode the tmux server holds the pane's
             // full grid independent of whether the app re-emits, so `capture-pane` returns
             // the current content directly; the retained non-destructive swap
-            // ([captureWouldClearVisibleContent] in [seedPaneFromCaptureOnce]) keeps the
+            // ([captureWouldClearVisibleContent] in [captureAndApplyPaneSnapshot]) keeps the
             // last good frame if a capture is momentarily near-blank, so the reseed either
             // lands fresh authoritative content or keeps the prior frame — never black,
             // never a stray keystroke. This single chokepoint feeds manual Redraw, the
             // within-grace reattach, the no-op-resize heal, and the reflow completion.
-            seedPaneFromCapture(
+            healActivePaneIfStaleRender(
                 client,
                 activePane,
                 refreshGuard,
+                force = true,
                 recordMilestone = false,
             )
         }
@@ -8239,7 +8240,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // Issue #693/#662: this is a fresh attach for the reused panes —
                 // their old per-attach seed flags no longer apply, so clear them
                 // and let [reseedAllVisiblePanes] re-capture every visible pane
-                // with the new control client. [seedPaneFromCapture] now keeps
+                // with the new control client. [healActivePaneIfStaleRender] now keeps
                 // the last rendered frame on an empty capture (never repaints
                 // black) and retries, so a degraded reconnect can't strand a
                 // black pane.
@@ -10055,7 +10056,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * watchdog and heal oracle both early-return on, so nothing self-heals and
      * the user must tap "Recreate terminal". This routes both overflow classes
      * through the existing [reseedActivePaneForReattach]-family machinery
-     * ([drainPaneOutputBacklog] → [seedPaneFromCapture] →
+     * ([drainPaneOutputBacklog] → [healActivePaneIfStaleRender] →
      * [attachTerminalProducerForPane]) with a bounded retry budget
      * ([OVERFLOW_RECOVERY_MAX_ATTEMPTS] within [OVERFLOW_RECOVERY_WINDOW_MS]) so
      * a still-saturated channel can't loop into a reseed storm — after the
@@ -10251,7 +10252,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 //    buffered live deltas flush in order after the snapshot. The
                 //    non-destructive swap keeps the last good frame if the capture
                 //    is momentarily near-blank.
-                reseeded = seedPaneFromCapture(client, pane, guard, recordMilestone = false)
+                reseeded = healActivePaneIfStaleRender(
+                    client, pane, guard, force = true, recordMilestone = false,
+                ) == HealOutcome.Healed
                 if (reseeded) {
                     // Issue #1297: the snapshot is authoritative — the held frames
                     // are all PRE-capture (already reflected server-side in the
@@ -10769,7 +10772,11 @@ public class TmuxSessionViewModel @Inject constructor(
         try {
             if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
                 activePane.terminalState.openSeedGateWithoutSeed()
-            } else if (!seedPaneFromCapture(client, activePane, refreshGuard, recordMilestone = true)) {
+            } else if (
+                healActivePaneIfStaleRender(
+                    client, activePane, refreshGuard, force = true, recordMilestone = true,
+                ) != HealOutcome.Healed
+            ) {
                 // Issue #468: a failed/empty active-pane capture must still open
                 // the seed gate so buffered live %output flushes in order.
                 activePane.terminalState.openSeedGateWithoutSeed()
@@ -10795,7 +10802,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     continue
                 }
                 val seeded = try {
-                    seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+                    healActivePaneIfStaleRender(
+                        client, pane, refreshGuard, force = true, recordMilestone = false,
+                    ) == HealOutcome.Healed
                 } catch (t: Throwable) {
                     if (t is CancellationException) {
                         pane.terminalState.openSeedGateWithoutSeed()
@@ -10847,12 +10856,12 @@ public class TmuxSessionViewModel @Inject constructor(
             // [panesSeededThisAttach] this attach, so they get their authoritative
             // post-attach repaint here.
             if (pane.paneId in panesSeededThisAttach) continue
-            // [seedPaneFromCapture] feeds the snapshot through
+            // The forced reseed feeds the snapshot through
             // [TerminalSurfaceState.appendRemoteOutput], which is safe to call
             // on an already-open gate (it is a feed + an open no-op), so a pane
             // that was already seeded as "new" simply gets its current frame
             // re-painted in place.
-            seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+            healActivePaneIfStaleRender(client, pane, refreshGuard, force = true, recordMilestone = false)
         }
     }
 
@@ -10895,7 +10904,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-blank-pane-reseed pane=${pane.paneId} window=${pane.windowId} " +
                     "session=${activeTarget?.sessionName} status=${_connectionStatus.value}",
             )
-            seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+            healActivePaneIfStaleRender(client, pane, refreshGuard, force = true, recordMilestone = false)
         }
     }
 
@@ -10949,7 +10958,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // gone). That reads "not blank", so the pre-#941 gate passed it and the
             // partial-black pane was revealed as Connected and never reseeded (the
             // maintainer's "switched and it was black" symptom). Heal it here too —
-            // `seedPaneFromCapture` does a full clear+repaint, so it restores the
+            // the forced reseed does a full clear+repaint, so it restores the
             // FULL viewport from tmux's authoritative grid.
             //
             // Over-heal guard: a partial-black read is a HEURISTIC and a real
@@ -10967,10 +10976,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     "tmux-reveal-gate-active-pane-partial-blank pane=${activePane.paneId} " +
                         "session=${activeTarget?.sessionName} -> one heal capture then reveal",
                 )
-                seedPaneFromCapture(
+                healActivePaneIfStaleRender(
                     client = client,
                     pane = activePane,
                     refreshGuard = refreshGuard,
+                    force = true,
                     recordMilestone = false,
                     maxAttempts = 1,
                 )
@@ -10986,10 +10996,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-reveal-gate-active-pane-blank pane=${activePane.paneId} " +
                     "attempt=$attempt session=${activeTarget?.sessionName}",
             )
-            seedPaneFromCapture(
+            healActivePaneIfStaleRender(
                 client = client,
                 pane = activePane,
                 refreshGuard = refreshGuard,
+                force = true,
                 recordMilestone = false,
                 maxAttempts = 1,
             )
@@ -11569,82 +11580,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-blank-pane-reseed-on-switch pane=$paneId window=${pane.windowId} " +
                     "session=${activeTarget?.sessionName}",
             )
-            seedPaneFromCapture(client, pane, refreshGuard = null, recordMilestone = false)
-        }
-    }
-
-    /**
-     * Capture a single pane's current content with `capture-pane -p -e` and
-     * feed it (with the restored cursor) into the pane's emulator, restoring
-     * the visible screen + colors after a tmux reattach. Returns true when a
-     * snapshot was actually applied. Shared by the new-pane preload
-     * ([preloadVisibleContentForNewPanes]) and the all-visible-pane reseed
-     * ([reseedAllVisiblePanes]).
-     */
-    /**
-     * Issue #693/#662: seed a pane from `capture-pane`, RETRYING when the
-     * capture comes back empty/error/null on a flaky link.
-     *
-     * The black-screen-while-connected bug: [seedPaneFromCaptureOnce] used to
-     * be the only seed call, and it treats an empty/error/null capture as a
-     * SILENT no-op (`return false` — no repaint, no keep-last, NO retry). On a
-     * degraded-but-connected channel the attach-time capture can transiently
-     * return empty; the idle full-screen agent/pager then emits no `%output`,
-     * so the pane's emulator stays unpainted and the surface renders the
-     * near-black background while status is `Connected` — the maintainer's
-     * green-dot-but-black-pane screenshots (and the partial/orphaned-cell
-     * variant, which is the SAME unseeded grid showing only a few live deltas).
-     *
-     * Retrying a transiently-empty capture (bounded, short backoff) lands the
-     * frame the next time the link recovers. A persistently-empty capture means
-     * tmux genuinely has nothing for that pane (a truly blank shell) — those
-     * retries are cheap and stop after the bound. The caller keeps the last
-     * rendered frame on a still-empty result (we never clear the emulator on a
-     * failed capture), so a momentary drop never repaints black.
-     */
-    private suspend fun seedPaneFromCapture(
-        client: TmuxClient,
-        pane: TmuxPaneState,
-        refreshGuard: RuntimeRefreshGuard?,
-        recordMilestone: Boolean,
-        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
-    ): Boolean {
-        // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
-        // round-trip so a concurrent reseed net (the pager-settle
-        // [reseedVisiblePaneIfBlank]) dedups against the in-flight seed instead of
-        // racing it into a second redundant `capture-pane`. Cleared in the finally
-        // so the genuine #662 black-window heal still fires once no seed is pending.
-        panesSeedInFlightThisAttach.add(pane.paneId)
-        try {
-            // Issue #1151: reseed purely from tmux's authoritative server-side grid
-            // via `capture-pane` — we NEVER inject a keystroke into the pane to nudge
-            // a repaint. #989's `send-keys C-l` did exactly that and the 0x0C byte
-            // reached the agent CLI as input (Claude/GLM's "Ctrl+L is disabled…"
-            // banner on every switch / foreground-return). In `-CC` control mode the
-            // tmux server tracks the pane's full grid regardless of whether the app
-            // re-emits, so `capture-pane` returns the current content directly; the
-            // non-destructive swap in [seedPaneFromCaptureOnce]
-            // ([captureWouldClearVisibleContent]) keeps the last good frame across the
-            // retry loop below if a capture is momentarily near-blank — so the reseed
-            // lands fresh authoritative content or keeps the prior frame, never black,
-            // and never sends the app a control byte.
-            var attempt = 0
-            while (true) {
-                if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
-                if (client.disconnected.value) return false
-                if (seedPaneFromCaptureOnce(client, pane, refreshGuard, recordMilestone)) {
-                    return true
-                }
-                attempt += 1
-                if (attempt >= maxAttempts) return false
-                // Short backoff so a flaky-link empty capture is re-tried after the
-                // channel has a moment to recover, without stalling a genuinely
-                // empty pane's reveal for long. The guard re-check at the top of the
-                // loop aborts immediately if the runtime was superseded mid-wait.
-                delay(SEED_CAPTURE_EMPTY_RETRY_DELAY_MS)
-            }
-        } finally {
-            panesSeedInFlightThisAttach.remove(pane.paneId)
+            healActivePaneIfStaleRender(client, pane, refreshGuard = null, force = true, recordMilestone = false)
         }
     }
 
@@ -11779,9 +11715,56 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
+        // Issue #1353 R2 — the single reseed authority's UNCONDITIONAL (force) mode,
+        // folded in from the deleted parallel `seedPaneFromCapture` sink (M4). A caller
+        // that needs a GUARANTEED reseed (cold-open attach seed, blank-pane heal, reveal
+        // handoff, reattach) passes `force = true`: the capture→[appendRemoteOutput] fires
+        // WITHOUT consulting the #1300 divergence oracle. A non-forced call stays
+        // oracle-gated (the M2 stale-render heal below). ONE capture→append authority.
+        force: Boolean = false,
+        // Force-mode only: warm-switch capture milestone (the cold-open active-pane seed).
+        recordMilestone: Boolean = false,
+        // Force-mode only: bound on the empty/near-blank capture retry loop (#693/#662).
+        // Ignored on the oracle-gated (non-force) path, which pays exactly one capture.
+        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
     ): HealOutcome {
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
         if (client.disconnected.value) return HealOutcome.Unverified
+        // Issue #1353 R2 — the UNCONDITIONAL reseed (seed mode). Folded in from the old
+        // `seedPaneFromCapture`: capture tmux's authoritative grid and apply it WITHOUT the
+        // oracle gate, RETRYING a transiently empty/near-blank capture on a flaky link
+        // (bounded); the non-destructive swap in [captureAndApplyPaneSnapshot] keeps the last
+        // good frame so a momentary drop never repaints black. Returns [HealOutcome.Healed]
+        // when a snapshot landed, [HealOutcome.Unverified] otherwise (so a force caller reads
+        // `== HealOutcome.Healed` exactly where it previously read the seed's Boolean `true`).
+        if (force) {
+            // Issue #830: publish "a seed for this pane is in flight" BEFORE the first
+            // round-trip so a concurrent reseed net (the pager-settle
+            // [reseedVisiblePaneIfBlank]) dedups against the in-flight seed instead of
+            // racing it into a second redundant `capture-pane`. Cleared in the finally.
+            panesSeedInFlightThisAttach.add(pane.paneId)
+            try {
+                var attempt = 0
+                while (true) {
+                    if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+                        return HealOutcome.Unverified
+                    }
+                    if (client.disconnected.value) return HealOutcome.Unverified
+                    if (captureAndApplyPaneSnapshot(client, pane, refreshGuard, recordMilestone)) {
+                        return HealOutcome.Healed
+                    }
+                    attempt += 1
+                    if (attempt >= maxAttempts) return HealOutcome.Unverified
+                    // Short backoff so a flaky-link empty capture is re-tried after the
+                    // channel has a moment to recover, without stalling a genuinely empty
+                    // pane's reveal for long. The guard re-check at the top aborts
+                    // immediately if the runtime was superseded mid-wait.
+                    delay(SEED_CAPTURE_EMPTY_RETRY_DELAY_MS)
+                }
+            } finally {
+                panesSeedInFlightThisAttach.remove(pane.paneId)
+            }
+        }
         // NOTE: this heal does NOT pre-skip a blank/partial-blank pane. The
         // divergence oracle ([visibleScreenDivergesFromCapture]) is the single
         // decision: it only fires when tmux's grid HAS substantial content while
@@ -11973,7 +11956,17 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private suspend fun seedPaneFromCaptureOnce(
+    /**
+     * Issue #1353 R2 — the ONE capture→[appendRemoteOutput] apply. A single
+     * single-flight `capture-pane`+cursor round-trip that applies tmux's authoritative
+     * grid to the pane, with the #989 NON-DESTRUCTIVE swap ([captureWouldClearVisibleContent]):
+     * a momentarily near-blank capture is REFUSED (the last good frame is kept, never
+     * cleared to black) so the caller's retry loop re-captures. Returns true when a
+     * snapshot was actually applied. Called ONLY from the force branch of
+     * [healActivePaneIfStaleRender] (the unified reseed chokepoint) — there is no other
+     * seed entry point after the R2 fold.
+     */
+    private suspend fun captureAndApplyPaneSnapshot(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
@@ -15903,7 +15896,7 @@ public class TmuxSessionViewModel @Inject constructor(
             //    pane is FULLY populated but wrapped at the stale width — NOT blank,
             //    so [reseedBlankVisiblePanes] `continue`s past it and the garble
             //    persists until a manual tmux refresh. tmux's grid is authoritative
-            //    post-reflow, and [seedPaneFromCapture] -> [toTerminalViewportBytes]
+            //    post-reflow, and [healActivePaneIfStaleRender] -> [toTerminalViewportBytes]
             //    prepends `ESC[H ESC[2J` (full clear+repaint), so an unconditional
             //    active-pane re-capture authoritatively wipes the stale mis-wrapped
             //    rows and re-fits them to the new grid — no manual refresh needed.
@@ -15936,7 +15929,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * short-circuits with no `refresh-client -C` — yet the IME transition lost
      * the idle full-screen agent's redraw and left the active pane BLACK. tmux's
      * server grid still holds the content, so re-capture the active pane from a
-     * fresh `capture-pane` (which [seedPaneFromCapture] -> [toTerminalViewportBytes]
+     * fresh `capture-pane` (which [healActivePaneIfStaleRender] -> [toTerminalViewportBytes]
      * replays as a full clear+repaint) — but ONLY when the pane is actually
      * blank/suspect, so a routine keyboard toggle on an already-painted pane stays
      * a no-op (no capture). Keyed to the target session id via the runtime guard,

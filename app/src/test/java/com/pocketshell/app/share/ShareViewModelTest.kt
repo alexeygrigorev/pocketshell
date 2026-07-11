@@ -17,10 +17,12 @@ import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -410,6 +412,104 @@ class ShareViewModelTest {
             "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
             longest <= maxExpectedCommandLength,
         )
+    }
+
+    // ---- Issue #1475: Share→attached-pane must ride the send-keys exec lane
+    // (not the shared `-CC` channel), so a share paste into a live agent
+    // mid-`%output`-burst does NOT head-of-line-block behind the burst and wedge
+    // the app — the same send-lane wedge class #1460 fixed for the composer send
+    // sites, here for `ShareViewModel.sendTextToAttachedPane`. ----
+
+    @Test
+    fun `single-line share paste completes on the exec lane while a -CC burst wedges the send`() =
+        runTest {
+            // RED on the pre-#1475 code (send-keys via `sendCommand`): the send's
+            // `%begin`/`%end` reply is head-of-line-blocked behind the burst on the
+            // one sshj reader, so the paste never completes (stays Running) — the
+            // maintainer's "app froze". GREEN with the fix: the send rides the
+            // dedicated exec lane and completes even while the burst holds `-CC`.
+            assertSharePasteCompletesDuringCcSendWedge(
+                hostId = 1475L,
+                text = "echo hello",
+                expectedSendKeysPrefix = "send-keys -l -t %0 --",
+            )
+        }
+
+    @Test
+    fun `multi-line bracketed share paste completes on the exec lane while a -CC burst wedges the send`() =
+        runTest {
+            // Class coverage (G2): the multi-line bracketed-paste route funnels
+            // through `send-keys -H`, the other interactive-send shape Share uses.
+            // It too must ride the exec lane, not the wedged `-CC` channel.
+            assertSharePasteCompletesDuringCcSendWedge(
+                hostId = 14751L,
+                text = "para 1\npara 2",
+                expectedSendKeysPrefix = "send-keys -H -t %0 ",
+            )
+        }
+
+    /**
+     * Issue #1475 shared driver: register a host whose live client models a
+     * sustained agent `%output` burst saturating the shared `-CC` control
+     * channel (so any `-CC` `send-keys` round-trip is head-of-line-blocked and
+     * never returns), stage [text], drive `pasteIntoSession`, and assert the
+     * paste COMPLETES — proving the interactive send rode the dedicated
+     * `send-keys` exec lane, independent of the wedged `-CC` channel. On the
+     * pre-fix code the send used `sendCommand` and the paste stays Running
+     * forever (RED); with the exec-lane routing it reaches Success (GREEN).
+     */
+    private fun TestScope.assertSharePasteCompletesDuringCcSendWedge(
+        hostId: Long,
+        text: String,
+        expectedSendKeysPrefix: String,
+    ) {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = host(id = hostId, name = "burst-host-$hostId")
+        val client = ShareCcBurstWedgeClient(paneIdReply = "%0")
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(ShareableItem.TextItem(text = text, displayName = "note"))
+
+        try {
+            vm.pasteIntoSession(host)
+            advanceUntilIdle()
+
+            val state = vm.uploadState.value
+            assertTrue(
+                "share paste must complete during a live -CC %output burst, but stayed " +
+                    "$state (exec-lane sends so far: ${client.execLaneSendKeys}); the " +
+                    "interactive send is head-of-line-blocked behind the burst on the shared " +
+                    "-CC channel",
+                state is UploadState.Success,
+            )
+            assertTrue(
+                "the interactive send must ride the send-keys exec lane, got " +
+                    "${client.execLaneSendKeys}",
+                client.execLaneSendKeys.isNotEmpty() &&
+                    client.execLaneSendKeys.all { it.startsWith("send-keys") },
+            )
+            assertTrue(
+                "expected an exec-lane send carrying '$expectedSendKeysPrefix', got " +
+                    "${client.execLaneSendKeys}",
+                client.execLaneSendKeys.any { it.startsWith(expectedSendKeysPrefix) },
+            )
+            assertTrue(
+                "the interactive send must NOT be issued on the wedged -CC sendCommand path, " +
+                    "got ${client.ccSendKeys}",
+                client.ccSendKeys.isEmpty(),
+            )
+        } finally {
+            // Release the parked -CC coroutine so it does not outlive the test.
+            client.releaseCcWedge()
+        }
     }
 
     @Test
@@ -1869,6 +1969,60 @@ class ShareViewModelTest {
             username = "alex",
             keyId = 99L,
         )
+
+    /**
+     * Issue #1475 reproduction double. Models a live agent `%output` burst that
+     * has saturated the shared per-host `-CC` control channel: any `-CC`
+     * [sendCommand] round-trip for a `send-keys` has its `%begin`/`%end` reply
+     * HEAD-OF-LINE-BLOCKED behind the burst on the ONE sshj transport reader and
+     * never returns (the #1459/#1460 send-lane wedge, here for
+     * Share→attached-pane). The DEDICATED `send-keys` exec lane
+     * ([sendKeysViaExec]) reads its own channel outside the transport dispatcher,
+     * so it returns fast even mid-burst. The cheap pane-id `display-message`
+     * query still answers on `-CC` — it is a pre-send resolution, not the
+     * interactive send. Every other [TmuxClient] member is delegated to a real
+     * [FakeTmuxClient].
+     */
+    private class ShareCcBurstWedgeClient(
+        private val paneIdReply: String,
+        private val delegate: FakeTmuxClient = FakeTmuxClient(),
+    ) : TmuxClient by delegate {
+
+        /** `send-keys` commands that rode the dedicated exec lane (the fix). */
+        val execLaneSendKeys: MutableList<String> = mutableListOf()
+
+        /** `send-keys` commands that hit the wedged shared `-CC` path (the bug). */
+        val ccSendKeys: MutableList<String> = mutableListOf()
+
+        private val ccWedge: CompletableDeferred<CommandResponse> = CompletableDeferred()
+
+        override suspend fun sendCommand(cmd: String): CommandResponse = when {
+            // The interactive send on the shared -CC channel: wedged behind the
+            // burst. Parks until the test releases it (models the never-arriving
+            // %begin/%end reply stuck behind the burst on the one sshj reader).
+            cmd.startsWith("send-keys") -> {
+                ccSendKeys += cmd
+                ccWedge.await()
+            }
+            // Cheap pre-send pane resolution answers normally.
+            cmd.startsWith("display-message") ->
+                CommandResponse(number = 0L, output = listOf(paneIdReply), isError = false)
+            else -> CommandResponse(number = 0L, output = emptyList(), isError = false)
+        }
+
+        override suspend fun sendKeysViaExec(
+            sendKeysCommand: String,
+            timeoutMs: Long?,
+        ): CommandResponse {
+            execLaneSendKeys += sendKeysCommand
+            // `send-keys` prints nothing on success.
+            return CommandResponse(number = 0L, output = emptyList(), isError = false)
+        }
+
+        fun releaseCcWedge() {
+            ccWedge.complete(CommandResponse(number = 0L, output = emptyList(), isError = false))
+        }
+    }
 
     private fun HostEntity.shareTestLeaseTarget(keyPath: String, purpose: String? = null): SshLeaseTarget =
         SshLeaseTarget(

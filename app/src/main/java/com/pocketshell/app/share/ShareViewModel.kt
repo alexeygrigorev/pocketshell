@@ -1181,6 +1181,19 @@ internal class ShareViewModel internal constructor(
      * single-line text keeps the existing `send-keys -l` shape so the
      * regression suite around the share paste UI is preserved.
      *
+     * Issue #1460/#1475: the `send-keys` round-trips ride the DEDICATED
+     * `send-keys` exec lane ([TmuxClient.sendKeysViaExec]) — the same
+     * independent [com.pocketshell.core.ssh.SshSession.exec] channel the
+     * interactive composer send sites use — NOT the shared per-host `-CC`
+     * control channel [sendCommand] awaits `%begin`/`%end` on. Share→pane
+     * is the SAME send-lane wedge class the #1459 Codex-freeze audit found:
+     * a share paste into a live agent mid-`%output`-burst had its
+     * `send-keys` reply head-of-line-blocked behind the burst on the ONE
+     * sshj transport reader, so the paste wedged (the "app froze" report).
+     * The exec lane reads its own channel outside the transport dispatcher,
+     * so the send returns while a burst saturates `-CC`. The pane-id query
+     * stays on `-CC` (a cheap pre-send resolution, not the interactive send).
+     *
      * Throws [IllegalStateException] when tmux reports an error so the
      * caller surfaces a Failed UploadState instead of silently
      * succeeding.
@@ -1191,9 +1204,9 @@ internal class ShareViewModel internal constructor(
         if (BracketedPaste.containsLineBreak(bytes) || bytes.size > BracketedPaste.BODY_CHUNK_BYTES) {
             for (hex in BracketedPaste.hexChunks(bytes)) {
                 val response = if (paneId != null) {
-                    client.sendCommand("send-keys -H -t $paneId $hex")
+                    client.sendKeysViaExec("send-keys -H -t $paneId $hex")
                 } else {
-                    client.sendCommand("send-keys -H $hex")
+                    client.sendKeysViaExec("send-keys -H $hex")
                 }
                 if (response.isError) {
                     val detail = response.output.joinToString(separator = " ").trim()
@@ -1212,7 +1225,7 @@ internal class ShareViewModel internal constructor(
                 "send-keys -l -- '$literal'"
             }
         }
-        val response = client.sendCommand(cmd)
+        val response = client.sendKeysViaExec(cmd)
         if (response.isError) {
             val detail = response.output.joinToString(separator = " ").trim()
             throw IllegalStateException(

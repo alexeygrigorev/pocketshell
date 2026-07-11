@@ -1319,6 +1319,14 @@ Release build steps:
 3. Update Android metadata before tagging:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
+   - **Bump `tools/pocketshell/pyproject.toml` `version` in LOCKSTEP with
+     `versionName`.** The `#948` version-coupling guard (`scripts/check-version-coupling.sh`,
+     run in the `Python utility tests` required check) hard-fails the bump PR if
+     the app `versionName` and the `tools/pocketshell` package version drift.
+     Bumping only `app/build.gradle.kts` leaves the guard red (empty-looking
+     `pytest`-passed job that fails at the guard step) — bump both, or the
+     release PR won't go green. Verify locally with
+     `bash scripts/check-version-coupling.sh` (exits 0 when aligned).
 4. Run the normal verification gate before committing the version bump.
 5. Commit the version bump on a release branch, open a PR to `main`, and merge
    only after the required protected-`main` checks are green. Then fast-forward

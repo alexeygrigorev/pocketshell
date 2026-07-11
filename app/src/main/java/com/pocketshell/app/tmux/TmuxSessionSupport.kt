@@ -417,8 +417,6 @@ internal const val SEND_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
 internal const val SEND_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
 
-internal const val CACHED_RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = RUNTIME_HEALTH_PROBE_TIMEOUT_MS
-
 /**
  * Issue #1042 (cause #1): the small bound on the single control-channel probe the
  * liveness-first network-restore arm issues when the transport keepalive has aged
@@ -634,13 +632,6 @@ internal object PrewarmSeedFaultTestOverride {
  * test drives with the actual ViewModel detach landing.
  */
 internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
-
-/**
- * Issue #188: logcat tag for kill-window diagnostics. Mirrors the
- * `issue168-kill` tag the dashboard side uses for `kill-session`. Kept
- * under the 23-character Log.isLoggable cap.
- */
-internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
 
 /**
  * Issue #464: logcat tag for the confirmed kill-session path on the

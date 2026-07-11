@@ -45,7 +45,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -61,7 +60,6 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
-import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
@@ -687,68 +685,6 @@ private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) 
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-        }
-    }
-}
-
-// -- Previews -----------------------------------------------------------------
-
-@Preview(name = "Snippet picker - populated", widthDp = 412, heightDp = 600)
-@Composable
-private fun SnippetPickerPopulatedPreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SnippetPickerContent(
-                snippets = listOf(
-                    // Derived label, single-line body: the body collapses
-                    // to the label so the preview row stays hidden
-                    // (issue #198 dedup).
-                    SnippetEntity(id = 1, hostId = 1, label = null, body = "kubectl get pods -A", kind = "command"),
-                    // Derived label, multi-line body: the second line is
-                    // hidden by the derived label, so the preview shows
-                    // the full body with newlines collapsed to spaces.
-                    SnippetEntity(
-                        id = 2,
-                        hostId = 1,
-                        label = null,
-                        body = "kubectl logs -f deploy/api\n  --since=10m --tail=200",
-                        kind = "command",
-                    ),
-                    // Overridden label: secondary preview shows the body
-                    // because it differs from the chosen label.
-                    SnippetEntity(
-                        id = 3,
-                        hostId = 1,
-                        label = "summarise diff",
-                        body = "Please summarise the staged git diff and highlight risky changes.",
-                        kind = "prompt",
-                    ),
-                ),
-                totalCount = 3,
-                query = "",
-                onQueryChange = {},
-                onSnippetSend = { _, _ -> },
-                onManageTap = {},
-                onClose = {},
-            )
-        }
-    }
-}
-
-@Preview(name = "Snippet picker - empty", widthDp = 412, heightDp = 600)
-@Composable
-private fun SnippetPickerEmptyPreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SnippetPickerContent(
-                snippets = emptyList(),
-                totalCount = 0,
-                query = "",
-                onQueryChange = {},
-                onSnippetSend = { _, _ -> },
-                onManageTap = {},
-                onClose = {},
-            )
         }
     }
 }

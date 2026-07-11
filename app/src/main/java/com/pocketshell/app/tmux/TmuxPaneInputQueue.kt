@@ -199,5 +199,3 @@ internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024
 internal const val TMUX_INPUT_CHUNK_BYTES: Int = 512
 internal const val TMUX_INPUT_SEND_MAX_ATTEMPTS: Int = 2
 internal const val TMUX_INPUT_SEND_RETRY_DELAY_MS: Long = 150L
-internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
-    TMUX_INPUT_MAX_PENDING_BYTES / TMUX_INPUT_CHUNK_BYTES - 1

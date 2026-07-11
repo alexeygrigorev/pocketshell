@@ -257,7 +257,7 @@ internal class FakeTmuxClient(
 
     /**
      * Issue #926: the thread name on which the most recent SEED round-trip
-     * actually ran. The seed IO ([TmuxSessionViewModel.seedPaneFromCaptureOnce]
+     * actually ran. The seed IO ([TmuxSessionViewModel.captureAndApplyPaneSnapshot]
      * → [captureWithCursor]) and the attach/switch `list-panes`
      * ([handleCommand]) must run OFF the Main (UI) thread; a test pins Main and
      * the seed-IO dispatcher to two DISTINCT single-thread dispatchers and

@@ -288,6 +288,20 @@ internal class FakeTmuxClient(
     @Volatile
     var captureWithCursorGate: CompletableDeferred<Unit>? = null
 
+    /**
+     * Issue #1353 R3: response reserved for a capture that PARKED on
+     * [captureWithCursorGate] (a slow / in-flight capture). When set, a parked capture
+     * returns THIS (with [gatedCursorReply]) instead of consuming the [capturePaneResponses]
+     * FIFO — so a concurrent single-flight test can hand the SLOW (parked) heal and the FAST
+     * (unparked) heal DISTINCT responses deterministically, independent of coroutine run order
+     * (which flips between the fixed serialized path and the un-serialized base).
+     */
+    @Volatile
+    var gatedCaptureResponse: CommandResponse? = null
+
+    @Volatile
+    var gatedCursorReply: String? = null
+
     override suspend fun captureWithCursor(
         paneId: String,
         scrollbackLines: Int,
@@ -295,7 +309,18 @@ internal class FakeTmuxClient(
     ): com.pocketshell.core.tmux.CaptureWithCursor {
         lastCaptureThreadName = Thread.currentThread().name
         lastCaptureTimeoutMs = timeoutMs
-        captureWithCursorGate?.await()
+        val parkedOnGate = captureWithCursorGate
+        parkedOnGate?.await()
+        if (parkedOnGate != null) {
+            gatedCaptureResponse?.let { reserved ->
+                // Record the capture command so healCaptureCount()-style assertions still see it.
+                sentCommands += "capture-pane -p -e -S -$scrollbackLines -t $paneId"
+                return com.pocketshell.core.tmux.CaptureWithCursor(
+                    capture = reserved,
+                    cursorReply = gatedCursorReply,
+                )
+            }
+        }
         // Reuse the canned-response plumbing in handleCommand so existing
         // capturePaneResponses / cursorQueryResponses fixtures keep working.
         val capture = handleCommand(

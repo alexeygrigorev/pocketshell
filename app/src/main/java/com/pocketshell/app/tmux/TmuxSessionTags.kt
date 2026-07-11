@@ -38,8 +38,6 @@ internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:ba
 internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
     "tmux:chrome:compact:more"
 
-internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
-
 internal const val TMUX_PROJECT_SWITCHER_TAG = "tmux:chrome:project-switcher"
 internal const val TMUX_PROJECT_SWITCHER_MENU_TAG = "tmux:chrome:project-switcher:menu"
 internal const val TMUX_PROJECT_SWITCHER_ROW_TAG_PREFIX = "tmux:chrome:project-switcher:row:"

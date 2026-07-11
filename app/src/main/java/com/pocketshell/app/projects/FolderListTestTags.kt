@@ -86,8 +86,6 @@ fun folderSessionProfileChipTestTag(folderPath: String, sessionName: String): St
 /** Issue #1237: tags the agent-state chip (idle / waiting / working) on a session row. */
 fun folderSessionAgentStateChipTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:agent-state"
-fun folderSessionActionsTestTag(folderPath: String, sessionName: String): String =
-    "folder-list:detail:$folderPath:$sessionName:stop"
 
 fun folderSessionOpenMenuItemTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:open:item"

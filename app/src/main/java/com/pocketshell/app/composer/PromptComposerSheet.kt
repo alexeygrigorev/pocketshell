@@ -79,7 +79,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -100,7 +99,6 @@ import dagger.hilt.internal.GeneratedComponentManagerHolder
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
-import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -2056,15 +2054,6 @@ internal const val COMPOSER_DISCARD_TAG = "prompt-composer-discard"
 internal const val COMPOSER_CLOSE_TAG = "prompt-composer-close"
 
 /**
- * Issue #196: the agent-pane Send button tag, shared with
- * [AgentComposerSurface] and consumed by the tmux / raw-SSH conversation
- * screens (`TmuxSessionScreen`, `SessionScreen`). The composer sheet itself
- * no longer renders a separate Insert button (#453 collapsed the pair), but
- * the agent surfaces still tag their single Send with this value.
- */
-internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
-
-/**
  * Issue #453: the single primary Send button (Idle / Text-inserted states).
  * Always submits with Enter — the Insert/Send pair collapsed to one. The
  * tag keeps the historic `…-send-enter` value so existing connected tests
@@ -2122,18 +2111,6 @@ internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
 internal const val COMPOSER_TO_FIELD_TAG = "prompt-composer-to-field"
 internal const val COMPOSER_STOP_SEND_TAG = "prompt-composer-stop-send"
 
-
-/**
- * Issue #153 fix 3: long-press tooltip copy for the Send buttons. Kept
- * here as named constants so connected tests can assert against the
- * exact wording without re-implementing the copy and so future copy
- * tweaks live in one obvious place.
- */
-internal const val SEND_TOOLTIP_LABEL: String =
-    "Insert the draft into the prompt without submitting"
-internal const val SEND_ENTER_TOOLTIP_LABEL: String =
-    "Send the draft and submit it with Enter"
-
 /**
  * Issue #174: test tag for the recording discard control. It only appears in
  * `Recording`, where it stops the mic and drops the buffer before Whisper.
@@ -2169,114 +2146,3 @@ private val SLASH_DROPDOWN_MAX_HEIGHT = 196.dp
  * into the ViewModel.
  */
 internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
-
-// -- Previews -----------------------------------------------------------------
-
-/**
- * Idle state — empty text area, mic in `Idle`, waveform collapsed.
- * Matches the cold-open look of the composer.
- */
-@Preview(name = "Composer · idle", widthDp = 412, heightDp = 360)
-@Composable
-private fun PromptComposerIdlePreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SheetContent(
-                state = PromptComposerViewModel.UiState(
-                    draft = "",
-                    recording = PromptComposerViewModel.RecordingState.Idle,
-                    amplitude = 0f,
-                    error = null,
-                ),
-                onClose = {},
-                onDraftChange = {},
-                onMicTap = {},
-                onSend = {},
-            )
-        }
-    }
-}
-
-/**
- * Issue #453 / #508: Recording state — amplitude-driven waveform + the
- * `00:17` elapsed timer; below, the two explicit stop actions ("Insert" +
- * "Send"). No persistent Auto-send toggle, no redundant "CAPTURING" text.
- */
-@Preview(name = "Composer · recording", widthDp = 412, heightDp = 360)
-@Composable
-private fun PromptComposerRecordingPreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SheetContent(
-                state = PromptComposerViewModel.UiState(
-                    draft = "",
-                    recording = PromptComposerViewModel.RecordingState.Recording,
-                    amplitude = 0.7f,
-                    hasDetectedSpeech = true,
-                    recordingElapsedMs = 17_000L,
-                    // Issue #870 (reopen): a long live partial — the dedicated
-                    // two-line area keeps the TAIL (latest words) visible and
-                    // marks the dropped head with a leading ellipsis.
-                    liveTranscript = "open the deployment pipeline and check the " +
-                        "logs then restart the worker and confirm the latest commit is deployed",
-                    error = null,
-                ),
-                onClose = {},
-                onDraftChange = {},
-                onMicTap = {},
-                onSend = {},
-            )
-        }
-    }
-}
-
-/**
- * Issue #453 / #508: Transcribing state — "Transcribing…" + spinner; below,
- * Cancel + "Send" (arms the queued send for the in-flight round-trip). No
- * persistent Auto-send toggle.
- */
-@Preview(name = "Composer · transcribing", widthDp = 412, heightDp = 360)
-@Composable
-private fun PromptComposerTranscribingPreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SheetContent(
-                state = PromptComposerViewModel.UiState(
-                    draft = "",
-                    recording = PromptComposerViewModel.RecordingState.Transcribing,
-                    amplitude = 0f,
-                    error = null,
-                ),
-                onClose = {},
-                onDraftChange = {},
-                onMicTap = {},
-                onSend = {},
-            )
-        }
-    }
-}
-
-/**
- * Issue #453: Text-inserted state — the transcript fills the editable input
- * and is editable before Send; 📎/`{}` left, Send + arrow right.
- */
-@Preview(name = "Composer · text inserted", widthDp = 412, heightDp = 360)
-@Composable
-private fun PromptComposerTextInsertedPreview() {
-    PocketShellTheme {
-        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
-            SheetContent(
-                state = PromptComposerViewModel.UiState(
-                    draft = "check the deploy log and tell me what failed in the last run",
-                    recording = PromptComposerViewModel.RecordingState.Idle,
-                    amplitude = 0f,
-                    error = null,
-                ),
-                onClose = {},
-                onDraftChange = {},
-                onMicTap = {},
-                onSend = {},
-            )
-        }
-    }
-}

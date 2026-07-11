@@ -1711,26 +1711,6 @@ public class AgentConversationRepository internal constructor(
         return CodexWindow(events = events, rawLineCount = lines.size, sourceLineCount = sourceLineCount)
     }
 
-    fun tailEvents(
-        session: SshSession,
-        detection: AgentDetection,
-        onEvent: (ConversationEvent) -> Unit,
-    ): Job? {
-        if (detection.isOpenCodeSqlite()) {
-            return tailEventsFromLine(session, detection, fromLineExclusive = 0L, onEvent)
-        }
-        val parser = parserFor(detection.agent) ?: return null
-        return try {
-            session.tail(detection.sourcePath) { line ->
-                parser.parseLine(line).forEach(onEvent)
-            }
-        } catch (_: SshException) {
-            null
-        } catch (_: IOException) {
-            null
-        }
-    }
-
     suspend fun lineCount(session: SshSession, detection: AgentDetection): Long =
         session.exec(
             if (detection.isOpenCodeSqlite()) {

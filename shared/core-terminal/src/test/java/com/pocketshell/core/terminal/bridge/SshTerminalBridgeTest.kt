@@ -163,6 +163,122 @@ class SshTerminalBridgeTest {
         }
     }
 
+    /**
+     * Issue #1459 (the 6th Codex-freeze mechanism — a RENDER-side `feedLock`
+     * main-thread deadlock): the live Codex `%output` producer runs off-Main and,
+     * on a FULL process→terminal queue, BLOCKS in `writeProcessToTerminalQueue`
+     * WHILE HOLDING [SshTerminalBridge.feedLock] (feedChunks takes it at the top and
+     * the blocking write is inside that critical section). A reseed/heal apply
+     * (`healActivePaneIfStaleRender`/reconciler → `appendRemoteOutput` →
+     * [SshTerminalBridge.seedThenOpenGate]) deliberately hops BACK to Main (#926) and
+     * takes the SAME `feedLock` on the Main thread. On the pre-fix code the Main
+     * thread parks on the `feedLock` monitor → the looper can never run the drain
+     * that would free the blocked producer → the queue never drains → the producer
+     * never releases `feedLock` → PERMANENT deadlock → ANR → "Codex froze, had to
+     * force-restart". `stop()` documents this exact deadlock and escapes it by
+     * CLOSING the queue first; the live heal/reseed path had no such escape.
+     *
+     * This reproduces it synthetically WITHOUT an emulator (the #780 hard-assert
+     * model, no `assume`-skip): under the PAUSED Robolectric looper a >64 KB feed on
+     * a worker thread blocks in `ByteQueue.write` holding `feedLock` — the identical
+     * precondition to the on-device freeze. Then, from the MAIN looper thread (the
+     * test thread), we call the reseed apply `seedThenOpenGate(...)`.
+     *
+     * RED→GREEN: on base, `seedThenOpenGate` parks on the `feedLock` monitor held by
+     * the blocked producer and NEVER returns → the `@Test(timeout)` fires (the test
+     * HANGS → RED). With the fix the Main-looper acquisition drains the queue to
+     * unblock the producer, so the reseed COMPLETES within a bounded deadline — the
+     * load-bearing GREEN assertion below (`elapsedMs` bound). No terminal bytes are
+     * lost or reordered: the producer's older live output renders in FIFO order,
+     * then the reseed snapshot on top.
+     */
+    @Test(timeout = 30_000)
+    fun mainThreadReseedDoesNotDeadlockAgainstProducerBlockedHoldingFeedLock() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 8_000,
+        )
+        val payload = uniquelyMarkedLargePayload()
+        assertTrue(
+            "producer payload must exceed one full process->terminal queue so the " +
+                "producer BLOCKS in ByteQueue.write holding feedLock",
+            payload.bytes.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Issue1459BlockedProducer").apply { isDaemon = true }
+        }
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Deliberately DO NOT pump the PAUSED main looper: the queue fills and the
+            // producer blocks in ByteQueue.write holding feedLock — the exact #1459
+            // deadlock precondition (a live %output burst mid-flight).
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the #1459 reseed deadlock; it finished early",
+                feed.isDone,
+            )
+
+            // The reseed/heal apply runs on the Main looper (this test thread IS the
+            // main looper) and MUST NOT park forever on feedLock. On the pre-fix code
+            // this call deadlocks → the @Test(timeout) fires (RED).
+            val seed = "\r\nreseed-line-A\r\nreseed-line-B".toByteArray(Charsets.US_ASCII)
+            val startedAtNanos = System.nanoTime()
+            bridge.seedThenOpenGate(seed)
+            val elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000L
+
+            // LOAD-BEARING GREEN assertion (#1459): the Main-thread reseed COMPLETED
+            // while the producer was blocked-holding-feedLock, within a bounded
+            // deadline. The deadlock manifests as this line never being reached (the
+            // @Test(timeout) hang); a real completion is fast (drain-to-unblock).
+            assertTrue(
+                "Main-thread reseed must complete within 5s while a producer is blocked " +
+                    "holding feedLock (it took ${elapsedMs}ms); the #1459 deadlock returns as a hang",
+                elapsedMs < 5_000L,
+            )
+
+            // The blocked producer must have been unblocked (the looper drained the
+            // queue so its write completed) — no wedged producer leaks.
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked producer must unwind once the Main-thread reseed drains the queue",
+                feed.isDone,
+            )
+            feed.get(1, TimeUnit.SECONDS)
+
+            // Byte-integrity: no lost/reordered bytes. All of the producer's live
+            // output renders (its LAST line is present → nothing dropped), then the
+            // reseed snapshot renders AFTER it (older live before the seed → no reorder).
+            drainMainLooperUntil {
+                bridge.emulator.screen.transcriptText.contains("reseed-line-B")
+            }
+            shadowOf(Looper.getMainLooper()).idle()
+            val transcript = bridge.emulator.screen.transcriptText
+            val lastProducerMarker = payload.transcriptText // its last marked line
+            assertTrue(
+                "all producer live output must survive the reseed (last line missing = dropped bytes)",
+                transcript.contains(lastProducerMarker),
+            )
+            assertTrue(
+                "the reseed snapshot must render",
+                transcript.contains("reseed-line-A") && transcript.contains("reseed-line-B"),
+            )
+            assertTrue(
+                "producer live output must render BEFORE the reseed snapshot (FIFO, no reorder)",
+                transcript.indexOf(lastProducerMarker) < transcript.indexOf("reseed-line-A"),
+            )
+        } finally {
+            executor.shutdownNow()
+            bridge.stop()
+        }
+    }
+
     @Test(timeout = 5_000)
     fun feedBytesOnMainLooperDrainsLargePayloadWithoutDeadlockOrLoss() {
         assertEquals(Looper.getMainLooper(), Looper.myLooper())
@@ -978,6 +1094,30 @@ class SshTerminalBridgeTest {
     }
 
     /**
+     * Issue #1459: a live-`%output`-shaped payload larger than one process→terminal
+     * queue (so the producer BLOCKS holding `feedLock`), with a UNIQUE per-line
+     * marker so the reseed regression can assert the producer's LAST line survived
+     * (no dropped bytes) and rendered BEFORE the reseed snapshot (FIFO, no reorder).
+     * Each line stays under the column width so it renders on one row (the marker is
+     * not split across a wrap).
+     */
+    private fun uniquelyMarkedLargePayload(): Payload {
+        val payloadLines = List(RESEED_PRODUCER_LINES) { line ->
+            "producer-%05d ".format(line) +
+                ('a'.code + (line % 26)).toChar().toString().repeat(LINE_LENGTH - 20)
+        }
+        val payloadWireText = payloadLines.joinToString(separator = "\r\n")
+        val payload = payloadWireText.toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            "reseed producer fixture must exceed one process-to-terminal queue",
+            payload.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+        // transcriptText carries the LAST line's marker so the test can assert it
+        // survived and ordered before the seed.
+        return Payload(payload, payloadLines.last())
+    }
+
+    /**
      * Issue #829: a seed that fits in ONE process-to-terminal queue write (so it is
      * the final/only chunk and on-main handoff is allowed) but spans MANY drain
      * slices, so a time budget can cut the inline drain short with bytes left over
@@ -1204,6 +1344,11 @@ class SshTerminalBridgeTest {
     private companion object {
         private const val LINE_LENGTH = 100
         private const val LINES_LARGER_THAN_PROCESS_QUEUE = 900
+
+        // Issue #1459: reseed-vs-blocked-producer fixture. ~1200 * 94 B ≈ 110 KB —
+        // comfortably more than one 64 KB process->terminal queue, so the producer
+        // blocks in ByteQueue.write holding feedLock (the deadlock precondition).
+        private const val RESEED_PRODUCER_LINES = 1_200
         private const val RAW_BURST_LINES = 5_000
         private const val TMUX_BURST_LINES = 1_200
 

@@ -10,7 +10,9 @@ import com.termux.terminal.TerminalSessionClient
 import java.io.OutputStream
 import java.lang.reflect.Field
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 
 public class TerminalSeedGateOverflowException(
     public val pendingBytes: Int,
@@ -130,7 +132,23 @@ public class SshTerminalBridge(
     @Volatile
     private var inputDrainerThread: Thread? = null
     private val stopped = AtomicBoolean(false)
-    private val feedLock = Any()
+
+    /**
+     * Serializes writes to the process→terminal queue (a single producer + the
+     * seed-tail pump never interleave a partial chunk) and guards the seed-tail
+     * FIFO state.
+     *
+     * Issue #1459: a [ReentrantLock] (not a plain monitor) so a MAIN-looper feed
+     * ([feedChunks] on the handler looper) can acquire it WITHOUT ever parking —
+     * see [lockFeedOnLooperNeverParking]. An off-main live `%output` producer can
+     * hold this lock while BLOCKED in [SessionReflection.writeProcessToTerminalQueue]
+     * on a FULL process→terminal queue, waiting for the main looper to drain it; a
+     * reseed/heal apply that hops back to Main ([seedThenOpenGate]) must NOT park on
+     * the monitor there, or the looper can never run the drain that would release
+     * the producer → permanent deadlock → ANR (the live analog of the [stop]
+     * deadlock this file already documents at [stop]).
+     */
+    private val feedLock = ReentrantLock()
 
     /**
      * Issue #468: seed gate. tmux reattach paints a pane from a
@@ -353,7 +371,16 @@ public class SshTerminalBridge(
         // [dispatchMainLooperDrains] so the inline parse stops after a bounded
         // number of bytes regardless of how fast the device parses a slice.
         var inlineDrainedBytes = 0
-        synchronized(feedLock) {
+        // Issue #1459: on the main looper acquire [feedLock] WITHOUT ever parking on
+        // it — an off-main producer blocked on a full queue holds it and can only be
+        // released by a drain THIS looper must run. Off the looper a plain blocking
+        // acquire is correct (a queued producer can park safely; it is not the looper).
+        if (isHandlerLooper) {
+            lockFeedOnLooperNeverParking()
+        } else {
+            feedLock.lock()
+        }
+        try {
             // Re-entrant on-looper feed while a seed tail is already being pumped:
             // append to the FIFO so ordering (seed tail -> this feed) is preserved,
             // and let the pump drain it. Never write straight to the queue here —
@@ -373,6 +400,20 @@ public class SshTerminalBridge(
                     durationNanos = System.nanoTime() - feedStartedAtNanos,
                 )
                 return
+            }
+
+            if (isHandlerLooper) {
+                // Issue #1459: a just-unblocked producer (or one that beat a
+                // closeSeedGate) may have left live `%output` bytes queued. We hold
+                // [feedLock] now, so no producer can add more; drain the queued live
+                // (FIFO, in arrival order — older live before the seed we are about to
+                // write) so the seed write below cannot block the looper on a full
+                // queue. We are the only drainer while holding [feedLock]; a blocking
+                // write into a full queue here would be a fresh deadlock. Bounded by
+                // the current queue contents (<= one queueful).
+                while (SessionReflection.availableProcessOutputBytes(session) > 0) {
+                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+                }
             }
 
             var remaining = count
@@ -450,6 +491,8 @@ public class SshTerminalBridge(
                 // budget is feed-scoped, like the wall-time budget).
                 inlineDrainedBytes += chunkLength
             }
+        } finally {
+            feedLock.unlock()
         }
         traceState?.traceSink?.onFeedCompleted(
             bytes = count,
@@ -457,6 +500,51 @@ public class SshTerminalBridge(
             durationNanos = System.nanoTime() - feedStartedAtNanos,
         )
     }
+
+    /**
+     * Issue #1459: acquire [feedLock] from the MAIN looper WITHOUT ever parking on
+     * it. An off-main live `%output` producer can hold [feedLock] while BLOCKED in
+     * [SessionReflection.writeProcessToTerminalQueue] on a FULL process→terminal
+     * queue, waiting for THIS looper to drain it. If a reseed/heal apply
+     * ([seedThenOpenGate] → [feedBytesToEmulator] → [feedChunks]) parked on the
+     * `feedLock` monitor here, the looper could never run that drain → the queue
+     * never makes room → the producer never releases [feedLock] → permanent deadlock
+     * → ANR ("Codex froze, had to force-restart"). This is the live analog of the
+     * [stop] deadlock, which escapes it by CLOSING the queue; a live reseed cannot
+     * close the queue, but it CAN drain it: dispatching `MSG_NEW_INPUT` reads the
+     * queue (no [feedLock] needed), frees room, so the blocked producer completes its
+     * feed and releases [feedLock]. Runs on the handler looper only.
+     */
+    private fun lockFeedOnLooperNeverParking() {
+        // Fast path: uncontended (the common cold-attach seed writes into an idle
+        // bridge; no producer holds [feedLock]). Acquire immediately.
+        if (feedLock.tryLock()) return
+        val handler = SessionReflection.getMainThreadHandler(session)
+        val deadline = nowMillis() + FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS
+        while (nowMillis() < deadline) {
+            // The holder is an off-main producer blocked on a full queue: drain a
+            // slice so it can make progress toward releasing [feedLock]. Draining does
+            // NOT require [feedLock] (the read path is independent), so THIS looper
+            // frees the producer instead of deadlocking behind it.
+            if (SessionReflection.availableProcessOutputBytes(session) > 0) {
+                handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+            }
+            if (tryAcquireFeedLock(FEEDLOCK_LOOPER_ACQUIRE_POLL_MILLIS)) return
+        }
+        // Backstop (unreachable when the holder is queue-blocked — draining always
+        // frees it first). If reached, the holder is NOT queue-blocked (the queue is
+        // drained/empty), so a plain blocking acquire cannot deadlock: it is about to
+        // release.
+        feedLock.lock()
+    }
+
+    private fun tryAcquireFeedLock(timeoutMillis: Long): Boolean =
+        try {
+            feedLock.tryLock(timeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            feedLock.tryLock()
+        }
 
     private fun recordChunkWrite(
         traceState: TraceState,
@@ -513,7 +601,14 @@ public class SshTerminalBridge(
         val turnStartedAtMillis = nowMillis()
         var pumpDone = false
         var openGateAfterPump = false
-        synchronized(feedLock) {
+        // #1459: a plain blocking acquire is safe here — the pump only ever runs
+        // during a seed while the gate is CLOSED, so no off-main producer is inside
+        // [feedChunks] holding [feedLock] blocked on a full queue (live `%output`
+        // buffers behind the gate instead). Any producer that beat the gate-close is
+        // already unblocked by the on-looper [feedChunks] drain-to-unblock before the
+        // seed that scheduled this pump could proceed.
+        feedLock.lock()
+        try {
             while (true) {
                 // Drain a slice of whatever is already queued.
                 if (SessionReflection.availableProcessOutputBytes(session) > 0) {
@@ -581,6 +676,8 @@ public class SshTerminalBridge(
                 openGateAfterPump = seedTailGateOpenPending
                 seedTailGateOpenPending = false
             }
+        } finally {
+            feedLock.unlock()
         }
         // #866 lock-ordering: [flushAndOpenGateLocked] takes `gateLock` then
         // `feedLock`; this pump must therefore NEVER take `gateLock` while holding
@@ -748,13 +845,19 @@ public class SshTerminalBridge(
         // writes and reorder bytes. Decide under [feedLock] so the pump cannot finish
         // (and clear the flag) between this check and the deferral. Defer the open to
         // the pump; otherwise open now.
-        val deferGateOpen = synchronized(feedLock) {
+        // #1459: brief non-blocking bookkeeping; a plain blocking acquire is safe —
+        // this runs while the gate is still closed (gated == true), so no off-main
+        // producer is inside [feedChunks] holding [feedLock] blocked on a full queue.
+        feedLock.lock()
+        val deferGateOpen = try {
             if (seedTailPumpScheduled) {
                 seedTailGateOpenPending = true
                 true
             } else {
                 false
             }
+        } finally {
+            feedLock.unlock()
         }
         if (!deferGateOpen) {
             gated = false
@@ -797,10 +900,13 @@ public class SshTerminalBridge(
         // Issue #866: drop any in-flight seed tail so the torn-down session leaves
         // no pending pump work. The pump turn itself guards on stopped.get() and
         // returns early; clearing the FIFO frees the retained byte arrays.
-        synchronized(feedLock) {
+        feedLock.lock()
+        try {
             seedTailSegments.clear()
             seedTailPumpScheduled = false
             seedTailGateOpenPending = false
+        } finally {
+            feedLock.unlock()
         }
         SessionReflection.closeTerminalToProcessQueue(session)
         inputDrainerThread?.interrupt()
@@ -984,6 +1090,23 @@ public class SshTerminalBridge(
          * real-wall-clock guard.
          */
         internal const val SEED_INLINE_MAX_BYTES: Int = PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES / 4
+
+        /**
+         * Issue #1459: backstop wall-clock ceiling for
+         * [lockFeedOnLooperNeverParking]'s drain-to-unblock loop. The loop resolves a
+         * queue-blocked producer in milliseconds (each drained slice frees room for
+         * the producer to make progress toward releasing [feedLock]); this only bounds
+         * the — unreachable when the holder is queue-blocked — pathological case, and
+         * is set well under the ~5 s input-dispatch ANR budget.
+         */
+        internal const val FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS: Long = 2_000L
+
+        /**
+         * Issue #1459: poll interval for the timed [feedLock] `tryLock` between
+         * drain-to-unblock turns. Small so the blocked producer is freed promptly once
+         * a slice has been drained, without hot-spinning.
+         */
+        private const val FEEDLOCK_LOOPER_ACQUIRE_POLL_MILLIS: Long = 1L
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }

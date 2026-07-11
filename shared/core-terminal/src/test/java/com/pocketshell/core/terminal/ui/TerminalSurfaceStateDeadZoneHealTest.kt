@@ -28,9 +28,11 @@ import java.io.OutputStream
  * ## RED → GREEN (D33/G1/G10)
  *
  * [deadZoneBandClearsBothOldCeilingsYetIsHealedByUnifiedOracle] composes a >3-line half-black
- * band whose live share of the rows is > 0.50 (clears the old LINE ceiling —
- * `visibleScreenLooksSparseForSendHeal` is FALSE). The oracle judges it LOST (GREEN). The
- * geometry is visible-render-vs-capture-pane, not a proxy.
+ * band whose live share of the rows is > 0.50. Epic #1353 R1 collapsed the divergent local
+ * pre-gates into the single [TerminalSurfaceState.renderLooksSuspect] authority (0.75 ceiling), so
+ * this band — which the OLD send-only 0.5 ceiling skipped while the reveal 0.75 gate caught it (the
+ * #1153 desync) — is now flagged suspect by the ONE predicate every launcher shares. The oracle
+ * then judges it LOST (GREEN). The geometry is visible-render-vs-capture-pane, not a proxy.
  *
  * ## Class coverage (D32-G2)
  *
@@ -109,12 +111,13 @@ class TerminalSurfaceStateDeadZoneHealTest {
             "precondition: it has MORE than 3 live lines, so it is NOT the ≤3-line partial-black",
             state.visibleScreenIsPartiallyBlank(),
         )
-        // The old LINE ceiling (50%) judged it healthy: live share of the rows > 0.50, so the
-        // 0.5-live-fraction send-heal pre-check reads NON-sparse.
-        assertFalse(
-            "RED premise: > 50% of the visible rows are live → the old 50%-line ceiling judged " +
-                "the band HEALTHY (cleared the LINE ceiling)",
-            state.visibleScreenLooksSparseForSendHeal(),
+        // Epic #1353 R1: the single unified suspect authority (0.75 ceiling) FLAGS this >50%-live
+        // band — where the old send-only 0.5 ceiling read it NON-sparse and diverged from the
+        // reveal 0.75 gate (the #1153 desync). One authority: send and reveal now agree.
+        assertTrue(
+            "R1: the unified renderLooksSuspect() authority flags a >3-line, >50%-rows-live band " +
+                "(0.58 live-fraction ≤ 0.75) — the old send-only 0.5 ceiling missed it",
+            state.renderLooksSuspect(),
         )
 
         // GREEN: the unified char-coverage oracle judges the band LOST (on base this returns
@@ -159,12 +162,14 @@ class TerminalSurfaceStateDeadZoneHealTest {
                     state.visibleRenderLostFrameVsCapture(capture),
                 )
                 if (liveFraction > 0.5) {
-                    // The DEAD-ZONE members: confirm they cleared the old 50%-line send-heal
-                    // ceiling (so they were genuinely un-healed on the pre-#1176 line ceiling),
-                    // closing the dead-zone as a class not a point.
-                    assertFalse(
-                        "band $blackPercent%: cleared the old 50%-line ceiling",
-                        state.visibleScreenLooksSparseForSendHeal(),
+                    // The DEAD-ZONE members (>0.5 live, so the OLD send-only 0.5 ceiling read them
+                    // NON-sparse and diverged from the reveal 0.75 gate). Epic #1353 R1: the single
+                    // unified [renderLooksSuspect] authority (0.75) now flags them, closing the
+                    // dead-zone AND the send/reveal desync as a class, not a point.
+                    assertTrue(
+                        "band $blackPercent%: the unified suspect authority (0.75) flags the whole " +
+                            "dead-zone the old send-only 0.5 ceiling skipped",
+                        state.renderLooksSuspect(),
                     )
                 }
             }

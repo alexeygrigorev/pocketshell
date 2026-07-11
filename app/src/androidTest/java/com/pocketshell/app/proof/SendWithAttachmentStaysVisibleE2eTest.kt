@@ -73,8 +73,9 @@ import java.io.File
  * The heal's real contract is "the visible render is repainted to the SAME content tmux holds"
  * ([TerminalSurfaceState.visibleRenderLostFrameVsCapture] false), NOT "the live rows exceed some
  * fraction of the viewport". A correctly-restored agent frame can legitimately be a small fraction
- * of a tall (e.g. 56-row) emulator viewport — the cheap send-heal pre-check
- * [TerminalSurfaceState.visibleScreenLooksSparseForSendHeal] (a 0.5 live-fraction cost-gate) reads
+ * of a tall (e.g. 56-row) emulator viewport — the unified local suspect pre-gate
+ * [TerminalSurfaceState.renderLooksSuspect] (the single 0.75 live-fraction cost-gate every launcher
+ * shares, epic #1353 R1) reads
  * such a frame "sparse", which is HARMLESS: the authoritative `capture-pane` diff is the load-bearing
  * guard and refuses to re-heal a frame that already matches tmux (proven at the JVM level by
  * `shortPromptDoesNotThrashHeal`). So the final acceptance compares visible-vs-capture, not a
@@ -301,7 +302,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
             hit = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
                 .panes.value.firstOrNull()
                 ?.terminalState
-                ?.visibleScreenLooksSparseForSendHeal() ?: false
+                ?.renderLooksSuspect() ?: false
         }
         return hit
     }

@@ -327,7 +327,7 @@ class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
         compose.activityRule.scenario.onActivity { activity ->
             hit = viewModel(activity).panes.value.firstOrNull()
                 ?.terminalState
-                ?.visibleRenderMayHaveLostFrame() ?: false
+                ?.renderLooksSuspect() ?: false
         }
         return hit
     }

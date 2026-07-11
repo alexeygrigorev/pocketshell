@@ -51,7 +51,7 @@ import java.io.FileOutputStream
  * ## The production bug (reveal-time leg of the #1208 fragments-over-black)
  *
  * The reveal/resize/switch nets gate an authoritative `capture-pane` diff on the CHEAP LOCAL
- * pre-check [com.pocketshell.core.terminal.ui.TerminalSurfaceState.visibleRenderMayHaveLostFrame].
+ * pre-check [com.pocketshell.core.terminal.ui.TerminalSurfaceState.renderLooksSuspect].
  * Before #1214 that pre-check only flagged a live-fraction in `(0.5, 0.75]` or a ≤3-line
  * partial-blank. So a mostly-empty pane with >3 scattered live lines but a live-fraction BELOW 0.5
  * read "healthy" at the reveal gate and the no-op-resize heal → it REVEALED UNHEALED
@@ -251,7 +251,7 @@ class MostlyEmptyModelHealsAtRevealJourneyE2eTest {
         compose.activityRule.scenario.onActivity { activity ->
             hit = viewModel(activity).panes.value.firstOrNull()
                 ?.terminalState
-                ?.visibleRenderMayHaveLostFrame() ?: false
+                ?.renderLooksSuspect() ?: false
         }
         return hit
     }

@@ -37,7 +37,7 @@ internal class StaleRenderSparseWakeBaselines {
         if (
             state.surfaceIsBlackWhileModelHasContent() ||
             state.visibleScreenIsBlankOrPartiallyBlank() ||
-            !state.visibleRenderMayHaveLostFrame()
+            !state.renderLooksSuspect()
         ) {
             remove(pane)
             return
@@ -49,7 +49,7 @@ internal class StaleRenderSparseWakeBaselines {
     fun renderLooksSuspect(pane: TmuxPaneState): Boolean {
         val state = pane.terminalState
         if (state.surfaceIsBlackWhileModelHasContent()) return true
-        if (!state.visibleRenderMayHaveLostFrame()) return false
+        if (!state.renderLooksSuspect()) return false
         if (state.visibleScreenIsBlankOrPartiallyBlank()) return true
         val healthySparseChars = renderedCharsByPane[pane.paneId] ?: return true
         val currentChars = state.renderedNonBlankCharCount()

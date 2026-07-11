@@ -46,7 +46,7 @@ import java.io.InputStream
  * A render with >50% of the visible rows live (clears the old 0.50 LINE ceiling) AND >25% of
  * tmux's chars (clears the old 0.25 CHAR ceiling) reads NON-blank AND NON-partial-black locally,
  * so the pre-#1176 gates (`blank || partialBlank`) SKIPPED it. Both gates now widen their local
- * cost-gate to [TerminalSurfaceState.visibleRenderMayHaveLostFrame] and confirm against tmux's
+ * cost-gate to [TerminalSurfaceState.renderLooksSuspect] and confirm against tmux's
  * authoritative capture before healing.
  *
  * ## RED → GREEN (D33/G1/G10) — driving the REAL production entry points
@@ -202,7 +202,7 @@ class DeadZoneBandRevealResizeHealTest {
         assertFalse(
             "precondition: a dense pane is confidently full → the local capture-gate is FALSE, " +
                 "so no capture is paid",
-            pane.terminalState.visibleRenderMayHaveLostFrame(),
+            pane.terminalState.renderLooksSuspect(),
         )
 
         client.capturePaneResponses.addLast(
@@ -235,7 +235,7 @@ class DeadZoneBandRevealResizeHealTest {
         advanceUntilIdle()
 
         overpaintDensePane(pane)
-        assertFalse(pane.terminalState.visibleRenderMayHaveLostFrame())
+        assertFalse(pane.terminalState.renderLooksSuspect())
 
         client.capturePaneResponses.addLast(
             CommandResponse(number = 99L, output = FULL_FRAME, isError = false),
@@ -410,7 +410,7 @@ class DeadZoneBandRevealResizeHealTest {
         )
         assertTrue(
             "#1214: the widened local capture-gate flags the mostly-empty model (worth a capture-diff)",
-            s.visibleRenderMayHaveLostFrame(),
+            s.renderLooksSuspect(),
         )
         assertTrue(
             "the unified oracle judges the mostly-empty model LOST vs tmux's full frame",
@@ -422,13 +422,12 @@ class DeadZoneBandRevealResizeHealTest {
         val s = pane.terminalState
         assertFalse("dead-zone band is NOT fully blank", s.visibleScreenIsBlank())
         assertFalse("dead-zone band is NOT ≤3-line partial-black", s.visibleScreenIsPartiallyBlank())
-        assertFalse(
-            "dead-zone band cleared the old 0.5 LINE ceiling (> 50% rows live)",
-            s.visibleScreenLooksSparseForSendHeal(),
-        )
+        // Epic #1353 R1: the >50%-live band that the OLD send-only 0.5 ceiling read NON-sparse (and
+        // so diverged from the reveal 0.75 gate — the #1153 desync) is now flagged by the SINGLE
+        // unified [renderLooksSuspect] authority every launcher shares.
         assertTrue(
-            "the #1176 local capture-gate catches the band (worth a capture-diff)",
-            s.visibleRenderMayHaveLostFrame(),
+            "the unified local suspect authority (0.75) catches the band (worth a capture-diff)",
+            s.renderLooksSuspect(),
         )
         assertTrue(
             "the unified oracle judges the dead-zone band LOST vs tmux's full frame",

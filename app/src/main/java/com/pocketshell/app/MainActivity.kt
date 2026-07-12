@@ -518,7 +518,17 @@ class MainActivity : FragmentActivity() {
             }
             }
         }
-        maybeRequestNotificationPermission()
+        // Issue #1509: the app-open POST_NOTIFICATIONS request that used to fire
+        // here is DELETED (D22 hard-cut). It surfaced as a SECOND sequential
+        // prompt on launch (alongside the host-version-mismatch update banner).
+        // The notifications-permission request is now folded into the SINGLE
+        // session-tree setup coordinator (FolderListViewModel.runSessionTreeSetup
+        // → FolderListScreen), so it is driven from one place, lazily, when the
+        // user reaches a host's session tree — never as an app-open trigger.
+        // The forwarding-activation re-request below is retained: it is a
+        // distinct, event-driven (#487) ask that fires only when port forwarding
+        // actually goes active (0 → ≥1) — not on app open — so it is not part of
+        // the reported dual-prompt symptom.
         observeForwardingForNotificationPermission()
         observeKilledSessionsForLastSession()
         if (resolveDefaultHostOnLaunch) {

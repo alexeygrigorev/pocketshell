@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG
+
 /**
  * Graceful version-mismatch detection for the agent-launch flow (issue #759).
  *
@@ -41,14 +43,19 @@ object AgentLaunchVersionCheck {
      * the host's global `exclude-newer` (`~/.config/uv/uv.toml`) — when the
      * newest release is younger than that cutoff, uv reports "Nothing to
      * upgrade" and exits 0, so the upgrade is a no-op and the version mismatch
-     * never clears. The targeted `--exclude-newer-package pocketshell=<far
-     * future>` override lifts that cap for this one package only (mirroring the
-     * bootstrap installer's [com.pocketshell.app.bootstrap.UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE]),
+     * never clears.
+     *
+     * Issue #1492 widens that: the old `--exclude-newer-package
+     * pocketshell=<far future>` override lifted the cap for `pocketshell` ONLY,
+     * so a release that pins a sibling (`quse`) past the host's cutoff still
+     * failed to resolve (a silent no-op). The global
+     * [com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG] lifts the cap for the
+     * WHOLE tool-install resolution — pocketshell + its entire pinned closure —
      * leaving the user's reproducibility setting intact for everything else.
      * `pipx upgrade` / `pip install -U` are not affected by uv's cutoff.
      */
     const val UPDATE_COMMAND: String =
-        "uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell"
+        "uv tool install --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
 
     /**
      * The server-side wrapper line the agent-launch flow types into a fresh

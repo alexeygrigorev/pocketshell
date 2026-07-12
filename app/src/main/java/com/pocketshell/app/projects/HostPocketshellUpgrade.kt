@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
@@ -25,9 +26,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    their shims).
  * 2. PROBES which installer owns `pocketshell` and runs the matching upgrade:
  *    - `uv tool list` mentions `pocketshell` → `uv tool install --upgrade
- *      --exclude-newer-package pocketshell=2099-12-31 pocketshell` (the #779
- *      override that lifts uv's global `exclude-newer` cap so the upgrade is
- *      never a silent no-op — mirrors [PayloadVersionCheck.UPDATE_COMMAND]).
+ *      --exclude-newer 2099-12-31 pocketshell` (the #779/#1492 override that
+ *      lifts uv's global `exclude-newer` cap for the WHOLE resolution so a
+ *      sibling pin like `quse` past the cap cannot make the upgrade a silent
+ *      no-op — mirrors [PayloadVersionCheck.UPDATE_COMMAND]).
  *    - else `pipx` present → `pipx upgrade pocketshell`.
  *    - else `pip`/`pip3` present → `pip install -U pocketshell`.
  *    - else exit `127` so the caller surfaces "no installer found".
@@ -135,8 +137,9 @@ public class HostPocketshellUpgrade {
          * The single `/bin/sh` command: augment PATH, probe the owning installer
          * (uv → pipx → pip), and run the matching upgrade. Exits 127 when none is
          * found. The uv arm mirrors [PayloadVersionCheck.UPDATE_COMMAND]
-         * (`--exclude-newer-package pocketshell=2099-12-31`, issue #779) so the
-         * upgrade is never silently capped by the host's global uv cutoff.
+         * (the global [UV_EXCLUDE_NEWER_FLAG], issue #779 widened by #1492) so the
+         * upgrade is never silently capped by the host's global uv cutoff — for
+         * pocketshell OR any of its pinned siblings.
          */
         internal val UPGRADE_COMMAND: String = buildString {
             // PATH augmentation: same per-user bin dirs PocketshellCommand prepends
@@ -150,7 +153,7 @@ public class HostPocketshellUpgrade {
             append("if command -v uv >/dev/null 2>&1 && ")
             append("uv tool list 2>/dev/null | grep -qi '^pocketshell\\b'; then ")
             append("exec uv tool install --upgrade ")
-            append("--exclude-newer-package $UV_EXCLUDE_NEWER pocketshell; ")
+            append("$UV_EXCLUDE_NEWER_FLAG pocketshell; ")
             // pipx next.
             append("elif command -v pipx >/dev/null 2>&1; then ")
             append("exec pipx upgrade pocketshell; ")
@@ -162,7 +165,5 @@ public class HostPocketshellUpgrade {
             // No installer at all.
             append("else exit 127; fi")
         }
-
-        private const val UV_EXCLUDE_NEWER: String = "pocketshell=2099-12-31"
     }
 }

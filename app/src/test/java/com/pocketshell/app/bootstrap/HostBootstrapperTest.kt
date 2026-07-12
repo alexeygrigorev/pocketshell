@@ -8,6 +8,7 @@ import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -833,14 +834,23 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun uvPocketshellCommands_includeTargetedExcludeNewerOverride() {
+    fun uvPocketshellCommands_includeGlobalExcludeNewerOverride() {
+        // Issue #1492: the cap must be lifted for the WHOLE resolution (global
+        // `--exclude-newer`), NOT just the pocketshell package
+        // (`--exclude-newer-package pocketshell=…`), or a release that pins a
+        // sibling (quse) past the host's cap silently no-ops.
         assertEquals(
-            "uv tool install --exclude-newer-package pocketshell=2099-12-31 pocketshell",
+            "uv tool install --exclude-newer 2099-12-31 pocketshell",
             uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = false),
         )
         assertEquals(
-            "uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell",
+            "uv tool install --upgrade --exclude-newer 2099-12-31 pocketshell",
             uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = true),
+        )
+        // The narrow per-package override that broke on sibling pins must be gone.
+        assertFalse(
+            uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = true)
+                .contains("--exclude-newer-package"),
         )
         assertTrue(!upgradeCommand(PythonToolInstaller.Pipx, BootstrapTool.Pocketshell).contains("exclude-newer"))
     }
@@ -1485,9 +1495,9 @@ class HostBootstrapperTest {
 
     private companion object {
         const val UV_POCKETSHELL_INSTALL_ARGS: String =
-            "tool install --exclude-newer-package pocketshell=2099-12-31 pocketshell"
+            "tool install --exclude-newer 2099-12-31 pocketshell"
         const val UV_POCKETSHELL_UPGRADE_ARGS: String =
-            "tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell"
+            "tool install --upgrade --exclude-newer 2099-12-31 pocketshell"
         const val UV_POCKETSHELL_UPGRADE_COMMAND: String = "uv $UV_POCKETSHELL_UPGRADE_ARGS"
         const val DEFAULT_BOOTSTRAP_PATH: String =
             "/home/u/.local/bin:/home/u/bin:/home/u/.cargo/bin:/usr/local/bin:/usr/bin:/bin"

@@ -375,6 +375,20 @@ Minimum pre-push gate:
   god-object past its baseline is itself a D28 smell — the fix is a real
   reduction (delete dead old-path code or extract to a sibling `*Effects`/
   diagnostics file), never raising the baseline.
+- **A render-heal / stale-render-watchdog / virtual-clock coroutine-loop change
+  MUST run the FULL `:app:testDebugUnitTest` locally before push — NOT a narrow
+  `--tests` class.** A watchdog/heal test that constructs and then cancels its
+  OWN loop passes in ~15s in isolation, while a *sibling* VM test that drains
+  virtual time via `advanceUntilIdle()` HANGS FOREVER against an unbounded
+  re-arm loop — a silent hang, not an assertion failure. #1517 shipped
+  review-approved (both the local gate and the reviewer ran only the narrow
+  `Issue1495WatchdogCoverage` class) but hung the CI `Unit tests` job for 35 min
+  (`while (true)` rolling watchdog with no terminal/cancel condition). Any loop
+  on the render-heal watchdog MUST have a terminal condition reachable under
+  virtual time (idle-tick bound / job-cancel), and the pre-push proof is the
+  whole module completing under a wall-clock `timeout`, not one class. #1518's
+  `forkEvery=100`/`maxHeapSize=1536m` test-fork config makes that full run
+  survive the Robolectric metaspace load.
 - A verifier/reviewer agent independently inspects the diff and reruns the
   relevant local checks from the implementer's worktree before the orchestrator
   integrates it. Treat this verifier as a required local gatekeeper before any

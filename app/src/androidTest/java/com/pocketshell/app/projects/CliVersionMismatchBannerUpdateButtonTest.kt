@@ -62,11 +62,16 @@ class CliVersionMismatchBannerUpdateButtonTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
+    // Derived from the PRODUCTION prompt builder so the banner copy (and its
+    // embedded upgrade command) can never drift from the real one — issue #1492
+    // widened that command to the global `--exclude-newer` cap override.
     private val message =
-        "This host's pocketshell is 0.4.14; the app expects 0.4.16. " +
-            "Update it on the host:\nuv tool install --upgrade " +
-            "--exclude-newer-package pocketshell=2099-12-31 pocketshell\n" +
-            "(or: pipx upgrade pocketshell / pip install -U pocketshell)"
+        PayloadVersionCheck.outdatedHostPrompt(
+            PayloadVersionCheck.Verdict.HostOutdated(
+                hostVersion = "0.4.14",
+                expectedVersion = "0.4.16",
+            ),
+        )
 
     @Test
     fun idleState_updateAndDismissPresentReachableNotClipped() {

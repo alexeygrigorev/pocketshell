@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG
+
 /**
  * Passive payload-version mismatch detection (issue #885).
  *
@@ -32,12 +34,13 @@ object PayloadVersionCheck {
     /**
      * The copy-paste command shown to bring the host's `pocketshell` up to date.
      * Mirrors [com.pocketshell.app.projects.AgentLaunchVersionCheck.UPDATE_COMMAND]
-     * — the targeted `--exclude-newer-package` override lifts the host's global
-     * `uv` `exclude-newer` cap for this one package (issue #779) so the upgrade
-     * is never a silent no-op.
+     * — the global [com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG] lifts the
+     * host's `uv` `exclude-newer` cap for the WHOLE tool-install resolution
+     * (issue #779 for pocketshell, widened by #1492 to cover its pinned siblings
+     * like `quse`) so the upgrade is never a silent no-op.
      */
     const val UPDATE_COMMAND: String =
-        "uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell"
+        "uv tool install --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
 
     /**
      * The verdict of comparing a payload-carried [hostVersion] against the

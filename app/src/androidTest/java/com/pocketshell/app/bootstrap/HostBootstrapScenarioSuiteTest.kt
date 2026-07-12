@@ -148,7 +148,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("PocketShell CLI update failed", substring = true).assertExists()
         compose.onNodeWithText("fixture refused upgrade", substring = true).assertExists()
         compose.onNodeWithText(
-            "uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell",
+            "uv tool install --upgrade --exclude-newer 2099-12-31 pocketshell",
             substring = true,
         ).assertExists()
         compose.onNodeWithText("Path: /usr/local/bin/pocketshell", substring = true).assertExists()
@@ -235,7 +235,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("Host setup needed").assertExists()
         assertSetupRows("pocketshell")
         compose.onNodeWithText(
-            "uv tool install --exclude-newer-package pocketshell=2099-12-31 pocketshell or pipx install pocketshell",
+            "uv tool install --exclude-newer 2099-12-31 pocketshell or pipx install pocketshell",
         ).assertExists()
         capture("02-unsupported-manual-setup")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()

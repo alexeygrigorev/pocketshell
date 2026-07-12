@@ -192,15 +192,19 @@ class FolderListViewModelHostUpgradeTest {
     }
 
     @Test
-    fun upgradeCommand_probesUvPipxPip_withUvCapOverride() {
+    fun upgradeCommand_probesUvPipxPip_withGlobalUvCapOverride() {
         // Installer-detection criterion: the single command probes uv → pipx →
-        // pip and uses the #779 uv exclude-newer override so the upgrade is not a
-        // silent no-op.
+        // pip and uses the #779/#1492 uv exclude-newer override so the upgrade is
+        // not a silent no-op.
         val cmd = HostPocketshellUpgrade.UPGRADE_COMMAND
         assertTrue("must probe uv tool ownership", cmd.contains("uv tool list"))
         assertTrue(
-            "uv arm must use the #779 exclude-newer cap override",
-            cmd.contains("--exclude-newer-package pocketshell=2099-12-31"),
+            "uv arm must lift the exclude-newer cap for the WHOLE resolution (#1492)",
+            cmd.contains("--exclude-newer 2099-12-31"),
+        )
+        assertFalse(
+            "uv arm must NOT use the narrow per-package override that broke on sibling pins (#1492)",
+            cmd.contains("--exclude-newer-package"),
         )
         assertTrue("must fall back to pipx", cmd.contains("pipx upgrade pocketshell"))
         assertTrue("must fall back to pip", cmd.contains("pip install -U pocketshell"))

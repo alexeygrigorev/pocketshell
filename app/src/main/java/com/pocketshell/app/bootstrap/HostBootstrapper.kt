@@ -65,7 +65,30 @@ public enum class PythonToolInstaller(
     Pipx("pipx"),
 }
 
-internal const val UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE: String = "pocketshell=2099-12-31"
+/**
+ * Issue #1492 (widens #779): lift uv's `exclude-newer` date cap for the ENTIRE
+ * `uv tool install` resolution, not just the `pocketshell` package.
+ *
+ * The host bakes a global `exclude-newer` cutoff (`~/.config/uv/uv.toml`, plus the
+ * pocketshell tool receipt) for reproducibility. A pocketshell release can pin an
+ * in-house sibling (`quse`, `tmuxctl`, …) to a version published AFTER that
+ * cutoff. The old per-package override `--exclude-newer-package
+ * pocketshell=<far-future>` lifted the cap for `pocketshell` ONLY, so the sibling
+ * stayed filtered out → the whole resolution was unsatisfiable → uv kept the
+ * already-installed old version and exited 0 (a silent no-op; the mismatch banner
+ * never cleared). The maintainer's real repro (hetzner, 2026-07-12): app v0.4.27,
+ * host stuck at 0.4.24 because 0.4.27 pins `quse==0.0.9` (published after the
+ * host's ~07-05 cap). Lifting the cap globally with `--exclude-newer
+ * <far-future>` covers pocketshell + its entire pinned dependency closure — the
+ * pocketshell tool install always wants the latest pocketshell + its EXACT pins,
+ * so a date cap only ever produces false "unsatisfiable" no-ops here. Hard-cut
+ * (D22): this REPLACES the narrow per-package override; there is no fallback and
+ * no hand-enumerated sibling list (the next new pin would re-break that).
+ */
+public const val UV_EXCLUDE_NEWER_DATE: String = "2099-12-31"
+
+/** The global uv flag that lifts the `exclude-newer` cap for the whole resolution. */
+public const val UV_EXCLUDE_NEWER_FLAG: String = "--exclude-newer $UV_EXCLUDE_NEWER_DATE"
 
 internal fun uvToolInstallCommand(tool: BootstrapTool, upgrade: Boolean): String =
     "uv ${uvToolInstallArgs(tool, upgrade)}"
@@ -75,7 +98,7 @@ internal fun uvToolInstallArgs(tool: BootstrapTool, upgrade: Boolean): String =
         append("tool install")
         if (upgrade) append(" --upgrade")
         if (tool == BootstrapTool.Pocketshell) {
-            append(" --exclude-newer-package $UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE")
+            append(" $UV_EXCLUDE_NEWER_FLAG")
         }
         append(" ${tool.packageName}")
     }

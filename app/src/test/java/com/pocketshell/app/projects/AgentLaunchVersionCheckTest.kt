@@ -92,10 +92,15 @@ class AgentLaunchVersionCheckTest {
         // The hint names the required minimum and gives a copyable command.
         assertTrue(hint.contains(AgentLaunchVersionCheck.MIN_AGENT_POCKETSHELL_VERSION))
         assertTrue(hint.contains(AgentLaunchVersionCheck.UPDATE_COMMAND))
-        // Issue #779: the copyable command must bypass the host's global uv
-        // `exclude-newer` cutoff, or it can silently report "Nothing to
-        // upgrade" and the mismatch never clears.
-        assertTrue(hint.contains("--exclude-newer-package pocketshell="))
+        // Issue #779/#1492: the copyable command must bypass the host's global
+        // uv `exclude-newer` cutoff for the WHOLE resolution (global
+        // `--exclude-newer`), or a release that pins a sibling (quse) past the
+        // cutoff silently no-ops and the mismatch never clears.
+        assertTrue(hint.contains("--exclude-newer 2099-12-31"))
+        assertFalse(
+            "must not use the narrow per-package override that broke on sibling pins",
+            hint.contains("--exclude-newer-package"),
+        )
         assertTrue(hint.contains("uv tool install --upgrade"))
         // The raw Click jargon must NOT leak into the user-facing hint.
         assertFalse(hint.contains("No such command"))

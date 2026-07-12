@@ -101,7 +101,10 @@ class AgentLaunchVersionCheckTest {
             "must not use the narrow per-package override that broke on sibling pins",
             hint.contains("--exclude-newer-package"),
         )
-        assertTrue(hint.contains("uv tool install --upgrade"))
+        assertTrue(hint.contains("uv tool install --refresh --upgrade"))
+        // Issue #1490: --refresh busts uv's stale index cache so a freshly
+        // published release is visible (else the upgrade is a silent no-op).
+        assertTrue(hint.contains("--refresh"))
         // The raw Click jargon must NOT leak into the user-facing hint.
         assertFalse(hint.contains("No such command"))
     }

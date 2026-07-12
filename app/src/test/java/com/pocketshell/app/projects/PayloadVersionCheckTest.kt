@@ -87,5 +87,8 @@ class PayloadVersionCheckTest {
         assertTrue(prompt.contains("0.4.9"))
         assertTrue(prompt.contains("0.4.12"))
         assertTrue(prompt.contains(PayloadVersionCheck.UPDATE_COMMAND))
+        // Issue #1490: the command must carry --refresh so a stale uv index
+        // cache cannot silently no-op the host update.
+        assertTrue(PayloadVersionCheck.UPDATE_COMMAND.contains("--refresh"))
     }
 }

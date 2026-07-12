@@ -538,6 +538,38 @@ public class SshTerminalBridge(
         feedLock.lock()
     }
 
+    /**
+     * Issue #1491: acquire [feedLock] from a code path that may run on the MAIN
+     * looper (a reseed/heal/gate apply that hopped back to Main via #926). Mirrors
+     * [feedChunks]'s guarded acquisition: when we ARE the handler looper, use
+     * [lockFeedOnLooperNeverParking] so the looper NEVER parks on the monitor held by
+     * an off-main `%output` producer BLOCKED in [SessionReflection.writeProcessToTerminalQueue]
+     * on a full queue (it drains the queue to free the producer instead); off the
+     * looper a plain blocking acquire is correct (a queued producer can park safely;
+     * it is not the looper).
+     *
+     * This closes the residual H1-sibling deadlock #1459 left open: the #1459 fix
+     * only made [feedChunks]'s on-looper acquisition non-parking, but
+     * [runSeedTailPumpTurn] and [flushAndOpenGateLocked] still did a plain
+     * `feedLock.lock()`, guarded only by a comment-invariant ("the pump only runs
+     * while the seed gate is CLOSED"). That invariant is broken by a force-reseed of
+     * a HEALTHY (non-quiesced, gate-OPEN) live Codex pane, which schedules the
+     * seed-tail pump on an OPEN gate while a live producer streams — so those sites
+     * could park the looper behind a queue-blocked producer → permanent Main-thread
+     * deadlock → force-restart. Making both acquisitions non-parking removes the
+     * dependence on the (now-broken) invariant while preserving byte order/integrity
+     * exactly as H1 did: draining feeds the older queued live bytes to the emulator in
+     * FIFO order before the caller writes anything further.
+     */
+    private fun lockFeedForLooperOrBlocking() {
+        val handler = SessionReflection.getMainThreadHandler(session)
+        if (Looper.myLooper() == handler.looper) {
+            lockFeedOnLooperNeverParking()
+        } else {
+            feedLock.lock()
+        }
+    }
+
     private fun tryAcquireFeedLock(timeoutMillis: Long): Boolean =
         try {
             feedLock.tryLock(timeoutMillis, TimeUnit.MILLISECONDS)
@@ -601,13 +633,18 @@ public class SshTerminalBridge(
         val turnStartedAtMillis = nowMillis()
         var pumpDone = false
         var openGateAfterPump = false
-        // #1459: a plain blocking acquire is safe here — the pump only ever runs
-        // during a seed while the gate is CLOSED, so no off-main producer is inside
-        // [feedChunks] holding [feedLock] blocked on a full queue (live `%output`
-        // buffers behind the gate instead). Any producer that beat the gate-close is
-        // already unblocked by the on-looper [feedChunks] drain-to-unblock before the
-        // seed that scheduled this pump could proceed.
-        feedLock.lock()
+        // #1491: the #1459 comment-invariant ("the pump only ever runs during a seed
+        // while the gate is CLOSED") is BROKEN by the force-reseed of a HEALTHY
+        // (non-quiesced) live Codex pane: `captureAndApplyPaneSnapshot` closes the gate
+        // only conditionally, then `appendRemoteOutput`→`seedThenOpenGate` schedules
+        // this pump on an OPEN gate while a live `%output` producer streams. That
+        // producer can be BLOCKED in [feedChunks]→writeProcessToTerminalQueue on a full
+        // queue holding [feedLock]; a plain blocking acquire here would park THIS looper
+        // behind it → the looper can service neither this pump nor the #803 drain → the
+        // queue never drains → the producer never releases [feedLock] → permanent
+        // Main-thread deadlock → "Codex froze, had to force-restart". Acquire without
+        // ever parking on the looper: drain the queue to free the blocked producer.
+        lockFeedForLooperOrBlocking()
         try {
             while (true) {
                 // Drain a slice of whatever is already queued.
@@ -845,10 +882,15 @@ public class SshTerminalBridge(
         // writes and reorder bytes. Decide under [feedLock] so the pump cannot finish
         // (and clear the flag) between this check and the deferral. Defer the open to
         // the pump; otherwise open now.
-        // #1459: brief non-blocking bookkeeping; a plain blocking acquire is safe —
-        // this runs while the gate is still closed (gated == true), so no off-main
-        // producer is inside [feedChunks] holding [feedLock] blocked on a full queue.
-        feedLock.lock()
+        // #1491: brief non-blocking bookkeeping. The #1459 comment-invariant ("this
+        // runs while the gate is still closed") is BROKEN on the healthy-reseed path:
+        // `seedThenOpenGate`/`openGateFlushingPending` are called with the gate OPEN
+        // (a force-reseed of a non-quiesced live Codex pane, or the #468 capture-failed
+        // fallback), so an off-main `%output` producer can be BLOCKED in [feedChunks]
+        // holding [feedLock] on a full queue when this runs on Main. A plain blocking
+        // acquire would park the looper behind it → permanent deadlock (see
+        // [lockFeedForLooperOrBlocking]). Acquire without parking on the looper.
+        lockFeedForLooperOrBlocking()
         val deferGateOpen = try {
             if (seedTailPumpScheduled) {
                 seedTailGateOpenPending = true

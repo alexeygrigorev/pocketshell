@@ -279,6 +279,288 @@ class SshTerminalBridgeTest {
         }
     }
 
+    /**
+     * Issue #1491 (the 7th Codex-freeze mechanism — the residual H1-sibling deadlock
+     * #1459 left OPEN): the #1459 fix made only [SshTerminalBridge.feedChunks]'s
+     * on-looper `feedLock` acquisition non-parking. It left TWO other Main-looper
+     * `feedLock.lock()` sites — [SshTerminalBridge.runSeedTailPumpTurn] and
+     * [SshTerminalBridge.flushAndOpenGateLocked] — STILL PARKING, guarded only by a
+     * comment-invariant ("the pump only ever runs during a seed while the gate is
+     * CLOSED, so no off-main producer is inside `feedChunks` holding `feedLock`").
+     *
+     * That invariant is BROKEN by the force-reseed of a HEALTHY (non-quiesced) live
+     * Codex pane: `captureAndApplyPaneSnapshot` closes the seed gate only
+     * conditionally (a healthy-looking pane is intentionally NOT quiesced — the
+     * #1219/#1164 steady-heat back-off keeps the gate OPEN), then
+     * `appendRemoteOutput`→`seedThenOpenGate` schedules the seed-tail pump on an OPEN
+     * gate while a live `%output` producer streams. That off-main producer, on a full
+     * process→terminal queue, BLOCKS in `writeProcessToTerminalQueue` HOLDING
+     * `feedLock`; the pump's plain `feedLock.lock()` then parks THIS looper behind it →
+     * the looper can service neither the pump nor the #803 drain → the queue never
+     * makes room → the producer never releases `feedLock` → permanent Main-thread
+     * deadlock → "backgrounded during a Codex burst, came back, app froze, had to
+     * force-restart".
+     *
+     * This reproduces the [SshTerminalBridge.runSeedTailPumpTurn] site synthetically
+     * WITHOUT an emulator (the #780 hard-assert model, NO `assume`-skip): a large
+     * multi-chunk seed fed on Main (gate OPEN — never closed) defers its tail to the
+     * frame-yielding pump (the #866 handoff), scheduling `runSeedTailPumpTurn` on an
+     * OPEN gate. Then a >64 KB off-Main producer blocks in `ByteQueue.write` holding
+     * `feedLock` (the identical live-`%output`-mid-flight precondition). We then drive
+     * `runSeedTailPumpTurn` on the Main looper (via reflection — a #780-style synthetic
+     * injection of the exact concurrency window that H1's own drain-to-unblock would
+     * otherwise mask in a single-shot test, because a continuously-streaming pane
+     * re-blocks after each unblock).
+     *
+     * RED→GREEN: on base, the pump parks on the `feedLock` monitor held by the blocked
+     * producer and NEVER returns → the `@Test(timeout)` fires (HANGS → RED). With the
+     * fix ([SshTerminalBridge.lockFeedForLooperOrBlocking] → the non-parking on-looper
+     * acquire) the pump drains the queue to free the producer, completes within a
+     * bounded deadline (the load-bearing GREEN `elapsedMs` assertion), and preserves
+     * byte order/integrity: the producer's live output renders in FIFO order (its LAST
+     * line survives → nothing dropped, in producer index order → no reorder), then the
+     * deferred seed TAIL renders AFTER it (older live before the seed → no reorder).
+     */
+    @Test(timeout = 30_000)
+    fun seedTailPumpOnOpenGateDoesNotDeadlockAgainstProducerBlockedHoldingFeedLock() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 20_000,
+        )
+
+        // Force-reseed of a HEALTHY pane: the gate is OPEN (never closed) — the exact
+        // #1219/#1164 steady-heat state that breaks the #1459 comment-invariant. A
+        // large multi-chunk dense-SGR seed (the #866 `capture-pane -e` shape) fed on
+        // Main defers its tail to the pump, so `runSeedTailPumpTurn` is scheduled ON AN
+        // OPEN GATE. Append a unique end marker so the test can prove the seed TAIL
+        // (the part the pump drains) renders.
+        val seed = multiChunkDenseSgrSeedPayload().bytes +
+            "\r\n$SEED_TAIL_MARKER\r\n".toByteArray(Charsets.US_ASCII)
+        bridge.feedBytes(seed)
+
+        // Hard precondition: the seed-tail pump MUST be scheduled on the OPEN gate for
+        // this to exercise the #1491 site (not a vacuous pass). If the seed drained
+        // fully inline (no handoff) this assert fails loudly rather than green-washing.
+        assertTrue(
+            "the multi-chunk seed must have deferred its tail to the frame-yielding " +
+                "pump (seedTailPumpScheduled), scheduling runSeedTailPumpTurn on the OPEN " +
+                "gate — the #1491 precondition",
+            seedTailPumpScheduled(bridge),
+        )
+        assertFalse(
+            "the gate must be OPEN (healthy non-quiesced pane) — the state that breaks " +
+                "the #1459 pump invariant",
+            seedGateClosed(bridge),
+        )
+
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Issue1491PumpBlockedProducer").apply { isDaemon = true }
+        }
+        val payload = uniquelyMarkedLargePayload()
+        assertTrue(
+            "producer payload must exceed one full process->terminal queue so the " +
+                "producer BLOCKS in ByteQueue.write holding feedLock",
+            payload.bytes.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Deliberately DO NOT pump the PAUSED looper: the queue fills and the live
+            // producer blocks in ByteQueue.write HOLDING feedLock — the exact #1491
+            // deadlock precondition (a live %output burst mid-flight while the pump is
+            // scheduled on an open gate).
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the #1491 seed-tail-pump deadlock; " +
+                    "it finished early",
+                feed.isDone,
+            )
+
+            // Drive the seed-tail pump on the Main looper (this test thread IS the main
+            // looper). On the pre-fix code its plain feedLock.lock() parks FOREVER on the
+            // monitor held by the blocked producer, and — because feedLock is an
+            // uninterruptible ReentrantLock and Robolectric runs the test on this same
+            // main thread — nothing can preempt it: the run HANGS (RED, caught by the CI
+            // job timeout; locally by killing the run). With the fix the on-looper
+            // acquire ([lockFeedForLooperOrBlocking]) drains the queue to free the
+            // producer, so the pump turn COMPLETES within a bounded deadline (the GREEN
+            // `elapsedMs` assertion below). This mirrors the sibling #1459 test's shape.
+            val startedAtNanos = System.nanoTime()
+            invokeRunSeedTailPumpTurn(bridge)
+            val elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            assertTrue(
+                "seed-tail pump turn must complete within 5s while a producer is blocked " +
+                    "holding feedLock (it took ${elapsedMs}ms); the #1491 deadlock returns " +
+                    "as a hang (never reaching this line)",
+                elapsedMs < 5_000L,
+            )
+
+            // The blocked producer must have been released (the looper drained the queue
+            // so its write completed) — no wedged producer leaks past the pump turn.
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked producer must unwind once the on-looper pump drains the queue",
+                feed.isDone,
+            )
+            feed.get(1, TimeUnit.SECONDS)
+
+            // Byte-integrity: no lost/reordered bytes. Drain the reposted pump turns +
+            // scheduler until the seed tail marker (the LAST seed byte) has rendered.
+            drainMainLooperUntil {
+                bridge.emulator.screen.transcriptText.contains(SEED_TAIL_MARKER)
+            }
+            shadowOf(Looper.getMainLooper()).idle()
+            val transcript = bridge.emulator.screen.transcriptText
+
+            // Byte integrity — NO drop, NO reorder. The producer's live output is
+            // 1200 uniquely-marked lines. Assert the ENTIRE contiguous range 1..1199 is
+            // present (a strong no-drop proof — a dropped/clobbered live byte removes its
+            // line) and renders in strictly increasing index order (no reorder within the
+            // live stream). Line 00000 is excluded ONLY because it shares the seed→producer
+            // boundary row: the seed head's inline drain ends mid-row, so line 00000's
+            // "producer-00000" LABEL is overwritten by the boundary render while its byte
+            // payload still renders — a cursor-position artifact, not a dropped byte
+            // (verified: the 80-glyph body of line 00000 is on-screen; only the shared-row
+            // label is clobbered). Every subsequent line owns its own row and is intact.
+            val missing = (1..1199).map { "producer-%05d".format(it) }
+                .filterNot { transcript.contains(it) }
+            assertTrue(
+                "producer live output must not be dropped — missing lines: ${missing.take(8)}",
+                missing.isEmpty(),
+            )
+            val firstMarker = "producer-00001"
+            val midMarker = "producer-00600"
+            val lastMarker = "producer-01199"
+            assertTrue(
+                "producer live output must render in FIFO order (no reorder within the stream)",
+                transcript.indexOf(firstMarker) < transcript.indexOf(midMarker) &&
+                    transcript.indexOf(midMarker) < transcript.indexOf(lastMarker),
+            )
+            // The deferred seed TAIL (pumped) renders, and STRICTLY AFTER the producer's
+            // last live line — older live before the seed, no reorder (the #468/#866
+            // seed-before-live ordering the pump preserves).
+            assertTrue(
+                "the deferred seed tail (drained by the pump) must render",
+                transcript.contains(SEED_TAIL_MARKER),
+            )
+            assertTrue(
+                "the producer's last live line must render BEFORE the seed tail (FIFO, no reorder)",
+                transcript.indexOf(lastMarker) < transcript.indexOf(SEED_TAIL_MARKER),
+            )
+        } finally {
+            executor.shutdownNow()
+            bridge.stop()
+        }
+    }
+
+    /**
+     * Issue #1491, second residual parking site: [SshTerminalBridge.flushAndOpenGateLocked]
+     * (`feedLock.lock()` at the gate-open bookkeeping). It is reached from the PUBLIC
+     * `openGateFlushingPending()` (the #468 capture-failed / older-tmux fallback that
+     * opens the gate WITHOUT a preceding feed — so nothing drains the queue before the
+     * `feedLock.lock()`). Called on Main while a live `%output` producer is BLOCKED in
+     * `ByteQueue.write` HOLDING `feedLock`, the plain acquire parks the looper behind
+     * the queue-blocked producer → the same permanent Main-thread deadlock as the pump
+     * site.
+     *
+     * This reproduces it synthetically (the #780 hard-assert model, NO `assume`-skip):
+     * a >64 KB off-Main producer blocks in `ByteQueue.write` holding `feedLock` (the
+     * live-mid-flight precondition), then `openGateFlushingPending()` runs on the Main
+     * looper. RED→GREEN: on base, `flushAndOpenGateLocked`'s plain `feedLock.lock()`
+     * parks forever → the `@Test(timeout)` fires (RED). With the fix
+     * ([SshTerminalBridge.lockFeedForLooperOrBlocking]) it drains the queue to free the
+     * producer, completes within a bounded deadline (the GREEN `elapsedMs` assertion),
+     * and the producer's live output renders losslessly and in FIFO order.
+     */
+    @Test(timeout = 30_000)
+    fun openGateFlushingPendingDoesNotDeadlockAgainstProducerBlockedHoldingFeedLock() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 20_000,
+        )
+        // Healthy pane: the gate is OPEN — openGateFlushingPending's flushAndOpenGateLocked
+        // still executes its feedLock.lock() regardless of gate state.
+        assertFalse(
+            "the gate must be OPEN for the healthy-reseed precondition",
+            seedGateClosed(bridge),
+        )
+
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Issue1491FlushBlockedProducer").apply { isDaemon = true }
+        }
+        val payload = uniquelyMarkedLargePayload()
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Producer blocks in ByteQueue.write HOLDING feedLock — the deadlock
+            // precondition.
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the #1491 flushAndOpenGateLocked deadlock",
+                feed.isDone,
+            )
+
+            // openGateFlushingPending() → flushAndOpenGateLocked() runs on the Main
+            // looper. On the pre-fix code its plain feedLock.lock() parks FOREVER on the
+            // monitor held by the blocked producer (uninterruptible ReentrantLock on the
+            // Robolectric main thread → the run HANGS: RED, caught by the CI job timeout /
+            // by killing the run). With the fix the on-looper acquire
+            // ([lockFeedForLooperOrBlocking]) drains the queue to free the producer, so it
+            // COMPLETES within a bounded deadline (the GREEN `elapsedMs` assertion below).
+            val startedAtNanos = System.nanoTime()
+            bridge.openGateFlushingPending()
+            val elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            assertTrue(
+                "openGateFlushingPending must complete within 5s while a producer is " +
+                    "blocked holding feedLock (it took ${elapsedMs}ms); the #1491 deadlock " +
+                    "returns as a hang (never reaching this line)",
+                elapsedMs < 5_000L,
+            )
+
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked producer must unwind once the on-looper gate-open drains the queue",
+                feed.isDone,
+            )
+            feed.get(1, TimeUnit.SECONDS)
+
+            // Byte-integrity: the producer's live output survives losslessly and in FIFO
+            // order (no drop, no reorder).
+            drainMainLooperUntil {
+                bridge.emulator.screen.transcriptText.contains("producer-01199")
+            }
+            shadowOf(Looper.getMainLooper()).idle()
+            val transcript = bridge.emulator.screen.transcriptText
+            val firstMarker = "producer-00000"
+            val midMarker = "producer-00600"
+            val lastMarker = "producer-01199"
+            assertTrue(
+                "producer live output must not be dropped (first/mid/last markers present)",
+                transcript.contains(firstMarker) &&
+                    transcript.contains(midMarker) &&
+                    transcript.contains(lastMarker),
+            )
+            assertTrue(
+                "producer live output must render in FIFO order (no reorder within the stream)",
+                transcript.indexOf(firstMarker) < transcript.indexOf(midMarker) &&
+                    transcript.indexOf(midMarker) < transcript.indexOf(lastMarker),
+            )
+        } finally {
+            executor.shutdownNow()
+            bridge.stop()
+        }
+    }
+
     @Test(timeout = 5_000)
     fun feedBytesOnMainLooperDrainsLargePayloadWithoutDeadlockOrLoss() {
         assertEquals(Looper.getMainLooper(), Looper.myLooper())
@@ -1331,6 +1613,40 @@ class SshTerminalBridgeTest {
         override fun logStackTrace(tag: String?, e: Exception?) = Unit
     }
 
+    /**
+     * Issue #1491: read the private `seedTailPumpScheduled` flag so the reproduction
+     * can HARD-assert the seed-tail pump is scheduled on an OPEN gate before driving
+     * it (a vacuous pass — pump not scheduled — must fail loudly, not green-wash).
+     */
+    private fun seedTailPumpScheduled(bridge: SshTerminalBridge): Boolean {
+        val field = SshTerminalBridge::class.java
+            .getDeclaredField("seedTailPumpScheduled")
+            .apply { isAccessible = true }
+        return field.getBoolean(bridge)
+    }
+
+    /** Issue #1491: read the private `gated` flag (true == seed gate CLOSED). */
+    private fun seedGateClosed(bridge: SshTerminalBridge): Boolean {
+        val field = SshTerminalBridge::class.java
+            .getDeclaredField("gated")
+            .apply { isAccessible = true }
+        return field.getBoolean(bridge)
+    }
+
+    /**
+     * Issue #1491: drive the private [SshTerminalBridge.runSeedTailPumpTurn] on the
+     * Main looper (this test thread). A #780-style synthetic injection of the exact
+     * on-device concurrency window (pump scheduled on an OPEN gate + a live producer
+     * re-blocked holding feedLock) that a single-shot public-API call cannot hold open,
+     * because H1's own drain-to-unblock frees the producer before the posted pump runs.
+     */
+    private fun invokeRunSeedTailPumpTurn(bridge: SshTerminalBridge) {
+        val method = SshTerminalBridge::class.java
+            .getDeclaredMethod("runSeedTailPumpTurn")
+            .apply { isAccessible = true }
+        method.invoke(bridge)
+    }
+
     private fun terminalSessionClient(session: TerminalSession): TerminalSessionClient {
         val field = TerminalSession::class.java.getDeclaredField("mClient").apply { isAccessible = true }
         return field.get(session) as TerminalSessionClient
@@ -1372,6 +1688,11 @@ class SshTerminalBridgeTest {
         // SEVERAL 64 KB queue chunks — the multi-chunk Codex alt-screen seed that
         // pinned the main thread (every non-final chunk drained inline pre-#866).
         private const val MULTI_CHUNK_SEED_LINES = 1_200
+
+        // Issue #1491: unique marker appended to the END of the multi-chunk seed so the
+        // reproduction can prove the seed TAIL (the part the frame-yielding pump drains)
+        // renders — and renders strictly AFTER the producer's live output (no reorder).
+        private const val SEED_TAIL_MARKER = "SEED-TAIL-MARKER-1491"
 
         // Strips SGR (CSI ... m) escapes so the expected transcript matches the
         // glyphs Termux renders (it consumes the colour escapes, not the screen).

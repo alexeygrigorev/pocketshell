@@ -2416,6 +2416,9 @@ public class TmuxSessionViewModel @Inject constructor(
     @set:androidx.annotation.VisibleForTesting
     internal var teardownLaunchFailureForTest: Throwable? = null
 
+    /** #1495 (Part 3, #780 model): inject a throw in the reseed→arm window; the finally fence must still re-arm. */
+    internal var reseedArmWindowFailureForTest: Throwable? = null
+
     // Reuse pane rows across reconciles so the attached TerminalSurfaceState
     // (and its emulator scrollback) survives layout-change events. Keyed by
     // pane ID; entries are removed when tmux drops the pane.
@@ -3757,12 +3760,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // skipWhenFreshlySeeded=false forces the recapture even for a pane already seeded
             // this attach — the live client never re-attached, so the pane stays in
             // panesSeededThisAttach and a skip would leave the surface black (#1181).
-            reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
-            // Issue #1295: the pinned beyond-grace foreground resume is another one-shot reseed
-            // that armed NO steady watchdog. On a port-forward-pinned "always-on" connection the
-            // original connect-time watchdog may have hit its lifetime tick-ceiling across a long
-            // session, so re-arm the single lifetime net here too (arm-dedup keeps it singular).
-            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
+            // Issue #1295 + #1495(Part 3): re-arm the single lifetime net in a `finally` so a
+            // cancel/teardown throw in the reseed→arm window can't leave a still-current runtime
+            // watchdog-less. isCurrentRuntime no-ops a superseded runtime; arm-dedup keeps it singular.
+            try {
+                reseedActivePaneForReattach(guard, skipWhenFreshlySeeded = false)
+                reseedArmWindowFailureForTest?.let { throw it }
+            } finally {
+                if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
+            }
         }
     }
 
@@ -3901,18 +3907,16 @@ public class TmuxSessionViewModel @Inject constructor(
             // the live line is repainted from a fresh `capture-pane`. The reseed is
             // dropped if the runtime/target was superseded mid-flight (the guard),
             // so a late seed for a switched-away session can never paint.
-            reseedActivePaneForReattach(guard)
-            // Issue #1295: the within-grace reseed-only reattach is a ONE-SHOT reseed that
-            // (pre-#1295) armed NO steady stale-render watchdog — it relied on the original
-            // connect-time watchdog having SURVIVED. But that watchdog can be gone (a
-            // superseded runtime exited its loop, a prior disconnect-recovery left it dead,
-            // the lifetime tick-ceiling elapsed), and Claude repaints only incrementally after
-            // reveal, so an idle pane that later diverges on such a runtime had NO post-reveal
-            // net and stayed black FOREVER. Re-arm the single lifetime net here so the
-            // reattached runtime always has exactly one live watchdog. [armActivePaneStaleRenderWatchdog]
-            // cancels any prior loop before launching (arm-dedup), so this can never stack a
-            // second concurrent watchdog even when the connect-time one is still alive.
-            if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
+            // Issue #1295 + #1495(Part 3): re-arm the single lifetime net (the sole post-reveal
+            // net for an idle Claude pane) in a `finally` so a cancel/teardown throw in the
+            // reseed→arm window can't leave a still-current runtime watchdog-less. isCurrentRuntime
+            // no-ops a superseded runtime; arm-dedup keeps it singular.
+            try {
+                reseedActivePaneForReattach(guard)
+                reseedArmWindowFailureForTest?.let { throw it }
+            } finally {
+                if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
+            }
         }
     }
 
@@ -11245,7 +11249,8 @@ public class TmuxSessionViewModel @Inject constructor(
         staleRenderWatchdogJob?.cancel()
         staleRenderSparseWakeBaselines.clear()
         staleRenderWatchdogJob = bridgeScope.launch {
-            var tick = 0
+            // Issue #1495 (Part 2, #1517): ticks with nothing to heal; bounded so advanceUntilIdle can't spin forever.
+            var idleTicks = 0
             // Issue #1166: consecutive stable ticks drive the back-off interval.
             var stableTicks = 0
             // Issue #1294: consecutive UNVERIFIED heal ticks (capture timeout/error/empty/
@@ -11253,7 +11258,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // tell a genuinely-idle backed-off pane from a pane whose heal captures are
             // WEDGED while it is black. Reset on any confirming (HEALTHY/HEALED) tick.
             var unverifiedStreak = 0
-            while (tick < staleRenderWatchdogMaxTicks) {
+            while (idleTicks < staleRenderWatchdogMaxTicks) {
                 // Issue #1166: wait out the (possibly backed-off) interval, but a
                 // fresh active-pane %output wake cuts a backed-off wait short so a
                 // SUSPECT (locally black/partial-black) redraw is captured within the
@@ -11272,7 +11277,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     stableTicks = 0
                     unverifiedStreak = 0
                     staleRenderSparseWakeBaselines.clear()
-                    tick += 1
+                    idleTicks += 1
                     continue
                 }
                 // Issue #1166 foreground + screen-on gate: nothing to heal when the
@@ -11282,7 +11287,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     stableTicks = 0
                     unverifiedStreak = 0
                     staleRenderSparseWakeBaselines.clear()
-                    tick += 1
+                    idleTicks += 1
                     continue
                 }
                 // Issue #1158: the alt-buffer agent latch is driven from the
@@ -11304,7 +11309,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     recordWatchdogLiveness(
                         pane = activePane,
                         refreshGuard = refreshGuard,
-                        tick = tick,
+                        tick = idleTicks,
                         backedOff = stableTicks > 0,
                     )
                     // Issue #1494 — bound the per-tick heal so one hung capture can't freeze the loop.
@@ -11345,8 +11350,10 @@ public class TmuxSessionViewModel @Inject constructor(
                             recordHealCaptureUnverified(activePane, unverifiedStreak)
                         }
                     }
+                    // #1495 Part 2: only steadily-HEALTHY ticks count toward the bounded exit.
+                    idleTicks = if (outcome == HealOutcome.Healthy) idleTicks + 1 else 0
                 }
-                tick += 1
+                if (activePane == null) idleTicks += 1 // fg + screen-on but no visible pane
             }
         }
     }

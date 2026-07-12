@@ -167,6 +167,17 @@ jobs:
           chmod +x scripts/test-ci-journey-budget.sh
           scripts/test-ci-journey-budget.sh
 
+      # Issue #1458: fast, JVM-free fixture test for the emulator-journey
+      # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
+      # per-shard token-writing / aggregation wiring in tests.yml. Proves the
+      # load-bearing property WITHOUT an emulator: all-green -> CLEAN,
+      # all-infra-storm -> RE-RUN (neutral, no false red email), and a genuine
+      # journey failure -> RED (never masked). Cheap (< 5 s), no emulator.
+      - name: CI journey aggregate-verdict guard (issue #1458)
+        run: |
+          chmod +x scripts/test-ci-journey-aggregate-verdict.sh
+          scripts/test-ci-journey-aggregate-verdict.sh
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out
@@ -770,7 +781,12 @@ jobs:
           profile: pixel_7
           force-avd-creation: true
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          # Issue #1458: `-memory 6144` raises the guest RAM from the pixel_7 AVD
+          # hwconfig default (2048 MB) to 6 GB so the swiftshader render pipeline
+          # + Gradle connected-test + 3 Docker fixtures stop starving the guest
+          # (the `Failed to start Emulator console` storm signature). ubuntu-latest
+          # gives ~16 GB host RAM, so 6 GB guest leaves comfortable host headroom.
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh
 
@@ -871,7 +887,12 @@ jobs:
           profile: pixel_7
           force-avd-creation: true
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          # Issue #1458: `-memory 6144` raises the guest RAM from the pixel_7 AVD
+          # hwconfig default (2048 MB) to 6 GB so the swiftshader render pipeline
+          # + Gradle connected-test + 3 Docker fixtures stop starving the guest
+          # (the `Failed to start Emulator console` storm signature). ubuntu-latest
+          # gives ~16 GB host RAM, so 6 GB guest leaves comfortable host headroom.
+          emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh
 
@@ -904,8 +925,23 @@ jobs:
       #     class issue #771 targets.
       # Genuine journey failures still keep the job RED (exit 1), so a real test
       # regression cannot hide behind an "infra" message.
+      # Issue #1458 (AGGREGATION): this per-shard classify step is now
+      # `continue-on-error` so a single shard's infra abort (console storm / #470
+      # cancel / #771 never-booted) can NEVER fail the whole `Tests` workflow on
+      # its own and fire a false red-CI email. Instead, EVERY branch below writes
+      # a one-word per-shard VERDICT TOKEN (CLEAN | INFRA | RED) to
+      # artifacts/ci-journey/shard-verdict.txt, which is uploaded per shard and
+      # rolled up by the downstream `emulator-journey-verdict` aggregation job
+      # into ONE overall verdict (CLEAN / RE-RUN / RED). The per-shard ::error /
+      # ::warning annotations + red step marker are PRESERVED for forensics; the
+      # exit codes below are UNCHANGED (genuine failures still exit 1 at the step
+      # level, visible in the log), but the AGGREGATION job — not this step — is
+      # what turns the run red. RED (a HEALTHY-console genuine journey failure or
+      # the #835 budget timeout) still produces an aggregate RED, so a real
+      # regression is never masked.
       - name: Classify emulator-journey result (infra-abort vs test-failure)
         if: always()
+        continue-on-error: true
         run: |
           first="${{ steps.journey.outcome }}"
           retry="${{ steps.journey_retry.outcome }}"
@@ -914,6 +950,13 @@ jobs:
           first_timeout="${{ steps.journey_summary.outputs.first_timeout }}"
           first_failure="${{ steps.journey_summary.outputs.first_failure }}"
           summary="artifacts/ci-journey/summary.md"
+          # Issue #1458: record this shard's verdict token for the aggregation
+          # job. CLEAN = passed; INFRA = environmental (storm / #470 cancel /
+          # #771 never-booted) re-run signal; RED = genuine journey failure or
+          # #835 budget timeout. Written in EVERY branch before its exit.
+          verdict_file="artifacts/ci-journey/shard-verdict.txt"
+          mkdir -p "$(dirname "$verdict_file")"
+          write_verdict() { printf '%s\n' "$1" > "$verdict_file"; echo "SHARD_VERDICT=$1 (shard ${{ matrix.shard }})"; }
           # Issue #1458: count the `Failed to start Emulator console` storm from
           # the durable journey-console capture (teed by run_bounded). On a
           # CPU/RAM-starved swiftshader AVD this ddmlib line repeats ~100×/shard
@@ -942,24 +985,29 @@ jobs:
           echo "first summary genuine failure: ${first_failure:-false}"
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
+            write_verdict CLEAN
             exit 0
           fi
           if [[ "$retry" == "success" ]]; then
             echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
+            write_verdict CLEAN
             exit 0
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then
             if (( console_storm_count >= console_storm_threshold )); then
               echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::The first cold boot wrote a JOURNEY_FAILED summary, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict, so this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
+              write_verdict INFRA
               exit 1
             fi
             echo "::error title=Emulator journey FAILED — first attempt genuine failure::The first cold boot wrote a JOURNEY_FAILED / Failed BOTH attempts summary, and the retry did not pass cleanly. Refusing to downgrade this run to advisory timeout even if the retry overwrote summary.md with a timeout-only artifact."
+            write_verdict RED
             exit 1
           fi
           if [[ "${first_timeout:-false}" == "true" ]]; then
             timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its own 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31): a budget timeout means a load-bearing class was silently cut short, which used to be masked as advisory-green. The retry is skipped because a budget timeout is deterministic. Either the enumeration stall has returned or the selection no longer fits the budget — investigate; do NOT treat as a flake. Class(es) cut short / not run:"
             [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
+            write_verdict RED
             exit 1
           fi
           # If a cold-boot attempt was cancelled, do not trust summary.md for a
@@ -968,6 +1016,7 @@ jobs:
           # attempt did not produce a trustworthy final suite verdict.
           if [[ "$first" == "cancelled" || "$retry" == "cancelled" || "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
             echo "::error title=Emulator journey TIMEOUT — step cancelled (#470 stall)::A journey cold-boot attempt was CANCELLED before producing a trustworthy final suite verdict. Any existing artifacts/ci-journey/summary.md may be stale from an earlier attempt, so this is NOT reported as a genuine failed-on-both-cold-boots test regression. This is the recurring enumeration-stall/step-timeout infra class (issue #835 / #470). Re-run."
+            write_verdict INFRA
             exit 1
           fi
           # Both attempts failed — classify from the suite's own summary artifact.
@@ -980,6 +1029,7 @@ jobs:
             # test-failure verdict below — a real regression is NEVER swallowed.
             if (( console_storm_count >= console_storm_threshold )); then
               echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::A load-bearing journey class failed on both cold-boot attempts, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A both-attempts JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict; this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine test regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
+              write_verdict INFRA
               exit 1
             fi
             # The emulator booted and the suite ran to a verdict: a journey class
@@ -988,6 +1038,7 @@ jobs:
             failed_classes="$(awk '/Failed BOTH attempts/{f=1; next} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey FAILED — genuine test failure::A load-bearing journey class failed on BOTH cold-boot attempts AFTER the emulator booted and the suite ran to a verdict. This is a real test regression (NOT a #771 emulator-infra abort). Failing class(es):"
             [[ -n "$failed_classes" ]] && printf '%s\n' "$failed_classes"
+            write_verdict RED
             exit 1
           fi
           # Issue #835 (REOPENED, DURABLE GUARD): the suite ran (the emulator
@@ -1006,6 +1057,7 @@ jobs:
             timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31), NOT an advisory-green: a budget timeout means a load-bearing class was silently cut short. Either the in-emulator enumeration stall has returned or the selection no longer fits the budget — investigate. This is distinct from a never-booted emulator (#771) and from a genuine test regression. Class(es) cut short / not run:"
             [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
+            write_verdict RED
             exit 1
           fi
           # No suite summary at all: the script aborted before any class reached
@@ -1013,6 +1065,7 @@ jobs:
           # so gradle could not run. This is the EMULATOR INFRA UNAVAILABLE
           # class (#771).
           echo "::error title=EMULATOR INFRA UNAVAILABLE::Both cold-boot attempts failed and the journey suite wrote NO summary (artifacts/ci-journey/summary.md missing), so no journey class ever ran to a verdict — the emulator never reached 'device' / adb never came up (boot/adb infra, issue #771). This is an infra abort, NOT a test regression."
+          write_verdict INFRA
           exit 1
 
       - name: Collect Docker logs
@@ -1065,6 +1118,61 @@ jobs:
           path: artifacts/docker/
           if-no-files-found: ignore
 
+      # Issue #1458 (AGGREGATION): upload this shard's one-word verdict token so
+      # the `emulator-journey-verdict` job can roll all shards into ONE overall
+      # verdict. Per-shard name so matrix legs don't collide; the aggregation
+      # job downloads them with the `emulator-journey-verdict-shard-*` pattern.
+      - name: Upload shard verdict token
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-journey-verdict-shard-${{ matrix.shard }}
+          path: artifacts/ci-journey/shard-verdict.txt
+          if-no-files-found: warn
+
       - name: Stop Docker fixture
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Issue #1458 (AGGREGATION): roll the per-shard emulator-journey verdict tokens
+  # into ONE overall verdict so `main`'s emulator-level health is readable at a
+  # glance and an all-infra flake run does NOT fire a false red-CI email.
+  #
+  # The research spike on #1458 found the heavy journey job flakes constantly
+  # from host-CPU starvation on 2–4 vCPU hosted runners: each console-storm shard
+  # was classified as `EMULATOR INFRA UNAVAILABLE` but STILL exited 1 (red) with
+  # no rollup, so three independent red checks left main-health unreadable and
+  # spammed red-CI email. The per-shard classify step is now `continue-on-error`
+  # and records a CLEAN | INFRA | RED token; this job consumes those tokens:
+  #   * every shard CLEAN            -> CLEAN  (green)
+  #   * no RED, at least one INFRA   -> RE-RUN (neutral green + ::warning; the
+  #                                    failures were environmental, re-run)
+  #   * any shard RED (a HEALTHY-console genuine journey failure or the #835
+  #     budget timeout)              -> RED    (exit 1, the run goes red)
+  # A genuine journey assertion failure therefore STILL turns the run red — the
+  # aggregation never masks a real regression (the #657/#844 flake-masks-real
+  # trap's inverse). Per-shard logs/annotations stay intact for forensics.
+  emulator-journey-verdict:
+    name: Emulator journey aggregate verdict (#1458)
+    needs: emulator-journey
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download per-shard verdict tokens
+        uses: actions/download-artifact@v5
+        with:
+          pattern: emulator-journey-verdict-shard-*
+          path: artifacts/ci-journey-verdicts
+        continue-on-error: true
+
+      - name: Aggregate the per-shard verdicts into ONE verdict
+        env:
+          # Keep in sync with the length of the emulator-journey matrix.shard.
+          EXPECTED_SHARDS: 3
+        run: |
+          chmod +x scripts/ci-journey-aggregate-verdict.sh
+          scripts/ci-journey-aggregate-verdict.sh artifacts/ci-journey-verdicts

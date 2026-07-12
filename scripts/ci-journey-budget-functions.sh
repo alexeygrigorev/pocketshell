@@ -124,8 +124,14 @@ run_class() {
     return 124
   fi
   attempt_start=$SECONDS
+  # Issue #1458: --max-workers=2 (parity with the Unit job) caps Gradle's worker
+  # fan-out so it stops fighting the swiftshader emulator + KVM + Docker fixtures
+  # for the 2–4 host vCPUs — the CPU starvation that triggers the
+  # `Failed to start Emulator console` storm. The Gradle DAEMON is still reused
+  # (no --no-daemon), preserving the #835 budget-fit.
   run_bounded "$cap" \
     "$GRADLEW" :app:connectedDebugAndroidTest \
+    --max-workers=2 \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
@@ -161,8 +167,12 @@ run_ct_class() {
     return 124
   fi
   attempt_start=$SECONDS
+  # Issue #1458: --max-workers=2 (parity with the Unit job + run_class) caps
+  # Gradle's worker fan-out so it stops starving the swiftshader emulator of host
+  # vCPUs (the `Failed to start Emulator console` storm). Daemon still reused.
   run_bounded "$cap" \
     "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
+    --max-workers=2 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace
   rc=$?

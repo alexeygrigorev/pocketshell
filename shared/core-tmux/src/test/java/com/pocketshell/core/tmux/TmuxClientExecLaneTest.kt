@@ -559,6 +559,324 @@ class TmuxClientExecLaneTest {
             }
         }
 
+    // ---------------------------------------------------------------------
+    // Issue #1496: the session-lifecycle wedge — the residual `sendCommand`
+    // SPOF the 2026-07-12 Codex-freeze audit found after #1460 (send lane) and
+    // #1488 (share lane). The in-session Rename and the sessions dashboard's
+    // Create / Rename / Kill actions and its live `list-sessions` poll all rode
+    // the shared per-host `-CC` `sendCommand`, so a live Codex `%output` burst
+    // head-of-line-blocked their `%begin`/`%end` reply ~30-40s behind it on the
+    // ONE sshj reader (10s mutex acquire + 30s ceiling; the 10s idle gate never
+    // fires while output flows). The RED tests document WHY each of the five
+    // command strings wedges on `-CC`; the GREEN tests prove `sendLifecycleViaExec`
+    // does NOT wedge — it rides the dedicated exec channel. Covers the CLASS: all
+    // five call sites (rename in-session + dashboard share the same command
+    // string), not one.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `RED — rename-session on the shared -CC sendCommand wedges behind a held control channel`() =
+        runBlocking { assertSendCommandWedgesDuringCcWedge("rename-session -t 'work' 'renamed'") }
+
+    @Test
+    fun `RED — new-session -d on the shared -CC sendCommand wedges behind a held control channel`() =
+        runBlocking { assertSendCommandWedgesDuringCcWedge("new-session -d -s 'next' -c '~'") }
+
+    @Test
+    fun `RED — kill-session on the shared -CC sendCommand wedges behind a held control channel`() =
+        runBlocking { assertSendCommandWedgesDuringCcWedge("kill-session -t 'work'") }
+
+    @Test
+    fun `RED — list-sessions poll on the shared -CC sendCommand wedges behind a held control channel`() =
+        runBlocking {
+            assertSendCommandWedgesDuringCcWedge(
+                "list-sessions -F '#{session_name}::#{session_created}'",
+            )
+        }
+
+    @Test
+    fun `GREEN — rename-session completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            assertSendLifecycleViaExecCompletesDuringCcWedge(
+                sessionCommand = "rename-session -t 'work' 'renamed'",
+                expectExecEquals = "tmux rename-session -t 'work' 'renamed'",
+            )
+        }
+
+    @Test
+    fun `GREEN — new-session -d completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            assertSendLifecycleViaExecCompletesDuringCcWedge(
+                sessionCommand = "new-session -d -s 'next' -c '~'",
+                expectExecEquals = "tmux new-session -d -s 'next' -c '~'",
+            )
+        }
+
+    @Test
+    fun `GREEN — kill-session completes on the exec lane while the -CC channel is wedged`() =
+        runBlocking {
+            assertSendLifecycleViaExecCompletesDuringCcWedge(
+                sessionCommand = "kill-session -t 'work'",
+                expectExecEquals = "tmux kill-session -t 'work'",
+            )
+        }
+
+    @Test
+    fun `GREEN — list-sessions poll completes on the exec lane and returns rows while -CC is wedged`() =
+        runBlocking {
+            // Issue #1496 class coverage: the dashboard live poll returns rows
+            // (unlike the rename/create/kill mutations). Prove it completes fast
+            // off `-CC` under a burst AND parses the rows the caller's row
+            // parser expects — the exact `-CC` per-row contract, unchanged.
+            val rows = listOf("work::1::2::1::::", "next::3::4::0::::")
+            val listCommand = "list-sessions -F '#{session_name}::#{session_created}'"
+            val shell = FakeShell()
+            val session = FakeSession(
+                shell,
+                execHandler = sendLifecycleExecHandler(stdout = rows.joinToString("\n") + "\n"),
+            )
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                withTimeout(2_000) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+                withTimeout(2_000) {
+                    while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+                }
+
+                val startedAtMs = System.currentTimeMillis()
+                val response = withTimeout(5_000) {
+                    client.sendLifecycleViaExec(listCommand)
+                }
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+                assertFalse("the poll must succeed during a -CC burst", response.isError)
+                assertEquals(rows, response.output)
+                assertTrue(
+                    "the poll must complete well under the -CC mutex ceiling " +
+                        "(elapsed ${elapsedMs}ms) proving it did not wait on the wedged " +
+                        "-CC sendMutex",
+                    elapsedMs < 2_000L,
+                )
+                assertEquals(
+                    "the list-sessions must ride the exec lane verbatim",
+                    "tmux $listCommand",
+                    session.execCommands.single { it.contains("list-sessions") },
+                )
+                assertFalse(
+                    "the list-sessions must NOT be written to the wedged -CC shell",
+                    shell.stdinAsString().contains("list-sessions"),
+                )
+                wedger.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `sendLifecycleViaExec surfaces an error response when the session is gone`() = runBlocking {
+        // Issue #1496: a non-zero exec exit (name collision, session gone) must
+        // surface as an ERROR CommandResponse carrying stderr — so a failed
+        // rename/create/kill still fails honestly (the dashboard shows its
+        // error banner), matching the `-CC` error contract exactly.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = sendLifecycleExecHandler(
+                exitCode = 1,
+                stderr = "duplicate session: next",
+            ),
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.sendLifecycleViaExec("new-session -d -s 'next'")
+            }
+            assertTrue("a gone/colliding session must surface as an error response", response.isError)
+            assertEquals(listOf("duplicate session: next"), response.output)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendLifecycleViaExec succeeds with an empty non-error response on a normal mutation`() =
+        runBlocking {
+            // Issue #1496: `rename-session` / `kill-session` print nothing on
+            // success, so a zero exit must yield an empty, non-error response
+            // (the caller treats it as success).
+            val shell = FakeShell()
+            val session = FakeSession(shell, execHandler = sendLifecycleExecHandler())
+            val client = RealTmuxClient(session, scope)
+            try {
+                client.connect()
+                val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                    client.sendLifecycleViaExec("rename-session -t 'work' 'renamed'")
+                }
+                assertFalse("a normal mutation must not be an error", response.isError)
+                assertTrue("rename-session prints nothing on success", response.output.isEmpty())
+                assertEquals(
+                    "tmux rename-session -t 'work' 'renamed'",
+                    session.execCommands.single { it.contains("rename-session") },
+                )
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `sendLifecycleViaExec bounds itself and throws within the short ceiling on a wedged exec`() =
+        runBlocking {
+            // Issue #1496: a genuinely wedged/half-open transport (the exec never
+            // returns) must surface a TmuxClientException within the caller's
+            // SHORT ceiling, not hang to the full command ceiling — so a
+            // dashboard action against a dead link fails fast.
+            val shell = FakeShell()
+            val neverReturns = CompletableDeferred<ExecResult>()
+            val session = FakeSession(shell, execHandler = { neverReturns.await() })
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching {
+                    withTimeout(5_000) {
+                        client.sendLifecycleViaExec("kill-session -t 'work'", timeoutMs = 250L)
+                    }
+                }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+                assertTrue(
+                    "a wedged lifecycle exec must surface a TmuxClientException from " +
+                        "the short ceiling, not hang to the command ceiling (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                assertTrue(
+                    "the action must time out within ~the short ceiling (elapsed ${elapsedMs}ms)",
+                    elapsedMs < 5_000L,
+                )
+                neverReturns.cancel()
+            } finally {
+                client.close()
+            }
+        }
+
+    /**
+     * Issue #1496 RED driver: connect, wedge the shared `-CC` control channel
+     * with a never-answered command (modelling a reply stuck behind a live agent
+     * `%output` burst on the one sshj reader), then assert the OLD path
+     * [RealTmuxClient.sendCommand] on [sessionCommand] does NOT complete within a
+     * generous budget — it is wedged behind the held sendMutex. This is the
+     * reproduced freeze for each of the five session-management round-trips.
+     */
+    private suspend fun assertSendCommandWedgesDuringCcWedge(sessionCommand: String) {
+        val shell = FakeShell()
+        val session = FakeSession(shell, execHandler = sendLifecycleExecHandler())
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            // Wedge `-CC`: this command never gets a `%begin`/`%end` reply (the
+            // FakeShell never answers), modelling a reply stuck behind a
+            // sustained `%output` burst on the single sshj reader. It holds the
+            // sendMutex.
+            val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+            }
+
+            val completed = withTimeoutOrNull(1_500) {
+                client.sendCommand(sessionCommand)
+            }
+            assertNull(
+                "BUG REPRO: '$sessionCommand' on the shared -CC sendCommand must " +
+                    "wedge behind the held control channel (it returned $completed)",
+                completed,
+            )
+            wedger.cancel()
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1496 GREEN driver: same held-`-CC` wedge as the RED driver, but
+     * [sessionCommand] rides [RealTmuxClient.sendLifecycleViaExec] on the
+     * dedicated exec channel and returns WELL under the `-CC` mutex ceiling —
+     * proving it did not wait on the wedged sendMutex. Asserts the mutation is a
+     * non-error empty response, that the exec carried the command verbatim (via
+     * [expectExecEquals]), and that it never reached the wedged `-CC` stdin.
+     */
+    private suspend fun assertSendLifecycleViaExecCompletesDuringCcWedge(
+        sessionCommand: String,
+        expectExecEquals: String,
+    ) {
+        val shell = FakeShell()
+        val session = FakeSession(shell, execHandler = sendLifecycleExecHandler())
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val wedger = scope.async { runCatching { client.sendCommand("list-clients") } }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().contains("list-clients")) { yield(); delay(10) }
+            }
+
+            val startedAtMs = System.currentTimeMillis()
+            val response = withTimeout(5_000) {
+                client.sendLifecycleViaExec(sessionCommand)
+            }
+            val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+            assertFalse("the mutation must succeed during a -CC burst", response.isError)
+            assertTrue(
+                "a mutation prints nothing on success (was ${response.output})",
+                response.output.isEmpty(),
+            )
+            assertTrue(
+                "the mutation must complete well under the -CC mutex ceiling " +
+                    "(elapsed ${elapsedMs}ms) proving it did not wait on the wedged " +
+                    "-CC sendMutex",
+                elapsedMs < 2_000L,
+            )
+            assertTrue(
+                "the session command must ride the exec lane verbatim " +
+                    "(exec commands were ${session.execCommands})",
+                session.execCommands.contains(expectExecEquals),
+            )
+            assertFalse(
+                "the session command must NOT be written to the wedged -CC shell",
+                shell.stdinAsString().contains(sessionCommand.substringBefore(' ')),
+            )
+            wedger.cancel()
+        } finally {
+            client.close()
+        }
+    }
+
+    private fun sendLifecycleExecHandler(
+        stdout: String = "",
+        exitCode: Int = 0,
+        stderr: String = "",
+        delayMs: Long = 0L,
+    ): suspend (String) -> ExecResult = { _ ->
+        if (delayMs > 0L) delay(delayMs)
+        // A mutation prints nothing on success; a `list-sessions` read returns
+        // its rows via [stdout]; a non-zero exit carries stderr.
+        ExecResult(stdout = stdout, stderr = stderr, exitCode = exitCode)
+    }
+
     /**
      * Issue #1460 shared driver: connect, wedge the shared `-CC` control channel
      * with a never-answered command (modelling a reply stuck behind a live agent

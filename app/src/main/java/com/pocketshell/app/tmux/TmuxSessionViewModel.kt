@@ -16308,7 +16308,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-
     /**
      * Epic #821 Slice 1: read the active session's RECORDED `@ps_agent_kind`
      * fresh from the host and publish it on [currentSessionRecordedKind]. The
@@ -16488,13 +16487,10 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    // #1496 exec off -CC (D22)
     private fun sendLifecycleCommand(command: String) {
         val client = clientRef ?: return
-        bridgeScope.launch {
-            runCatching {
-                client.sendCommand(command)
-            }
-        }
+        bridgeScope.launch { runCatching { client.sendLifecycleViaExec(command) } }
     }
 
     /**

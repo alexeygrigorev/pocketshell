@@ -286,7 +286,14 @@ class SessionsDashboardViewModel @Inject constructor(
      * the response. Visible-for-test through [parseListSessionsRow].
      */
     private suspend fun fetchSessions(entry: ActiveTmuxClients.Entry): List<SessionSummary>? {
-        val response = entry.client.sendCommand(LIST_SESSIONS_COMMAND)
+        // Issue #1496: the live `list-sessions` poll rides the DEDICATED exec
+        // lane ([TmuxClient.sendLifecycleViaExec]), NOT the shared `-CC`
+        // control channel. On the `-CC` lane a live Codex `%output` burst
+        // head-of-line-blocked this poll's reply behind it on the one sshj
+        // reader (10s mutex acquire + 30s ceiling); the exec lane reads its own
+        // channel outside the transport dispatcher, so the dashboard stays
+        // fresh while a burst saturates `-CC`.
+        val response = entry.client.sendLifecycleViaExec(LIST_SESSIONS_COMMAND)
         if (response.isError) return null
         return response.output.mapNotNull { line ->
             parseListSessionsRow(
@@ -445,9 +452,9 @@ class SessionsDashboardViewModel @Inject constructor(
      *
      * We do NOT subscribe to `%sessions-changed` here (unlike
      * [killSession]) because tmux emits the notification BEFORE the new
-     * row is queryable in some edge cases — instead we rely on
-     * sendCommand's response correlator: when `sendCommand` returns
-     * non-error, the session exists on the server, so an immediate
+     * row is queryable in some edge cases — instead we rely on the exec
+     * lane's response (issue #1496): when [TmuxClient.sendLifecycleViaExec]
+     * returns non-error, the session exists on the server, so an immediate
      * list-sessions is guaranteed to see it.
      */
     fun createSession(
@@ -487,7 +494,10 @@ class SessionsDashboardViewModel @Inject constructor(
                 }
             }
             val sendResult = runCatching {
-                client.sendCommand(
+                // Issue #1496: Create rides the DEDICATED exec lane
+                // ([TmuxClient.sendLifecycleViaExec]), NOT the shared `-CC`
+                // control channel a live Codex burst can head-of-line-block.
+                client.sendLifecycleViaExec(
                     "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
                         "-c '${escapeSingleQuoted(creation.startDirectory)}'",
                 )
@@ -524,7 +534,10 @@ class SessionsDashboardViewModel @Inject constructor(
         if (oldTrimmed.isEmpty() || newTrimmed.isEmpty()) return
         viewModelScope.launch {
             runCatching {
-                entry.client.sendCommand(
+                // Issue #1496: Rename rides the DEDICATED exec lane
+                // ([TmuxClient.sendLifecycleViaExec]), NOT the shared `-CC`
+                // control channel a live Codex burst can head-of-line-block.
+                entry.client.sendLifecycleViaExec(
                     "rename-session -t '${escapeSingleQuoted(oldTrimmed)}' " +
                         "'${escapeSingleQuoted(newTrimmed)}'",
                 )
@@ -611,7 +624,13 @@ class SessionsDashboardViewModel @Inject constructor(
             }
 
             val sendResult = runCatching {
-                client.sendCommand("kill-session -t '${escapeSingleQuoted(trimmed)}'")
+                // Issue #1496: Kill rides the DEDICATED exec lane
+                // ([TmuxClient.sendLifecycleViaExec]), NOT the shared `-CC`
+                // control channel a live Codex burst can head-of-line-block.
+                // tmux still emits `%sessions-changed` to the attached `-CC`
+                // client on teardown, so the post-kill event wait below is
+                // unaffected by moving the kill itself onto the exec lane.
+                client.sendLifecycleViaExec("kill-session -t '${escapeSingleQuoted(trimmed)}'")
             }
             val response = sendResult.getOrNull()
             val transportFailure = sendResult.exceptionOrNull()

@@ -2486,8 +2486,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * down the old control channel before opening the new one so a
      * dashboard row tap actually attaches to the requested tmux session.
      * [keyPath] is the resolved absolute path of the user's private key
-     * on disk, the same way [com.pocketshell.app.session.SessionViewModel]
-     * consumes it from the host picker.
+     * on disk, the same way it is consumed from the host picker.
      */
     public fun connect(
         hostId: Long,
@@ -16498,8 +16497,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Translate a [com.pocketshell.app.session.SessionViewModel]-style
-     * key-bar label (`Esc`, `Tab`, `‹`, `⌃`, ...) into a tmux `send-keys`
+     * Translate a key-bar label (`Esc`, `Tab`, `‹`, `⌃`, ...) into a tmux `send-keys`
      * named-key argument, then dispatch it.
      *
      * Mirrors the byte-level mapping in `SessionViewModel.unmodifiedBytesFor`

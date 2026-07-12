@@ -156,16 +156,14 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 import kotlinx.coroutines.launch
 
 /**
- * Phase 2 session screen for `tmux -CC` hosts — the per-pane equivalent of
- * [com.pocketshell.app.session.SessionScreen] for plain SSH.
+ * Phase 2 session screen for `tmux -CC` hosts, rendering one pane at a time.
  *
  * Per [D6](../../../../../../../../docs/decisions.md), exactly ONE pane is
  * rendered at a time, wrapped in a [HorizontalPager] so a horizontal swipe
  * navigates left/right between panes inside the current window. No tiled
  * rendering — tmux's native split layout is unreadable at phone scale.
  *
- * Stacks four bands top-to-bottom, mirroring the structure of
- * [com.pocketshell.app.session.SessionScreen]:
+ * Stacks four bands top-to-bottom:
  *
  * 1. **Breadcrumb** — `host › session › window › pane`. Back arrow
  *    "detaches" (i.e. tears down the [TmuxSessionViewModel]).

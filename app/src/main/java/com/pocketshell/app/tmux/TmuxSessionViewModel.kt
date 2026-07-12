@@ -11097,7 +11097,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // line) is healed by the switch-reveal gate BEFORE this watchdog
                     // is even armed ([awaitActivePaneSeededOrLoading]), and a
                     // send-overpaint partial-black is healed by the post-send heal
-                    // ([scheduleSendOverpaintHeal]). Extending this post-reveal net to
+                    // ([requestReconcile] with [ReconcileReason.Send]). Extending this post-reveal net to
                     // partial-black would over-heal a legitimately small single-line
                     // pane (a real one-line prompt that landed after reveal reads
                     // partial-black), reseed-thrashing it on every arming — so the
@@ -11491,6 +11491,15 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         return healActivePaneIfStaleRender(client, activePane, guard)
     }
+
+    /** Issue #1353 R4 (test seam): submit a reconcile event via [requestReconcile] on the live client. */
+    internal fun requestReconcileForTest(paneId: String, reason: ReconcileReason) {
+        val client = clientRef ?: return
+        requestReconcile(client, paneId, reason)
+    }
+
+    /** Issue #1353 R4 (test seam): the R3 per-pane single-flight owner the reconcile routes through. */
+    internal fun renderHealCoordinatorForTest(): RenderHealCoordinator = renderHealCoordinator
 
     /**
      * Issue #966/#967 (test seam): is the underlying tmux control client currently
@@ -14063,42 +14072,31 @@ public class TmuxSessionViewModel @Inject constructor(
             // heals already restore a partial-black pane; a SEND-triggered overpaint had
             // NO heal, so the pane stayed black until the user manually redrew. Schedule
             // a one-shot, guarded active-pane heal that fires ONLY if the pane settles
-            // partial-black/blank after the overpaint.
-            scheduleSendOverpaintHeal(client, paneId)
+            // partial-black/blank after the overpaint. Issue #1353 R4: this is now an EVENT
+            // submission through the shared reconcile entry ([requestReconcile]) rather than a
+            // private send-only poll — the send path no longer owns a bespoke timer.
+            requestReconcile(client, paneId, ReconcileReason.Send)
         }
     }
 
     /**
-     * Issue #941 (black-screen B1) + issue #1153 (send-with-attachment half-black): after a
-     * send's submit Enter, the agent's `%output` overpaint can leave the active pane BLACK or
-     * partial-black. A composer Send WITH AN ATTACHMENT is always multi-line (it appends an
-     * "Attached files:" block), so it takes the bracketed-paste + submit branch and the
-     * alt-screen agent clear+cursor-address-redraws its WHOLE viewport — the overpaint blanks
-     * the grid and the agent only PARTIALLY repaints, leaving the maintainer's "partly redrew
-     * but still too black" pane on a LIVE transport (no reconnect).
+     * Issue #1353 slice R4 — the EVENT-SUBMISSION entry for the render-heal reconciler. A trigger
+     * submits an immediate hot reconcile for [paneId] via a [ReconcileReason] instead of owning a
+     * bespoke poll loop; the reconcile runs through the SINGLE chokepoint
+     * [healActivePaneIfStaleRender] (R3 per-pane single-flight), so two triggers on one pane can
+     * never race the M9 seed gate. This slice migrates ONLY [ReconcileReason.Send] — the #941/#1153
+     * post-send agent-overpaint heal that was the private `scheduleSendOverpaintHeal` 350 ms×4 poll;
+     * L2/L3/L5 fold into this entry in a later slice (R5).
      *
-     * The pre-#1153 heal had TWO gaps this closes:
-     *  1. It gated on the LOCAL-ONLY `visibleScreenIsBlank() || visibleScreenIsPartiallyBlank()`
-     *     heuristic (≤3 live lines / ≤25% rows). A "partly redrew" frame has MORE than 3 live
-     *     lines (input box + a few conversation lines + status) yet materially less than tmux's
-     *     full grid, so it failed the gate and the heal skipped. Now the heal judges the pane
-     *     against tmux's AUTHORITATIVE `capture-pane` via [healActivePaneIfStaleRender] — the
-     *     #1138 union oracle [TerminalSurfaceState.visibleRenderLostFrameVsCapture], widened for
-     *     #1153 to catch the >3-line half-black band — so it fires whenever the on-screen frame
-     *     is materially less than the authoritative grid, not only when ≤3 lines survive.
-     *  2. Its fixed 350 ms one-shot lost the race against the bigger attachment redraw (the pane
-     *     could still be mid-clear at 350 ms, or the redraw could land AFTER it). Now it re-checks
-     *     on a bounded cadence ([SEND_OVERPAINT_HEAL_MAX_TICKS] settle ticks), so a late/large
-     *     redraw is still caught and a re-overpaint after an early heal is re-healed.
-     *
-     * A DENSE, normally-painted response is a no-op: each tick pays only the cheap LOCAL
-     * [TerminalSurfaceState.renderLooksSuspect] pre-check and pays for the
-     * authoritative `capture-pane` diff ONLY when the render looks sparse enough to possibly be
-     * a lost frame. The heal is guarded by a [RuntimeRefreshGuard] keyed to the current
-     * generation + target + client so a late heal can never paint a switched-away session, and
-     * is scoped to the pane the send targeted while it is still the active pane.
+     * Send behaviour preserved: after a send's submit Enter the agent's `%output` overpaint can
+     * leave the active pane BLACK/partial/half-black on a LIVE transport. The reconcile re-checks
+     * on a bounded cadence ([ReconcileReason.settleTicks] × [ReconcileReason.settleDelayMs]) so a
+     * late/large redraw is still caught, judges the pane against tmux's AUTHORITATIVE `capture-pane`
+     * (the #1138/#1300 union oracle), and is a no-op on a dense frame (each tick pays only the cheap
+     * LOCAL [TerminalSurfaceState.renderLooksSuspect] pre-check). Guarded by a [RuntimeRefreshGuard]
+     * so a late heal can never paint a switched-away session, and scoped to [paneId] while active.
      */
-    private fun scheduleSendOverpaintHeal(client: TmuxClient, paneId: String) {
+    private fun requestReconcile(client: TmuxClient, paneId: String, reason: ReconcileReason) {
         val target = activeTarget ?: return
         val healGeneration = connectGeneration
         val guard = RuntimeRefreshGuard(
@@ -14107,17 +14105,15 @@ public class TmuxSessionViewModel @Inject constructor(
             client = client,
         )
         bridgeScope.launch {
-            repeat(SEND_OVERPAINT_HEAL_MAX_TICKS) { tick ->
-                // Let the post-submit agent overpaint land (and re-check on later ticks for a
-                // late/large attachment redraw) before judging the pane.
-                delay(SEND_OVERPAINT_HEAL_SETTLE_MS)
+            repeat(reason.settleTicks) { tick ->
+                // Let the overpaint land (and re-check on later ticks for a late/large redraw)
+                // before judging the pane.
+                delay(reason.settleDelayMs)
                 if (clientRef !== client) return@launch
                 if (client.disconnected.value) return@launch
                 if (inlineConnectionStatus !is ConnectionStatus.Connected) return@launch
                 if (!isCurrentRuntime(guard)) return@launch
                 val activePane = activeVisiblePane() ?: return@launch
-                // Heal only the pane the send targeted while it is still the active pane
-                // (the reported "sent a message → everything black" is the focused pane).
                 if (activePane.paneId != paneId) return@launch
                 // Cheap LOCAL pre-check: skip the capture round-trip on a dense, normally-painted
                 // response (its live rows sit above the sparse ceiling). Only a fully-blank /
@@ -14125,19 +14121,21 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (!activePane.terminalState.renderLooksSuspect()) return@repeat
                 Log.i(
                     ISSUE_145_RECONNECT_TAG,
-                    "tmux-send-overpaint-active-pane-heal-check pane=${activePane.paneId} " +
-                        "window=${activePane.windowId} session=${target.sessionName} tick=$tick",
+                    "tmux-reconcile-event-active-pane-heal-check reason=$reason " +
+                        "pane=${activePane.paneId} window=${activePane.windowId} " +
+                        "session=${target.sessionName} tick=$tick",
                 )
-                // Authoritative heal: capture tmux's grid, diff it against the render, and
-                // re-seed ONLY when the render is materially less than the authoritative frame.
+                // Authoritative heal through the SINGLE chokepoint (R3 per-pane single-flight):
+                // capture tmux's grid, diff it against the render, and re-seed ONLY when the
+                // render is materially less than the authoritative frame.
                 val healed = runCatching {
                     healActivePaneIfStaleRender(client, activePane, guard)
                 }.getOrDefault(HealOutcome.Unverified) == HealOutcome.Healed
                 if (healed) {
                     Log.i(
                         ISSUE_145_RECONNECT_TAG,
-                        "tmux-send-overpaint-active-pane-heal-applied pane=${activePane.paneId} " +
-                            "session=${target.sessionName} tick=$tick",
+                        "tmux-reconcile-event-active-pane-heal-applied reason=$reason " +
+                            "pane=${activePane.paneId} session=${target.sessionName} tick=$tick",
                     )
                 }
             }
@@ -15317,9 +15315,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // (vim/htop/less/…) can trigger the same clear+redraw overpaint that leaves the pane
         // half-black on a live transport. Schedule the same bounded, capture-diff-gated heal
         // ONLY for a multi-line payload — a single keystroke never overpaints the whole
-        // viewport, so per-keystroke input pays nothing.
+        // viewport, so per-keystroke input pays nothing. Issue #1353 R4: via the shared
+        // reconcile-event entry, same as the agent send path.
         if (BracketedPaste.containsLineBreak(bytes)) {
-            scheduleSendOverpaintHeal(client, paneId)
+            requestReconcile(client, paneId, ReconcileReason.Send)
         }
     }
 

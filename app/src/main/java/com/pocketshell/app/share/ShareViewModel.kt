@@ -648,8 +648,22 @@ internal class ShareViewModel internal constructor(
     private suspend fun resolveActiveSessions(host: HostEntity): List<ActiveSessionTarget> {
         val entry = activeTmuxClients.clients.value[host.id] ?: return emptyList()
         val windows = runCatching {
+            // Issue #1488: the picker's `list-panes -a` enumeration rides the
+            // DEDICATED exec lane ([TmuxClient.listPanesViaExec]) — the same
+            // independent [com.pocketshell.core.ssh.SshSession.exec] channel the
+            // #1316 attach reconcile and the #1460/#1475 interactive send ride —
+            // NOT the shared per-host `-CC` control channel [sendCommand] awaits
+            // `%begin`/`%end` on. This was one of the FOUR residual `-CC` SPOFs
+            // the 2026-07-12 transport audit found (H2): the share target picker
+            // runs four serial `-CC` read round-trips (this enumeration, the
+            // identity resolution, the confirm-time staleness check, and the
+            // paste pane-id), so a share into a host with a live Codex `%output`
+            // burst head-of-line-blocked the WHOLE picker behind the saturated
+            // channel for well over a minute. The exec lane reads its own
+            // channel's stdout outside the transport dispatcher, so the query
+            // returns while a burst saturates `-CC`. Same command string / parse.
             val response =
-                entry.client.sendCommand(SshFolderListGateway.CONTROL_LIST_PANES_COMMAND)
+                entry.client.listPanesViaExec(SshFolderListGateway.CONTROL_LIST_PANES_COMMAND)
             if (response.isError) return@runCatching emptyList()
             SshFolderListGateway.parseSessionWindowRows(response.output.joinToString("\n"))
         }.getOrDefault(emptyList())
@@ -697,7 +711,13 @@ internal class ShareViewModel internal constructor(
         val entry = activeTmuxClients.clients.value[host.id] ?: return emptyMap()
         val wanted = sessionNames.toSet()
         return runCatching {
-            val response = entry.client.sendCommand(SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND)
+            // Issue #1488: the picker's `list-sessions` identity resolution rides
+            // the exec lane too — see [resolveActiveSessions]. It runs serially
+            // right after the pane enumeration while building the picker, so if it
+            // stayed on `-CC` it would head-of-line-block behind a live `%output`
+            // burst exactly the same way. Command string and parse unchanged.
+            val response =
+                entry.client.listPanesViaExec(SshFolderListGateway.CONTROL_LIST_SESSIONS_COMMAND)
             if (response.isError) return@runCatching emptyMap()
             SshFolderListGateway.parseListSessionsRows(response.output.joinToString("\n"))
                 .asSequence()
@@ -720,7 +740,12 @@ internal class ShareViewModel internal constructor(
         val expectedCreated = session.sessionCreated
         if (expectedId != null && expectedCreated != null) {
             val response = runCatching {
-                client.sendCommand(
+                // Issue #1488: the confirm-time staleness check rides the exec
+                // lane — see [resolveActiveSessions]. It fires when the user taps
+                // a session target; on a host mid-`%output`-burst a `-CC`
+                // round-trip here would wedge the confirm exactly as the picker
+                // build did. Same command string / parse; only the lane moves.
+                client.listPanesViaExec(
                     "display-message -p -t '$escaped' '#{session_id}::#{session_created}'",
                 )
             }.getOrNull() ?: return false
@@ -729,7 +754,7 @@ internal class ShareViewModel internal constructor(
             return actual == "$expectedId::$expectedCreated"
         }
         val response = runCatching {
-            client.sendCommand("has-session -t '$escaped'")
+            client.listPanesViaExec("has-session -t '$escaped'")
         }.getOrNull() ?: return false
         return !response.isError
     }
@@ -1191,8 +1216,10 @@ internal class ShareViewModel internal constructor(
      * `send-keys` reply head-of-line-blocked behind the burst on the ONE
      * sshj transport reader, so the paste wedged (the "app froze" report).
      * The exec lane reads its own channel outside the transport dispatcher,
-     * so the send returns while a burst saturates `-CC`. The pane-id query
-     * stays on `-CC` (a cheap pre-send resolution, not the interactive send).
+     * so the send returns while a burst saturates `-CC`. Issue #1488: the
+     * pre-send pane-id resolution now rides the exec lane too (see
+     * [resolveActivePaneIdOrNull]) — leaving it on `-CC` left it able to
+     * head-of-line-block at RESOLUTION before the exec-lane send ever ran.
      *
      * Throws [IllegalStateException] when tmux reports an error so the
      * caller surfaces a Failed UploadState instead of silently
@@ -1234,9 +1261,31 @@ internal class ShareViewModel internal constructor(
         }
     }
 
+    /**
+     * Issue #1488: resolve the active pane id on the DEDICATED exec lane
+     * ([TmuxClient.listPanesViaExec]) — the same independent
+     * [com.pocketshell.core.ssh.SshSession.exec] channel the #1316 attach
+     * reconcile and the #1460/#1475 interactive send ride — NOT the shared
+     * per-host `-CC` control channel [sendCommand] awaits `%begin`/`%end` on.
+     *
+     * This was one of the FOUR residual `-CC` SPOFs the #1459 Codex-freeze
+     * audit / the 2026-07-12 transport audit found (H2): after #1475 moved the
+     * interactive SEND onto the exec lane, the pre-send pane-id resolution
+     * still rode `sendCommand`, so a share-sheet paste into a live agent pane
+     * mid-`%output`-burst head-of-line-blocked at RESOLUTION — before the
+     * exec-lane send — because its `display-message` reply was stuck behind the
+     * burst on the ONE sshj transport reader. The exec lane reads its own
+     * channel's stdout outside the transport dispatcher, so the resolution
+     * returns while a burst saturates `-CC`.
+     *
+     * `listPanesViaExec` prepends `tmux` and runs the passed command on the
+     * exec channel; the `display-message -p '#{pane_id}'` query, its parse
+     * (first `%`-prefixed line), and the null-on-error/failure fallback to an
+     * untargeted `send-keys` are all unchanged — only the transport lane moves.
+     */
     private suspend fun resolveActivePaneIdOrNull(client: TmuxClient): String? {
         val response = runCatching {
-            client.sendCommand("display-message -p '#{pane_id}'")
+            client.listPanesViaExec("display-message -p '#{pane_id}'")
         }.getOrNull() ?: return null
         if (response.isError) return null
         val first = response.output.firstOrNull()?.trim().orEmpty()

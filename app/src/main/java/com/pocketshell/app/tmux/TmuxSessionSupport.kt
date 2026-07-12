@@ -319,6 +319,17 @@ internal const val STALE_RENDER_WATCHDOG_BACKOFF_MAX_DOUBLINGS: Int = 3
 internal const val STALE_RENDER_WATCHDOG_MAX_TICKS: Int = 10_000
 
 /**
+ * Issue #1494 — the per-tick `withTimeout` the stale-render watchdog wraps its heal call in, so
+ * ONE hung capture can never freeze the watchdog LOOP (its own supervisor). Set slightly above
+ * the cooperative `capture-pane` ceiling ([SEED_CAPTURE_TIMEOUT_MS] = 2.5 s) so a healthy or
+ * slow-but-alive heal always completes within it, while a heal wedged on an uninterruptible
+ * exec-lane read is abandoned (scored UNVERIFIED) at this bound and the loop advances to the
+ * next tick. This is the LOOP-liveness half of #1494; the per-pane single-flight force-reset
+ * ([RenderHealCoordinator.HELD_TOO_LONG_MS]) is the future-heal half.
+ */
+internal const val RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS: Long = 4_000L
+
+/**
  * Issue #941 (black-screen B1): after a send's submit Enter, wait this long for
  * the agent's `%output` overpaint to land before judging whether the active pane
  * settled partial-black/blank and needs the one-shot send-overpaint heal. Short

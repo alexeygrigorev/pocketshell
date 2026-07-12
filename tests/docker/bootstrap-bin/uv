@@ -8,12 +8,22 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ]; then
     action="install --upgrade"
     shift
   fi
-  if [ "${1:-}" = "--exclude-newer-package" ]; then
-    shift 2
-  fi
+  # Consume any leading flags (order-independent) before the positional package:
+  #   --exclude-newer <date>          global pin (production, post-#1492) — 2 tokens
+  #   --exclude-newer-package <p=date>  legacy per-package pin (pre-#1492)  — 2 tokens
+  while true; do
+    case "${1:-}" in
+      --exclude-newer|--exclude-newer-package)
+        shift 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
   package="${1:-}"
   if [ -z "$package" ]; then
-    printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer-package <package=date>] <package>\n' >&2
+    printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer <date>] [--exclude-newer-package <package=date>] <package>\n' >&2
     exit 64
   fi
   target_dir="${HOME}/.local/bin"
@@ -64,5 +74,5 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "upgrade" ] && [ -n "${3:-}" ]; then
   exit 0
 fi
 
-printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer-package <package=date>] <package> and managed tool upgrade <package>\n' >&2
+printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer <date>] [--exclude-newer-package <package=date>] <package> and managed tool upgrade <package>\n' >&2
 exit 64

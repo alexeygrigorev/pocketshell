@@ -145,6 +145,11 @@ class FolderListViewModel internal constructor(
             ""
         }
     },
+    // Issue #1509: notifications step of the single session-tree setup — see
+    // [defaultNotificationPermissionNeeded]. Injectable test seam.
+    private val notificationPermissionNeeded: () -> Boolean = {
+        defaultNotificationPermissionNeeded(applicationContext)
+    },
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -247,13 +252,11 @@ class FolderListViewModel internal constructor(
 
     /**
      * Issue #885: passive host-CLI-version mismatch, detected from the
-     * `pocketshell tree` payload's `cli_version` on every host open (warm/direct
-     * included) — NOT a separate slow blocking `--version` exec. Non-null when
-     * the host's `pocketshell` is OLDER than this app build expects; the
-     * FolderList surfaces it as a small dismissible update prompt. Stays `null`
-     * when the versions match, when the payload carries no version (old CLI), or
-     * when the host is NEWER than the app (that is the app-behind case, not a
-     * host-update prompt — see [PayloadVersionCheck.Verdict.AppOutdated]).
+     * `pocketshell tree` payload's `cli_version` — NOT a slow blocking `--version`
+     * exec. Non-null only when the host `pocketshell` is OLDER than this app build
+     * expects; the FolderList surfaces it as a dismissible update prompt. Stays
+     * `null` on match, on a versionless payload (old CLI), or when the host is
+     * NEWER (the app-behind case — see [PayloadVersionCheck.Verdict.AppOutdated]).
      */
     private val _cliVersionMismatch: MutableStateFlow<PayloadVersionCheck.Verdict.HostOutdated?> =
         MutableStateFlow(null)
@@ -266,22 +269,22 @@ class FolderListViewModel internal constructor(
         _cliVersionUpdateState.value = CliVersionUpdateState.Idle
     }
 
+    /** Issue #1509: THE single session-tree setup coordinator (relocation + dedup, D22). */
+    private val sessionTreeSetup = SessionTreeSetupCoordinator(notificationPermissionNeeded)
+
+    val notificationPermissionRequest: StateFlow<Boolean> =
+        sessionTreeSetup.notificationPermissionRequest
+
+    fun onNotificationPermissionRequestConsumed() =
+        sessionTreeSetup.onNotificationPermissionRequestConsumed()
+
     /**
-     * Issue #947: the progress state of the banner's one-tap **Update** action,
-     * which runs the host-side `pocketshell` upgrade over the warm SSH session.
-     *
-     * - [Idle] — no update in flight (the banner shows the Update + Dismiss
-     *   buttons).
-     * - [Running] — the upgrade exec is in flight (the banner shows a spinner;
-     *   Update is disabled).
-     * - [Failure] — the upgrade failed; [Failure.message] (installer stderr /
-     *   timeout / no-installer) is shown and the user can Retry or Dismiss. There
-     *   is NO stuck spinner: the state always leaves [Running] (the exec is
-     *   bounded, #944/#939).
-     *
-     * A SUCCESS does not get its own state — the upgrade re-checks the host
-     * version and, when it now matches, clears [cliVersionMismatch] so the whole
-     * banner disappears (the success signal is the banner going away).
+     * Issue #947: progress of the banner's one-tap **Update** action (host-side
+     * `pocketshell` upgrade over the warm SSH session). [Idle] shows the
+     * Update/Dismiss buttons; [Running] a spinner; [Failure] the installer error
+     * with Retry/Dismiss — never a stuck spinner (the exec is bounded, #944/#939).
+     * SUCCESS has no state: the upgrade re-checks the version and, on a match,
+     * clears [cliVersionMismatch] so the whole banner disappears.
      */
     public sealed interface CliVersionUpdateState {
         public data object Idle : CliVersionUpdateState
@@ -310,20 +313,13 @@ class FolderListViewModel internal constructor(
 
     /**
      * Issue #947: run the host-side `pocketshell` upgrade for the
-     * [cliVersionMismatch] banner's one-tap **Update** button.
-     *
-     * Over the EXISTING warm SSH session (D21 — no new connection) it:
-     *  1. flips the banner to [CliVersionUpdateState.Running] (spinner);
-     *  2. execs the auto-detected installer upgrade (bounded — #944/#939);
-     *  3. on success RE-CHECKS the host version via a fresh `tree get` and feeds
-     *     it through [observePayloadCliVersion] — when it now matches, the
-     *     mismatch clears and the whole banner disappears;
-     *  4. on failure (or a re-check that still reports outdated) surfaces a
-     *     [CliVersionUpdateState.Failure] with the installer error so the user can
-     *     Retry or Dismiss — never a stuck spinner.
-     *
-     * Idempotent against a double tap: a second call while one is in flight is
-     * ignored.
+     * [cliVersionMismatch] banner's one-tap **Update** button. Over the EXISTING
+     * warm SSH session (D21) it flips to [CliVersionUpdateState.Running], execs
+     * the bounded installer upgrade (#944/#939), then on success RE-CHECKS the
+     * version via a fresh `tree get` through [observePayloadCliVersion] (a match
+     * clears the banner); on failure / still-outdated it surfaces a
+     * [CliVersionUpdateState.Failure] — never a stuck spinner. Idempotent against
+     * a double tap (a second call while one is in flight is ignored).
      */
     fun runHostPocketshellUpgrade() {
         if (_cliVersionUpdateState.value is CliVersionUpdateState.Running) return
@@ -342,16 +338,12 @@ class FolderListViewModel internal constructor(
         _cliVersionUpdateState.value = CliVersionUpdateState.Running
         hostUpgradeJob = viewModelScope.launch {
             // Issue #1157: robustly (re)acquire a live session on demand rather than
-            // dead-ending on a possibly-absent/expired warm lease. The upgrade runs
-            // over the FolderList's warm-lease session, which is SEPARATE from the
-            // live terminal sessions; with 13 live sessions (genuinely connected) but
-            // this screen's warm lease released/expired/not-yet-acquired, the old
-            // `awaitWarmSession() == null` gate surfaced a FALSE "Not connected"
-            // that contradicted the tree + tray. [acquireUpgradeSession] reuses a
-            // live warm session as-is and, when absent, re-acquires from the SHARED
-            // pool — which REUSES the live pooled transport (refcount, no new
-            // connect — D21) and only dials fresh when there is genuinely no live
-            // transport. It returns null ONLY when the host is truly unreachable.
+            // dead-ending on a possibly-absent/expired warm lease. [acquireUpgradeSession]
+            // reuses a live warm session as-is and, when absent, re-acquires from the
+            // SHARED pool — REUSING the live pooled transport (refcount, no new connect
+            // — D21) and dialing fresh only when there is genuinely no live transport,
+            // so it avoids the old `awaitWarmSession() == null` FALSE "Not connected"
+            // that contradicted a connected tree + tray. Null ONLY when unreachable.
             val session = acquireUpgradeSession(params)
             if (session == null || bound != params) {
                 _cliVersionUpdateState.value =
@@ -377,12 +369,10 @@ class FolderListViewModel internal constructor(
 
     /**
      * Issue #947: after a successful upgrade exec, re-read the host CLI version
-     * from a fresh `tree get` and re-evaluate the mismatch. When it now matches
-     * (or the host is newer), [observePayloadCliVersion] clears
-     * [cliVersionMismatch] and we drop back to [CliVersionUpdateState.Idle] (the
-     * banner disappears). When it STILL reports outdated — e.g. the upgrade was a
-     * silent no-op — we surface a failure so the spinner never sticks and the
-     * user can retry/dismiss.
+     * from a fresh `tree get` and re-evaluate. A now-matching (or newer) version
+     * clears [cliVersionMismatch] and drops back to [CliVersionUpdateState.Idle];
+     * a still-outdated read (a silent no-op upgrade) surfaces a failure so the
+     * spinner never sticks and the user can retry/dismiss.
      */
     private suspend fun recheckHostVersionAfterUpgrade(params: BoundParams, session: SshSession) {
         val source = treeRemoteSource
@@ -424,11 +414,10 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Issue #885: feed a payload-carried [hostCliVersion] (from `tree get` /
-     * `tree reconcile`) through [PayloadVersionCheck] and raise the passive
-     * update prompt when the host CLI is older than this app build. Visible for
-     * test. A `null`/blank/unparseable version is "no signal" and never raises a
-     * false prompt; a NEWER host CLI does not raise the prompt either.
+     * Issue #885: feed a payload-carried [hostCliVersion] through
+     * [PayloadVersionCheck] and raise the passive update prompt when the host CLI
+     * is older than this app build. A null/blank/unparseable version or a NEWER
+     * host CLI is "no signal" and never raises a false prompt. Visible for test.
      */
     internal fun observePayloadCliVersion(hostCliVersion: String?) {
         if (hostCliVersion.isNullOrBlank()) return
@@ -443,10 +432,10 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * The `pocketshell` version this app build expects on the host. Resolved via
-     * [expectedPocketshellVersionProvider] (the installed app `versionName` on
-     * the production path; injectable in tests). Blank when the read fails, which
-     * [PayloadVersionCheck.evaluate] treats as "no signal".
+     * The `pocketshell` version this app build expects on the host, via
+     * [expectedPocketshellVersionProvider] (installed app `versionName`; injectable
+     * in tests). Blank when the read fails — [PayloadVersionCheck] treats it as
+     * "no signal".
      */
     private fun expectedPocketshellVersion(): String = expectedPocketshellVersionProvider()
 
@@ -907,6 +896,9 @@ class FolderListViewModel internal constructor(
         )
         warmReleaseJob?.cancel()
         warmReleaseJob = null
+        // Issue #1509: the single setup pass — folds in the notifications request
+        // (the MainActivity.onCreate app-open trigger is deleted, D22).
+        sessionTreeSetup.runSetup()
         // Issue #783: keep the live `-CC` event subscriptions
         // (`%sessions-changed` + `%window-close`) and the periodic reconcile tied
         // to the BOUND-HOST lifetime, not screen composition. On a same-host
@@ -943,6 +935,9 @@ class FolderListViewModel internal constructor(
         clientCacheSeedJob = null
         warmSessionReady.value = false
         bound = params
+        // Issue #1509: host CHANGE re-arms the one-shot version-mismatch check
+        // (a same-host re-entry, handled above, keeps a dismissed banner gone).
+        sessionTreeSetup.onHostChanged()
         tree.bindHost(hostId)
         rootSnapshotLoaded = false
         lastWatchedFolders = emptyList()
@@ -1553,10 +1548,12 @@ class FolderListViewModel internal constructor(
                 source.reconcileTree(session, params.hostName)
             }
             if (bound != params) return@launch
-            // Issue #885: the reconcile payload also carries the host CLI
-            // version (it fires on every open + resume), so the passive check
-            // stays live even when `tree get` returned an empty seed.
-            observePayloadCliVersion(delta?.cliVersion)
+            // Issue #885/#1509: the reconcile payload also carries the version, so
+            // the one-shot check still fires when `tree get` returned an empty
+            // seed — still gated to ONCE per open (no re-raise on later polls).
+            sessionTreeSetup.maybeRunVersionCheck(delta?.cliVersion) {
+                observePayloadCliVersion(it)
+            }
             if (delta == null || delta.added.isNotEmpty()) {
                 // Unavailable or new sessions appeared → full probe.
                 launchReconcile(params)
@@ -1667,11 +1664,12 @@ class FolderListViewModel internal constructor(
                         hostChanged = true
                         return@withTimeoutOrNull
                     }
-                    // Issue #885: passive host-CLI-version check from the SAME
-                    // payload the client already round-trips on every open — no
-                    // separate blocking `--version` exec, and consistent because
-                    // this fires on warm/direct opens too (not only home→open).
-                    observePayloadCliVersion(treeResult.cliVersion)
+                    // Issue #885/#1509: passive host-CLI-version check, gated to
+                    // run EXACTLY ONCE per session-tree open (the single lazy
+                    // background check, never an app-open trigger).
+                    sessionTreeSetup.maybeRunVersionCheck(treeResult.cliVersion) {
+                        observePayloadCliVersion(it)
+                    }
                     val nodes = treeResult.nodes
                     if (nodes.isNotEmpty()) {
                         tree.hydrate(nodes.map { it.toHydratedNode() })

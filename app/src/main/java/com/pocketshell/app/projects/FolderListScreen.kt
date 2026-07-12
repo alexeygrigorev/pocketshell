@@ -275,6 +275,24 @@ fun FolderListScreen(
         }
     }
 
+    // Issue #1509: the notification-permission request is now driven by the
+    // single session-tree setup coordinator in the view model (folded in from the
+    // deleted MainActivity.onCreate app-open trigger). When the setup raises the
+    // request, launch the Android 13+ POST_NOTIFICATIONS runtime prompt from the
+    // session tree — the one place — then consume it so it fires at most once.
+    val notificationPermissionRequest by viewModel.notificationPermissionRequest.collectAsState()
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* best-effort — the in-app indicators work regardless of the grant */ }
+    LaunchedEffect(notificationPermissionRequest) {
+        if (notificationPermissionRequest) {
+            runCatching {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            viewModel.onNotificationPermissionRequestConsumed()
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
     }

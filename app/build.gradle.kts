@@ -153,6 +153,31 @@ android {
                     events("passed", "skipped", "failed")
                     showStandardStreams = true
                 }
+
+                // #1518: the Robolectric render-heal sibling suite
+                // (*StaleRender* / *RenderHeal* / *Watchdog*, plus the heavy
+                // TmuxSessionViewModel Robolectric classes the glob pulls in)
+                // loads a large amount of per-class state. Gradle's default
+                // `forkEvery = 0` keeps EVERY app test class in ONE long-lived
+                // worker JVM, so that heap/metaspace piles up across the whole
+                // run and OOMs the fork when the render-heal glob (or the whole
+                // module) runs together — narrow single-class runs stayed fine.
+                // Bound it two ways, both well under the 7 GB hosted runner
+                // (daemon -Xmx2048m + this fork ≈ 3.5 GB peak):
+                //   - an explicit, CI-budget-safe worker heap, and
+                //   - a finite `forkEvery` so the worker JVM is recycled every
+                //     N test classes and per-class Robolectric metaspace can't
+                //     accumulate unbounded. forkEvery=100 survives the exact
+                //     metaspace level that OOMs the default single fork while
+                //     costing only a few worker restarts (~+25s on this module).
+                // Both stay overridable for local repro/tuning.
+                test.maxHeapSize = providers.gradleProperty("pocketshell.test.maxHeap")
+                    .orElse("1536m").get()
+                test.setForkEvery(
+                    providers.gradleProperty("pocketshell.test.forkEvery")
+                        .orElse("100").get().toLong()
+                )
+
                 val apiVersion = providers.gradleProperty("api.version")
                     .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
                     .get()

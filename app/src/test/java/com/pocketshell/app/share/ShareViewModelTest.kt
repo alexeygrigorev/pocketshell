@@ -512,6 +512,143 @@ class ShareViewModelTest {
         }
     }
 
+    // ---- Issue #1488: the FULL residual `-CC` wedge the 2026-07-12 transport
+    // audit found (H2). #1475 moved only the interactive SEND onto the exec lane;
+    // the share picker path still ran FOUR serial `-CC` read round-trips — the
+    // `list-panes` enumeration, the `list-sessions` identity resolution, the
+    // confirm-time staleness check, and the paste pane-id resolution. A share
+    // into a host mid-`%output`-burst head-of-line-blocked the WHOLE picker
+    // behind the saturated channel for well over a minute. This drives all four
+    // behind a saturated `-CC` and proves each now rides the exec lane. ----
+
+    @Test
+    fun `full share picker path completes off the exec lane while a -CC burst wedges the channel`() =
+        runTest {
+            // RED on base (#1488 unfixed): each of the four picker reads rides
+            // `sendCommand`, so its reply is head-of-line-blocked behind the burst
+            // on the one sshj reader. The picker build never resolves (stays
+            // loading), the confirm staleness check never returns (stage stays
+            // Running), and the paste parks at RESOLUTION (stays Running). GREEN
+            // with the fix: all four ride `listPanesViaExec` (the exec lane),
+            // return fast even mid-burst, so the whole path completes.
+            val registry = ActiveTmuxClients()
+            val vm = newVm(registry)
+            val host = host(id = 1488L, name = "burst-host-1488")
+            val client = ShareCcPickerBurstWedgeClient(
+                paneIdReply = "%0",
+                listPanesRows = listOf(
+                    "work::0::main::0::1::/home/alexey/git/pocketshell::/dev/pts/1::bash",
+                    "scratch::0::main::1::1::/home/alexey/git/live::/dev/pts/2::bash",
+                ),
+                listSessionsRows = listOf(
+                    "work::\$1::101::101::0::::::::::/home/alexey/git/pocketshell",
+                    "scratch::\$2::202::202::1::::::::::/home/alexey/git/live",
+                ),
+                // Mismatches the resolved scratch identity ($2::202) so the
+                // confirm staleness check returns a terminal Failed(stale) — which
+                // proves the check COMPLETED off `-CC` (on base it wedges Running).
+                staleIdentityReply = "\$9::999",
+            )
+            registry.register(
+                hostId = host.id,
+                hostName = host.name,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = "/tmp/key",
+                client = client,
+            )
+
+            try {
+                // Step A: build the picker — resolveActiveSessions (`list-panes`)
+                // + resolveSessionIdentities (`list-sessions`), both serial `-CC`.
+                vm.setItem(uriItem("shot.png"))
+                vm.selectTargetHost(host)
+                advanceUntilIdle()
+
+                val selection = vm.targetSelection.value
+                // Load-bearing GREEN assertion (G6): the picker RESOLVES during a
+                // live `-CC` burst — on base it head-of-line-blocks at the
+                // `list-panes` enumeration and stays loading forever.
+                assertTrue(
+                    "share picker must resolve during a live -CC %output burst, but was " +
+                        "$selection; the list-panes/list-sessions enumeration is " +
+                        "head-of-line-blocked at the wedged -CC sendCommand (exec-lane " +
+                        "resolves so far: ${client.execLaneResolveCommands}, wedged -CC " +
+                        "resolves: ${client.ccResolveCommands})",
+                    selection != null && !selection.loading && selection.activeSessions.isNotEmpty(),
+                )
+                val session = selection!!.activeSessions.first()
+                assertEquals("scratch", session.sessionName)
+                assertEquals("\$2", session.tmuxSessionId)
+
+                // Step B: confirm a session target — isSessionTargetCurrent
+                // (`display-message -p -t … #{session_id}::#{session_created}`).
+                vm.stageIntoSession(host, session)
+                advanceUntilIdle()
+
+                val stageState = vm.uploadState.value
+                // GREEN: the confirm staleness check COMPLETES (reaches a terminal
+                // Failed/Success) — on base it wedges on `-CC` and stays Running.
+                assertTrue(
+                    "confirm-time staleness check must complete during a live -CC burst, but " +
+                        "stayed $stageState; it is head-of-line-blocked at the wedged -CC " +
+                        "sendCommand (wedged -CC resolves: ${client.ccResolveCommands})",
+                    stageState is UploadState.Failed || stageState is UploadState.Success,
+                )
+                vm.clearUploadState()
+
+                // Step C: paste — resolveActivePaneIdOrNull
+                // (`display-message -p '#{pane_id}'`).
+                vm.setItem(ShareableItem.TextItem(text = "echo hello", displayName = "note"))
+                vm.pasteIntoSession(host)
+                advanceUntilIdle()
+
+                val pasteState = vm.uploadState.value
+                assertTrue(
+                    "share paste must complete during a live -CC %output burst, but stayed " +
+                        "$pasteState; pane-id resolution is head-of-line-blocked at the wedged " +
+                        "-CC sendCommand (wedged -CC resolves: ${client.ccResolveCommands})",
+                    pasteState is UploadState.Success,
+                )
+
+                // Class coverage (D31/D32): ALL FOUR picker reads rode the exec
+                // lane, carrying their SAME command strings.
+                val execReads = client.execLaneResolveCommands
+                assertTrue(
+                    "list-panes enumeration must ride the exec lane, got $execReads",
+                    execReads.any { it.startsWith("list-panes") },
+                )
+                assertTrue(
+                    "list-sessions identity resolution must ride the exec lane, got $execReads",
+                    execReads.any { it.startsWith("list-sessions") },
+                )
+                assertTrue(
+                    "confirm-time staleness display-message must ride the exec lane, got $execReads",
+                    execReads.any { it.startsWith("display-message -p -t") },
+                )
+                assertTrue(
+                    "paste pane-id display-message must ride the exec lane, got $execReads",
+                    execReads.any { it.startsWith("display-message -p") && it.contains("#{pane_id}") },
+                )
+                // NONE of the four reads hit the wedged `-CC` sendCommand.
+                assertTrue(
+                    "no picker read may be issued on the wedged -CC sendCommand path, got " +
+                        "${client.ccResolveCommands}",
+                    client.ccResolveCommands.isEmpty(),
+                )
+                // The resolved pane id flows into the targeted exec-lane send.
+                assertTrue(
+                    "expected the resolved pane %0 to target the exec-lane send, got " +
+                        "${client.execLaneSendKeys}",
+                    client.execLaneSendKeys.any { it.startsWith("send-keys -l -t %0 --") },
+                )
+            } finally {
+                // Release any parked -CC coroutine so it does not outlive the test.
+                client.releaseCcWedge()
+            }
+        }
+
     @Test
     fun pasteIntoSessionRejectsNonTextStagedItems() = runTest {
         val registry = ActiveTmuxClients()
@@ -1978,10 +2115,10 @@ class ShareViewModelTest {
      * never returns (the #1459/#1460 send-lane wedge, here for
      * Share→attached-pane). The DEDICATED `send-keys` exec lane
      * ([sendKeysViaExec]) reads its own channel outside the transport dispatcher,
-     * so it returns fast even mid-burst. The cheap pane-id `display-message`
-     * query still answers on `-CC` — it is a pre-send resolution, not the
-     * interactive send. Every other [TmuxClient] member is delegated to a real
-     * [FakeTmuxClient].
+     * so it returns fast even mid-burst. Post-#1488 the pane-id `display-message`
+     * RESOLUTION also rides the exec lane ([listPanesViaExec]) — so it answers
+     * there, NOT on the wedged `-CC` [sendCommand]. Every other [TmuxClient]
+     * member is delegated to a real [FakeTmuxClient].
      */
     private class ShareCcBurstWedgeClient(
         private val paneIdReply: String,
@@ -2004,10 +2141,111 @@ class ShareViewModelTest {
                 ccSendKeys += cmd
                 ccWedge.await()
             }
-            // Cheap pre-send pane resolution answers normally.
-            cmd.startsWith("display-message") ->
-                CommandResponse(number = 0L, output = listOf(paneIdReply), isError = false)
+            // Post-#1488 the pane-id resolution no longer rides -CC; if it did,
+            // it would wedge behind the burst like everything else.
+            cmd.startsWith("display-message") -> {
+                ccSendKeys += cmd
+                ccWedge.await()
+            }
             else -> CommandResponse(number = 0L, output = emptyList(), isError = false)
+        }
+
+        override suspend fun listPanesViaExec(
+            listPanesCommand: String,
+            timeoutMs: Long?,
+        ): CommandResponse =
+            // Issue #1488: the pane-id `display-message` resolution rides the
+            // exec lane, so it answers here even while the burst holds `-CC`.
+            CommandResponse(number = 0L, output = listOf(paneIdReply), isError = false)
+
+        override suspend fun sendKeysViaExec(
+            sendKeysCommand: String,
+            timeoutMs: Long?,
+        ): CommandResponse {
+            execLaneSendKeys += sendKeysCommand
+            // `send-keys` prints nothing on success.
+            return CommandResponse(number = 0L, output = emptyList(), isError = false)
+        }
+
+        fun releaseCcWedge() {
+            ccWedge.complete(CommandResponse(number = 0L, output = emptyList(), isError = false))
+        }
+    }
+
+    /**
+     * Issue #1488 reproduction double. Models a live agent `%output` burst that
+     * has saturated the shared per-host `-CC` control channel: EVERY `-CC`
+     * [sendCommand] read round-trip the share picker path issues — the
+     * `list-panes` session enumeration, the `list-sessions` identity resolution,
+     * the confirm-time `display-message`/`has-session` staleness check, AND the
+     * paste's `display-message -p '#{pane_id}'` resolution — has its
+     * `%begin`/`%end` reply HEAD-OF-LINE-BLOCKED behind the burst on the ONE sshj
+     * transport reader and never returns. This is the FULL residual H2 wedge the
+     * 2026-07-12 transport audit found: the picker runs four serial `-CC` reads,
+     * so a share into a Codex-burst host head-of-line-blocked the WHOLE picker
+     * for well over a minute (the 10 s idle gate never fires while %output
+     * flows; each call bounded only by the 30 s absolute ceiling). The dedicated
+     * exec lane ([listPanesViaExec] for the reads, [sendKeysViaExec] for the
+     * send) reads its own channel outside the transport dispatcher, so it returns
+     * fast even mid-burst. Every other [TmuxClient] member is delegated to a real
+     * [FakeTmuxClient].
+     */
+    private class ShareCcPickerBurstWedgeClient(
+        private val paneIdReply: String,
+        private val listPanesRows: List<String>,
+        private val listSessionsRows: List<String>,
+        /** identity the staleness `display-message -t` reports (mismatch => stale). */
+        private val staleIdentityReply: String,
+        private val delegate: FakeTmuxClient = FakeTmuxClient(),
+    ) : TmuxClient by delegate {
+
+        /** picker/paste read queries that rode the dedicated exec lane (the fix). */
+        val execLaneResolveCommands: MutableList<String> = mutableListOf()
+
+        /** picker/paste read queries that hit the wedged shared `-CC` path (the bug). */
+        val ccResolveCommands: MutableList<String> = mutableListOf()
+
+        /** `send-keys` commands that rode the dedicated exec lane. */
+        val execLaneSendKeys: MutableList<String> = mutableListOf()
+
+        private val ccWedge: CompletableDeferred<CommandResponse> = CompletableDeferred()
+
+        private fun isPickerRead(cmd: String): Boolean =
+            cmd.startsWith("list-panes") ||
+                cmd.startsWith("list-sessions") ||
+                cmd.startsWith("display-message") ||
+                cmd.startsWith("has-session")
+
+        override suspend fun sendCommand(cmd: String): CommandResponse = when {
+            // Any picker/paste read round-trip on the shared -CC channel is
+            // wedged behind the burst. Parks until the test releases it (models
+            // the never-arriving %begin/%end reply stuck behind the burst on the
+            // one sshj reader) — the WHOLE picker head-of-line-blocks here.
+            isPickerRead(cmd) -> {
+                ccResolveCommands += cmd
+                ccWedge.await()
+            }
+            // A -CC send would wedge the same way; modelled for completeness.
+            cmd.startsWith("send-keys") -> ccWedge.await()
+            else -> CommandResponse(number = 0L, output = emptyList(), isError = false)
+        }
+
+        override suspend fun listPanesViaExec(
+            listPanesCommand: String,
+            timeoutMs: Long?,
+        ): CommandResponse {
+            execLaneResolveCommands += listPanesCommand
+            val out = when {
+                listPanesCommand.startsWith("list-panes") -> listPanesRows
+                listPanesCommand.startsWith("list-sessions") -> listSessionsRows
+                // The paste pane-id resolution.
+                listPanesCommand.contains("#{pane_id}") -> listOf(paneIdReply)
+                // The confirm-time staleness check (session_id::session_created).
+                listPanesCommand.contains("#{session_id}") -> listOf(staleIdentityReply)
+                listPanesCommand.startsWith("has-session") -> emptyList()
+                else -> emptyList()
+            }
+            return CommandResponse(number = 0L, output = out, isError = false)
         }
 
         override suspend fun sendKeysViaExec(

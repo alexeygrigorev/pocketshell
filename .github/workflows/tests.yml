@@ -178,6 +178,20 @@ jobs:
           chmod +x scripts/test-ci-journey-aggregate-verdict.sh
           scripts/test-ci-journey-aggregate-verdict.sh
 
+      # Issue #1293: fast, JVM-free fixture test for the nightly-fault per-phase
+      # test-report preservation helper (scripts/lib/nightly-phase-reports.sh).
+      # The nightly-fault suite runs each phase as a separate connected-test
+      # gradle invocation writing to the SAME app/build report paths, so a later
+      # phase used to overwrite the release-GATING phase-2 report before upload
+      # (making the DisconnectBlackhole / NatIdle failing assertions
+      # unrecoverable). The self-test proves — with fake per-phase result dirs,
+      # no emulator — that each phase's report survives to a distinct
+      # non-colliding path and none is clobbered. Cheap (< 2 s).
+      - name: Nightly-fault per-phase report preservation guard (issue #1293)
+        run: |
+          chmod +x scripts/lib/nightly-phase-reports.sh
+          scripts/lib/nightly-phase-reports.sh --self-test
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out

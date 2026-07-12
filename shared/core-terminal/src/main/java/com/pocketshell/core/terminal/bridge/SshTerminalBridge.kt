@@ -520,22 +520,34 @@ public class SshTerminalBridge(
         // bridge; no producer holds [feedLock]). Acquire immediately.
         if (feedLock.tryLock()) return
         val handler = SessionReflection.getMainThreadHandler(session)
-        val deadline = nowMillis() + FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS
-        while (nowMillis() < deadline) {
+        // Issue #1489: acquire by draining-and-polling ONLY — this looper NEVER does a
+        // plain blocking `feedLock.lock()`. The prior code fell through to a plain
+        // `feedLock.lock()` backstop after a fixed 2 s deadline; that STILL deadlocks
+        // for a single in-flight `%output` payload larger than 2 s of 2 KB drain slices
+        // (the off-main producer is STILL parked in [ByteQueue.write] holding [feedLock]
+        // when the deadline trips, and the plain lock then parks THIS looper behind it →
+        // the exact #1459/#1485 deadlock, merely DELAYED by 2 s). A "plain-block only
+        // when the queue is empty" variant is also unsafe: a multi-chunk producer can
+        // momentarily empty the queue between two 64 KB chunk writes while still holding
+        // [feedLock] with more chunks to write, then re-park on the next full chunk — so
+        // Main parking on an empty-queue observation re-introduces the same deadlock. The
+        // ONLY discipline that always frees a queue-blocked producer is to keep draining
+        // while any bytes remain and only ever acquire [feedLock] via a TIMED
+        // [tryAcquireFeedLock] (which parks at most [FEEDLOCK_LOOPER_ACQUIRE_POLL_MILLIS],
+        // never unbounded), so the looper always returns to drain. The loop exits the
+        // instant the producer finishes its whole feed and releases [feedLock] (bounded
+        // by the payload size, not an arbitrary wall clock).
+        while (true) {
             // The holder is an off-main producer blocked on a full queue: drain a
             // slice so it can make progress toward releasing [feedLock]. Draining does
             // NOT require [feedLock] (the read path is independent), so THIS looper
-            // frees the producer instead of deadlocking behind it.
+            // frees the producer instead of deadlocking behind it. NEVER fall through to
+            // a plain blocking acquire while bytes remain (issue #1489).
             if (SessionReflection.availableProcessOutputBytes(session) > 0) {
                 handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
             }
             if (tryAcquireFeedLock(FEEDLOCK_LOOPER_ACQUIRE_POLL_MILLIS)) return
         }
-        // Backstop (unreachable when the holder is queue-blocked — draining always
-        // frees it first). If reached, the holder is NOT queue-blocked (the queue is
-        // drained/empty), so a plain blocking acquire cannot deadlock: it is about to
-        // release.
-        feedLock.lock()
     }
 
     /**
@@ -1134,19 +1146,14 @@ public class SshTerminalBridge(
         internal const val SEED_INLINE_MAX_BYTES: Int = PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES / 4
 
         /**
-         * Issue #1459: backstop wall-clock ceiling for
-         * [lockFeedOnLooperNeverParking]'s drain-to-unblock loop. The loop resolves a
-         * queue-blocked producer in milliseconds (each drained slice frees room for
-         * the producer to make progress toward releasing [feedLock]); this only bounds
-         * the — unreachable when the holder is queue-blocked — pathological case, and
-         * is set well under the ~5 s input-dispatch ANR budget.
-         */
-        internal const val FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS: Long = 2_000L
-
-        /**
-         * Issue #1459: poll interval for the timed [feedLock] `tryLock` between
-         * drain-to-unblock turns. Small so the blocked producer is freed promptly once
-         * a slice has been drained, without hot-spinning.
+         * Issue #1459/#1489: poll interval for the timed [feedLock] `tryLock` between
+         * [lockFeedOnLooperNeverParking]'s drain-to-unblock turns. The on-looper
+         * acquisition NEVER does a plain blocking `feedLock.lock()` (issue #1489 removed
+         * the fixed-deadline backstop that could still deadlock behind a producer parked
+         * past the deadline); it drains a slice, then acquires only via this TIMED
+         * `tryLock`, which parks at most this interval before returning to drain. Small so
+         * the blocked producer is freed promptly once a slice has been drained, without
+         * hot-spinning.
          */
         private const val FEEDLOCK_LOOPER_ACQUIRE_POLL_MILLIS: Long = 1L
 

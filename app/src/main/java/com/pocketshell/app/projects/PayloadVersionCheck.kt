@@ -37,10 +37,12 @@ object PayloadVersionCheck {
      * — the global [com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG] lifts the
      * host's `uv` `exclude-newer` cap for the WHOLE tool-install resolution
      * (issue #779 for pocketshell, widened by #1492 to cover its pinned siblings
-     * like `quse`) so the upgrade is never a silent no-op.
+     * like `quse`), and `--refresh` (issue #1490) busts uv's stale index/resolver
+     * cache so a freshly-published release is visible — together they make the
+     * upgrade never a silent no-op.
      */
     const val UPDATE_COMMAND: String =
-        "uv tool install --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
+        "uv tool install --refresh --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
 
     /**
      * The verdict of comparing a payload-carried [hostVersion] against the

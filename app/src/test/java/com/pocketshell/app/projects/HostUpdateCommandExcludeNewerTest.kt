@@ -4,6 +4,7 @@ import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.uvToolInstallCommand
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -91,6 +92,25 @@ class HostUpdateCommandExcludeNewerTest {
                     "Command: $command",
                 targetVersion,
                 resolved,
+            )
+        }
+    }
+
+    @Test
+    fun everyHostUpdateCommand_refreshesTheUvIndexCache() {
+        // Issue #1490: even with the exclude-newer cap lifted, `uv tool install
+        // --upgrade` resolves from a STALE index/resolver cache that predates the
+        // new publish — it reports success and leaves the old version installed
+        // (the maintainer's "found nothing newer to install" no-op on hetzner).
+        // `--refresh` forces uv to re-fetch the index + package metadata so a
+        // freshly-published release is visible. Guard the WHOLE class (all four
+        // build sites) so no call site can silently drop it and re-open the bug.
+        for ((site, command) in allEmittedUpdateCommands()) {
+            assertTrue(
+                "$site must pass --refresh so `uv tool install` busts its stale " +
+                    "index/resolver cache and sees a freshly-published pocketshell " +
+                    "release (#1490) — command: $command",
+                command.contains("--refresh"),
             )
         }
     }

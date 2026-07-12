@@ -206,6 +206,10 @@ class FolderListViewModelHostUpgradeTest {
             "uv arm must NOT use the narrow per-package override that broke on sibling pins (#1492)",
             cmd.contains("--exclude-newer-package"),
         )
+        assertTrue(
+            "uv arm must pass --refresh so a stale index/resolver cache cannot no-op the upgrade (#1490)",
+            cmd.contains("--refresh"),
+        )
         assertTrue("must fall back to pipx", cmd.contains("pipx upgrade pocketshell"))
         assertTrue("must fall back to pip", cmd.contains("pip install -U pocketshell"))
         assertTrue("must exit 127 when no installer is found", cmd.contains("exit 127"))

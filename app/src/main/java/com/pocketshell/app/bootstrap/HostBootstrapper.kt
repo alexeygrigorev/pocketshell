@@ -96,6 +96,16 @@ internal fun uvToolInstallCommand(tool: BootstrapTool, upgrade: Boolean): String
 internal fun uvToolInstallArgs(tool: BootstrapTool, upgrade: Boolean): String =
     buildString {
         append("tool install")
+        // Issue #1490: `--refresh` forces uv to re-fetch the package index +
+        // metadata instead of resolving from a cache that predates the new
+        // publish. Without it, `uv tool install --upgrade` resolves the stale
+        // cache, reports success, and leaves the OLD version installed (the
+        // maintainer's "found nothing newer to install" no-op) even with the
+        // exclude-newer cap already lifted. Scoped to pocketshell (the only
+        // fast-moving tool we install) alongside the exclude-newer override.
+        if (tool == BootstrapTool.Pocketshell) {
+            append(" --refresh")
+        }
         if (upgrade) append(" --upgrade")
         if (tool == BootstrapTool.Pocketshell) {
             append(" $UV_EXCLUDE_NEWER_FLAG")

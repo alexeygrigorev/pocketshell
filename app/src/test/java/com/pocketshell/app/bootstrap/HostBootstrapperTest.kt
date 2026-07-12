@@ -834,17 +834,49 @@ class HostBootstrapperTest {
     }
 
     @Test
+    fun hostBootstrapFailedSubtitle_reflectsTheActualOutcome_notAlwaysAnError() {
+        // Issue #1490: the exit-0 no-op (installer reported success but found
+        // nothing newer) must NOT be described as "the package manager reported
+        // an error" — that is misleading. It gets an honest no-change subtitle.
+        val noChange = cliUpdateNoChangeMessage(
+            mismatch = ToolStatus.VersionMismatch(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.4.24",
+                expectedVersion = "0.4.28",
+            ),
+            installer = PythonToolInstaller.Uv,
+        )
+        val noChangeSubtitle = hostBootstrapFailedSubtitle("hetzner", noChange)
+        assertTrue(noChangeSubtitle.contains("found nothing newer to install"))
+        assertFalse(noChangeSubtitle.contains("the package manager reported an error"))
+        assertTrue(noChangeSubtitle.contains("hetzner"))
+
+        // A real installer error keeps the package-manager-error phrasing.
+        val realError = cliUpdateFailureMessage(
+            mismatch = null,
+            installer = PythonToolInstaller.Uv,
+            stderr = "error: failed to build pocketshell",
+            exitCode = 1,
+        )
+        val errorSubtitle = hostBootstrapFailedSubtitle("hetzner", realError)
+        assertTrue(errorSubtitle.contains("the package manager reported an error"))
+    }
+
+    @Test
     fun uvPocketshellCommands_includeGlobalExcludeNewerOverride() {
         // Issue #1492: the cap must be lifted for the WHOLE resolution (global
         // `--exclude-newer`), NOT just the pocketshell package
         // (`--exclude-newer-package pocketshell=…`), or a release that pins a
         // sibling (quse) past the host's cap silently no-ops.
+        // Issue #1490: `--refresh` busts uv's stale index/resolver cache so a
+        // freshly-published release is visible (else the upgrade exits 0 having
+        // "found nothing newer to install" — the reported no-op).
         assertEquals(
-            "uv tool install --exclude-newer 2099-12-31 pocketshell",
+            "uv tool install --refresh --exclude-newer 2099-12-31 pocketshell",
             uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = false),
         )
         assertEquals(
-            "uv tool install --upgrade --exclude-newer 2099-12-31 pocketshell",
+            "uv tool install --refresh --upgrade --exclude-newer 2099-12-31 pocketshell",
             uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = true),
         )
         // The narrow per-package override that broke on sibling pins must be gone.
@@ -1310,7 +1342,7 @@ class HostBootstrapperTest {
 
         assertEquals(InstallResult.Success, result)
         assertTrue(session.recorded.contains(pathAware("'/opt/homebrew/bin/uv' $UV_POCKETSHELL_UPGRADE_ARGS")))
-        assertTrue(session.recorded.none { it.contains("PATH=") && it.contains("; uv tool install --upgrade") })
+        assertTrue(session.recorded.none { it.contains("PATH=") && it.contains("; uv tool install --refresh --upgrade") })
     }
 
     @Test
@@ -1495,9 +1527,9 @@ class HostBootstrapperTest {
 
     private companion object {
         const val UV_POCKETSHELL_INSTALL_ARGS: String =
-            "tool install --exclude-newer 2099-12-31 pocketshell"
+            "tool install --refresh --exclude-newer 2099-12-31 pocketshell"
         const val UV_POCKETSHELL_UPGRADE_ARGS: String =
-            "tool install --upgrade --exclude-newer 2099-12-31 pocketshell"
+            "tool install --refresh --upgrade --exclude-newer 2099-12-31 pocketshell"
         const val UV_POCKETSHELL_UPGRADE_COMMAND: String = "uv $UV_POCKETSHELL_UPGRADE_ARGS"
         const val DEFAULT_BOOTSTRAP_PATH: String =
             "/home/u/.local/bin:/home/u/bin:/home/u/.cargo/bin:/usr/local/bin:/usr/bin:/bin"

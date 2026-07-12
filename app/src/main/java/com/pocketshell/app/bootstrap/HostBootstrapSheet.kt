@@ -454,7 +454,7 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
     SheetColumn {
         SheetHeader(
             title = "Install failed",
-            subtitle = "$hostName · the package manager reported an error.",
+            subtitle = hostBootstrapFailedSubtitle(hostName, message),
         )
         Spacer(modifier = Modifier.height(PocketShellSpacing.md))
         Box(
@@ -491,6 +491,26 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
             )
         }
     }
+}
+
+/**
+ * Issue #1490: the failure sheet subtitle must reflect the ACTUAL outcome. The
+ * old hard-coded "the package manager reported an error." was wrong for the
+ * exit-0 no-op path ([cliUpdateNoChangeMessage]) — the installer reported
+ * *success*, it just found nothing newer, so telling the user the package
+ * manager errored is misleading. Detect the no-change no-op by the message
+ * marker and give an honest subtitle; every other failure keeps the
+ * package-manager-error phrasing.
+ */
+internal fun hostBootstrapFailedSubtitle(hostName: String, message: String): String {
+    val noChange = message.contains("did not change the installed version") ||
+        message.contains("found nothing newer to install")
+    val reason = if (noChange) {
+        "the update ran but found nothing newer to install."
+    } else {
+        "the package manager reported an error."
+    }
+    return "$hostName · $reason"
 }
 
 private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {

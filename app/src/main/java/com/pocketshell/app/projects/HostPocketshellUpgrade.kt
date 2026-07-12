@@ -25,11 +25,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    non-interactive SSH exec misses `~/.local/bin`, where uv/pipx/pip drop
  *    their shims).
  * 2. PROBES which installer owns `pocketshell` and runs the matching upgrade:
- *    - `uv tool list` mentions `pocketshell` → `uv tool install --upgrade
- *      --exclude-newer 2099-12-31 pocketshell` (the #779/#1492 override that
+ *    - `uv tool list` mentions `pocketshell` → `uv tool install --refresh
+ *      --upgrade --exclude-newer 2099-12-31 pocketshell` (the #779/#1492 override
  *      lifts uv's global `exclude-newer` cap for the WHOLE resolution so a
  *      sibling pin like `quse` past the cap cannot make the upgrade a silent
- *      no-op — mirrors [PayloadVersionCheck.UPDATE_COMMAND]).
+ *      no-op, and `--refresh` (#1490) busts uv's stale index/resolver cache so a
+ *      freshly-published release is visible — mirrors
+ *      [PayloadVersionCheck.UPDATE_COMMAND]).
  *    - else `pipx` present → `pipx upgrade pocketshell`.
  *    - else `pip`/`pip3` present → `pip install -U pocketshell`.
  *    - else exit `127` so the caller surfaces "no installer found".
@@ -152,7 +154,7 @@ public class HostPocketshellUpgrade {
             // pocketshell would wrongly try uv.
             append("if command -v uv >/dev/null 2>&1 && ")
             append("uv tool list 2>/dev/null | grep -qi '^pocketshell\\b'; then ")
-            append("exec uv tool install --upgrade ")
+            append("exec uv tool install --refresh --upgrade ")
             append("$UV_EXCLUDE_NEWER_FLAG pocketshell; ")
             // pipx next.
             append("elif command -v pipx >/dev/null 2>&1; then ")

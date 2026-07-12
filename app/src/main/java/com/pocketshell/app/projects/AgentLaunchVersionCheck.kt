@@ -52,10 +52,16 @@ object AgentLaunchVersionCheck {
      * [com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG] lifts the cap for the
      * WHOLE tool-install resolution — pocketshell + its entire pinned closure —
      * leaving the user's reproducibility setting intact for everything else.
+     *
+     * Issue #1490 adds `--refresh`: even with the cap lifted, `uv tool install
+     * --upgrade` resolves from a stale index/resolver cache that predates the new
+     * publish and reports success while leaving the old version installed (the
+     * maintainer's "found nothing newer to install" no-op). `--refresh` re-fetches
+     * the index + metadata so a freshly-published release is seen.
      * `pipx upgrade` / `pip install -U` are not affected by uv's cutoff.
      */
     const val UPDATE_COMMAND: String =
-        "uv tool install --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
+        "uv tool install --refresh --upgrade $UV_EXCLUDE_NEWER_FLAG pocketshell"
 
     /**
      * The server-side wrapper line the agent-launch flow types into a fresh

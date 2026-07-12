@@ -565,7 +565,7 @@ class SshTerminalBridgeTest {
      * Issue #1489 (the residual the #1459/#1491 fixes left OPEN): EVERY main-looper
      * `feedLock` acquisition routes through [SshTerminalBridge.lockFeedOnLooperNeverParking],
      * whose drain-to-unblock loop USED to fall through to a plain `feedLock.lock()`
-     * backstop after a fixed [FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS] (2 s) wall-clock
+     * backstop after a fixed 2 s wall-clock
      * deadline. That backstop STILL deadlocks: a single in-flight `%output` payload
      * larger than 2 s worth of 2 KB drain slices keeps the off-main producer PARKED in
      * `ByteQueue.write` HOLDING `feedLock` when the deadline trips, and the plain
@@ -1930,7 +1930,7 @@ class SshTerminalBridgeTest {
 
         // Issue #1489: injected-clock step per MAIN-looper nowMillis() read for the
         // backstop-expiry reproductions. Set ABOVE the (base) 2 s
-        // FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS so the base drain-to-unblock loop's
+        // acquire deadline so the base drain-to-unblock loop's
         // `while (nowMillis() < deadline)` check is ALWAYS past the deadline on its first
         // read → it falls straight to the plain `feedLock.lock()` backstop while the
         // off-main producer is still parked (the >2 s-payload state, injected). The fix

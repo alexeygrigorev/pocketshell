@@ -561,6 +561,251 @@ class SshTerminalBridgeTest {
         }
     }
 
+    /**
+     * Issue #1489 (the residual the #1459/#1491 fixes left OPEN): EVERY main-looper
+     * `feedLock` acquisition routes through [SshTerminalBridge.lockFeedOnLooperNeverParking],
+     * whose drain-to-unblock loop USED to fall through to a plain `feedLock.lock()`
+     * backstop after a fixed [FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS] (2 s) wall-clock
+     * deadline. That backstop STILL deadlocks: a single in-flight `%output` payload
+     * larger than 2 s worth of 2 KB drain slices keeps the off-main producer PARKED in
+     * `ByteQueue.write` HOLDING `feedLock` when the deadline trips, and the plain
+     * `feedLock.lock()` then parks THIS looper behind it → the exact #1459/#1485
+     * Main-thread deadlock → "Codex froze, had to force-restart", merely DELAYED by 2 s.
+     * The existing #1459/#1491 tests never reach the backstop — their producers drain
+     * free within 2 s of real time — so this class member was green-but-unproven.
+     *
+     * This member (empty-capture heal exit — [SshTerminalBridge.openGateFlushingPending],
+     * the #468 capture-failed / older-tmux fallback, gate OPEN so `gated == false`)
+     * reproduces the backstop-expiry deadlock DETERMINISTICALLY with the #780 synthetic
+     * model (NO `assume`-skip): an injected clock that advances only on MAIN-looper reads
+     * and by more than the 2 s deadline per read, so the base drain-to-unblock loop's
+     * deadline trips on its first check while the off-main producer is STILL parked
+     * holding `feedLock` — exactly the state a >2 s payload creates on-device. On base
+     * the backstop's plain `feedLock.lock()` parks forever → the `@Test(timeout)` fires
+     * (RED). With the fix ([SshTerminalBridge.lockFeedOnLooperNeverParking] NEVER
+     * plain-blocks: it keeps draining while any bytes remain and acquires `feedLock` only
+     * via a TIMED `tryLock`) the acquisition drains the queue to free the producer,
+     * completes within a bounded deadline (the load-bearing GREEN `elapsedMs` assertion),
+     * and preserves the producer's live output losslessly and in FIFO order.
+     */
+    @Test(timeout = 30_000)
+    fun openGateFlushingPendingReachesBackstopWithoutDeadlockWhenDeadlineTripsWithProducerParked() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        // #780 synthetic model: a clock that advances only on MAIN-looper reads, and by
+        // MORE than the (base) 2 s deadline per read, so the base drain-to-unblock loop's
+        // `while (nowMillis() < deadline)` check is ALWAYS past the deadline on its first
+        // read → the loop falls straight through to the plain `feedLock.lock()` backstop
+        // WITHOUT draining, while the off-main producer is still parked holding feedLock:
+        // the exact >2 s-payload state, injected deterministically. The off-main producer
+        // (no looper) reads 0, so it never advances the clock.
+        val mainLooper = Looper.getMainLooper()
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 20_000,
+            nowMillis = {
+                if (Looper.myLooper() == mainLooper) {
+                    clock.getAndAdd(BACKSTOP_TRIP_CLOCK_STEP_MS)
+                } else {
+                    0L
+                }
+            },
+        )
+        // Healthy pane: the gate is OPEN — openGateFlushingPending's flushAndOpenGateLocked
+        // acquires feedLock (via the on-looper non-parking helper) regardless of gate state.
+        assertFalse(
+            "the gate must be OPEN (healthy non-quiesced pane) for the empty-capture heal exit",
+            seedGateClosed(bridge),
+        )
+
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Issue1489BackstopFlushProducer").apply { isDaemon = true }
+        }
+        val payload = uniquelyMarkedLargePayload()
+        assertTrue(
+            "producer payload must exceed one full process->terminal queue so the " +
+                "producer BLOCKS in ByteQueue.write holding feedLock",
+            payload.bytes.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Producer blocks in ByteQueue.write HOLDING feedLock — the deadlock
+            // precondition (a live %output burst mid-flight).
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the #1489 backstop deadlock; it finished early",
+                feed.isDone,
+            )
+
+            // openGateFlushingPending() → flushAndOpenGateLocked() → the on-looper feedLock
+            // acquire runs on Main. On base the injected clock makes the drain-to-unblock
+            // loop's deadline trip immediately (no drain), so it falls to the plain
+            // `feedLock.lock()` backstop and parks FOREVER behind the queue-blocked producer
+            // → HANGS (RED, caught by the @Test timeout). With the fix the acquire never
+            // plain-blocks — it drains the queue to free the producer and completes bounded.
+            val startedAtNanos = System.nanoTime()
+            bridge.openGateFlushingPending()
+            val elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            assertTrue(
+                "openGateFlushingPending must complete within 5s while a producer is blocked " +
+                    "holding feedLock past the backstop deadline (it took ${elapsedMs}ms); the " +
+                    "#1489 backstop deadlock returns as a hang (never reaching this line)",
+                elapsedMs < 5_000L,
+            )
+
+            // The blocked producer must have been released (the looper drained the queue so
+            // its write completed) — no wedged producer leaks past the backstop.
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked producer must unwind once the on-looper acquire drains the queue",
+                feed.isDone,
+            )
+            feed.get(1, TimeUnit.SECONDS)
+
+            // Byte-integrity: the producer's live output survives losslessly and in FIFO
+            // order (no drop, no reorder). Drain the trailing buffered bytes (the scheduler
+            // uses the real Robolectric clock, not the injected budget clock).
+            drainMainLooperUntil {
+                bridge.emulator.screen.transcriptText.contains("producer-01199")
+            }
+            shadowOf(Looper.getMainLooper()).idle()
+            val transcript = bridge.emulator.screen.transcriptText
+            val firstMarker = "producer-00001"
+            val midMarker = "producer-00600"
+            val lastMarker = "producer-01199"
+            assertTrue(
+                "producer live output must not be dropped (first/mid/last markers present)",
+                transcript.contains(firstMarker) &&
+                    transcript.contains(midMarker) &&
+                    transcript.contains(lastMarker),
+            )
+            assertTrue(
+                "producer live output must render in FIFO order (no reorder within the stream)",
+                transcript.indexOf(firstMarker) < transcript.indexOf(midMarker) &&
+                    transcript.indexOf(midMarker) < transcript.indexOf(lastMarker),
+            )
+        } finally {
+            executor.shutdownNow()
+            bridge.stop()
+        }
+    }
+
+    /**
+     * Issue #1489, the large-payload backstop-expiry variant through the RESEED-APPLY
+     * entry ([SshTerminalBridge.seedThenOpenGate] → [SshTerminalBridge.feedChunks] on
+     * Main — the #1459 primary caller). Same residual, different main-looper entry point,
+     * for class coverage: the empty-capture heal exit ([openGateFlushingPendingReachesBackstop...])
+     * AND the reseed-apply feed both funnel through [SshTerminalBridge.lockFeedOnLooperNeverParking]'s
+     * backstop.
+     *
+     * The producer is a genuine MULTI-CHUNK (~110 KB, > one 64 KB queue) live `%output`
+     * payload, so the fix's drain-to-unblock must drain ACROSS chunks to free it (the
+     * "single payload larger than the deadline's worth of drain slices" the audit named);
+     * the injected clock (#780 synthetic model) deterministically trips the base 2 s
+     * deadline while that producer is still parked. On base the reseed feed's on-looper
+     * acquire falls to the plain `feedLock.lock()` backstop and parks forever → the seed
+     * is never applied and the producer never freed → HANGS (RED, caught by the timeout).
+     * With the fix the acquire drains the multi-chunk producer free, applies the seed, and
+     * the producer's live output renders losslessly and strictly BEFORE the reseed snapshot
+     * (older live before the seed — the #468 FIFO ordering).
+     */
+    @Test(timeout = 30_000)
+    fun reseedApplyReachesBackstopWithoutDeadlockWhenLargePayloadKeepsProducerParked() {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper())
+        val mainLooper = Looper.getMainLooper()
+        val clock = AtomicLong(0L)
+        val bridge = SshTerminalBridge(
+            columns = LINE_LENGTH,
+            rows = 24,
+            transcriptRows = 20_000,
+            nowMillis = {
+                if (Looper.myLooper() == mainLooper) {
+                    clock.getAndAdd(BACKSTOP_TRIP_CLOCK_STEP_MS)
+                } else {
+                    0L
+                }
+            },
+        )
+
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "Issue1489BackstopReseedProducer").apply { isDaemon = true }
+        }
+        val payload = uniquelyMarkedLargePayload()
+        assertTrue(
+            "producer payload must exceed one full process->terminal queue (multi-chunk) so " +
+                "the fix must drain ACROSS chunks to free the producer",
+            payload.bytes.size > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES,
+        )
+        val feed = executor.submit { bridge.feedBytes(payload.bytes) }
+        try {
+            // Producer blocks in ByteQueue.write HOLDING feedLock — the deadlock
+            // precondition (a live %output burst mid-flight while a reseed lands).
+            Thread.sleep(300)
+            assertFalse(
+                "producer must be BLOCKED on the full process->terminal queue (holding " +
+                    "feedLock) for this to reproduce the #1489 backstop deadlock; it finished early",
+                feed.isDone,
+            )
+
+            // A small reseed snapshot fed on Main (seedThenOpenGate). Its feedChunks acquire
+            // runs the on-looper non-parking helper; on base the injected clock trips the
+            // deadline immediately and it falls to the plain `feedLock.lock()` backstop →
+            // parks forever behind the multi-chunk producer → HANGS (RED). With the fix it
+            // drains the multi-chunk producer free, then applies the seed (bounded).
+            val seed = "\r\nreseed-line-A\r\nreseed-line-B".toByteArray(Charsets.US_ASCII)
+            val startedAtNanos = System.nanoTime()
+            bridge.seedThenOpenGate(seed)
+            val elapsedMs = (System.nanoTime() - startedAtNanos) / 1_000_000L
+            assertTrue(
+                "the reseed apply must complete within 5s while a large-payload producer is " +
+                    "blocked holding feedLock past the backstop deadline (it took ${elapsedMs}ms); " +
+                    "the #1489 backstop deadlock returns as a hang (never reaching this line)",
+                elapsedMs < 5_000L,
+            )
+
+            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the blocked multi-chunk producer must unwind once the reseed apply drains the queue",
+                feed.isDone,
+            )
+            feed.get(1, TimeUnit.SECONDS)
+
+            // Byte-integrity: all producer live output survives (its LAST line present →
+            // nothing dropped) and renders BEFORE the reseed snapshot (older live before the
+            // seed — the #468 FIFO ordering the drain-to-unblock preserves). feedChunks drains
+            // ALL queued producer bytes before writing the seed, so this renders synchronously.
+            drainMainLooperUntil {
+                bridge.emulator.screen.transcriptText.contains("reseed-line-B")
+            }
+            shadowOf(Looper.getMainLooper()).idle()
+            val transcript = bridge.emulator.screen.transcriptText
+            val lastProducerMarker = payload.transcriptText // its last marked line
+            assertTrue(
+                "all producer live output must survive the reseed (last line missing = dropped bytes)",
+                transcript.contains(lastProducerMarker),
+            )
+            assertTrue(
+                "the reseed snapshot must render",
+                transcript.contains("reseed-line-A") && transcript.contains("reseed-line-B"),
+            )
+            assertTrue(
+                "producer live output must render BEFORE the reseed snapshot (FIFO, no reorder)",
+                transcript.indexOf(lastProducerMarker) < transcript.indexOf("reseed-line-A"),
+            )
+        } finally {
+            executor.shutdownNow()
+            bridge.stop()
+        }
+    }
+
     @Test(timeout = 5_000)
     fun feedBytesOnMainLooperDrainsLargePayloadWithoutDeadlockOrLoss() {
         assertEquals(Looper.getMainLooper(), Looper.myLooper())
@@ -1682,6 +1927,15 @@ class SshTerminalBridgeTest {
         // the budget trips after ceil(24/4)=6 inline slices.
         private const val SEED_CLOCK_STEP_MS = 4L
         private const val EXPECTED_INLINE_SLICES = 6
+
+        // Issue #1489: injected-clock step per MAIN-looper nowMillis() read for the
+        // backstop-expiry reproductions. Set ABOVE the (base) 2 s
+        // FEEDLOCK_LOOPER_ACQUIRE_DEADLINE_MS so the base drain-to-unblock loop's
+        // `while (nowMillis() < deadline)` check is ALWAYS past the deadline on its first
+        // read → it falls straight to the plain `feedLock.lock()` backstop while the
+        // off-main producer is still parked (the >2 s-payload state, injected). The fix
+        // never reads the clock in that loop, so the step value is irrelevant to GREEN.
+        private const val BACKSTOP_TRIP_CLOCK_STEP_MS = 10_000L
 
         // Issue #866: multi-chunk on-main seed fixture. Each dense-SGR line is far
         // wider than its glyph count (per-cell colour escapes), so ~1200 lines span

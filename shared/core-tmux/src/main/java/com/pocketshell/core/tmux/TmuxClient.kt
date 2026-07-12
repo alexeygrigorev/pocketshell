@@ -280,6 +280,31 @@ public interface TmuxClient : AutoCloseable {
     ): CommandResponse = sendCommand(sendKeysCommand)
 
     /**
+     * Issue #1496: run a session-management tmux control command
+     * (`rename-session`, `new-session -d`, `kill-session`, or the dashboard's
+     * live `list-sessions` poll) on the DEDICATED [SshSession.exec] channel —
+     * the same independent lane [sendKeysViaExec] (#1460) / [listPanesViaExec]
+     * (#1316) use — NOT the shared per-host `-CC` channel [sendCommand] awaits
+     * `%begin`/`%end` on. These user-interactive round-trips rode `sendCommand`,
+     * so a live Codex `%output` burst head-of-line-blocked their reply behind it
+     * on the ONE sshj reader (10s mutex acquire + 30s ceiling — the Codex-freeze
+     * audit's residual transport SPOF). The exec lane reads its own channel
+     * outside the transport dispatcher, so these return fast under a burst.
+     *
+     * [sessionCommand] is the `-CC`-form command WITHOUT the leading `tmux`, so
+     * the caller's command string and error semantics are unchanged: a mutation
+     * prints nothing on success (empty non-error), `list-sessions` returns its
+     * rows, a non-zero exit surfaces an error response carrying stderr.
+     * [timeoutMs] bounds the round-trip so a wedged transport throws a
+     * [TmuxClientException] fast instead of parking the UI action. The default
+     * falls back to a `-CC` [sendCommand] for doubles with no exec lane.
+     */
+    public suspend fun sendLifecycleViaExec(
+        sessionCommand: String,
+        timeoutMs: Long? = null,
+    ): CommandResponse = sendCommand(sessionCommand)
+
+    /**
      * Subscribe to `%output` events for a single pane.
      *
      * Multiple callers may subscribe to the same pane — the underlying
@@ -1395,6 +1420,53 @@ internal class RealTmuxClient(
             )
             throw TmuxClientException(
                 "tmux send-keys (exec interactive send lane) timed out after ${effectiveTimeoutMs}ms",
+            )
+        }
+        return parseSendKeysExecResult(execResult)
+    }
+
+    /**
+     * Issue #1496: run a session-management control command (`rename-session`,
+     * `new-session -d`, `kill-session`, or the dashboard `list-sessions` poll)
+     * on the DEDICATED [SshSession.exec] channel — the same lane [sendKeysViaExec]
+     * (#1460) / [listPanesViaExec] (#1316) use — NOT the shared `-CC` [sendMutex]
+     * a live Codex `%output` burst head-of-line-blocks (10s acquire + 30s
+     * ceiling). [sessionCommand] is the `-CC`-form command (no leading `tmux`);
+     * [timeoutMs] bounds the round-trip so a wedged transport throws fast. The
+     * parse matches the `-CC` contract: empty non-error on success, rows for
+     * `list-sessions`, stderr on a non-zero exit.
+     */
+    override suspend fun sendLifecycleViaExec(
+        sessionCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (closed) throw TmuxClientException("client is closed")
+        if (!connected) throw TmuxClientException("client is not connected")
+        val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
+        val command = "tmux $sessionCommand"
+        val execResult =
+            try {
+                // Independent of the busy `-CC` channel, so this returns fast under
+                // a burst. The ceiling is the safety bound for a genuinely
+                // wedged/half-open transport; cancelling the exec closes its OWN
+                // channel (RealSshSession.exec cancellation handler), never `-CC`.
+                withTimeoutOrNull(effectiveTimeoutMs) {
+                    session.exec(command)
+                }
+            } catch (t: Throwable) {
+                throw TmuxClientException(
+                    "tmux session-lifecycle exec (dashboard/rename lane) failed: ${t.message}",
+                    t,
+                )
+            }
+        if (execResult == null) {
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux sendLifecycleViaExec exec timed out >${effectiveTimeoutMs}ms " +
+                    "(session-lifecycle lane); surfacing a best-effort failure.",
+            )
+            throw TmuxClientException(
+                "tmux session-lifecycle (exec lane) timed out after ${effectiveTimeoutMs}ms",
             )
         }
         return parseSendKeysExecResult(execResult)

@@ -522,6 +522,66 @@ class SessionsDashboardViewModelTest {
     }
 
     /**
+     * Issue #1496: every dashboard session-management round-trip (Create,
+     * Rename, Kill, and the live `list-sessions` poll) must ride the DEDICATED
+     * exec lane ([TmuxClient.sendLifecycleViaExec]) — NOT the shared `-CC`
+     * [TmuxClient.sendCommand] a live Codex `%output` burst can
+     * head-of-line-block for 30-40s. Proven by asserting each command lands in
+     * [FakeTmuxClient.sendLifecycleViaExecCalls] (the exec lane), and that the
+     * raw `-CC` send-lane (bare [FakeTmuxClient.sendCommand]) was never used for
+     * any of them.
+     */
+    @Test
+    fun dashboardLifecycleAndPollRideTheExecLaneNotTheCcSendCommand() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            // new-session, rename-session, kill-session, then the refresh
+            // list-sessions each pop one empty success.
+            repeat(6) {
+                responses.addLast(
+                    CommandResponse(number = it.toLong(), output = emptyList(), isError = false),
+                )
+            }
+        }
+        val h = host(31L, "thirtyone")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.createSession(entry, "next")
+        vm.renameSession(entry, "next", "renamed")
+        vm.killSession(entry, "renamed")
+        runCurrent()
+        client.emittedEvents.emit(ControlEvent.SessionsChanged)
+        advanceUntilIdle()
+        // The live poll seam runs the same fetch the poll loop uses.
+        vm.fetchSessionsForTest(entry)
+
+        assertTrue(
+            "Create must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
+            client.sendLifecycleViaExecCalls.any { it == "new-session -d -s 'next' -c '~'" },
+        )
+        assertTrue(
+            "Rename must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
+            client.sendLifecycleViaExecCalls.any { it == "rename-session -t 'next' 'renamed'" },
+        )
+        assertTrue(
+            "Kill must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
+            client.sendLifecycleViaExecCalls.any { it == "kill-session -t 'renamed'" },
+        )
+        assertTrue(
+            "the list-sessions poll must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
+            client.sendLifecycleViaExecCalls.any { it.startsWith("list-sessions") },
+        )
+    }
+
+    /**
      * Issue #168 — silent kill failures (failure mode 1 from the issue
      * body) must now surface as a [killError] banner AND must not run
      * the refresh, because a refresh after a failed kill would show the

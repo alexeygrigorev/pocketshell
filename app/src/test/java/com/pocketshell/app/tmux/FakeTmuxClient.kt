@@ -346,6 +346,25 @@ internal class FakeTmuxClient(
         return handleCommand(cmd, bestEffort = false)
     }
 
+    /**
+     * Issue #1496: records the session-management commands (`rename-session`,
+     * `new-session -d`, `kill-session`, the dashboard `list-sessions` poll) the
+     * dashboard / in-session Rename routed onto the DEDICATED exec lane, so a
+     * test can prove the call site rides [sendLifecycleViaExec] (off `-CC`) and
+     * not the raw `-CC` [sendCommand]. Still routes through [handleCommand] so
+     * the existing canned-[responses] plumbing (list-sessions rows, `%error`
+     * responses) keeps working unchanged.
+     */
+    val sendLifecycleViaExecCalls: MutableList<String> = mutableListOf()
+
+    override suspend fun sendLifecycleViaExec(
+        sessionCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        sendLifecycleViaExecCalls += sessionCommand
+        return handleCommand(sessionCommand, bestEffort = false)
+    }
+
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         handleCommand(cmd, bestEffort = true)
 

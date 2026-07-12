@@ -55,6 +55,38 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
+    fun renameCurrentSessionRidesTheExecLaneNotTheCcSendCommand() = runTest(scheduler) {
+        // Issue #1496: the in-session Rename must ride the DEDICATED exec lane
+        // ([TmuxClient.sendLifecycleViaExec]) on the warm connection, NOT the
+        // shared `-CC` [TmuxClient.sendCommand] a live Codex `%output` burst can
+        // head-of-line-block for 30-40s (the maintainer's Rename froze
+        // mid-burst).
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.renameCurrentSession("renamed")
+        advanceUntilIdle()
+
+        // The load-bearing proof: had Rename used the raw `-CC` sendCommand
+        // path, sendLifecycleViaExecCalls would be empty. It carries the exact
+        // rename command, so the round-trip rode the exec lane.
+        assertEquals(
+            listOf("rename-session -t 'work' 'renamed'"),
+            client.sendLifecycleViaExecCalls,
+        )
+    }
+
+    @Test
     fun lifecycleCommandsDeriveCreateNameButIgnoreBlankRenameNames() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()

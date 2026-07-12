@@ -156,7 +156,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.coroutineContext
@@ -11308,28 +11307,26 @@ public class TmuxSessionViewModel @Inject constructor(
                         tick = tick,
                         backedOff = stableTicks > 0,
                     )
+                    // Issue #1494 — bound the per-tick heal so one hung capture can't freeze the loop.
                     val outcome = runCatching {
-                        healActivePaneIfStaleRender(client, activePane, refreshGuard)
+                        withTimeoutOrNull(RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS) {
+                            healActivePaneIfStaleRender(client, activePane, refreshGuard)
+                        } ?: HealOutcome.Unverified
                     }.getOrDefault(HealOutcome.Unverified)
-                    // Issue #1294 (three-state scoring — the load-bearing fix): score the
-                    // tick by WHICH of the three oracle outcomes it was, never conflating a
-                    // capture FAILURE with a confirmed-healthy tick.
+                    // Issue #1294 (three-state scoring — the load-bearing fix): score the tick by
+                    // WHICH oracle outcome it was, never conflating a capture FAILURE with healthy.
                     //
-                    //  - HEALTHY: the authoritative capture CONFIRMED the render matches tmux.
-                    //    This — and ONLY this — earns the #1219 steady-heat back-off (4s -> 8s
-                    //    -> 16s), even while the pane streams %output (the #1164 "runs warm"
-                    //    lever). Before #1294 a capture FAILURE was scored identically here, so
-                    //    consecutive failures throttled the watchdog to 16s exactly while the
-                    //    pane was black and a Claude burst had the -CC capture mutex wedged.
+                    //  - HEALTHY: the capture CONFIRMED the render matches tmux. This — and ONLY
+                    //    this — earns the #1219 steady-heat back-off (4s->8s->16s), even while the
+                    //    pane streams %output (the #1164 "runs warm" lever). Before #1294 a FAILURE
+                    //    was scored identically, throttling to 16s while the pane was black.
                     //  - HEALED: the oracle found + repaired a real divergence (black / partial-
                     //    black / stale render vs tmux's grid). Snap the cadence back to hot so a
                     //    just-blacked pane is re-checked at 4s (#1138/#1153 heal preservation).
                     //  - UNVERIFIED: the capture could NOT confirm health (timeout / error /
-                    //    empty-on-live-transport / mutex-starved). Keep the HOT cadence — never
-                    //    throttle — so a black pane whose heal captures are wedged keeps retrying
-                    //    at 4s until the mutex frees and the heal lands, instead of backing off
-                    //    to 16s while the user stares at a black pane. Record the streak into the
-                    //    exportable diagnostics (#1175) so an export tells "blind" from "idle".
+                    //    empty-on-live-transport / mutex-starved / #1494 tick-timeout). Keep the HOT
+                    //    cadence — never throttle — so a black pane keeps retrying at 4s. Record the
+                    //    streak into the exportable diagnostics (#1175) so it tells "blind" from "idle".
                     when (outcome) {
                         HealOutcome.Healthy -> {
                             stableTicks += 1
@@ -11736,8 +11733,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // seed-gate (M9) window so a sibling launcher (L1 send / L2 watchdog / L5 reveal) on the
         // SAME pane can't cross into it and open the gate early, clobbering a buffered newer
         // `%output` delta (spike §3 race). Keyed per pane, so different panes heal concurrently.
-        // `withLock` is inline (early returns stay non-local, the mutex ALWAYS unlocks — bounded).
-        renderHealCoordinator.paneHealMutex(pane.paneId).withLock {
+        // Issue #1494 — [withPaneHealLock] force-resets a lock wedged past HELD_TOO_LONG_MS.
+        renderHealCoordinator.withPaneHealLock(pane.paneId) {
             healActivePaneIfStaleRenderLocked(
                 client, pane, refreshGuard, force, recordMilestone, maxAttempts,
             )

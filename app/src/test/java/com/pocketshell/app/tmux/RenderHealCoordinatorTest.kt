@@ -1,9 +1,12 @@
 package com.pocketshell.app.tmux
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
@@ -65,6 +68,89 @@ class RenderHealCoordinatorTest {
         )
 
         coordinator.paneHealMutex("%1").unlock()
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #1494 — the BOUNDED single-flight: a WEDGED holder must not permanently
+    // reject future heals, but a SLOW-BUT-ALIVE holder must still serialize (no double-run).
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun withPaneHealLockForceResetsAHolderWedgedPastTheBound() = runTest {
+        var clock = 0L
+        val coordinator = RenderHealCoordinator(nowMs = { clock })
+
+        // A heal WEDGES holding the pane's single-flight (models an uninterruptible capture on a
+        // dead socket that never returns and so never releases the lock).
+        val wedge = CompletableDeferred<Unit>()
+        val wedged = launch { coordinator.withPaneHealLock("%1") { wedge.await() } }
+        runCurrent()
+
+        // The holder has now held the lock PAST the bound.
+        clock = RenderHealCoordinator.HELD_TOO_LONG_MS
+        var laterRan = false
+        val later = launch { coordinator.withPaneHealLock("%1") { laterRan = true } }
+        runCurrent()
+
+        assertTrue(
+            "REGRESSION (#1494): a heal whose per-pane single-flight holder is WEDGED past the " +
+                "held-too-long bound must FORCE-RESET the lock and proceed — before #1494 it " +
+                "parked on withLock forever, so one hung capture wedged every future heal.",
+            laterRan,
+        )
+
+        wedged.cancel()
+        later.cancel()
+    }
+
+    @Test
+    fun withPaneHealLockWaitsForASlowButAliveHolderInsteadOfForceResetting() = runTest {
+        var clock = 0L
+        val coordinator = RenderHealCoordinator(nowMs = { clock })
+
+        val holderGate = CompletableDeferred<Unit>()
+        var holderInside = false
+        var laterRan = 0
+        var sawConcurrentDoubleRun = false
+
+        val holder = launch {
+            coordinator.withPaneHealLock("%1") {
+                holderInside = true
+                holderGate.await()
+                holderInside = false
+            }
+        }
+        runCurrent()
+
+        // A second heal arrives while the holder is only briefly held — WELL WITHIN the bound.
+        clock = RenderHealCoordinator.HELD_TOO_LONG_MS - 1
+        val later = launch {
+            coordinator.withPaneHealLock("%1") {
+                if (holderInside) sawConcurrentDoubleRun = true
+                laterRan += 1
+            }
+        }
+        runCurrent()
+
+        assertEquals(
+            "single-flight preserved (#1484): a slow-but-alive holder must be WAITED for, never " +
+                "force-reset — the second heal has not run while the holder is inside its window",
+            0,
+            laterRan,
+        )
+
+        // The holder releases; the queued heal now proceeds — SERIALIZED, never overlapping.
+        holderGate.complete(Unit)
+        runCurrent()
+
+        assertEquals("the queued heal runs exactly once after the holder releases", 1, laterRan)
+        assertFalse(
+            "the force-reset/fallback must NOT double-run a heal that is merely slow-but-alive",
+            sawConcurrentDoubleRun,
+        )
+
+        holder.cancel()
+        later.cancel()
     }
 
     @Test

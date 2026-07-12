@@ -196,6 +196,21 @@ JOURNEY_NOTCLASS_ARG="$(join_by , "${JOURNEY_EXCLUDED_CLASSES[@]}")"
 source "$REPO_ROOT/scripts/lib/nightly-fault-verdict.sh"
 FAULT_VERDICT_FILE="$ARTIFACT_DIR/fault-verdict.txt"
 
+# Per-phase test-report preservation (issue #1293): each phase below is a
+# SEPARATE `:app:connectedDebugAndroidTest` invocation that writes its JUnit
+# XML + HTML report + pulled device output to the SAME default `app/build/...`
+# paths, so a later phase CLOBBERS an earlier phase's report before the workflow
+# uploads artifacts. `preserve_phase_reports <slug>` snapshots each phase's
+# report into `$ARTIFACT_DIR/phase-reports/<slug>/` (already inside the uploaded
+# `artifacts/nightly-extensive/` tree) IMMEDIATELY after the phase runs. This is
+# OBSERVABILITY ONLY — it copies reports, never runs gradle and never touches
+# any phase's pass/fail exit code (it is called AFTER each `$?` capture and
+# always returns 0).
+# shellcheck source=scripts/lib/nightly-phase-reports.sh
+source "$REPO_ROOT/scripts/lib/nightly-phase-reports.sh"
+PHASE_REPORTS_DIR="$ARTIFACT_DIR/phase-reports"
+APP_BUILD_DIR="$REPO_ROOT/app/build"
+
 # ---------------------------------------------------------------------------
 # Sharding (issue #835 follow-up): the full connected journey/E2E suite is
 # ~680 tests. Run serially on ONE swiftshader AVD it cannot finish inside the
@@ -248,6 +263,10 @@ echo "=========================================================="
 JOURNEY_EXIT=$?
 echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 
+# Snapshot phase 1's report BEFORE the phase-2 gradle invocation overwrites it
+# (issue #1293). Observability only — never affects JOURNEY_EXIT.
+preserve_phase_reports "phase1-journey" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+
 # Default the aux phases to SKIPPED; only the shard that owns them flips these.
 NETWORK_FAULT_EXIT=0
 BOOTSTRAP_EXIT=0
@@ -273,6 +292,12 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   NETWORK_FAULT_EXIT=$?
   echo "phase 2 (network-fault proofs) exit code: $NETWORK_FAULT_EXIT"
 
+  # Snapshot phase 2's report BEFORE the phase-2b gradle invocation overwrites
+  # it (issue #1293). THIS is the release-GATING report whose overwrite made the
+  # DisconnectBlackhole / NatIdle failing assertions unrecoverable. Observability
+  # only — never affects NETWORK_FAULT_EXIT.
+  preserve_phase_reports "phase2-network-fault" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 2b: #822 expected-fail lane (NON-GATING)"
   echo "Included classes: $EXPECTED_FAIL_CLASS_ARG"
@@ -292,6 +317,10 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   EXPECTED_FAIL_EXIT=$?
   echo "phase 2b (#822 expected-fail lane) exit code: $EXPECTED_FAIL_EXIT (NON-GATING)"
 
+  # Snapshot phase 2b's report BEFORE the phase-3 gradle invocation overwrites it
+  # (issue #1293). Observability only — never affects EXPECTED_FAIL_EXIT.
+  preserve_phase_reports "phase2b-expected-fail" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 3: bootstrap setup scenarios (opt-in, GATING)"
   echo "Selected methods: $BOOTSTRAP_CLASS_ARG"
@@ -308,6 +337,12 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     --stacktrace
   BOOTSTRAP_EXIT=$?
   echo "phase 3 (bootstrap setup scenarios) exit code: $BOOTSTRAP_EXIT"
+
+  # Snapshot phase 3's report too (issue #1293). It is the LAST aux phase so its
+  # report currently survives at the default path, but snapshotting it keeps the
+  # per-phase set complete + uniform (and future-proofs adding a phase 4).
+  # Observability only — never affects BOOTSTRAP_EXIT.
+  preserve_phase_reports "phase3-bootstrap" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
 
   nf_status="PASS"
   [[ "$NETWORK_FAULT_EXIT" -ne 0 ]] && nf_status="FAIL"
@@ -371,6 +406,12 @@ fi
   echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** |"
   echo
   echo "**Extensive-shard overall (non-gating summary): $overall_status**"
+  echo
+  echo "Per-phase test reports (issue #1293) are preserved under"
+  echo "\`artifacts/nightly-extensive/phase-reports/<phase>/\` so a later phase no"
+  echo "longer overwrites an earlier phase's JUnit XML / HTML report / device"
+  echo "output before the artifact upload. Read the GATING phase-2 assertions at"
+  echo "\`artifacts/nightly-extensive/phase-reports/phase2-network-fault/\`."
   echo
   echo "## Fault-injection safety verdict (issue #1201 — the RELEASE-GATING signal)"
   echo

@@ -338,6 +338,39 @@ internal const val SEND_OVERPAINT_HEAL_SETTLE_MS: Long = 350L
  */
 internal const val SEND_OVERPAINT_HEAL_MAX_TICKS: Int = 4
 
+/**
+ * Issue #1353 slice R4 — the EVENT-SUBMISSION reason for the render-heal reconciler
+ * ([TmuxSessionViewModel.requestReconcile]). A trigger submits an immediate hot reconcile via a
+ * reason instead of owning its own bespoke poll loop; the reconcile runs through the single
+ * chokepoint [TmuxSessionViewModel.healActivePaneIfStaleRender] (with the R3 per-pane
+ * single-flight). Each reason carries the settle cadence appropriate to it, so cadence is a
+ * property of the event, not of six independent timers.
+ *
+ * This slice migrates ONLY [Send] (the #941/#1153 post-send agent-overpaint heal, formerly the
+ * private `scheduleSendOverpaintHeal` poll). The rest of the spike's reasons
+ * (Reveal|Reattach|Foreground|NetworkRestore|SeedLanded|StaleTick|SurfaceBlack) fold into this
+ * entry in later slices (R5); they are intentionally NOT added yet to keep this slice's blast
+ * radius scoped to the send path.
+ */
+internal enum class ReconcileReason(
+    /** How many bounded settle ticks the reconcile re-checks the active pane over. */
+    val settleTicks: Int,
+    /** Delay before each settle tick, so a late/large redraw is still caught. */
+    val settleDelayMs: Long,
+) {
+    /**
+     * Post-send agent `%output` overpaint (#941 black-screen B1 / #1153 half-black). After a
+     * send's submit Enter the agent TUI can `clear`+redraw and leave the active pane
+     * partial/half-black on a LIVE transport; this reconcile re-checks on a fast bounded cadence
+     * (≈1.4 s over 4 ticks), scoped to the pane the send targeted, and heals only when the
+     * render is materially less than tmux's authoritative grid.
+     */
+    Send(
+        settleTicks = SEND_OVERPAINT_HEAL_MAX_TICKS,
+        settleDelayMs = SEND_OVERPAINT_HEAL_SETTLE_MS,
+    ),
+}
+
 internal const val MaxAgentEvents: Int = 500
 
 /**

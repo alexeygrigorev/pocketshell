@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -320,6 +321,80 @@ class OutboundDeliveryGuardTest {
             "a fresh send must not pay a capture-pane probe round-trip",
             client.capturePaneTextViaExecCalls.isEmpty(),
         )
+    }
+
+    /**
+     * Issue #1541 (finding P9) — the durable-flag mechanism at the ledger level.
+     * The volatile ledger dies on a plain VM-clear (back-navigation); a ledger
+     * REBUILT after that clear must re-read the durable per-row `wireAttempted`
+     * flag and still run verify-before-resend. RED on base: a volatile-only
+     * rebuilt ledger has no memory ⇒ the reopened session blindly re-pastes
+     * (server occurrence 2). GREEN: the durable-backed rebuild sees the attempt.
+     */
+    @Test
+    fun rebuiltLedgerConsultsDurableFlagAfterVmClear() {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        // The composer enqueued the row that the VM is delivering.
+        store.enqueue("sessA", "durable payload", paneId = "%0")
+        val durable = store.asWireAttemptDurableStore()
+
+        // VM #1's ledger records the wire attempt (right before the paste).
+        val ledger1 = OutboundDeliveryLedger(durable = durable)
+        ledger1.recordWireAttempt("%0", "durable payload")
+        assertTrue(ledger1.hasAmbiguousAttempt("%0", "durable payload"))
+
+        // Back-navigation clears the VM: its volatile ledger dies. A base ledger
+        // with NO durable backing has no memory of the attempt (the P9 bug).
+        val baseRebuilt = OutboundDeliveryLedger()
+        assertFalse(
+            "RED (base): a volatile-only rebuilt ledger loses the wire attempt, so " +
+                "the reopened session blindly re-pastes (server occurrence 2)",
+            baseRebuilt.hasAmbiguousAttempt("%0", "durable payload"),
+        )
+
+        // The fix: a ledger rebuilt with the SAME durable store re-reads the flag
+        // and runs verify-before-resend (server occurrence 1).
+        val rebuilt = OutboundDeliveryLedger(durable = durable)
+        assertTrue(
+            "GREEN (fix): the durable `wireAttempted` flag makes the rebuilt ledger " +
+                "verify-before-resend instead of blindly re-pasting",
+            rebuilt.hasAmbiguousAttempt("%0", "durable payload"),
+        )
+    }
+
+    /**
+     * A FRESH send (no durable row / no prior attempt) never verifies, even with a
+     * durable backing — the hot send path stays probe-free.
+     */
+    @Test
+    fun freshSendWithDurableBackingButNoPriorAttemptDoesNotVerify() {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        val ledger = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
+        assertFalse(ledger.hasAmbiguousAttempt("%0", "a brand new prompt"))
+    }
+
+    /**
+     * [OutboundDeliveryLedger.clear] clears only the VOLATILE set — the durable row
+     * flag persists (dropped only when the row leaves the queue), so an as-yet-
+     * un-acked in-flight row still verifies on a later rebuild. This is what closes
+     * the `markDelivered`-lost corner: a cleared-but-not-yet-pruned row keeps
+     * verifying.
+     */
+    @Test
+    fun clearKeepsDurableRowFlagForAsYetUnackedRow() {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        store.enqueue("sessA", "unacked payload", paneId = "%0")
+        val durable = store.asWireAttemptDurableStore()
+        val ledger = OutboundDeliveryLedger(durable = durable)
+        ledger.recordWireAttempt("%0", "unacked payload")
+        ledger.clear("%0", "unacked payload")
+
+        assertTrue(
+            "clear() drops only the volatile entry; the durable row flag persists so " +
+                "a rebuilt ledger still verifies",
+            ledger.hasAmbiguousAttempt("%0", "unacked payload"),
+        )
+        assertTrue(store.hasWireAttempt("%0", "unacked payload"))
     }
 
     @Test

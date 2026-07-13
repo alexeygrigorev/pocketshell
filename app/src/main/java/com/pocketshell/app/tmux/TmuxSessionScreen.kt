@@ -452,6 +452,8 @@ public fun TmuxSessionScreen(
         promptComposerViewModel = promptComposerViewModel,
         controller = outboundQueueAutoFlushController,
     )
+    // #1531 (RC1): DOCKED launcher unsent badge.
+    val outboundLauncherBadge = rememberOutboundLauncherBadge(promptComposerViewModel, targetSessionId.value)
     val sessionCardsState by viewModel.sessionCards.collectAsState()
     val sessionCards = remember(sessionCardsState, activeSessionCardsTargetKey) {
         if (sessionCardsState.targetKey == activeSessionCardsTargetKey) {
@@ -2256,17 +2258,13 @@ public fun TmuxSessionScreen(
                             )
                         }
                     },
-                    // Issue #810: the composer launcher is UNCONDITIONAL — it only
-                    // opens the Prompt Composer sheet (no pane needed), so it is
-                    // never gated on `surfacePane`.
+                    // Issue #810: the launcher is UNCONDITIONAL (no pane needed).
                     onDictateTap = {
-                        // Plain tap: open the composer with NO recording (unchanged).
-                        micSheetAutoStartRecording = false
+                        micSheetAutoStartRecording = false // plain tap: no recording
                         showMicSheet = true
                     },
-                    // Issue #585: hold the launcher + swipe UP → open the composer
-                    // AND start recording immediately (locked hands-free), one
-                    // gesture. The sheet consumes `autoStartRecording` on open.
+                    // Issue #585: hold + swipe UP → open composer AND record (one
+                    // gesture); the sheet consumes `autoStartRecording` on open.
                     onDictateHoldSwipeUp = {
                         micSheetAutoStartRecording = true
                         showMicSheet = true
@@ -2338,6 +2336,8 @@ public fun TmuxSessionScreen(
                             )
                         }
                     } else null,
+                    unsentCount = outboundLauncherBadge?.count ?: 0, // #1531 (RC1)
+                    unsentHasFailure = outboundLauncherBadge?.hasFailure ?: false,
                     modifier = bottomControlsModifier,
                 )
             }

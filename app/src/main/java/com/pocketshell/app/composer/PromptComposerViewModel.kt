@@ -489,7 +489,12 @@ public class PromptComposerViewModel @Inject constructor(
         previews: List<AttachmentPreview> = emptyList(),
         stage: suspend () -> Result<List<String>>,
     ) {
-        if (count <= 0 || attachmentJob?.isActive == true) return
+        if (count <= 0) return
+        // #1531 (RC2): a pick while a prior upload stages used to drop SILENTLY.
+        if (attachmentJob?.isActive == true) {
+            _uiState.update { it.copy(error = ATTACHMENT_UPLOAD_BUSY_MESSAGE) }
+            return
+        }
         DiagnosticEvents.record("action", "attachment_stage_start", "count" to count)
         attachmentJob = viewModelScope.launch {
             _uiState.update {
@@ -803,19 +808,11 @@ public class PromptComposerViewModel @Inject constructor(
         sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
     ) {
         if (_uiState.value.sendInFlight) return
-        // Issue #872 (Part B reopen, v0.4.14): if the user taps Send while an
-        // attachment upload is STILL in flight, the old code cancelled the upload
-        // and fired a TEXT-ONLY send — silently dropping the attachment. That is
-        // the maintainer's exact on-device symptom: a reconnect/transport flap
-        // slows the SFTP transfer so it has not finished when Send fires, the text
-        // "goes through", and the attachment is gone with no tile, no durable
-        // ref, and no error. The #91510d0a durable-restore path never ran for this
-        // trigger (it is a DELIVERED send, not restoreFailedSend).
-        //
-        // Fix: do NOT cancel-and-drop. WAIT for the in-flight upload to resolve,
-        // then dispatch the send from the now-staged tiles so the attachment is
-        // carried — or, if the upload failed, surface the error and keep the draft
-        // (no silent text-only send). The user never loses the attachment.
+        // Issue #872 (Part B reopen): a Send while an attachment upload is STILL in
+        // flight must NOT cancel-and-drop into a text-only send (the silent
+        // attachment loss). WAIT for the upload, then send WITH the staged tiles —
+        // or, on upload failure, surface the error and keep the draft (no silent
+        // text-only send). The user never loses the attachment.
         if (attachmentJob?.isActive == true) {
             dispatchSendAfterUpload(withEnter, sendTarget)
             return
@@ -886,7 +883,11 @@ public class PromptComposerViewModel @Inject constructor(
         sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
     ) {
         if (_uiState.value.sendInFlight) return
-        if (outboundSidecarDispatchInFlight) return
+        // #1531 (RC2): a Send during a sidecar retry upload used to drop SILENTLY.
+        if (outboundSidecarDispatchInFlight) {
+            _uiState.update { it.copy(error = SEND_BUSY_UPLOADING_MESSAGE) }
+            return
+        }
         val draft = _uiState.value.draft
         val attachments = _uiState.value.attachments
         // Issue #544: compose the outgoing prompt = the user's clean draft
@@ -3560,7 +3561,9 @@ public class PromptComposerViewModel @Inject constructor(
          * status.
          */
         internal const val WILL_SEND_WHEN_RECONNECTED_MESSAGE: String =
-            "Will send when reconnected."
+            "Will send when reconnected." // #1531 (RC2) copy: ComposerSwallowMessages
+        internal const val ATTACHMENT_UPLOAD_BUSY_MESSAGE: String = COMPOSER_ATTACHMENT_UPLOAD_BUSY_MESSAGE
+        internal const val SEND_BUSY_UPLOADING_MESSAGE: String = COMPOSER_SEND_BUSY_UPLOADING_MESSAGE
 
         /**
          * Issue #939 (audit #935 S5-2): the end-to-end ceiling on the voice

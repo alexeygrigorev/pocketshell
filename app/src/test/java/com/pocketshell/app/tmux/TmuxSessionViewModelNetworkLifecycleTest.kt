@@ -665,18 +665,206 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
         registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
         runCurrent()
 
-        // The calm "reconnecting" band is surfaced (UI not left on a dead-but-live
-        // session) WITHOUT launching a redial loop and WITHOUT tearing the lease.
+        // Issue #1522 (H1): the band is now DEBOUNCED — a sub-second cellular
+        // validation blip must NOT flap the UI. Right after the loss (before the
+        // debounce elapses) the session is STILL Connected, not Reconnecting.
         assertTrue(
-            "a bare loss surfaces the calm Reconnecting band immediately",
+            "a bare loss must NOT paint the Reconnecting band immediately (it is debounced) — #1522",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals("no redial during the loss window — lease is held", 0, connector.connectCount)
+
+        // Once the loss OUTLASTS the debounce (and the keepalive still cannot vouch —
+        // default false here) the honest calm band surfaces so the user is not left on
+        // a dead-but-live session, still WITHOUT a redial and WITHOUT tearing the lease.
+        advanceTimeBy(NETWORK_LOSS_BAND_DEBOUNCE_MS + 1)
+        runCurrent()
+        assertTrue(
+            "a sustained bare loss surfaces the calm Reconnecting band after the debounce",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
         assertEquals("no redial during the loss window — lease is held", 0, connector.connectCount)
 
-        // No churn: even after time passes nothing redials (no ladder running).
+        // No churn: even after more time passes nothing redials (no ladder running).
         advanceTimeBy(60_000L)
         advanceUntilIdle()
         assertEquals(0, connector.connectCount)
+    }
+
+    @Test
+    fun issue1522RapidValidationBlipsOnStableLinkNeverFlapTheBandOrRedial() = runTest(scheduler) {
+        // Issue #1522 REPRODUCE-FIRST (D33/G10): the maintainer's EXACT stable-LTE
+        // flap — "it connects, it disconnects, it connects, it disconnects." Cellular
+        // drops NET_CAPABILITY_VALIDATED for sub-second windows constantly at full
+        // signal (RAT handovers, periodic re-validation, v4↔v6 flips) while the TCP /
+        // -CC socket stays perfectly alive. Each blip is a NoValidatedNetwork →
+        // Validated pair SHORTER than the loss-band debounce.
+        //
+        // RED on base (no debounce, no keepalive check on the loss arm): each loss
+        // paints the Reconnecting band SYNCHRONOUSLY in holdNetworkLost, so the
+        // "still Connected right after the loss" assertion fails on the very first
+        // blip and the band flaps N times.
+        // GREEN with #1522: the band is debounced and the restore cancels it before
+        // it can paint, so the ConnectionState NEVER leaves Connected across the whole
+        // storm and reconnect_events == 0 (no teardown).
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> FakeTmuxClient().withSinglePane("work", "%1") }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+
+        // ADVERSARIAL: pin the keepalive so it CANNOT vouch (proven-alive=false) — this
+        // proves the DEBOUNCE alone holds the line, not the immediate keepalive
+        // shortcut. The socket is alive (probe-dead seam OFF) so each restore rides
+        // through with NO redial, isolating the band flap as the symptom (not a real
+        // teardown, which the connectCount assertion also guards).
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = false
+
+        val hook = registry.lifecycleHooksSnapshot().single()
+        val blips = 8
+        for (i in 0 until blips) {
+            hook.onNetworkChanged(networkLoss(sequence = (i * 2 + 1).toLong()))
+            runCurrent()
+            // LOAD-BEARING (RED on base = Reconnecting): a sub-second validation blip
+            // must NOT flap the band to Reconnecting.
+            assertTrue(
+                "blip #$i: a transient validation loss must NOT flap the band to Reconnecting " +
+                    "(#1522); got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            // The blip clears well within the debounce window.
+            advanceTimeBy(400L)
+            hook.onNetworkChanged(networkRestore(sequence = (i * 2 + 2).toLong()))
+            advanceUntilIdle()
+            assertTrue(
+                "blip #$i: the restore keeps the session Connected (no flap); " +
+                    "got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+        }
+
+        // LOAD-BEARING: zero teardown across the whole stable-LTE churn — the
+        // long-running-session gate's own criterion (reconnect_events == 0).
+        assertEquals(
+            "a stable link's validation churn must never redial (reconnect_events == 0) — #1522",
+            0,
+            connector.connectCount,
+        )
+        assertEquals(0, TMUX_CONNECT_ATTEMPTS.get())
+
+        vm.forceTransportProvenAliveForTest = null
+    }
+
+    @Test
+    fun issue1522SustainedFlapAmortizesBandPaintsViaBackoffNotEverySecond() = runTest(scheduler) {
+        // Issue #1522 (amortization, REPRODUCE-FIRST): the maintainer's second symptom —
+        // on a flaky link the loss reconnect "reloads the window every ~1s with NO
+        // amortization" because holdNetworkLost painted the band with retryDelayMs = 0
+        // (instant reload). The fix gives the loss band a GRACE (debounce) that ESCALATES
+        // via the connection's own auto-reconnect ladder on each actual reload, so a
+        // persistently flapping link reloads progressively LESS often, not every second.
+        //
+        // RED on base (retryDelayMs = 0, no debounce/backoff): the 2nd sustained loss
+        // paints the Reconnecting band IMMEDIATELY → the "still Connected at the base
+        // grace after the 2nd loss" assertion fails (base reloads every loss).
+        // GREEN: the 2nd loss must wait base + ladder[0] before it can paint — proving
+        // the reload is amortized (grace + backoff), not instant.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ -> FakeTmuxClient().withSinglePane("work", "%1") }
+        // The auto-reconnect ladder IS the loss-band backoff ladder (#1522).
+        vm.setAutoReconnectDelaysForTest(listOf(3_000L, 6_000L))
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        runCurrent()
+        // Keepalive can NOT vouch (so a sustained loss paints); the socket is alive so
+        // each restore rides through with no redial (isolating the reload cadence).
+        vm.forceTransportProvenAliveForTest = false
+        vm.forceLivenessProbeDeadForTest = false
+        val hook = registry.lifecycleHooksSnapshot().single()
+
+        // --- Reload #1: the FIRST sustained loss paints after the BASE grace. ---
+        hook.onNetworkChanged(networkLoss(sequence = 1L))
+        advanceTimeBy(NETWORK_LOSS_BAND_DEBOUNCE_MS - 100)
+        runCurrent()
+        assertTrue(
+            "1st loss must not paint before the base grace",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        advanceTimeBy(200)
+        runCurrent()
+        assertTrue(
+            "1st sustained loss paints the band after the base grace",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        // Link flaps back up briefly (ride-through, no redial). Use runCurrent so the
+        // 30s quiet-reset does NOT fire and reset the backoff before the next loss.
+        hook.onNetworkChanged(networkRestore(sequence = 2L))
+        runCurrent()
+        assertTrue(
+            "the restore rides through back to Connected (no redial)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        // --- Reload #2: the SECOND loss must wait base + ladder[0] (BACKOFF). ---
+        hook.onNetworkChanged(networkLoss(sequence = 3L))
+        advanceTimeBy(NETWORK_LOSS_BAND_DEBOUNCE_MS + 100)
+        runCurrent()
+        // LOAD-BEARING (RED on base = Reconnecting instantly): after the base grace the
+        // 2nd loss must STILL be Connected — the backoff extended the grace so the flaky
+        // link is NOT reloading at the base cadence.
+        assertTrue(
+            "2nd sustained loss must be AMORTIZED — still Connected at the base grace because " +
+                "the backoff (base + ladder[0]) extended it; base reloads instantly (#1522)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        // Only after the additional ladder[0] backoff does the 2nd band paint.
+        advanceTimeBy(3_000L)
+        runCurrent()
+        assertTrue(
+            "the 2nd band paints only after base + ladder[0] — proving grace + backoff",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+
+        // The whole flap never tore the transport down (amortized, not a redial storm).
+        advanceUntilIdle()
+        assertEquals(
+            "a flapping link's amortized reloads must never redial (reconnect_events == 0) — #1522",
+            0,
+            connector.connectCount,
+        )
+
+        vm.forceTransportProvenAliveForTest = null
     }
 
     @Test
@@ -713,11 +901,14 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
         // falls through to the fresh-lease redial being asserted here.
         vm.forceLivenessProbeDeadForTest = true
 
-        // Loss: hold + flip to Reconnecting (the loss-suspended state).
+        // Loss: hold + (issue #1522) after the debounce elapses — the keepalive is
+        // pinned DEAD here so it cannot vouch — flip to the loss-suspended Reconnecting
+        // state.
         registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        advanceTimeBy(NETWORK_LOSS_BAND_DEBOUNCE_MS + 1)
         runCurrent()
         assertTrue(
-            "loss leaves the session in the loss-suspended Reconnecting state",
+            "loss leaves the session in the loss-suspended Reconnecting state after the debounce",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
         assertEquals(0, connector.connectCount)
@@ -1105,7 +1296,11 @@ class TmuxSessionViewModelNetworkLifecycleTest : TmuxSessionViewModelTestBase() 
         )
 
         // The Doze interval: network drops while backgrounded, then restores on wake.
+        // Issue #1522: the band is debounced — the keepalive is dead here so it cannot
+        // vouch, so once the loss OUTLASTS the debounce the loss-suspended Reconnecting
+        // state surfaces.
         registry.lifecycleHooksSnapshot().single().onNetworkChanged(networkLoss())
+        advanceTimeBy(NETWORK_LOSS_BAND_DEBOUNCE_MS + 1)
         runCurrent()
         assertTrue(
             "the loss leaves the session in the loss-suspended Reconnecting state",

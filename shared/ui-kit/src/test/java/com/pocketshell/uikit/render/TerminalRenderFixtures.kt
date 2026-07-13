@@ -4,15 +4,19 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.components.LoadingIndicator
@@ -86,6 +90,59 @@ internal fun TmuxConnectingStatesRender() {
             LoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
                 label = "Attaching…",
+            )
+        }
+    }
+}
+
+/**
+ * Issue #1521: the DISCONNECTED session state — the fix for the maintainer's "there's
+ * nowhere to tap" dead-end. `FailedConnectionRow` + `RevealFailurePlaceholder` are
+ * app-only composables, so this fixture reproduces their visible chrome with ui-kit
+ * primitives: the top disconnect band ("Disconnected from …. Tap Reconnect to retry.")
+ * now carries a PROMINENT accent `PocketShellButton` ("Reconnect") instead of a
+ * borderless "Tap to reconnect" text link, and the centered placeholder is the calm
+ * "Disconnected." status (the misleading "tap to reconnect above." pointer is gone).
+ * A reviewer can eyeball that the Reconnect control reads as an obvious, tappable CTA.
+ */
+@Composable
+internal fun TmuxDisconnectedStateRender() {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // The disconnect band (reproduces FailedConnectionRow with the #1521 button).
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(color = PocketShellColors.Surface)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Disconnected from alexey@135.181.114.209:22. Tap Reconnect to retry.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            PocketShellButton(
+                text = "Reconnect",
+                onClick = {},
+                variant = ButtonVariant.Primary,
+                compact = true,
+            )
+        }
+        // The centered calm placeholder (reproduces RevealFailurePlaceholder).
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+                .background(color = PocketShellColors.Background),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "Disconnected.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 14.sp,
+                modifier = Modifier.padding(horizontal = 24.dp),
             )
         }
     }

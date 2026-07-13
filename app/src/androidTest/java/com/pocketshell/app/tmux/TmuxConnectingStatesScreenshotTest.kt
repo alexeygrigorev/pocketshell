@@ -19,7 +19,9 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -37,6 +39,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -397,6 +400,12 @@ class TmuxConnectingStatesScreenshotTest {
         val failed = TmuxSessionViewModel.ConnectionStatus.Failed(
             "Connection lost. Tap Reconnect to retry.",
         )
+        // Issue #1521 (AC2, gated): tapping the band's "Reconnect" control MUST invoke
+        // the existing reconnect action. This tap→reconnect assertion is asserted HERE,
+        // inside the CI-wired [TmuxConnectingStatesScreenshotTest]
+        // (`scripts/ci-journey-suite.sh` → emulator-journey), so the affordance is
+        // guarded per-push (not only in the un-gated component test).
+        var reconnectCalls = 0
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -413,8 +422,7 @@ class TmuxConnectingStatesScreenshotTest {
                     )
                     FailedConnectionRow(
                         message = failed.message,
-                        onReconnect = {},
-                        canReconnect = true,
+                        onReconnect = { reconnectCalls += 1 },
                     )
                     Box(
                         modifier = Modifier
@@ -444,8 +452,11 @@ class TmuxConnectingStatesScreenshotTest {
                 }
             }
         }
-        // The band's "Tap to reconnect" is the SOLE reconnect affordance.
-        compose.onNodeWithText("Tap to reconnect").assertExists()
+        // Issue #1521: the band's prominent, always-present "Reconnect" button is the
+        // SOLE reconnect affordance (replacing the old borderless "Tap to reconnect"
+        // text link). Exactly one on-screen reconnect control.
+        compose.onNodeWithText("Reconnect").assertExists()
+        compose.onNodeWithText("Tap to reconnect").assertDoesNotExist()
         compose
             .onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
             .assertCountEquals(1)
@@ -459,6 +470,15 @@ class TmuxConnectingStatesScreenshotTest {
         compose.waitForIdle()
         // ZERO animated indicators — the settled Failed state must not spin.
         assertIndeterminateIndicatorCount(0)
+        // Issue #1521 (AC2): the affordance is not just present — tapping it routes to
+        // the SAME existing reconnect action. RED without the always-present button
+        // (nothing tappable → no callback); GREEN with the fix.
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).performClick()
+        assertEquals(
+            "Tapping the disconnected-band Reconnect button must invoke the reconnect action",
+            1,
+            reconnectCalls,
+        )
         SystemClock.sleep(300)
         captureFullDevice(File(artifactDir(), "tmux-failed-single-reconnect-control.png"))
     }
@@ -497,7 +517,6 @@ class TmuxConnectingStatesScreenshotTest {
                     FailedConnectionRow(
                         message = failureReasonSentence((hardFailureState as SessionSurfaceState.Failed).reason),
                         onReconnect = {},
-                        canReconnect = true,
                     )
                     Box(
                         modifier = Modifier
@@ -531,6 +550,17 @@ class TmuxConnectingStatesScreenshotTest {
             .assertCountEquals(1)
         compose
             .onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
+        // Issue #1521 (AC3, gated): the calm center placeholder now reads a bare
+        // "Disconnected." status — the misleading "tap to reconnect above." pointer
+        // (which gestured at a non-obvious target) is GONE, since the recovery
+        // affordance is the prominent, always-present "Reconnect" button in the band.
+        // Asserted here in the CI-wired [TmuxConnectingStatesScreenshotTest] so the copy
+        // change is guarded per-push. RED on base: the placeholder said
+        // "Disconnected — tap to reconnect above." → the substring assert below fails.
+        compose.onNodeWithText("Disconnected.").assertExists()
+        compose
+            .onAllNodesWithText("tap to reconnect above", substring = true)
             .assertCountEquals(0)
         // Exactly ONE reconnect control (the band) and ZERO spinners.
         compose

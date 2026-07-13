@@ -622,6 +622,64 @@ class PromptComposerOutboundSendQueueViewModelTest {
     }
 
     @Test
+    fun issue1526_deferralEmissionTriggeredFlushSeesClearedInFlightGateAndReclaims() = runTest {
+        // Issue #1526 S1 (RED on the pre-fix ordering): markOutboundSendDeferred
+        // refreshed the queue snapshot BEFORE clearing `sendInFlight`. The
+        // screen's auto-flush (TmuxOutboundQueueAutoFlushEffect) is triggered BY
+        // that snapshot emission and self-gates on `sendInFlight` — an
+        // immediately-resumed collector (the on-device shape) observed the
+        // requeued row while the gate was still up, skipped it, and — the list
+        // never changing again — the deferred prompt sat "Will send when
+        // reconnected." forever inside a silently-healed connection window (the
+        // maintainer's delayed-delivery symptom). GREEN: the gate clears first,
+        // so the very emission that announces the requeued row can re-claim it.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("exactly once across the flap")
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+        val first = sent.single()
+
+        // The PRODUCTION flush shape: the real controller retrying at most one
+        // row per queue-snapshot emission, on an IMMEDIATELY-resumed collector
+        // (UnconfinedTestDispatcher) — the interleave the composed effect
+        // produces on-device.
+        val controller = com.pocketshell.app.tmux.OutboundQueueAutoFlushController()
+        val flushJob = launch(
+            kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler),
+        ) {
+            vm.outboundQueueItems.collect {
+                controller.onQueueSnapshotChanged(sessionLive = true) { excluding ->
+                    vm.retryNextOutboundItem(excludingIds = excluding)
+                }
+            }
+        }
+
+        // The connection dropped mid-send with an ambiguous outcome — the
+        // dispatcher defers the row (Option A).
+        vm.markOutboundSendDeferred(first)
+        advanceUntilIdle()
+
+        // THE regression assertion: the deferral's own snapshot emission must be
+        // able to re-claim the row (gate cleared first). On the old ordering the
+        // flush saw sendInFlight=true, skipped, and no re-dispatch ever came.
+        waitForSendCount(sent, 2)
+        assertEquals(
+            "the flush must re-claim the SAME deferred row",
+            first.outboundQueueItemId,
+            sent[1].outboundQueueItemId,
+        )
+        flushJob.cancel()
+    }
+
+    @Test
     fun issue971_queuedDropAutoSendsOnReconnectFlushExactlyOnce() = runTest {
         // (d) On reconnect the queued message auto-sends (the #900 flush wired in
         // TmuxSessionScreen via retryNextOutboundItem). After a drop the row stays

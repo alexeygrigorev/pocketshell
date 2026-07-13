@@ -1297,8 +1297,7 @@ public class PromptComposerViewModel @Inject constructor(
      * QUEUED and auto-sends on reconnect (the #900 flush). This:
      *
      *  - re-arms the durable row to [OutboundState.Queued] and clears its error
-     *    (so it reads as the single "Will send when reconnected." status, never a
-     *    terminal-looking "Failed — …" row),
+     *    (the single "Will send when reconnected." status),
      *  - clears the in-flight gates + watchdog so the next foreground/reconnect
      *    flush ([retryNextOutboundItem]) can re-claim it,
      *  - leaves the composer EMPTY (the prompt lives in the queue row — the
@@ -1345,19 +1344,20 @@ public class PromptComposerViewModel @Inject constructor(
             "composer_send_deferred_to_queue",
             "attachmentCount" to request.attachments.size,
         )
-        request.sendTarget.sessionKey
-            .takeIf { it.isNotBlank() }
-            ?.let { refreshOutboundQueueItemsFor(it) }
-        // Clear the in-flight gates so the reconnect flush can re-claim the row.
-        // The composer stays EMPTY (the row is the single representation) and NO
-        // "Not sent" error is set — the queue row's "Will send when reconnected."
-        // is the single coherent status.
+        // Issue #1526 S1: clear the in-flight gate BEFORE the queue refresh —
+        // the refresh emission triggers the #900 auto-flush, which self-gates
+        // on `sendInFlight`; the old order made the flush skip the requeued
+        // row and (the list never changing) it sat deferred forever.
+        // The composer stays EMPTY; no error banner.
         _uiState.update { current ->
             current.copy(
                 sendInFlight = false,
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
+        request.sendTarget.sessionKey
+            .takeIf { it.isNotBlank() }
+            ?.let { refreshOutboundQueueItemsFor(it) }
     }
 
     /**

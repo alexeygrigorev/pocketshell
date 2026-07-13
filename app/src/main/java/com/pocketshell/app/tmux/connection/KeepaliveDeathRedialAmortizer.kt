@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.tmux.TmuxConnectTrigger
@@ -65,6 +67,17 @@ internal class KeepaliveDeathRedialAmortizer(
     private val scope: CoroutineScope,
     private val backoffLadderMs: () -> List<Long>,
     private val quietResetMs: () -> Long,
+    /**
+     * Issue #1533: the diagnostic identity of the amortized redial so a SECOND
+     * instance (the same-identity network-restore redial) records HONEST field
+     * events instead of mislabelling itself as a keepalive death. Defaults keep
+     * the original #928 keepalive-death labels unchanged.
+     */
+    private val episodeEventName: String = "keepalive_death_redial_amortized",
+    private val episodeCause: String = KEEPALIVE_DEAD_REASON,
+    private val episodeSource: String = "passive_disconnect",
+    private val episodeTrigger: String = TmuxConnectTrigger.AutoReconnect.logValue,
+    private val episodeStage: String = "keepalive_death_redial",
 ) {
     /**
      * Keepalive-death episodes seen per host in the current flap window
@@ -91,11 +104,16 @@ internal class KeepaliveDeathRedialAmortizer(
             else ladder[count.coerceAtMost(ladder.size - 1)]
         episodeCountByHost[hostId] = (count + 1).coerceAtMost(ladder.size.coerceAtLeast(1))
         armQuietReset(hostId)
-        recordKeepaliveDeathRedialEpisode(
+        recordRedialEpisode(
             target = target,
             generation = generation,
             episode = count + 1,
             graceMs = graceMs,
+            eventName = episodeEventName,
+            cause = episodeCause,
+            source = episodeSource,
+            trigger = episodeTrigger,
+            stage = episodeStage,
         )
         if (graceMs > 0L) delay(graceMs)
     }
@@ -124,18 +142,23 @@ internal class KeepaliveDeathRedialAmortizer(
  * so a widening flap cadence is directly observable on-device (the audit's exit
  * criterion for slice 1b).
  */
-private fun recordKeepaliveDeathRedialEpisode(
+private fun recordRedialEpisode(
     target: ConnectionTarget,
     generation: Long,
     episode: Int,
     graceMs: Long,
+    eventName: String,
+    cause: String,
+    source: String,
+    trigger: String,
+    stage: String,
 ) {
     DiagnosticEvents.record(
         "connection",
-        "keepalive_death_redial_amortized",
-        "source" to "passive_disconnect",
-        "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-        "cause" to KEEPALIVE_DEAD_REASON,
+        eventName,
+        "source" to source,
+        "trigger" to trigger,
+        "cause" to cause,
         "episode" to episode,
         "graceMs" to graceMs,
         "hostId" to target.hostId,
@@ -146,10 +169,10 @@ private fun recordKeepaliveDeathRedialEpisode(
         "generation" to generation,
     )
     ReconnectCauseTrail.record(
-        stage = "keepalive_death_redial",
+        stage = stage,
         outcome = if (graceMs > 0L) "amortized" else "instant",
-        cause = KEEPALIVE_DEAD_REASON,
-        trigger = TmuxConnectTrigger.AutoReconnect.logValue,
+        cause = cause,
+        trigger = trigger,
         "hostId" to target.hostId,
         "episode" to episode,
         "graceMs" to graceMs,
@@ -269,5 +292,98 @@ internal fun recordSilentReattachFail(
         "cause" to "grace_elapsed",
         "transportReattachAttempts" to transportReattachAttempts,
         *shortAppSwitchFields,
+    )
+}
+
+/**
+ * Issue #1042 / #1533 (VM-shrink extraction): the `network_restore_ride_through`
+ * device trail — the restore RODE THROUGH on a surviving transport (the bounded
+ * probe answered, or #1533's same-identity reader-activity vouch). Field set
+ * unchanged from the former inline record in
+ * `TmuxSessionViewModel.rideThroughNetworkRestore`.
+ */
+internal fun recordNetworkRestoreRideThrough(
+    target: ConnectionTarget,
+    change: TerminalNetworkChange,
+    generation: Long,
+    cause: String,
+    clientHash: Int?,
+) {
+    DiagnosticEvents.record(
+        "connection",
+        "network_restore_ride_through",
+        "source" to "network_observer",
+        "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+        "reason" to change.reason,
+        "cause" to cause,
+        "classification" to "network_restored_transport_alive",
+        "reconnect" to false,
+        "sequence" to change.sequence,
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "generation" to generation,
+        "clientHash" to clientHash,
+        "deferredFromBackground" to change.deferredFromBackground,
+        *change.networkDiagnosticFields(),
+    )
+    ReconnectCauseTrail.record(
+        stage = "network_reconnect_decision",
+        outcome = "ride_through",
+        cause = cause,
+        trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+        "sequence" to change.sequence,
+        "hostId" to target.hostId,
+        "generation" to generation,
+        "classification" to "network_restored_transport_alive",
+        "deferredFromBackground" to change.deferredFromBackground,
+    )
+}
+
+/**
+ * Issue #997 / #1042 (VM-shrink extraction): the `network_restore_reconnect_start`
+ * device trail — the restore transport did NOT answer (a genuinely dead
+ * post-outage socket) so the #997 fresh-lease redial fires. Field set unchanged
+ * from the former inline record in
+ * `TmuxSessionViewModel.forceFreshLeaseRestoreReconnect`.
+ */
+internal fun recordNetworkRestoreReconnectStart(
+    target: ConnectionTarget,
+    change: TerminalNetworkChange,
+    generation: Long,
+    clientHash: Int?,
+) {
+    DiagnosticEvents.record(
+        "connection",
+        "network_restore_reconnect_start",
+        "source" to "network_observer",
+        "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
+        "reason" to change.reason,
+        "classification" to "network_restored_fast_reconnect",
+        "reconnect" to true,
+        "transportAnswered" to false,
+        "sequence" to change.sequence,
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "generation" to generation,
+        "clientHash" to clientHash,
+        "deferredFromBackground" to change.deferredFromBackground,
+        *change.networkDiagnosticFields(),
+    )
+    ReconnectCauseTrail.record(
+        stage = "network_reconnect_decision",
+        outcome = "schedule_reconnect",
+        cause = "network_restored",
+        trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+        "sequence" to change.sequence,
+        "hostId" to target.hostId,
+        "generation" to generation,
+        "classification" to "network_restored_fast_reconnect",
+        "deferredFromBackground" to change.deferredFromBackground,
     )
 }

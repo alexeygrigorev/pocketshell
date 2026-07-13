@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
 
 internal enum class NetworkChangeArm {
@@ -24,6 +25,26 @@ internal fun shouldReportValidatedHandoffToController(
             !previous.hasSameNetworkIdentityAs(change.current)
         } ?: false)
     return realValidatedHandoff && !transportKeepAliveProvenAlive()
+}
+
+/**
+ * Issue #1533: is this [TerminalNetworkChangeKind.NetworkRestored] a SAME-IDENTITY
+ * restore — validation returned on the SAME validated identity it was lost on (a
+ * brief validated-bit blip / re-validation on an unchanged transport, whose socket
+ * 4-tuple was preserved) — as opposed to a genuine transport handoff (WiFi↔cellular)
+ * that restored on a DIFFERENT identity?
+ *
+ * Only the same-identity case may ride through on LOCAL liveness evidence (the #927
+ * recent-reader-activity vouch): its surviving control bytes crossed the SAME live
+ * socket, so a `%output` burst that parks the round-trip probe is proof-of-life, not
+ * a dead channel. On a real identity change the surviving bytes crossed the OLD,
+ * now-dead socket, so the strict round-trip probe (#1193) must still run.
+ */
+internal fun TerminalNetworkChange.isSameIdentityNetworkRestore(): Boolean {
+    if (kind != TerminalNetworkChangeKind.NetworkRestored) return false
+    val restored = current as? TerminalNetworkSnapshot.Validated ?: return false
+    val preLoss = previousValidated ?: return false
+    return preLoss.hasSameNetworkIdentityAs(restored)
 }
 
 internal fun selectNetworkChangeArm(

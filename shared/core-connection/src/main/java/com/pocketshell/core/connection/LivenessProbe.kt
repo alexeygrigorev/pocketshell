@@ -224,6 +224,21 @@ class LivenessProbe(
      * consecutive failures; on [failureThreshold] it fires [ProbeIo.onProbeFailed]
      * ONCE and stops counting (the recovery path now owns the channel) until a
      * later success resets it.
+     *
+     * ## Issue #1543 / #1517 — virtual-clock test contract (must-run-forever loop)
+     *
+     * This is an intentionally INFINITE loop with NO idle-tick bound — its ONLY
+     * terminal condition is job cancellation ([stop] / [scope] cancel). An idle
+     * bound would weaken the on-device drop detector (it must keep probing a quiet
+     * foreground link forever), so it is deliberately absent. The consequence for
+     * tests: a `TestScope` that STARTs this loop and then calls `advanceUntilIdle()`
+     * HANGS FOREVER (the loop always has a next scheduled `delay`, so the scheduler
+     * never idles) — the #1517 / #882 CI-hang signature. Drive it with a BOUNDED
+     * `advanceTimeBy(...)` + a teardown [stop] / `scope.cancel()` (see
+     * `LivenessProbeTest`), never `advanceUntilIdle()`. In the app the VM's
+     * auto-start of this probe defaults OFF in the unit-test runtime for the same
+     * reason (`LivenessProbeTestOverride.autoStartEnabled`, #1543 finding L1), so a
+     * naive `TmuxSessionViewModel` test can't inherit the hang.
      */
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return

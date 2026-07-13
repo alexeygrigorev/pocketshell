@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.os.Build
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.connection.LivenessProbe
@@ -8,6 +9,30 @@ import com.pocketshell.core.terminal.input.BracketedPaste
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+
+/**
+ * Issue #1543 — is the current process a JVM/Robolectric UNIT-TEST runtime (as
+ * opposed to a real device / emulator)? Robolectric stamps [Build.FINGERPRINT] as
+ * `"robolectric"`; a real device / emulator never does.
+ *
+ * The proactive-drop [LivenessProbe] auto-start (and the core-ssh transport
+ * keepalive) default their auto-arm to OFF in that runtime so a naive
+ * `TmuxSessionViewModel` unit test that drains virtual time (`advanceUntilIdle()`)
+ * can NOT silently hang forever on the probe's cancel-terminal-only `delay()` loop
+ * — the exact #1517 / #882 CI-hang signature that #843 audit finding L1 flagged as
+ * re-armed because the guard used to default ON (opt-out). Making the default
+ * opt-IN means a new VM test inherits the safe behaviour without having to know
+ * about the override. On device / emulator the fingerprint is real, so the loop
+ * auto-starts and runs exactly as in production.
+ *
+ * Reading [Build.FINGERPRINT] is a static field access (never the "Stub!" throw a
+ * forked-JVM android.jar METHOD call makes), but it is guarded anyway so any
+ * unexpected access failure resolves to the production default (auto-start ON) —
+ * we never want a read glitch to silently disable the on-device probe.
+ */
+internal fun isRobolectricUnitTestRuntime(): Boolean =
+    runCatching { "robolectric".equals(Build.FINGERPRINT, ignoreCase = true) }
+        .getOrDefault(false)
 
 internal fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
     reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
@@ -584,13 +609,22 @@ internal object LivenessProbeTestOverride {
     /**
      * Whether a freshly-constructed VM auto-starts its probe loop. Production +
      * the connected emulator proof keep this TRUE (the loop runs on the real Main
-     * looper). JVM unit tests set it FALSE: the probe's infinite periodic `delay`
-     * loop on the virtual-clock Main would otherwise hang `runTest`'s
-     * `advanceUntilIdle()`. Those tests drive the probe via the explicit VM seams
-     * instead.
+     * looper). JVM/Robolectric unit tests default it FALSE: the probe's infinite
+     * periodic `delay` loop on the virtual-clock Main would otherwise hang
+     * `runTest`'s `advanceUntilIdle()`. Those tests drive the probe via the
+     * explicit VM seams instead.
+     *
+     * Issue #1543 (audit finding L1) — this now defaults OFF in the unit-test
+     * runtime ([isRobolectricUnitTestRuntime]) instead of ON. Previously it
+     * defaulted ON (opt-out), so a NEW `TmuxSessionViewModel` test that merely
+     * called `advanceUntilIdle()` inherited a silent forever-hang (the #1517 /
+     * #882 35-min CI-hang signature) unless the author remembered to opt out. It
+     * is now opt-IN: the safe default is inherited automatically, and a test that
+     * WANTS the loop running still opts in via [setAutoStartEnabledForTest] and
+     * drives it with a BOUNDED `advanceTimeBy`, never `advanceUntilIdle`.
      */
     @Volatile
-    var autoStartEnabled: Boolean = true
+    var autoStartEnabled: Boolean = !isRobolectricUnitTestRuntime()
 
     fun setAutoStartEnabledForTest(enabled: Boolean) {
         autoStartEnabled = enabled
@@ -615,7 +649,11 @@ internal object LivenessProbeTestOverride {
 
     fun clear() {
         setForTest(null, null, null)
-        autoStartEnabled = true
+        // Issue #1543 — reset to the RUNTIME default (OFF under Robolectric), NOT
+        // a hardcoded `true`. A hardcoded reset would re-arm the forever-hang for a
+        // SIBLING unit test that ran after this one's teardown and relied on the
+        // safe opt-in default.
+        autoStartEnabled = !isRobolectricUnitTestRuntime()
     }
 
     fun intervalMs(): Long = intervalMsOverride ?: LivenessProbe.DEFAULT_INTERVAL_MS

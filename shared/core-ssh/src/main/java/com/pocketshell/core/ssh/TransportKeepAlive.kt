@@ -230,6 +230,25 @@ internal class TransportKeepAlive(
      * and can never advance it, so a genuinely silent peer is STILL declared dead
      * within `countMax × interval` (~90s) — the #945 contract is preserved exactly,
      * while a slow-but-answering link rides through.
+     *
+     * ## Issue #1543 / #1517 — virtual-clock test contract (must-run-forever loop)
+     *
+     * This is an intentionally INFINITE loop: in production it runs for the whole
+     * life of the transport, and its ONLY terminal conditions are job cancellation
+     * ([stop] / [scope] cancel) and [KeepAliveIo.isAlive] going false. It therefore
+     * has NO idle-tick bound — one would weaken the on-device keepalive (it must
+     * keep pinging an idle link forever), so an idle bound is deliberately absent
+     * here (unlike the app render-heal watchdog, which re-arms on `%output` and can
+     * self-terminate). The consequence for TESTS: a `TestScope` that STARTs this
+     * loop and then calls `advanceUntilIdle()` will HANG FOREVER — the loop always
+     * has a next scheduled `delay`, so the scheduler is never idle. This is the
+     * exact #1517 (35-min CI hang) / #882 signature that #843 audit finding L1
+     * flagged. Drive this loop from tests with a BOUNDED `advanceTimeBy(...)` +
+     * `runCurrent()` and an explicit [stop] / `scope.cancel()` in teardown (see
+     * `TransportKeepAliveIdleCadenceTest` / `NatIdleMappingSurvivalKeepAliveTest`),
+     * NEVER `advanceUntilIdle()`. The parallel app-level [com.pocketshell.core.
+     * connection.LivenessProbe] auto-start now defaults OFF in the unit-test
+     * runtime for the same reason.
      */
     fun start(scope: CoroutineScope) {
         if (job?.isActive == true) return

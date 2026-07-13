@@ -904,17 +904,29 @@ public class PromptComposerViewModel @Inject constructor(
             "attachmentCount" to attachments.size,
             "withEnter" to withEnter,
         )
-        // Issue #971: HAND THE PROMPT OFF to the outbound queue — clear the
-        // editable draft + staged tiles the instant we go in-flight so the
-        // prompt is represented EXACTLY ONCE (the "Sending…" queue row), never
-        // as BOTH the editor text AND a duplicate "1 unsent prompt" row. This
-        // reverses the #745 keep-the-draft-visible behaviour (hard-cut per D22):
-        // the queue row is now the single in-flight source of truth, and the
-        // Send button reads `sendInFlight` to disable itself + show "Sending…".
-        // The clean draft + tiles still travel in the [SendRequest] / queue row,
-        // so a failed send ([restoreFailedSend]) puts the EXACT prompt back into
-        // the (now-single) composer, and a delivered send leaves it empty.
-        clearComposerForHandoff()
+        // Issue #971: HAND THE PROMPT OFF to the outbound queue so the prompt is
+        // represented EXACTLY ONCE (the "Sending…" queue row), never as BOTH the
+        // editor text AND a duplicate "1 unsent prompt" row. This reverses the
+        // #745 keep-the-draft-visible behaviour (hard-cut per D22): the queue row
+        // is the single in-flight source of truth, and the Send button reads
+        // `sendInFlight` to disable itself + show "Sending…". The clean draft +
+        // tiles still travel in the [SendRequest] / queue row, so a failed send
+        // ([restoreFailedSend]) puts the EXACT prompt back into the (now-single)
+        // composer, and a delivered send leaves it empty.
+        //
+        // Issue #1540 (L9 — the widest silent-LOST hole): the composer clear
+        // ([clearComposerForHandoff]) USED to run HERE, synchronously, BEFORE the
+        // durable outbound-queue row was committed (an async IO hop below; the
+        // sidecar path staged bytes first, widening the window). If the process
+        // died in that window the prompt existed in NEITHER the durable draft NOR
+        // the durable queue — gone with zero trace. The fix WRITE-AHEADS the
+        // durable row: the clear is deferred into each durable path and runs ONLY
+        // AFTER the row commit succeeds ([enqueueOutboundSend] /
+        // [enqueueAndDispatchSidecarBackedSend]), so a crash in the window always
+        // leaves the prompt recoverable in EXACTLY ONE durable place — the draft
+        // (before commit) or the queue row (after commit) — never lost. The
+        // no-durable-store fallback has no row to write-ahead, so it clears
+        // synchronously just before emitting (no IO hop, nothing to lose).
         _uiState.update { it.copy(sendInFlight = true, error = null) }
         // Issue #891: arm the overall-send watchdog the instant we go in-flight
         // so a host `onSend` that never resolves (wedged channel / dropped
@@ -967,6 +979,13 @@ public class PromptComposerViewModel @Inject constructor(
                         sendTarget = sendTarget,
                     )
                     withContext(Dispatchers.Main.immediate) {
+                        // Issue #1540 (L9): the durable row is committed — NOW it
+                        // is safe to clear the editable draft + durable draft. A
+                        // crash before this point leaves the prompt in the durable
+                        // draft (nothing was cleared yet); a crash after it leaves
+                        // the prompt in the just-committed queue row. Never both
+                        // gone at once — the LOST window is closed.
+                        clearComposerForHandoff()
                         emitPreparedSendRequest(
                             text = text,
                             withEnter = withEnter,
@@ -987,6 +1006,12 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return
         }
+        // Issue #1540 (L9): the no-durable-store fallback (DisabledOutboundQueueStore
+        // or a blank sessionKey) has no queue row to write-ahead, so there is no
+        // durable-loss window — the prompt only ever travels in the in-memory
+        // [SendRequest]. Clear synchronously here, just before emitting, exactly
+        // as the pre-#1540 code did.
+        clearComposerForHandoff()
         emitPreparedSendRequest(
             text = text,
             withEnter = withEnter,
@@ -1057,6 +1082,15 @@ public class PromptComposerViewModel @Inject constructor(
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
+        // Issue #1540 (L9): synthetic process-death seam (#780 model). Fires the
+        // INSTANT the durable draft has been cleared. A crash right here is the
+        // exact LOST window: the durable draft is gone, and — with the WRITE-AHEAD
+        // fix — the durable queue row is ALREADY committed (this runs after the
+        // commit in every durable path), so the test snapshots the durable stores
+        // and asserts the prompt survived in the queue row. On the pre-fix base
+        // this ran BEFORE the commit, so the snapshot showed the prompt gone from
+        // both stores (LOST). Production never sets this (null → no-op).
+        onDurableDraftClearedForHandoffTest?.invoke()
     }
 
     private fun hasLocalAttachmentsForSidecars(attachments: List<StagedAttachment>): Boolean =
@@ -1122,6 +1156,15 @@ public class PromptComposerViewModel @Inject constructor(
         if (queuedItem.id != itemId) {
             outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
         }
+        // Issue #1540 (L9): the durable row is committed (with its attachment
+        // refs AND the staged sidecar bytes above) — NOW it is safe to clear the
+        // editable draft + durable draft. This is the widest LOST window: the
+        // attachment path stages bytes BEFORE the row commit, so clearing the
+        // draft up front (the old order) meant a death between stage and commit
+        // lost the prompt AND orphaned the sidecar bytes with no owning row. The
+        // clear runs on Main ([clearComposerForHandoff] writes the SavedStateHandle
+        // draft slots, which require the Main thread).
+        withContext(Dispatchers.Main.immediate) { clearComposerForHandoff() }
         inFlightSendRequest = SendRequest(
             text = appendAttachmentPaths(cleanDraft, attachments.map { it.remotePath }),
             withEnter = withEnter,
@@ -1961,6 +2004,19 @@ public class PromptComposerViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal var sidecarRemovalForTest: (suspend (String) -> Unit)? = null
+
+    /**
+     * Issue #1540 (L9) synthetic process-death seam (#780 model). When non-null,
+     * [clearComposerForHandoff] invokes it the INSTANT the durable draft has been
+     * cleared — the exact moment a crash would leave the durable draft empty. The
+     * WRITE-AHEAD fix commits the durable queue row BEFORE this fires (in every
+     * durable path), so a test can snapshot the durable stores here and prove the
+     * prompt survived in the queue row (green); on the pre-fix base the clear ran
+     * BEFORE the commit, so the snapshot showed the prompt gone from BOTH the
+     * durable draft AND the durable queue (LOST → red). Production never sets it.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var onDurableDraftClearedForHandoffTest: (() -> Unit)? = null
 
     private fun refreshOutboundQueueItems() {
         _outboundQueueItems.value = composerTarget

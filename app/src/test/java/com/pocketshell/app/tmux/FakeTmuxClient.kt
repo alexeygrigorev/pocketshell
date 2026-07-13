@@ -188,6 +188,18 @@ internal class FakeTmuxClient(
 
     var suspendForeverOnBestEffortCommandPrefix: String? = null
 
+    /**
+     * Issue #1533: the #927 "busy ≠ dead" reader-activity clock the restore
+     * ride-through vouch reads. Default [Long.MAX_VALUE] = no reader activity known
+     * (the interface default), so existing tests keep going through the probe. A
+     * test pins a small value to model a live `%output` burst that keeps the SAME
+     * socket's reader active while the round-trip probe is parked behind the FIFO.
+     */
+    @Volatile
+    var millisSinceLastReaderActivityValue: Long = Long.MAX_VALUE
+
+    override fun millisSinceLastReaderActivity(): Long = millisSinceLastReaderActivityValue
+
     var sendCommandDelayMs: Long = 0L
 
     /**

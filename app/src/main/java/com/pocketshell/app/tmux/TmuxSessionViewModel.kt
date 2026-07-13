@@ -73,6 +73,9 @@ import com.pocketshell.app.tmux.connection.NetworkChangeEffects
 import com.pocketshell.app.tmux.connection.KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
 import com.pocketshell.app.tmux.connection.KeepaliveDeathRedialAmortizer
 import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
+import com.pocketshell.app.tmux.connection.isSameIdentityNetworkRestore
+import com.pocketshell.app.tmux.connection.recordNetworkRestoreReconnectStart
+import com.pocketshell.app.tmux.connection.recordNetworkRestoreRideThrough
 import com.pocketshell.app.tmux.connection.recordPassiveDisconnect
 import com.pocketshell.app.tmux.connection.recordSilentReattachFail
 import com.pocketshell.app.tmux.connection.recordSilentReattachStart
@@ -5324,6 +5327,22 @@ public class TmuxSessionViewModel @Inject constructor(
     )
 
     /**
+     * Issue #1533: cross-episode amortization for the SAME-IDENTITY network-restore
+     * redial (the "V2" busy-session flap) — the #928/#1522 debounce shape, distinct
+     * instance ([keepaliveDeathRedialAmortizer] sibling) with honest field events.
+     */
+    private val networkRestoreRedialAmortizer = KeepaliveDeathRedialAmortizer(
+        scope = viewModelScope,
+        backoffLadderMs = { autoReconnectDelaysMs },
+        quietResetMs = { keepaliveDeathQuietResetMs },
+        episodeEventName = "network_restore_redial_amortized",
+        episodeCause = "network_restored",
+        episodeSource = "network_observer",
+        episodeTrigger = TmuxConnectTrigger.NetworkReconnect.logValue,
+        episodeStage = "network_restore_redial",
+    )
+
+    /**
      * Issue #997 / #1522: [NetworkChangeArm.HoldNetworkLost] — a bare loss the
      * keepalive could NOT vouch for. Hold the lease and DEBOUNCE the band (grace +
      * escalating backoff): cellular clears `NET_CAPABILITY_VALIDATED` for sub-second
@@ -5376,11 +5395,15 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997 / #1042 / #1193: validation returned after a loss, including from
-     * a loss-suspended Reconnecting state. Ride through only when the existing
-     * control channel answers one bounded transition probe; otherwise schedule the
-     * fresh-lease restore reconnect. Passive keepalive freshness is intentionally
-     * not a positive restore authority across WiFi/cellular transitions.
+     * Issue #997 / #1042 / #1193 / #1533: validation returned after a loss.
+     *
+     * Issue #1533 (the "V2" busy-session flap): a SAME-IDENTITY restore whose control
+     * channel is STILL delivering bytes (a `%output` burst that parks the round-trip
+     * probe past its 5s budget) is a provably-alive transport — ride through on that
+     * #927 reader-activity vouch instead of tearing it down. Strict round-trip probing
+     * stays scoped to an identity CHANGE (#1193: on a handoff the surviving bytes
+     * crossed the OLD, now-dead socket). Otherwise probe; a dead socket redials via the
+     * #997 fresh lease, and a same-identity redial is AMORTIZED so it doesn't hammer.
      */
     private fun scheduleNetworkReconnectOnRestore(
         change: TerminalNetworkChange,
@@ -5388,11 +5411,13 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         // Issue #1522: validation returned — drop any pending debounced band.
         networkLossBandDebouncer.cancel()
-        // Issue #1193: EVERY restore ride-through decision goes through the bounded
-        // ACTIVE probe (require an answered round-trip). Ride through only if the
-        // (possibly new) path answers; redial via the #997 fresh lease if it does
-        // not. No passive-timestamp fast-path — that is what committed to a dead
-        // cellular socket.
+        val sameIdentity = change.isSameIdentityNetworkRestore()
+        // Issue #1533: same-identity + live-but-busy (recent reader activity) rides
+        // through WITHOUT the strict probe a `%output` burst would park past its budget.
+        if (sameIdentity && isRestoreTransportProvenAliveByReaderActivity()) {
+            rideThroughNetworkRestore(change, target, cause = "same_identity_reader_active")
+            return
+        }
         val probeGuard = currentNetworkTransitionProbeGuard(target)
         viewModelScope.launch {
             val alive = withTimeoutOrNull(RESTORE_LIVENESS_PROBE_BUDGET_MS) {
@@ -5405,9 +5430,32 @@ public class TmuxSessionViewModel @Inject constructor(
             if (alive) {
                 rideThroughNetworkRestore(change, target, cause = "probe_answered")
             } else {
+                // Issue #1533: amortize a real same-identity drop so a flapping host
+                // widens its cadence; an identity handoff still redials promptly.
+                if (sameIdentity) {
+                    networkRestoreRedialAmortizer.awaitRedialGrace(target, connectGeneration)
+                    // A newer reconnect generation may have superseded during the grace.
+                    if (probeGuard != null && !isCurrentNetworkTransitionProbe(probeGuard)) {
+                        recordStaleNetworkTransitionProbe(change, target, "network_restore_probe", probeGuard)
+                        return@launch
+                    }
+                }
                 forceFreshLeaseRestoreReconnect(change, target)
             }
         }
+    }
+
+    /**
+     * Issue #1533: is the current control channel proven alive by RECENT reader
+     * activity (#927)? A `%output` burst keeps advancing the reader's last-activity
+     * clock even while a `refresh-client` reply is parked — proof the SAME socket is
+     * alive. Valid ONLY on a same-identity restore (caller gates on that).
+     */
+    private fun isRestoreTransportProvenAliveByReaderActivity(): Boolean {
+        val client = clientRef ?: return false
+        return runCatching {
+            client.millisSinceLastReaderActivity() <= client.readerActivityLivenessWindowMs
+        }.getOrDefault(false)
     }
 
     private fun recordStaleNetworkTransitionProbe(
@@ -5436,11 +5484,11 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #1042 (cause #1): the restore RIDE-THROUGH arm. The existing transport
-     * survived the brief loss (proven alive, or the bounded probe answered), so the
-     * `-CC` client was never torn down. We do NOT redial — we just clear the calm
-     * loss-hold band by flipping back to [ConnectionState.Live] (which re-promotes
-     * the controller via `revealLive` and reopens the liveness-probe gate). No fresh
-     * lease, no visible Reconnecting churn — exactly the spurious-reconnect this
+     * survived the loss (bounded probe answered, or #1533's same-identity reader-
+     * activity vouch), so the `-CC` client was never torn down. We do NOT redial — we
+     * clear the calm loss-hold band by flipping back to [ConnectionState.Live] (which
+     * re-promotes the controller via `revealLive` and reopens the liveness-probe gate).
+     * No fresh lease, no visible Reconnecting churn — exactly the spurious-reconnect this
      * issue kills. Records a `network_restore_ride_through` device trail so the
      * decision is visible in field logs (not mislabelled as a redial).
      */
@@ -5456,36 +5504,12 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-network-restore-ride-through reason=$reason cause=$cause " +
                 targetLogFields(target),
         )
-        DiagnosticEvents.record(
-            "connection",
-            "network_restore_ride_through",
-            "source" to "network_observer",
-            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
-            "reason" to reason,
-            "cause" to cause,
-            "classification" to "network_restored_transport_alive",
-            "reconnect" to false,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "host" to target.host,
-            "port" to target.port,
-            "user" to target.user,
-            "session" to target.sessionName,
-            "generation" to connectGeneration,
-            "clientHash" to clientRef?.let { System.identityHashCode(it) },
-            "deferredFromBackground" to change.deferredFromBackground,
-            *change.networkDiagnosticFields(),
-        )
-        ReconnectCauseTrail.record(
-            stage = "network_reconnect_decision",
-            outcome = "ride_through",
+        recordNetworkRestoreRideThrough(
+            target = target,
+            change = change,
+            generation = connectGeneration,
             cause = cause,
-            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "generation" to connectGeneration,
-            "classification" to "network_restored_transport_alive",
-            "deferredFromBackground" to change.deferredFromBackground,
+            clientHash = clientRef?.let { System.identityHashCode(it) },
         )
         // Clear the loss-hold "reconnecting" band: the surviving transport is alive,
         // so flip back to Live (the -CC client was never torn down).
@@ -5500,12 +5524,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #997 / #1042: the restore FRESH-LEASE REDIAL arm — the #997 fallback for
-     * a genuinely dead post-outage socket (the transport did not survive the loss,
-     * so neither the keepalive nor the bounded probe answered). Drives a FAST
-     * reconnect via the existing `scheduleAutoReconnect` ladder (D28: NO new reconnect
-     * path). This is the unchanged pre-#1042 restore body — it now runs ONLY past the
-     * liveness gate in [scheduleNetworkReconnectOnRestore].
+     * Issue #997 / #1042: the restore FRESH-LEASE REDIAL arm — the #997 fallback for a
+     * genuinely dead post-outage socket (the bounded probe did not answer). Drives a
+     * FAST reconnect via the existing `scheduleAutoReconnect` ladder (D28: NO new
+     * reconnect path). Runs ONLY past the liveness gate in
+     * [scheduleNetworkReconnectOnRestore].
      */
     private fun forceFreshLeaseRestoreReconnect(
         change: TerminalNetworkChange,
@@ -5520,38 +5543,11 @@ public class TmuxSessionViewModel @Inject constructor(
             "tmux-network-restore-reconnect reason=$reason " +
                 targetLogFields(target),
         )
-        DiagnosticEvents.record(
-            "connection",
-            "network_restore_reconnect_start",
-            "source" to "network_observer",
-            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
-            "reason" to reason,
-            "classification" to "network_restored_fast_reconnect",
-            "reconnect" to true,
-            // Issue #1042: the redial now runs only PAST the liveness gate — the
-            // transport did NOT answer (keepalive aged out + bounded probe failed).
-            "transportAnswered" to false,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "host" to target.host,
-            "port" to target.port,
-            "user" to target.user,
-            "session" to target.sessionName,
-            "generation" to connectGeneration,
-            "clientHash" to clientRef?.let { System.identityHashCode(it) },
-            "deferredFromBackground" to change.deferredFromBackground,
-            *change.networkDiagnosticFields(),
-        )
-        ReconnectCauseTrail.record(
-            stage = "network_reconnect_decision",
-            outcome = "schedule_reconnect",
-            cause = "network_restored",
-            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "generation" to connectGeneration,
-            "classification" to "network_restored_fast_reconnect",
-            "deferredFromBackground" to change.deferredFromBackground,
+        recordNetworkRestoreReconnectStart(
+            target = target,
+            change = change,
+            generation = connectGeneration,
+            clientHash = clientRef?.let { System.identityHashCode(it) },
         )
         unregisterCurrentClient()
         scheduleAutoReconnect(

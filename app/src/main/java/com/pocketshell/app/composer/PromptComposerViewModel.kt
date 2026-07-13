@@ -111,16 +111,16 @@ public class PromptComposerViewModel @Inject constructor(
     // `VoiceModule` always provides the SharedPreferences-backed store so a
     // draft survives a session switch (and a process-death recreate) keyed
     // by the session it was authored in. See [ComposerDraftStore].
-    private val composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
+    internal val composerDraftStore: ComposerDraftStore = DisabledComposerDraftStore,
     // Issue #900: durable outbound queue surface. Defaults to a no-op store so
     // direct unit/connected constructors stay source-compatible; production
     // Hilt wiring provides the SharedPreferences-backed store.
-    private val outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
-    private val outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
-    private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
+    internal val outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
+    internal val outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
+    internal val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
-    private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(
+    internal val _uiState: MutableStateFlow<UiState> = MutableStateFlow(
         UiState(
             // Issue #169 Part 2: restore the typed/dictated draft so a
             // process-death recreate (the worst-case "screen-lock kills
@@ -200,7 +200,7 @@ public class PromptComposerViewModel @Inject constructor(
      * stale draft is discarded so it never appears in a session it was not
      * authored in. Null until the host wires the first target.
      */
-    private var composerTarget: String? = null
+    internal var composerTarget: String? = null
 
     /**
      * Issue #688: ids of pending-transcription rows with a retry round-trip
@@ -245,7 +245,7 @@ public class PromptComposerViewModel @Inject constructor(
      * small buffer so [trySend] never fails for the at-most-one pending
      * send the FSM allows.
      */
-    private val _sendRequests = Channel<SendRequest>(capacity = Channel.BUFFERED)
+    internal val _sendRequests = Channel<SendRequest>(capacity = Channel.BUFFERED)
     public val sendRequests: Flow<SendRequest> = _sendRequests.receiveAsFlow()
 
     /**
@@ -268,9 +268,9 @@ public class PromptComposerViewModel @Inject constructor(
     private var pendingSendWithEnter: Boolean = false
     private var pendingSendTarget: SendTargetSnapshot = SendTargetSnapshot()
     private var attachmentJob: Job? = null
-    private var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
+    internal var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
         null
-    private var outboundSidecarDispatchInFlight: Boolean = false
+    internal var outboundSidecarDispatchInFlight: Boolean = false
     internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
     private val draftPersistence = ComposerDraftPersistence(
         store = composerDraftStore,
@@ -290,9 +290,9 @@ public class PromptComposerViewModel @Inject constructor(
      * of an empty one. Set the instant a send goes in-flight; cleared the instant
      * it resolves (delivered / failed / strand-cleared / discarded).
      */
-    private var inFlightSendRequest: SendRequest? = null
+    internal var inFlightSendRequest: SendRequest? = null
 
-    private val watchdogs = PromptComposerWatchdogs(
+    internal val watchdogs = PromptComposerWatchdogs(
         scope = viewModelScope,
         sendTimeoutMs = OVERALL_SEND_TIMEOUT_MS,
         transcribeTimeoutMs = TRANSCRIBE_TIMEOUT_MS,
@@ -471,7 +471,7 @@ public class PromptComposerViewModel @Inject constructor(
         draftPersistence.save(sessionKey, draft)
     }
 
-    private fun clearComposerDraft(sessionKey: String?) {
+    internal fun clearComposerDraft(sessionKey: String?) {
         draftPersistence.clear(sessionKey)
     }
 
@@ -873,294 +873,6 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #211 / #745: compose + emit the [SendRequest] from the CURRENT draft
-     * and staged tiles, flipping the composer into the in-flight state. Split out
-     * of [dispatchSendNow] so the upload-await path ([dispatchSendAfterUpload])
-     * shares the exact same emission semantics once the upload has resolved.
-     */
-    private fun emitSendRequest(
-        withEnter: Boolean,
-        sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
-    ) {
-        if (_uiState.value.sendInFlight) return
-        // #1531 (RC2): a Send during a sidecar retry upload used to drop SILENTLY.
-        if (outboundSidecarDispatchInFlight) {
-            _uiState.update { it.copy(error = SEND_BUSY_UPLOADING_MESSAGE) }
-            return
-        }
-        val draft = _uiState.value.draft
-        val attachments = _uiState.value.attachments
-        // Issue #544: compose the outgoing prompt = the user's clean draft
-        // + the "Attached files:" suffix appended at the END from whatever
-        // tiles remain at send time. The draft stayed clean while composing;
-        // the agent still receives the remote paths.
-        val text = appendAttachmentPaths(draft, attachments.map { it.remotePath })
-        // Send when there is either typed text or at least one attachment.
-        // (A pure-attachment send still has a non-empty composed `text`.)
-        if (text.isEmpty()) return
-        DiagnosticEvents.record(
-            "action",
-            "composer_send",
-            "textBytes" to text.toByteArray(Charsets.UTF_8).size,
-            "attachmentCount" to attachments.size,
-            "withEnter" to withEnter,
-        )
-        // Issue #971: HAND THE PROMPT OFF to the outbound queue — clear the
-        // editable draft + staged tiles the instant we go in-flight so the
-        // prompt is represented EXACTLY ONCE (the "Sending…" queue row), never
-        // as BOTH the editor text AND a duplicate "1 unsent prompt" row. This
-        // reverses the #745 keep-the-draft-visible behaviour (hard-cut per D22):
-        // the queue row is now the single in-flight source of truth, and the
-        // Send button reads `sendInFlight` to disable itself + show "Sending…".
-        // The clean draft + tiles still travel in the [SendRequest] / queue row,
-        // so a failed send ([restoreFailedSend]) puts the EXACT prompt back into
-        // the (now-single) composer, and a delivered send leaves it empty.
-        clearComposerForHandoff()
-        _uiState.update { it.copy(sendInFlight = true, error = null) }
-        // Issue #891: arm the overall-send watchdog the instant we go in-flight
-        // so a host `onSend` that never resolves (wedged channel / dropped
-        // emission with no live collector) can never leave the composer stuck on
-        // "Sending…" forever.
-        watchdogs.armSend()
-        val handoffRequest = SendRequest(
-            text = text,
-            withEnter = withEnter,
-            cleanDraft = draft,
-            attachments = attachments,
-            sendTarget = sendTarget,
-        )
-        inFlightSendRequest = handoffRequest
-        if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
-            viewModelScope.launch(outboundQueueDispatcher) {
-                try {
-                    enqueueAndDispatchSidecarBackedSend(
-                        cleanDraft = draft,
-                        attachments = attachments,
-                        withEnter = withEnter,
-                        sendTarget = sendTarget,
-                    )
-                } catch (cancelled: CancellationException) {
-                    // Issue #929: a real cancellation (e.g. VM cleared) — clear
-                    // the in-flight gates so a recreated composer is not wedged,
-                    // then rethrow to honour structured concurrency.
-                    clearStrandedSendInFlight()
-                    throw cancelled
-                } catch (t: Throwable) {
-                    // Issue #929: any unexpected failure in the sidecar dispatch
-                    // is still a non-delivering exit — clear the strand so the
-                    // pipeline self-heals instead of waiting on the watchdog.
-                    clearStrandedSendInFlight(
-                        error = "Send failed: reconnect, then send again or discard the draft.",
-                    )
-                }
-            }
-            return
-        }
-        if (outboundQueueStore !== DisabledOutboundQueueStore &&
-            sendTarget.sessionKey.isNotBlank()
-        ) {
-            viewModelScope.launch(outboundQueueDispatcher) {
-                try {
-                    val outboundItem = enqueueOutboundSend(
-                        cleanDraft = draft,
-                        attachments = attachments,
-                        withEnter = withEnter,
-                        sendTarget = sendTarget,
-                    )
-                    withContext(Dispatchers.Main.immediate) {
-                        emitPreparedSendRequest(
-                            text = text,
-                            withEnter = withEnter,
-                            cleanDraft = draft,
-                            attachments = attachments,
-                            sendTarget = sendTarget,
-                            outboundQueueItemId = outboundItem?.id,
-                        )
-                    }
-                } catch (cancelled: CancellationException) {
-                    clearStrandedSendInFlight()
-                    throw cancelled
-                } catch (t: Throwable) {
-                    clearStrandedSendInFlight(
-                        error = "Send failed: reconnect, then send again or discard the draft.",
-                    )
-                }
-            }
-            return
-        }
-        emitPreparedSendRequest(
-            text = text,
-            withEnter = withEnter,
-            cleanDraft = draft,
-            attachments = attachments,
-            sendTarget = sendTarget,
-            outboundQueueItemId = null,
-        )
-    }
-
-    private fun emitPreparedSendRequest(
-        text: String,
-        withEnter: Boolean,
-        cleanDraft: String,
-        attachments: List<StagedAttachment>,
-        sendTarget: SendTargetSnapshot,
-        outboundQueueItemId: String?,
-    ) {
-        // Issue #254: a `Channel.trySend` buffers the item until a collector
-        // consumes it, so a send dispatched while the sheet's collector is
-        // mid-recreate (dismiss → re-open) is delivered to the next collector.
-        val request = SendRequest(
-            text = text,
-            withEnter = withEnter,
-            cleanDraft = cleanDraft,
-            attachments = attachments,
-            sendTarget = sendTarget,
-            outboundQueueItemId = outboundQueueItemId,
-        )
-        // Issue #971: remember the in-flight prompt so wedged/cancelled send
-        // recovery restores the exact draft + tiles to the now-cleared composer.
-        inFlightSendRequest = request
-        if (_sendRequests.trySend(request).isFailure) {
-            // Issue #971/#987: a buffer-full enqueue is a transient dispatch
-            // failure, not a permanent rejection — defer to the queue so the row
-            // stays queued and auto-retries on the next flush (Option A). Falls
-            // back to a composer-restore only when there is no durable row.
-            markOutboundSendDeferred(request)
-        }
-    }
-
-    /**
-     * Issue #971: hand the prompt off to the outbound queue — empty the editable
-     * composer (draft text + staged attachment tiles + the persisted draft slots)
-     * so an in-flight send is represented EXACTLY ONCE by its "Sending…" queue
-     * row, never as BOTH the editor AND a duplicate "1 unsent prompt" row.
-     *
-     * This clears the in-memory draft/tiles, the [SavedStateHandle] draft slots
-     * (so a process-death recreate mid-send does not resurrect the handed-off
-     * text into the editor alongside the queue row), and the durable per-session
-     * draft store (so a session switch away-and-back mid-send does not reload the
-     * handed-off draft into the editor next to its queue row). The prompt is NOT
-     * lost: it travels in the [SendRequest] + the durable queue row, so a failed
-     * send ([restoreFailedSend]) restores the exact draft + tiles back into the
-     * (now-single) composer, and a delivered send leaves the composer empty.
-     */
-    private fun clearComposerForHandoff() {
-        savedStateHandle[KEY_DRAFT] = ""
-        savedStateHandle[KEY_DRAFT_OWNER] = null
-        composerTarget?.let { target ->
-            clearComposerDraft(target)
-            composerDraftStore.clearAttachments(target)
-        }
-        _uiState.update { current ->
-            current.copy(
-                draft = "",
-                attachments = emptyList(),
-                attachmentUpload = AttachmentUploadState.Idle,
-            )
-        }
-    }
-
-    private fun hasLocalAttachmentsForSidecars(attachments: List<StagedAttachment>): Boolean =
-        outboundQueueStore !== DisabledOutboundQueueStore &&
-            outboundAttachmentSidecarStore != null &&
-            outboundAttachmentUploader != null &&
-            attachments.any { it.previewUri != null }
-
-    private suspend fun enqueueAndDispatchSidecarBackedSend(
-        cleanDraft: String,
-        attachments: List<StagedAttachment>,
-        withEnter: Boolean,
-        sendTarget: SendTargetSnapshot,
-    ) {
-        // Issue #929: this whole dispatch runs while `sendInFlight = true` (set by
-        // [emitSendRequest] before launching us). EVERY exit that does not deliver
-        // must clear the in-flight gates, or the pipeline wedges for the watchdog
-        // window. The early config-missing returns below are non-delivering exits.
-        val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() }
-        val sidecarStore = outboundAttachmentSidecarStore ?: run {
-            clearStrandedSendInFlight()
-            return
-        }
-        if (sessionKey == null) {
-            clearStrandedSendInFlight()
-            return
-        }
-        val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
-            attachment.previewUri?.let { index to it }
-        }
-        val itemId = UUID.randomUUID().toString()
-        val sidecars = sidecarStore.stage(
-            outboundItemId = itemId,
-            uris = localAttachments.map { it.second },
-            attachmentIndices = localAttachments.map { it.first },
-        )
-        if (sidecars.size != localAttachments.size) {
-            clearStrandedSendInFlight(
-                error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
-            )
-            return
-        }
-        val item = OutboundItem(
-            id = itemId,
-            sessionKey = sessionKey,
-            cleanText = cleanDraft,
-            attachments = attachments.toSidecarAwareDurableRefs(sidecars),
-            withEnter = withEnter,
-            state = OutboundState.Queued,
-            createdAtMs = clock(),
-            paneId = sendTarget.paneId,
-            route = sendTarget.route,
-            agentKind = sendTarget.agentKind,
-            // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
-            // existing un-delivered row instead of minting a duplicate.
-            sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
-        )
-        val queuedItem = outboundQueueStore.enqueueExisting(item)
-        // Issue #961: if this coalesced onto an existing un-delivered row, the
-        // freshly-staged sidecars under our throwaway `itemId` are orphaned —
-        // the existing row keeps its own staged bytes. Drop them and dispatch
-        // the row the queue actually kept, not our discarded id.
-        if (queuedItem.id != itemId) {
-            outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
-        }
-        inFlightSendRequest = SendRequest(
-            text = appendAttachmentPaths(cleanDraft, attachments.map { it.remotePath }),
-            withEnter = withEnter,
-            cleanDraft = cleanDraft,
-            attachments = attachments,
-            sendTarget = sendTarget,
-            outboundQueueItemId = queuedItem.id,
-        )
-        refreshOutboundQueueItemsFor(sessionKey)
-        dispatchPreparedOutboundItem(queuedItem.id)
-    }
-
-    private fun enqueueOutboundSend(
-        cleanDraft: String,
-        attachments: List<StagedAttachment>,
-        withEnter: Boolean,
-        sendTarget: SendTargetSnapshot,
-    ): OutboundItem? {
-        if (outboundQueueStore === DisabledOutboundQueueStore) return null
-        val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: return null
-        val item = outboundQueueStore.enqueue(
-            sessionKey = sessionKey,
-            cleanText = cleanDraft,
-            attachments = attachments.toDurableRefs(),
-            withEnter = withEnter,
-            paneId = sendTarget.paneId,
-            route = sendTarget.route,
-            agentKind = sendTarget.agentKind,
-            // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
-            // existing un-delivered row instead of minting a duplicate.
-            sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
-        )
-        val activeItem = outboundQueueStore.markInFlight(item.id) ?: item
-        refreshOutboundQueueItemsFor(sessionKey)
-        return activeItem
-    }
-
-    /**
      * Issue #745: the host confirmed the send was delivered. Now — and only
      * now — clear the draft, drop the staged attachment tiles, and leave the
      * in-flight state. The sheet's `sendRequests` collector calls this on the
@@ -1412,7 +1124,7 @@ public class PromptComposerViewModel @Inject constructor(
      * immediately instead of after the watchdog window. Idempotent; safe to call
      * even when no send was in flight.
      */
-    private fun clearStrandedSendInFlight(error: String? = null) {
+    internal fun clearStrandedSendInFlight(error: String? = null) {
         watchdogs.disarmSend()
         outboundSidecarDispatchInFlight = false
         // Issue #971/#987: the composer was cleared at handoff, so a non-delivering
@@ -1774,7 +1486,7 @@ public class PromptComposerViewModel @Inject constructor(
         return true
     }
 
-    private suspend fun dispatchPreparedOutboundItem(id: String): Boolean {
+    internal suspend fun dispatchPreparedOutboundItem(id: String): Boolean {
         if (!uploadSidecarsForOutboundItem(id)) return false
         return claimAndEmitOutboundItem(id)
     }
@@ -1963,6 +1675,19 @@ public class PromptComposerViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal var sidecarRemovalForTest: (suspend (String) -> Unit)? = null
 
+    /**
+     * Issue #1540 (L9) synthetic process-death seam (#780 model). When non-null,
+     * [clearComposerForHandoff] invokes it the INSTANT the durable draft has been
+     * cleared — the exact moment a crash would leave the durable draft empty. The
+     * WRITE-AHEAD fix commits the durable queue row BEFORE this fires (in every
+     * durable path), so a test can snapshot the durable stores here and prove the
+     * prompt survived in the queue row (green); on the pre-fix base the clear ran
+     * BEFORE the commit, so the snapshot showed the prompt gone from BOTH the
+     * durable draft AND the durable queue (LOST → red). Production never sets it.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var onDurableDraftClearedForHandoffTest: (() -> Unit)? = null
+
     private fun refreshOutboundQueueItems() {
         _outboundQueueItems.value = composerTarget
             ?.takeIf { it.isNotBlank() }
@@ -1970,7 +1695,7 @@ public class PromptComposerViewModel @Inject constructor(
             .orEmpty()
     }
 
-    private fun refreshOutboundQueueItemsFor(sessionKey: String) {
+    internal fun refreshOutboundQueueItemsFor(sessionKey: String) {
         if (composerTarget == sessionKey) refreshOutboundQueueItems()
     }
 

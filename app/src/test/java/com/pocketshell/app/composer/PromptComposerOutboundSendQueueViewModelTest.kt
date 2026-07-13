@@ -500,13 +500,22 @@ class PromptComposerOutboundSendQueueViewModelTest {
         vm.onDraftChange("ship it later")
         vm.requestSend(withEnter = true, sendTarget = target)
 
+        // Off the caller thread: the enqueue is still deferred to the queue
+        // dispatcher (nothing sent, no row yet before advancing).
         assertTrue(vm.uiState.value.sendInFlight)
-        assertEquals("", vm.uiState.value.draft)
         assertTrue(sent.isEmpty())
         assertTrue(queue.itemsFor("1/session-a").isEmpty())
+        // Issue #1540 (L9 — write-ahead): the editable draft is NO LONGER cleared
+        // up front. The clear now runs ONLY after the durable queue row commits,
+        // so before the dispatcher advances the draft is still present — the LOST
+        // window (draft cleared but row not yet committed) no longer exists.
+        assertEquals("ship it later", vm.uiState.value.draft)
 
         advanceUntilIdle()
 
+        // After the durable row committed the composer is cleared (single
+        // representation) and the row carries the prompt.
+        assertEquals("", vm.uiState.value.draft)
         val request = sent.single()
         val queueId = requireNotNull(request.outboundQueueItemId)
         assertEquals("ship it later", request.cleanDraft)
@@ -723,6 +732,220 @@ class PromptComposerOutboundSendQueueViewModelTest {
         vm.markSendDelivered(sent.last())
         assertTrue(vm.outboundQueueItems.value.isEmpty())
         assertEquals("", vm.uiState.value.draft)
+    }
+
+    // -- Issue #1540 (L9): the widest silent-LOST hole -----------------------
+    //
+    // The Fable message-queue audit's highest-severity LOST finding: a prompt
+    // could be lost with ZERO trace if the process died in the window between
+    // "durable draft cleared" and "durable outbound-queue row committed".
+    // `emitSendRequest` used to clear the composer + durable draft SYNCHRONOUSLY
+    // up front (old :917), then commit the durable queue row on a later IO hop —
+    // the attachment path staged bytes first, WIDENING the window. A crash in
+    // that window left the prompt in NEITHER the durable draft NOR the durable
+    // queue: gone, unrecoverable, no user-visible trace.
+    //
+    // The fix WRITE-AHEADS the durable row: the clear now runs ONLY after the
+    // row commit succeeds. These tests inject the death SYNTHETICALLY (#780
+    // model — no `assumeTrue`/CI-skip) via [onDurableDraftClearedForHandoffTest],
+    // which fires the INSTANT the durable draft is cleared — the exact crash
+    // point. They snapshot the DURABLE stores at that instant (what a real crash
+    // would leave on SharedPrefs) and assert the prompt survived in the queue
+    // row. RED-on-base repro for a reviewer: move `clearComposerForHandoff()`
+    // back to before the enqueue in `emitSendRequest` /
+    // `enqueueAndDispatchSidecarBackedSend` (keep the seam) — the death snapshot's
+    // queue is then EMPTY (LOST) and every green assertion below fails.
+
+    @Test
+    fun issue1540_L9_textSend_writeAheadCommitsDurableRowBeforeDraftClearSoDeathDoesNotLosePrompt() = runTest {
+        val draftStore = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            composerDraftStore = draftStore,
+        )
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(
+            sessionKey = "1/session-a",
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+        )
+
+        // Synthetic process death: snapshot the DURABLE stores the instant the
+        // draft is cleared — precisely what a crash right there would preserve.
+        var deathQueue: List<OutboundItem>? = null
+        var deathDraft: String? = "not-captured"
+        vm.onDurableDraftClearedForHandoffTest = {
+            if (deathQueue == null) {
+                deathQueue = queue.itemsFor("1/session-a")
+                deathDraft = draftStore.load("1/session-a")
+            }
+        }
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("ship the write-ahead")
+        // Pre-condition: the draft really is persisted durably before send, so a
+        // crash BEFORE the write-ahead commit would still recover it as a draft.
+        assertEquals("ship the write-ahead", draftStore.load("1/session-a"))
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        advanceUntilIdle()
+
+        val snap = requireNotNull(deathQueue) {
+            "the draft-clear seam never fired — the send handoff path did not run"
+        }
+        // GREEN (write-ahead): at the crash instant the durable queue ALREADY
+        // holds the row carrying the prompt. On the pre-fix base (clear-before-
+        // commit) this list is EMPTY → prompt LOST → this assertion is RED.
+        assertEquals(
+            "the prompt must be durable in the queue row at the crash instant",
+            listOf("ship the write-ahead"),
+            snap.map { it.cleanText },
+        )
+        // Single representation: the durable draft was cleared, so the prompt is
+        // in the queue row ONLY — never in BOTH the draft AND the queue.
+        assertTrue("durable draft must be cleared at handoff", deathDraft.isNullOrEmpty())
+
+        // -- Recovery + EXACTLY-ONCE: a fresh VM (process restart) reads the SAME
+        // durable store (SharedPrefs survives death) and delivers the recovered
+        // row exactly once. Wire-level occurrence==1 across the crash is the
+        // #1526 S1 verify-before-resend ledger's job; L9 guarantees the SINGLE
+        // durable representation (one row, no residual draft) that makes recovery
+        // deliver the prompt exactly once rather than duplicating it. --
+        val rowId = snap.single().id
+        val vm2 = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            composerDraftStore = draftStore,
+            savedStateHandle = SavedStateHandle(),
+            // A far-future clock so the stale-InFlight recovery cutoff is > the
+            // row's real-time createdAtMs (deterministic re-arm; no time race).
+            clock = { Long.MAX_VALUE / 2 },
+        )
+        val sent2 = collectSendRequests(vm2)
+        vm2.onComposerTargetChanged("1/session-a")
+        // The row survived as InFlight (mid-delivery when the process died); the
+        // production recovery flush re-arms the stale row to Queued.
+        assertEquals(listOf(rowId), vm2.requeueStaleOutboundInFlight(staleAfterMs = 0L).map { it.id })
+        val flushed = vm2.retryNextOutboundItem()
+        advanceUntilIdle()
+        assertEquals("recovery flush claims the recovered row", rowId, flushed)
+        assertEquals("recovery delivers exactly one send", 1, sent2.size)
+        assertEquals("ship the write-ahead", sent2.single().cleanDraft)
+
+        vm2.markSendDelivered(sent2.single())
+        // Exactly-once: the delivered row is pruned and can NOT be re-claimed, and
+        // there is no second (draft) representation to send again.
+        assertNull("no second deliverable representation after delivery", vm2.retryNextOutboundItem())
+        assertEquals("still exactly one send", 1, sent2.size)
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+        assertTrue("no residual durable draft", draftStore.load("1/session-a").isNullOrEmpty())
+    }
+
+    @Test
+    fun issue1540_L9_singleAttachmentSend_writeAheadCommitsDurableRowWithAttachmentBeforeDraftClear() = runTest {
+        val draftStore = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            composerDraftStore = draftStore,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            Result.success(refs.map { "~/.pocketshell/attachments/reuploaded/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        val local = localAttachmentFile("l9-single.txt", "attachment bytes")
+
+        // Capture ONLY the durable queue snapshot in the (non-suspend) seam; the
+        // sidecar byte store's read is suspend, so byte-ownership (L11) is out of
+        // scope here — the durable ROW carrying the attachment ref is the L9 proof.
+        var deathQueue: List<OutboundItem>? = null
+        vm.onDurableDraftClearedForHandoffTest = {
+            if (deathQueue == null) deathQueue = queue.itemsFor("1/session-a")
+        }
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("review this")
+        vm.attachFiles(
+            count = 1,
+            previews = listOf(PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain")),
+        ) {
+            Result.success(listOf("~/.pocketshell/attachments/old/l9-single.txt"))
+        }
+        settleUntil { vm.uiState.value.attachments.isNotEmpty() }
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        settleUntil { deathQueue != null }
+
+        val snap = requireNotNull(deathQueue)
+        // GREEN: the death happened AFTER the attachment bytes were staged AND the
+        // durable row committed — this is the WIDEST window (stage-then-commit).
+        // The row carries the text + the attachment ref, so the attachment send is
+        // recoverable. On base (clear up front) the queue is EMPTY at this instant
+        // → the attachment send is LOST with zero trace → red.
+        assertEquals(listOf("review this"), snap.map { it.cleanText })
+        assertEquals("row carries the single attachment ref", 1, snap.single().attachments.size)
+    }
+
+    @Test
+    fun issue1540_L9_multiAttachmentSend_writeAheadCommitsDurableRowWithAllAttachmentsBeforeDraftClear() = runTest {
+        val draftStore = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            composerDraftStore = draftStore,
+        )
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            Result.success(refs.map { "~/.pocketshell/attachments/reuploaded/${it.displayName}" })
+        }
+        val sent = collectSendRequests(vm)
+        val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
+        val localA = localAttachmentFile("l9-multi-a.txt", "bytes a")
+        val localB = localAttachmentFile("l9-multi-b.txt", "bytes b")
+
+        var deathQueue: List<OutboundItem>? = null
+        vm.onDurableDraftClearedForHandoffTest = {
+            if (deathQueue == null) deathQueue = queue.itemsFor("1/session-a")
+        }
+
+        vm.onComposerTargetChanged("1/session-a")
+        vm.onDraftChange("review both")
+        vm.attachFiles(
+            count = 2,
+            previews = listOf(
+                PromptComposerViewModel.AttachmentPreview(Uri.fromFile(localA), "text/plain"),
+                PromptComposerViewModel.AttachmentPreview(Uri.fromFile(localB), "text/plain"),
+            ),
+        ) {
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/old/l9-multi-a.txt",
+                    "~/.pocketshell/attachments/old/l9-multi-b.txt",
+                ),
+            )
+        }
+        settleUntil { vm.uiState.value.attachments.size == 2 }
+
+        vm.requestSend(withEnter = true, sendTarget = target)
+        settleUntil { deathQueue != null }
+
+        val snap = requireNotNull(deathQueue)
+        // GREEN: the multi-attachment/sidecar send commits ONE durable row with
+        // BOTH attachment refs before the draft clear. Base: queue EMPTY at the
+        // crash instant → the multi-attachment send is LOST → red.
+        assertEquals(listOf("review both"), snap.map { it.cleanText })
+        assertEquals("row carries BOTH attachment refs", 2, snap.single().attachments.size)
+        // Single representation: exactly ONE durable row for the one prompt.
+        assertEquals(1, snap.size)
     }
 
     @Test

@@ -70,6 +70,10 @@ import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.NetworkChangeArm
 import com.pocketshell.app.tmux.connection.NetworkChangeEffects
+import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
+import com.pocketshell.app.tmux.connection.recordNetworkLossBandPainted
+import com.pocketshell.app.tmux.connection.recordNetworkLossBandSuppressed
+import com.pocketshell.app.tmux.connection.recordNetworkLossHold
 import com.pocketshell.app.tmux.connection.PassiveDropArm
 import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
@@ -4970,6 +4974,9 @@ public class TmuxSessionViewModel @Inject constructor(
             suppressNetworkTransportProvenAlive = {
                 if (target != null) suppressNetworkTransportProvenAlive(it, target)
             },
+            suppressNetworkLostTransportProvenAlive = {
+                if (target != null) suppressNetworkLostTransportProvenAlive(it, target)
+            },
             scheduleNetworkReconnect = {
                 if (target != null) scheduleNetworkReconnect(it, target)
             },
@@ -5286,74 +5293,64 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
+    /** Issue #1522: debounces + backs off the bare-loss band. */
+    private val networkLossBandDebouncer = NetworkLossBandDebouncer(
+        scope = viewModelScope,
+        baseDebounceMs = NETWORK_LOSS_BAND_DEBOUNCE_MS,
+        backoffLadderMs = { autoReconnectDelaysMs },
+        quietResetMs = NETWORK_LOSS_BAND_BACKOFF_QUIET_RESET_MS,
+        transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },
+    )
+
     /**
-     * Issue #997: the [NetworkChangeArm.HoldNetworkLost] body. A bare network
-     * LOSS (`onLost` / airplane mode) was observed proactively. We do NOT tear the
-     * lease down — a loss is frequently transient (pocket, elevator) — but we DO
-     * surface the calm "reconnecting" band immediately so the user is not staring
-     * at a live-but-dead session, and we suspend the keepalive probe loop for the
-     * loss window. The probe loop self-suspends: [shouldRunLivenessProbe] only
-     * fires when the controller is `Live`, and flipping to `Reconnecting` here
-     * closes that gate — so probes stop churning writes into the dead socket
-     * without a separate suspend flag. Recovery is driven by the matching
-     * [scheduleNetworkReconnectOnRestore] when validation returns.
+     * Issue #997 / #1522: [NetworkChangeArm.HoldNetworkLost] — a bare loss the
+     * keepalive could NOT vouch for. Hold the lease and DEBOUNCE the band (grace +
+     * escalating backoff): cellular clears `NET_CAPABILITY_VALIDATED` for sub-second
+     * windows constantly on a live link, so an immediate paint + restore is the
+     * maintainer's flap. The band paints only if the loss OUTLASTS the grace and the
+     * keepalive still cannot vouch; a blip that clears (restore → cancel) never flaps.
      */
     private fun holdNetworkLost(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
-        val reason = change.reason
-        Log.i(
-            ISSUE_548_NETWORK_TAG,
-            "tmux-network-loss-hold reason=$reason " +
-                "cause=bare-network-loss " +
-                "current=${change.current.logValue} " +
-                targetLogFields(target),
+        recordNetworkLossHold(change, target, connectGeneration, debounced = true)
+        networkLossBandDebouncer.schedule(
+            onSuppressedByKeepAlive = {
+                recordNetworkLossBandSuppressed(
+                    change, target, connectGeneration, cause = "transport_proven_alive_debounced",
+                )
+            },
+            onPaintBand = { graceMs ->
+                recordNetworkLossBandPainted(change, target, connectGeneration, graceMs)
+                setConnectionState(
+                    ConnectionState.Reconnecting(
+                        host = target.host,
+                        port = target.port,
+                        user = target.user,
+                        attempt = 0,
+                        maxAttempts = 0,
+                        retryDelayMs = graceMs,
+                        reason = "Network lost; waiting for it to come back.",
+                    ),
+                )
+            },
         )
-        DiagnosticEvents.record(
-            "connection",
-            "network_loss_hold",
-            "source" to "network_observer",
-            "trigger" to TmuxConnectTrigger.NetworkReconnect.logValue,
-            "reason" to reason,
-            "classification" to "bare_network_loss",
-            "reconnect" to false,
-            "probesSuspended" to true,
-            "leaseHeld" to true,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "host" to target.host,
-            "port" to target.port,
-            "user" to target.user,
-            "session" to target.sessionName,
-            "generation" to connectGeneration,
-            "deferredFromBackground" to change.deferredFromBackground,
-            *change.networkDiagnosticFields(),
-        )
-        ReconnectCauseTrail.record(
-            stage = "network_loss_decision",
-            outcome = "hold",
-            cause = "bare_network_loss",
-            trigger = TmuxConnectTrigger.NetworkReconnect.logValue,
-            "sequence" to change.sequence,
-            "hostId" to target.hostId,
-            "generation" to connectGeneration,
-            "classification" to "bare_network_loss",
-            "deferredFromBackground" to change.deferredFromBackground,
-        )
-        // Surface the calm "reconnecting" band WITHOUT launching a redial loop
-        // (the lease is held; recovery fires on restore). A reconnect already in
-        // flight is filtered out by the reducer, so this never clobbers a ladder.
-        setConnectionState(
-            ConnectionState.Reconnecting(
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                attempt = 0,
-                maxAttempts = 0,
-                retryDelayMs = 0L,
-                reason = "Network lost; waiting for it to come back.",
-            ),
+    }
+
+    /**
+     * Issue #1522 (H1): [NetworkChangeArm.SuppressNetworkLostTransportProvenAlive] —
+     * a bare loss the keepalive already vouches for (not a real death). Hold the lease
+     * (still record `network_loss_hold`), suppress the band (stays Live), drop pending.
+     */
+    private fun suppressNetworkLostTransportProvenAlive(
+        change: TerminalNetworkChange,
+        target: ConnectionTarget,
+    ) {
+        networkLossBandDebouncer.cancel()
+        recordNetworkLossHold(change, target, connectGeneration, debounced = false)
+        recordNetworkLossBandSuppressed(
+            change, target, connectGeneration, cause = "transport_proven_alive",
         )
     }
 
@@ -5368,6 +5365,8 @@ public class TmuxSessionViewModel @Inject constructor(
         change: TerminalNetworkChange,
         target: ConnectionTarget,
     ) {
+        // Issue #1522: validation returned — drop any pending debounced band.
+        networkLossBandDebouncer.cancel()
         // Issue #1193: EVERY restore ride-through decision goes through the bounded
         // ACTIVE probe (require an answered round-trip). Ride through only if the
         // (possibly new) path answers; redial via the #997 fresh lease if it does

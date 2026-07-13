@@ -9,6 +9,7 @@ internal enum class NetworkChangeArm {
     SuppressNetworkNotValidated,
     SuppressNetworkCoalesced,
     SuppressNetworkTransportProvenAlive,
+    SuppressNetworkLostTransportProvenAlive,
     ScheduleNetworkReconnect,
     HoldNetworkLost,
     ScheduleNetworkReconnectOnRestore,
@@ -42,6 +43,17 @@ internal fun selectNetworkChangeArm(
             if (!hasTarget) return NetworkChangeArm.Ignore
             if (!hasClientOrSession) return NetworkChangeArm.Ignore
             if (autoReconnectActive) return NetworkChangeArm.Ignore
+            // Issue #1522 (H1): mirror the ValidatedIdentityChange arm below — a bare
+            // loss of NET_CAPABILITY_VALIDATED on a socket the transport keepalive
+            // still vouches for is NOT a real transport death (cellular clears the
+            // validated bit for sub-second windows constantly while the TCP / -CC
+            // channel stays alive). Suppress the calm band and keep the session Live,
+            // exactly as the identity-change handoff does. When the keepalive CANNOT
+            // vouch we fall through to HoldNetworkLost, whose VM body debounces the
+            // band so a transient blip still does not flap.
+            if (transportKeepAliveProvenAlive()) {
+                return NetworkChangeArm.SuppressNetworkLostTransportProvenAlive
+            }
             return NetworkChangeArm.HoldNetworkLost
         }
         TerminalNetworkChangeKind.NetworkRestored -> {
@@ -80,6 +92,7 @@ internal class NetworkChangeEffects(
     private val suppressNetworkNotValidated: (TerminalNetworkChange) -> Unit,
     private val suppressNetworkCoalesced: (TerminalNetworkChange) -> Unit,
     private val suppressNetworkTransportProvenAlive: (TerminalNetworkChange) -> Unit,
+    private val suppressNetworkLostTransportProvenAlive: (TerminalNetworkChange) -> Unit,
     private val scheduleNetworkReconnect: (TerminalNetworkChange) -> Unit,
     private val holdNetworkLost: (TerminalNetworkChange) -> Unit,
     private val scheduleNetworkReconnectOnRestore: (TerminalNetworkChange) -> Unit,
@@ -102,6 +115,8 @@ internal class NetworkChangeEffects(
                 suppressNetworkCoalesced(change)
             NetworkChangeArm.SuppressNetworkTransportProvenAlive ->
                 suppressNetworkTransportProvenAlive(change)
+            NetworkChangeArm.SuppressNetworkLostTransportProvenAlive ->
+                suppressNetworkLostTransportProvenAlive(change)
             NetworkChangeArm.ScheduleNetworkReconnect ->
                 scheduleNetworkReconnect(change)
             NetworkChangeArm.HoldNetworkLost ->

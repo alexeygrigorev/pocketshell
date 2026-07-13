@@ -465,10 +465,43 @@ internal const val RUNTIME_HEALTH_PROBE_TIMEOUT_MS: Long = 750L
  * Issue #1042 (cause #1): the small bound on the single control-channel probe the
  * liveness-first network-restore arm issues when the transport keepalive has aged
  * out. A surviving link answers well within this; a genuinely dead socket times out
- * and falls through to the #997 fresh-lease redial. Kept short so a dead socket's
- * recovery is not noticeably delayed past the old unconditional redial.
+ * and falls through to the #997 fresh-lease redial.
+ *
+ * Issue #1522 (H2): raised 2s → 5s. A LIVE-but-slow `-CC` channel right after a
+ * cellular RAT handover (the radio has just re-attached and the channel is
+ * momentarily congested) could take longer than 2s to answer the probe, so the
+ * restore arm force-redialled a socket that was actually fine — upgrading a
+ * cosmetic validation blip into a real teardown+redial (the heavier, longer-visible
+ * flap). 5s aligns with [com.pocketshell.core.connection.LivenessProbe]'s own
+ * `DEFAULT_PER_PROBE_TIMEOUT_MS` — the same budget every other single
+ * control-channel round-trip in the system gets to answer before it is declared
+ * dead — so a live-but-slow channel gets a fair chance to prove alive while a
+ * genuinely dead socket still falls through to the fresh-lease redial.
  */
-internal const val RESTORE_LIVENESS_PROBE_BUDGET_MS: Long = 2_000L
+internal const val RESTORE_LIVENESS_PROBE_BUDGET_MS: Long = 5_000L
+
+/**
+ * Issue #1522 (H1): how long a bare NetworkLost waits before painting the calm
+ * "reconnecting" band. Cellular drops `NET_CAPABILITY_VALIDATED` for sub-second
+ * windows constantly at full signal (RAT handovers, periodic re-validation, v4↔v6
+ * flips) while the TCP / tmux `-CC` channel stays alive; without a debounce each
+ * such blip painted the band immediately and the following restore flipped it back
+ * — the maintainer's connect/disconnect flap on a stable link. A blip that clears
+ * (restore) or that the keepalive can vouch for within this window never paints;
+ * only a loss that OUTLASTS it AND that the keepalive cannot vouch for surfaces the
+ * honest band. 2.5s swallows the transient cellular churn while a genuine sustained
+ * loss still surfaces promptly.
+ */
+internal const val NETWORK_LOSS_BAND_DEBOUNCE_MS: Long = 2_500L
+
+/**
+ * Issue #1522 (amortization): after the loss band has painted at least once on a
+ * flaky link, how long the link must stay quiet (no further loss) following a
+ * restore before the escalating loss-band backoff resets to the base grace. Keeps a
+ * persistently flapping link from hammering a reload every ~1s while letting a
+ * genuinely recovered link return to a snappy base grace.
+ */
+internal const val NETWORK_LOSS_BAND_BACKOFF_QUIET_RESET_MS: Long = 30_000L
 
 /**
  * Classification of a foreground tmux control-channel health probe.

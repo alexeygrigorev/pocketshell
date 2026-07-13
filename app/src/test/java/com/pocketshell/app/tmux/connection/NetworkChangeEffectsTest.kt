@@ -28,7 +28,15 @@ class NetworkChangeEffectsTest {
     }
 
     @Test
-    fun selector_networkLost_holdsWhenLeaseCanBeHeld() {
+    fun selector_networkLost_holdsWhenLeaseCanBeHeldAndKeepAliveCannotVouch() {
+        // Issue #1522 (G6): this is the ONLY case where a bare loss still routes to the
+        // band — the keepalive CANNOT vouch (default { false }), i.e. a genuine
+        // sustained loss. Pre-#1522 this test asserted HoldNetworkLost for EVERY bare
+        // loss regardless of keepalive, which encoded the flap bug (a transient blip on
+        // a live socket painted the band). That unconditional expectation is now split:
+        // keepalive-alive blip → SuppressNetworkLostTransportProvenAlive (no band; see
+        // selector_networkLost_suppressesBandWhenTransportKeepAliveProvenAlive), and
+        // ONLY the keepalive-unproven loss below still holds (then the VM debounces it).
         assertEquals(
             NetworkChangeArm.HoldNetworkLost,
             baseSelect(change = lostChange(), inlineConnected = false),
@@ -40,6 +48,43 @@ class NetworkChangeEffectsTest {
         assertEquals(
             NetworkChangeArm.Ignore,
             baseSelect(change = lostChange(), autoReconnectActive = true),
+        )
+    }
+
+    @Test
+    fun selector_networkLost_suppressesBandWhenTransportKeepAliveProvenAlive() {
+        // Issue #1522 (H1): a bare validation blip on a socket the keepalive still
+        // vouches for is NOT a real transport death — mirror the ValidatedIdentityChange
+        // arm and suppress the band (no flap), keeping the session Live.
+        assertEquals(
+            NetworkChangeArm.SuppressNetworkLostTransportProvenAlive,
+            baseSelect(change = lostChange(), transportKeepAliveProvenAlive = { true }),
+        )
+    }
+
+    @Test
+    fun selector_networkLost_keepAliveGateIsCheckedAfterTargetAndReconnectGuards() {
+        // Issue #1522: the keepalive suppress must not fire when there is no target /
+        // client / when a reconnect already owns the UI — those Ignore paths win first.
+        assertEquals(
+            NetworkChangeArm.Ignore,
+            baseSelect(change = lostChange(), hasTarget = false, transportKeepAliveProvenAlive = { true }),
+        )
+        assertEquals(
+            NetworkChangeArm.Ignore,
+            baseSelect(
+                change = lostChange(),
+                hasClientOrSession = false,
+                transportKeepAliveProvenAlive = { true },
+            ),
+        )
+        assertEquals(
+            NetworkChangeArm.Ignore,
+            baseSelect(
+                change = lostChange(),
+                autoReconnectActive = true,
+                transportKeepAliveProvenAlive = { true },
+            ),
         )
     }
 
@@ -161,10 +206,21 @@ class NetworkChangeEffectsTest {
         )
     }
 
+    @Test
+    fun dispatcher_networkLostProvenAlive_firesSuppressLostArmNotHold() {
+        val recorder = Recorder()
+        val arm = effects(recorder, transportKeepAliveProvenAlive = { true })
+            .dispatch(lostChange())
+
+        assertEquals(NetworkChangeArm.SuppressNetworkLostTransportProvenAlive, arm)
+        assertEquals(Recorder(lostTransportAlive = 1), recorder)
+    }
+
     private data class Recorder(
         var notValidated: Int = 0,
         var coalesced: Int = 0,
         var transportAlive: Int = 0,
+        var lostTransportAlive: Int = 0,
         var reconnect: Int = 0,
         var lost: Int = 0,
         var restored: Int = 0,
@@ -191,6 +247,7 @@ class NetworkChangeEffectsTest {
             suppressNetworkNotValidated = { recorder.notValidated += 1 },
             suppressNetworkCoalesced = { recorder.coalesced += 1 },
             suppressNetworkTransportProvenAlive = { recorder.transportAlive += 1 },
+            suppressNetworkLostTransportProvenAlive = { recorder.lostTransportAlive += 1 },
             scheduleNetworkReconnect = { recorder.reconnect += 1 },
             holdNetworkLost = { recorder.lost += 1 },
             scheduleNetworkReconnectOnRestore = { recorder.restored += 1 },

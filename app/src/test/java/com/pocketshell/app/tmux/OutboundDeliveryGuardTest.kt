@@ -397,6 +397,56 @@ class OutboundDeliveryGuardTest {
         assertTrue(store.hasWireAttempt("%0", "unacked payload"))
     }
 
+    /**
+     * Issue #1542 (finding D7) — class-coverage limb: an orphaned InFlight row that
+     * ACTUALLY landed. A row claimed InFlight stamps the durable `wireAttempted`
+     * flag on the row itself (via the InFlight claim → #1541); when that VM churns /
+     * dies mid-send, the poll-lane orphan sweep re-arms the row and the retry lane
+     * re-dispatches it through the SAME verify-before-resend send path with a ledger
+     * REBUILT from the durable store. Because the earlier attempt landed server-side,
+     * the probe must resolve `AlreadyLanded` — so the re-dispatch submits Enter only
+     * and never re-pastes (occurrence stays 1, no duplicate). RED if the claim did
+     * not stamp the durable flag (rebuilt ledger has no memory ⇒ blind re-paste ⇒
+     * occurrence 2). This composes with #1541 rather than adding a second flag.
+     */
+    @Test
+    fun issue1542_D7_orphanedInFlightThatLandedVerifiesAlreadyLandedViaClaimStampedDurableFlag() = runTest {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        val paneId = "%7"
+        val payload = "orphaned prompt that already landed"
+        // The prior VM enqueued and CLAIMED the row InFlight (its send began). The
+        // InFlight claim durably stamps `wireAttempted` on the row (#1541).
+        val row = store.enqueue("sessA", payload, paneId = paneId)
+        store.claim(row.id)
+        assertEquals(
+            com.pocketshell.app.composer.OutboundState.InFlight,
+            store.item(row.id)!!.state,
+        )
+        assertTrue(
+            "the InFlight claim must durably record the wire attempt on the row",
+            store.hasWireAttempt(paneId, payload),
+        )
+
+        // VM churn / process death: the volatile ledger dies. A ledger REBUILT with
+        // NO durable backing has no memory of the attempt (the pre-fix blind-repaste
+        // trap) — verify-before-resend would be skipped.
+        assertNull(
+            "a volatile-only rebuilt ledger loses the orphaned attempt (would blind re-paste)",
+            verifyBeforeAgentResend(OutboundDeliveryLedger(), captureShowing("$ $payload"), paneId, payload),
+        )
+
+        // The fix path: the ledger rebuilt from the SAME durable store re-reads the
+        // claim-stamped flag → verify → the pane shows the payload → AlreadyLanded,
+        // so the send path submits Enter only and never re-pastes (occurrence 1).
+        val rebuilt = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
+        val outcome = verifyBeforeAgentResend(rebuilt, captureShowing("$ $payload"), paneId, payload)
+        assertEquals(
+            "an orphaned InFlight row that actually landed must verify AlreadyLanded (occurrence 1)",
+            DeliveryProbeOutcome.AlreadyLanded,
+            outcome,
+        )
+    }
+
     @Test
     fun ledgerTracksRecordsClearsAndEvictsOldestBeyondCapacity() {
         val ledger = OutboundDeliveryLedger(maxEntries = 2)

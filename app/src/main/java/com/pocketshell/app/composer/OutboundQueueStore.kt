@@ -359,7 +359,14 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
  * @property withEnter whether delivery presses Enter after the paste.
  * @property state the persisted state-machine position.
  * @property createdAtMs enqueue time — the ordering key (oldest-first).
- * @property lastAttemptAtMs time of the last delivery attempt, or `null`.
+ * @property lastAttemptAtMs time of the last delivery attempt, or `null`. Issue
+ *   #1542 (Q1): stamped when the row is claimed InFlight
+ *   ([OutboundQueueStore.claimNext]/[OutboundQueueStore.claim]/[OutboundQueueStore.markInFlight]),
+ *   as well as on [OutboundQueueStore.markUploading]/[OutboundQueueStore.markFailed].
+ *   The stale-recovery sweep ([OutboundQueueStore.requeueStaleInFlight]) ages an
+ *   InFlight/Uploading row against this so an orphaned in-flight attempt can be
+ *   swept by its CLAIM age rather than its enqueue age. `null` only for a legacy
+ *   row that was never attempted (aged by [createdAtMs] as a fallback).
  * @property attemptCount number of delivery attempts so far.
  * @property lastError the last delivery error, or `null`.
  * @property paneId pane targeted by the original send action. Empty for legacy
@@ -1046,18 +1053,31 @@ private fun List<OutboundItem>.coalesceTargetForSendKey(
 private fun OutboundItem.reArmedForCoalesce(): OutboundItem =
     if (state == OutboundState.Failed) copy(state = OutboundState.Queued, lastError = null) else this
 
-private fun OutboundItem.claimedForAttempt(): OutboundItem =
-    if (state == OutboundState.InFlight) {
-        // Already InFlight — still stamp the durable wire-attempt flag (issue
-        // #1541) if a prior claim predates the flag, so verify-before-resend
-        // survives a VM-clear on this row.
-        markedWireAttempted(System.currentTimeMillis())
+private fun OutboundItem.claimedForAttempt(): OutboundItem {
+    // Issue #1542 (enabler Q1): stamp the CLAIM time onto [OutboundItem.lastAttemptAtMs]
+    // so an InFlight row can be AGED against its actual in-flight attempt. Before
+    // this, a claim to InFlight left `lastAttemptAtMs` null, so the stale-recovery
+    // sweep ([isStaleRecoverableAttempt]) had to fall back to [OutboundItem.createdAtMs]
+    // — and an orphaned InFlight row (send coroutine died / VM churned / process
+    // death mid-send) had no claim-age to sweep against, parking on "Sending…" until
+    // only the slow ~160s watchdog re-armed it (finding D7). This is DISTINCT from
+    // #1541's [OutboundItem.wireAttemptedAtMs], which records the FIRST wire attempt
+    // ever and is preserved across re-claims; the orphan sweep needs the LATEST
+    // attempt, so it needs its own timestamp.
+    val atMs = System.currentTimeMillis()
+    return if (state == OutboundState.InFlight) {
+        // Already InFlight — refresh the attempt timestamp and (issue #1541) stamp
+        // the durable wire-attempt flag if a prior claim predates it, so
+        // verify-before-resend survives a VM-clear on this row.
+        copy(lastAttemptAtMs = atMs).markedWireAttempted(atMs)
     } else {
         copy(
             state = OutboundState.InFlight,
             attemptCount = attemptCount + 1,
-        ).markedWireAttempted(System.currentTimeMillis())
+            lastAttemptAtMs = atMs,
+        ).markedWireAttempted(atMs)
     }
+}
 
 /**
  * Issue #1541: stamp the durable [OutboundItem.wireAttempted] flag (idempotent —

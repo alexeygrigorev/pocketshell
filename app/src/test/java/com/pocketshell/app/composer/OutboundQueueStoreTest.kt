@@ -383,6 +383,79 @@ class OutboundQueueStoreTest {
         assertEquals(OutboundState.Queued, store.item(queued.id)!!.state)
     }
 
+    // --- Issue #1542 (enabler Q1): a claim to InFlight stamps a claim age ----
+
+    /**
+     * Issue #1542 (enabler Q1) — the regression guard. A row claimed InFlight had
+     * NO [OutboundItem.lastAttemptAtMs], so the stale-recovery sweep had no
+     * in-flight-attempt timestamp to age it against and fell back to
+     * [OutboundItem.createdAtMs]. An orphaned InFlight row (send coroutine died /
+     * VM churn / process death) therefore could not be aged by its actual attempt,
+     * which is the enabler the D7 poll-lane orphan sweep needs. Every claim primitive
+     * ([OutboundQueueStore.claimNext] / [OutboundQueueStore.claim] /
+     * [OutboundQueueStore.markInFlight]) must now stamp the claim time — RED before
+     * the fix (`lastAttemptAtMs` is null after a claim), GREEN after.
+     */
+    @Test
+    fun issue1542_Q1_everyClaimPrimitiveStampsLastAttemptAtMsOnTheInFlightRow() {
+        val store = store()
+
+        // claimNext (the oldest-queued flush primitive).
+        val a = store.enqueue("sessA", "via claimNext")
+        assertNull("pre-claim: a Queued row has no attempt timestamp", store.item(a.id)!!.lastAttemptAtMs)
+        val claimedNext = store.claimNext("sessA")!!
+        assertEquals(OutboundState.InFlight, claimedNext.state)
+        assertNotNull(
+            "Q1: claimNext must stamp the claim time so the InFlight row can be aged",
+            claimedNext.lastAttemptAtMs,
+        )
+        assertEquals(claimedNext.lastAttemptAtMs, store.item(a.id)!!.lastAttemptAtMs)
+
+        // claim(id) (the exact clicked-row primitive).
+        val b = store.enqueue("sessB", "via claim")
+        val claimedExact = store.claim(b.id)!!
+        assertEquals(OutboundState.InFlight, claimedExact.state)
+        assertNotNull("Q1: claim must stamp the claim time", claimedExact.lastAttemptAtMs)
+
+        // markInFlight(id) (the enqueue-then-mark primitive).
+        val c = store.enqueue("sessC", "via markInFlight")
+        val marked = store.markInFlight(c.id)!!
+        assertEquals(OutboundState.InFlight, marked.state)
+        assertNotNull("Q1: markInFlight must stamp the claim time", marked.lastAttemptAtMs)
+    }
+
+    /**
+     * Issue #1542 (Q1 end-to-end): the stamped claim time makes an orphaned InFlight
+     * row sweepable by its CLAIM age. A row created LONG ago but only just claimed
+     * InFlight must NOT be considered stale by a cutoff that predates its claim
+     * (aging by createdAtMs would wrongly sweep an active send); once the claim age
+     * exceeds the cutoff it IS swept. This is the age semantics the D7 orphan sweep
+     * relies on.
+     */
+    @Test
+    fun issue1542_Q1_claimedInFlightRowIsAgedByClaimTimeNotCreatedAt() {
+        // A row minted a "long time ago" (small createdAtMs) but claimed InFlight
+        // just now would, under the old createdAtMs fallback, look instantly stale.
+        // With Q1 it carries a real claim timestamp, so it is aged from the claim.
+        val store = InMemoryOutboundQueueStore()
+        store.enqueue("sessA", "claimed just now", createdAtMs = 1L)
+        val claimed = store.claimNext("sessA")!!
+        val claimAt = claimed.lastAttemptAtMs!!
+
+        // A cutoff BEFORE the claim (createdAtMs=1 is way before it) must NOT sweep:
+        // the in-flight attempt is younger than the cutoff.
+        assertTrue(
+            "an actively-claimed row must not be swept by a cutoff before its claim",
+            store.requeueStaleInFlight("sessA", cutoffMs = claimAt - 1L).isEmpty(),
+        )
+        assertEquals(OutboundState.InFlight, store.item(claimed.id)!!.state)
+
+        // A cutoff at/after the claim sweeps it (orphan recovery).
+        val swept = store.requeueStaleInFlight("sessA", cutoffMs = claimAt)
+        assertEquals(listOf(claimed.id), swept.map { it.id })
+        assertEquals(OutboundState.Queued, store.item(claimed.id)!!.state)
+    }
+
     @Test
     fun requeuedStaleInFlightRowsAreClaimableAgainInOldestFirstOrder() {
         val store = store()

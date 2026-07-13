@@ -1,7 +1,6 @@
 package com.pocketshell.app.tmux
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
@@ -14,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -657,18 +657,19 @@ internal fun ReconnectingProgressRow(
 /**
  * Issue #145: in-session SSH-disconnect error band.
  *
- * Rendered when [TmuxSessionViewModel.connectionStatus] is
- * [TmuxSessionViewModel.ConnectionStatus.Failed]. Surfaces the
- * disconnect message and a single-tap Reconnect button that calls back
- * into [TmuxSessionViewModel.reconnect].
+ * Rendered when the fused [SessionSurfaceState] is a settled
+ * [SessionSurfaceState.Failed]. Surfaces the calm disconnect message and a
+ * prominent, ALWAYS-present Reconnect button that calls back into
+ * [TmuxSessionViewModel.reconnect].
  *
- * The message is rendered in the design-system error token
- * [PocketShellColors.Red] (see `docs/design-system.md` §1) so the band
- * reads as a real failure state instead of a muted hint.
- *
- * The Reconnect button is gated on [canReconnect] — when no target is
- * set (the ViewModel never opened) the button is hidden so the user
- * never sees a tap that silently no-ops.
+ * Issue #1521: the button is a prominent accent [PocketShellButton] (not a
+ * borderless `TextButton`) and is ALWAYS shown in the failed band — it is no
+ * longer gated on `canReconnect`. The prior gate hid the sole affordance whenever
+ * the VM had not preserved a reconnect target, producing the maintainer's reported
+ * dead-end (the copy said "Tap Reconnect to retry" while nothing on screen was
+ * tappable). The caller ([TmuxSessionScreen]) surfaces honest feedback when there is
+ * genuinely nothing to reconnect to, so an always-present button is never a silent
+ * no-op.
  *
  * The row is tagged with [TMUX_SESSION_ERROR_TAG] (root) and
  * [TMUX_SESSION_RECONNECT_TAG] (button) so the connected
@@ -679,29 +680,31 @@ internal fun ReconnectingProgressRow(
 internal fun FailedConnectionRow(
     message: String,
     onReconnect: () -> Unit,
-    canReconnect: Boolean,
 ) {
-    // EPIC #687 #720: the ONLY honest error (controller `Unreachable`) is a CALM,
-    // tappable "Tap to reconnect" affordance — never raw `TransportException`/SSH
-    // exception text, never the "Open the session again to reconnect" instruction.
-    // The whole band is tappable (taps run the existing reconnect action) and the
-    // text reads as a calm prompt, not a scary red failure. When there is genuinely
-    // nothing to reconnect to (`!canReconnect`, the VM never opened) the band is
-    // inert but still calm.
-    val rowModifier = Modifier
-        .fillMaxWidth()
-        .background(color = PocketShellColors.Surface)
-        .then(
-            if (canReconnect) {
-                Modifier.clickable(onClick = onReconnect)
-            } else {
-                Modifier
-            },
-        )
-        .padding(horizontal = 12.dp, vertical = 6.dp)
-        .testTag(TMUX_SESSION_ERROR_TAG)
+    // EPIC #687 #720: the ONLY honest error (controller `Unreachable`) is a CALM
+    // recoverable prompt — never raw `TransportException`/SSH exception text, never
+    // the "Open the session again to reconnect" instruction. The message reads as a
+    // calm prompt, not a scary red failure.
+    //
+    // Issue #1521 (maintainer dogfood — "there's nowhere to tap"): the disconnected
+    // state MUST always expose an OBVIOUS, clearly-tappable Reconnect control. The
+    // prior design rendered a borderless Material `TextButton` ("Tap to reconnect")
+    // gated on `canReconnect`, so a dropped session whose reconnect target the VM did
+    // not preserve (`canReconnect == false`) showed the "Tap Reconnect to retry" copy
+    // with NO affordance at all — the reported dead-end where the copy tells the user
+    // to reconnect but nothing reads as tappable, and the whole-row `clickable` was an
+    // invisible tap zone the user could not discover. The band now ALWAYS renders a
+    // prominent accent [PocketShellButton] (an obvious CTA, not muted text) wired to
+    // the SAME existing reconnect action ([onReconnect] → [TmuxSessionViewModel.reconnect]):
+    // no new reconnect path, no hidden whole-row tap zone. The caller surfaces honest
+    // feedback if there is genuinely nothing to reconnect to, so a tap is never a
+    // silent no-op.
     Row(
-        modifier = rowModifier,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag(TMUX_SESSION_ERROR_TAG),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -712,14 +715,14 @@ internal fun FailedConnectionRow(
             fontSize = 12.sp,
             modifier = Modifier.weight(1f),
         )
-        if (canReconnect) {
-            TextButton(
-                onClick = onReconnect,
-                modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
-            ) {
-                Text("Tap to reconnect")
-            }
-        }
+        Spacer(modifier = Modifier.width(8.dp))
+        PocketShellButton(
+            text = "Reconnect",
+            onClick = onReconnect,
+            variant = ButtonVariant.Primary,
+            compact = true,
+            modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
+        )
     }
 }
 
@@ -756,7 +759,6 @@ internal fun SessionFailureBand(
     user: String,
     host: String,
     port: Int,
-    canReconnect: Boolean,
     onReconnect: () -> Unit,
 ) {
     val failed = surfaceState as? SessionSurfaceState.Failed ?: return
@@ -771,7 +773,6 @@ internal fun SessionFailureBand(
             endpoint = disconnectEndpointLabel(user = user, host = host, port = port),
         ),
         onReconnect = onReconnect,
-        canReconnect = canReconnect,
     )
 }
 
@@ -817,11 +818,11 @@ internal fun SwitchingLoadingPlaceholder() {
  * "Disconnected" pill and the "Tap to reconnect" band.
  *
  * This placeholder renders DISTINCTLY from [SwitchingLoadingPlaceholder]: NO
- * spinner, a calm muted line that points at the tappable [FailedConnectionRow]
- * band above. The surface, the pill, and the error band now agree for the failure
- * state — all derived from the ONE [SessionSurfaceState]. Deliberately does not
- * itself carry a Reconnect button — the [FailedConnectionRow] band owns the single,
- * calm reconnect affordance.
+ * spinner, a calm muted status line. The surface, the pill, and the error band now
+ * agree for the failure state — all derived from the ONE [SessionSurfaceState].
+ * Deliberately does not itself carry a Reconnect button — the [FailedConnectionRow]
+ * band owns the SINGLE, prominent, always-present reconnect affordance (#1521), so
+ * there is exactly one obvious tappable Reconnect control on screen (no duplicate).
  */
 @Composable
 internal fun RevealFailurePlaceholder() {
@@ -834,9 +835,12 @@ internal fun RevealFailurePlaceholder() {
     ) {
         Text(
             // #720/#1322: a calm, honest prompt — the muted secondary token, NOT the
-            // alarming error band and NOT a spinner. The recovery affordance is the
-            // "Tap to reconnect" band above.
-            text = "Disconnected — tap to reconnect above.",
+            // alarming error band and NOT a spinner. Issue #1521: dropped the
+            // misleading "tap to reconnect above." pointer — the recovery affordance
+            // is now the prominent, always-present "Reconnect" button in the
+            // [FailedConnectionRow] band, an obvious CTA (not a hidden target the copy
+            // vaguely gestured at), so the placeholder just states the calm status.
+            text = "Disconnected.",
             color = PocketShellColors.TextSecondary,
             fontSize = 14.sp,
             modifier = Modifier.padding(horizontal = 24.dp),

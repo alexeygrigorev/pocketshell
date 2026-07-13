@@ -250,7 +250,6 @@ class TmuxConnectingProgressOverlayTest {
                         FailedConnectionRow(
                             message = current.message,
                             onReconnect = { reconnectCalls += 1 },
-                            canReconnect = true,
                         )
                     }
 
@@ -270,26 +269,38 @@ class TmuxConnectingProgressOverlayTest {
     }
 
     @Test
-    fun failedWithoutReconnectShowsCalmMessageAndHidesReconnectAction() {
-        // EPIC #687 #720: the honest-error band is now a CALM prompt — the curated
+    fun failedBandAlwaysShowsProminentReconnectButton_1521() {
+        // EPIC #687 #720: the honest-error band stays a CALM prompt — the curated
         // message is shown as-is, NEVER appended with the old "Open the session again
-        // to reconnect." instruction. When there is genuinely nothing to reconnect to
-        // (`canReconnect = false`) the tappable action is hidden but the message stays
-        // calm and un-instructed.
+        // to reconnect." instruction.
+        //
+        // Issue #1521 (maintainer dogfood — "there's nowhere to tap"): the band MUST
+        // ALWAYS expose a prominent, tappable Reconnect control. The prior design hid
+        // the affordance whenever the VM had not preserved a reconnect target, so the
+        // disconnected screen showed the "Tap Reconnect to retry" copy with nothing
+        // tappable — a dead-end. The button is now ALWAYS present (no `canReconnect`
+        // gate) and calls the existing reconnect action.
+        var reconnectCalls = 0
         compose.setContent {
             PocketShellTheme {
                 FailedConnectionRow(
-                    message = "Disconnected. Tap to reconnect.",
-                    onReconnect = {},
-                    canReconnect = false,
+                    message = "Disconnected from alex@10.0.2.2:22. Tap Reconnect to retry.",
+                    onReconnect = { reconnectCalls += 1 },
                 )
             }
         }
 
         compose.onNodeWithTag(TMUX_SESSION_ERROR_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Disconnected. Tap to reconnect.").assertIsDisplayed()
-        compose.onNodeWithText("Disconnected. Open the session again to reconnect.")
-            .assertDoesNotExist()
-        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).assertDoesNotExist()
+        compose.onNodeWithText("Disconnected from alex@10.0.2.2:22. Tap Reconnect to retry.")
+            .assertIsDisplayed()
+        // The old borderless "Tap to reconnect" text button is gone — replaced by the
+        // prominent "Reconnect" CTA.
+        compose.onNodeWithText("Tap to reconnect").assertDoesNotExist()
+        // The prominent Reconnect button is present, tappable, and routes to the
+        // existing reconnect action even in this "nowhere to tap" scenario.
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Reconnect").assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG).performClick()
+        assertEquals("Reconnect button must always be tappable in the failed band", 1, reconnectCalls)
     }
 }

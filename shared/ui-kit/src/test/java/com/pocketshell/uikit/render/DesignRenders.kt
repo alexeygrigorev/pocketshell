@@ -401,6 +401,17 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1521: the DISCONNECTED session state after the "there's nowhere to tap"
+     * fix — the disconnect band now carries a prominent, always-present accent
+     * "Reconnect" button (not a borderless text link), and the centered placeholder is
+     * the calm "Disconnected." status without the misleading "tap … above." pointer.
+     */
+    @Test
+    fun tmuxDisconnectedState() = render("tmux-disconnected-state") {
+        TmuxDisconnectedStateRender()
+    }
+
+    /**
      * Issue #756: the canonical [PocketShellButton] — the single shared button
      * the ~142 raw Material `Button`/`TextButton` call sites (and the 9 files
      * that hand-re-declared the same accent `ButtonDefaults.buttonColors` block)

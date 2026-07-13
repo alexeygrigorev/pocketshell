@@ -1076,6 +1076,19 @@ public fun TmuxSessionScreen(
     val composeRootView = LocalView.current
     val context = LocalContext.current
 
+    // Issue #993/#1521: the single reconnect-with-feedback action shared by the kebab
+    // "Reconnect" item and the disconnected band's always-present Reconnect button.
+    // Routes through the VM's single [TmuxSessionViewModel.reconnect]; a false return
+    // (no target) gives honest Toast feedback, never a silent no-op dead-end.
+    val reconnectWithFeedback: () -> Unit = {
+        val started = viewModel.reconnect()
+        Toast.makeText(
+            context,
+            if (started) "Reconnecting…" else "Nothing to reconnect to — reopen the session",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
     // Issue #488: a tapped server-local (loopback) URL whose remote port is not
     // yet forwarded for this host. Non-null drives the "Forward port N from
     // <host>?" confirm dialog; confirming routes through the existing
@@ -1364,22 +1377,11 @@ public fun TmuxSessionScreen(
                 viewModel.redrawActivePane()
             },
             onReconnect = {
-                // Issue #993: close the menu, then force an immediate reconnect of THIS
-                // session in place via the VM's single [TmuxSessionViewModel.reconnect]
-                // /TransportEffects entrypoint — the SAME path a session switch uses to
-                // recover a dropped session, so the user no longer has to switch away and
-                // back. `reconnect()` returns false only when there is no target (the
-                // `reconnectEnabled` gate already suppresses that), so the Toast confirms
-                // the reconnect was actually kicked off (visible feedback, no silent
-                // no-op). The terminal then shows the normal "Reconnecting…" band, and on
-                // success the #900 outbound queue auto-flushes the pending message.
+                // Issue #993: close the menu, then reconnect THIS session in place via
+                // the shared [reconnectWithFeedback] action — the SAME path a session
+                // switch uses. On success the #900 outbound queue auto-flushes.
                 moreExpanded = false
-                val started = viewModel.reconnect()
-                Toast.makeText(
-                    context,
-                    if (started) "Reconnecting…" else "Nothing to reconnect to",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                reconnectWithFeedback()
             },
             // Issue #993: only actionable when there IS a target to reconnect to AND a
             // connect/reconnect is not already in flight — see [reconnectKebabEnabled].
@@ -1644,8 +1646,10 @@ public fun TmuxSessionScreen(
                 user = user,
                 host = host,
                 port = port,
-                canReconnect = canReconnect,
-                onReconnect = { viewModel.reconnect() },
+                // Issue #1521: the band's prominent Reconnect button is ALWAYS shown so
+                // the disconnected state never dead-ends with "nowhere to tap". It routes
+                // to the SAME shared [reconnectWithFeedback] action the kebab uses.
+                onReconnect = reconnectWithFeedback,
             )
             // Per [D6]: render exactly one pane at a time. The
             // HorizontalPager renders only the visible page eagerly by

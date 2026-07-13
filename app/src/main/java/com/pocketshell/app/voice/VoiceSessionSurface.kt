@@ -600,6 +600,10 @@ internal fun BottomChipControls(
     // present render it in its disabled state so the user
     // sees that input is unavailable rather than losing a tap.
     inputEnabled: Boolean = true,
+    // Issue #1531 (audit RC1): the unsent-queue badge count + failure flag for the
+    // docked launcher (see [ComposerLauncherButton]).
+    unsentCount: Int = 0,
+    unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
@@ -724,6 +728,8 @@ internal fun BottomChipControls(
                             enabled = inputEnabled,
                             onClick = onDictateTap,
                             onHoldSwipeUp = onDictateHoldSwipeUp,
+                            unsentCount = unsentCount,
+                            unsentHasFailure = unsentHasFailure,
                         )
                     }
                 }
@@ -759,6 +765,10 @@ internal fun ConversationComposerLauncherRow(
     // Composer WITH recording already active + locked. Null leaves the launcher
     // tap-only (open-only).
     onDictateHoldSwipeUp: (() -> Unit)? = null,
+    // Issue #1531 (audit RC1): the unsent-queue badge count + failure flag for the
+    // docked launcher (see [ComposerLauncherButton]).
+    unsentCount: Int = 0,
+    unsentHasFailure: Boolean = false,
 ) {
     Box(
         modifier = modifier
@@ -775,6 +785,8 @@ internal fun ConversationComposerLauncherRow(
             enabled = inputEnabled,
             onClick = onDictateTap,
             onHoldSwipeUp = onDictateHoldSwipeUp,
+            unsentCount = unsentCount,
+            unsentHasFailure = unsentHasFailure,
         )
     }
 }
@@ -792,6 +804,15 @@ private fun ComposerLauncherButton(
     // behaviour is untouched. Null (the default) leaves the launcher tap-only for
     // callers/previews that don't wire the entry gesture.
     onHoldSwipeUp: (() -> Unit)? = null,
+    // Issue #1531 (audit RC1): the unsent-queue count for the current session.
+    // > 0 renders a corner badge on the launcher so a queued / deferred /
+    // uploading / failed send is VISIBLE on the session screen (before this the
+    // launcher had zero queue reference and a stuck send looked identical to
+    // "nothing pending" — the "silently dropped" symptom).
+    unsentCount: Int = 0,
+    // Issue #1531: true when any pending row has escalated to Failed — the badge
+    // reads as an ERROR (needs attention) instead of a calm in-flight pending.
+    unsentHasFailure: Boolean = false,
 ) {
     val containerColor = if (enabled) PocketShellColors.SurfaceElev else PocketShellColors.Surface
     val borderColor = if (enabled) PocketShellColors.AccentDim else PocketShellColors.BorderSoft
@@ -861,6 +882,29 @@ private fun ComposerLauncherButton(
                 contentDescription = null,
                 tint = glyphColor,
                 modifier = Modifier.size(PocketShellDensity.treeIndent),
+            )
+        }
+        // Issue #1531 (audit RC1): the unsent-queue badge, pinned to the launcher's
+        // top-end corner. Rendered ONLY when something is pending, so an empty
+        // queue leaves the launcher visually unchanged. A Failed row paints the
+        // ERROR role (needs attention / retry); an in-flight/queued row paints the
+        // calm Active role. The count text makes "how many are stuck" legible at a
+        // glance without opening the sheet.
+        if (unsentCount > 0) {
+            Badge(
+                label = unsentCount.toString(),
+                role = if (unsentHasFailure) BadgeRole.Error else BadgeRole.Active,
+                mono = false,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .semantics {
+                        contentDescription = if (unsentHasFailure) {
+                            "$unsentCount unsent (failed)"
+                        } else {
+                            "$unsentCount unsent"
+                        }
+                    }
+                    .testTag(SESSION_COMPOSER_UNSENT_BADGE_TAG),
             )
         }
     }
@@ -1049,6 +1093,14 @@ internal const val SESSION_ENTER_CHIP_TAG: String = "session:enter-chip"
 internal const val SESSION_COMPOSER_LAUNCHER_TAG: String = "session:composer-launcher"
 
 internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open prompt composer"
+
+/**
+ * Issue #1531 (audit RC1): stable test tag on the docked launcher's unsent-queue
+ * badge. Present in the tree ONLY while at least one outbound row for the current
+ * session is undelivered, so a test can assert the badge appears when a send is
+ * queued/deferred/failed and is absent when the queue is empty.
+ */
+internal const val SESSION_COMPOSER_UNSENT_BADGE_TAG: String = "session:composer-unsent-badge"
 
 internal const val SESSION_MIC_FAB_TAG: String = SESSION_COMPOSER_LAUNCHER_TAG
 

@@ -91,6 +91,42 @@ class AttachmentRetentionPolicyTest {
     }
 
     @Test
+    fun retentionDoesNotEvictAFreshMidSendAttachmentUnderNewestCapPressure() {
+        // Issue #1531 (audit RC4, G2/AC2 class coverage): "retention-eviction-
+        // mid-send". A just-uploaded attachment whose send is in flight (queued /
+        // deferred across a flap) is FRESH — its mtime is well within
+        // protectNewestMillis. Even when a burst of even-fresher files pushes it
+        // OUTSIDE the newest-cap, retention must NOT evict it mid-send:
+        // protectNewestMillis wins over the cap (shouldDelete short-circuits on
+        // age). This is DISCRIMINATING, not vacuous — removing the protectNewest
+        // guard would delete `mid-send.png` (it is 3rd-newest with keepNewest=2),
+        // so a regression that drops the protection fails this test.
+        val now = 10_000_000_000L
+        val policy = AttachmentRetentionPolicy(
+            ttlMillis = days(7),
+            keepNewest = 2,
+            protectNewestMillis = days(1),
+        )
+
+        val plan = policy.plan(
+            entries = listOf(
+                file("newer-1.png", now - minutes(1)),
+                file("newer-2.png", now - minutes(2)),
+                // The in-flight attachment: fresh (30 min old, < protectNewest)
+                // but 3rd-newest, so OUTSIDE keepNewest=2.
+                file("mid-send.png", now - minutes(30)),
+            ),
+            nowMillis = now,
+        )
+
+        assertFalse(
+            "a fresh mid-send attachment must NOT be evicted by retention even " +
+                "under newest-cap pressure (protectNewestMillis wins); plan=${plan.delete.map { it.name }}",
+            plan.delete.any { it.name == "mid-send.png" },
+        )
+    }
+
+    @Test
     fun deleteCommandsAreChunkedAndShellQuoted() {
         val commands = RemoteAttachmentPruner.buildDeleteCommands(
             remoteDir = ".pocketshell/attachments/host-1",
@@ -146,6 +182,8 @@ class AttachmentRetentionPolicyTest {
             sizeBytes = 1L,
             modifiedEpochSec = modifiedMillis / 1_000L,
         )
+
+    private fun minutes(value: Long): Long = value * 60L * 1_000L
 
     private fun hours(value: Long): Long = value * 60L * 60L * 1_000L
 

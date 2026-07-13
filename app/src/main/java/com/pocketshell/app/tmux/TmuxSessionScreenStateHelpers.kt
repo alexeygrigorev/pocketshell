@@ -7,7 +7,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import com.pocketshell.app.composer.OutboundLauncherBadge
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.outboundLauncherBadge
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.uikit.model.SessionAgentKind
@@ -88,6 +90,21 @@ internal fun rememberTmuxSessionTabState(
  */
 internal const val OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS: Long = 3_000L
 
+/**
+ * Issue #1531 (audit RC1): the current session's undelivered-outbound summary for
+ * the DOCKED composer launcher badge (null when nothing pending). Extracted here
+ * (not the ratchet-guarded `TmuxSessionScreen` god-file) so the screen call site
+ * is a single line.
+ */
+@Composable
+internal fun rememberOutboundLauncherBadge(
+    promptComposerViewModel: PromptComposerViewModel,
+    targetSessionKey: String,
+): OutboundLauncherBadge? {
+    val items by promptComposerViewModel.outboundQueueItems.collectAsState()
+    return remember(items, targetSessionKey) { items.outboundLauncherBadge(targetSessionKey) }
+}
+
 @Composable
 internal fun TmuxOutboundQueueAutoFlushEffect(
     sessionLive: Boolean,
@@ -103,6 +120,16 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
             retryNext = { excludingIds ->
                 promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
             },
+            // Issue #1531 (audit RC3): un-park a row stranded in `Uploading`
+            // (process death mid-upload, or an upload leg abandoned without a
+            // requeue) on the SAME poll cadence — not only on a connection-window
+            // flip. `requeueStaleOutboundInFlight` re-arms any Uploading/InFlight
+            // row older than the stale cutoff back to `Queued` (a no-op for a
+            // genuinely-active <cutoff upload), after which the retry lane can
+            // claim it. Without this a stranded `Uploading` row was unretryable
+            // by the user and unclaimable by auto-flush until the window flipped —
+            // "Uploading attachments…" forever on a session that stayed live.
+            sweepStaleInFlight = { promptComposerViewModel.requeueStaleOutboundInFlight() },
         )
     }
 }
@@ -135,6 +162,12 @@ internal suspend fun runOutboundQueueAutoFlush(
     outboundQueueItems: Flow<*>,
     controller: OutboundQueueAutoFlushController,
     retryNext: (excludingIds: Set<String>) -> String?,
+    // Issue #1531 (audit RC3): re-arm a stranded `Uploading`/`InFlight` row past
+    // the stale cutoff back to `Queued` so the retry lane can claim it WITHOUT a
+    // connection-window flip. A no-op for genuinely-active uploads (their attempt
+    // is younger than the cutoff). Defaulted to a no-op so existing unit tests
+    // that only exercise the redispatch lanes keep compiling unchanged.
+    sweepStaleInFlight: () -> Unit = {},
 ): Unit = coroutineScope {
     launch {
         outboundQueueItems.collect {
@@ -142,8 +175,13 @@ internal suspend fun runOutboundQueueAutoFlush(
         }
     }
     if (sessionLive) {
+        // One sweep up front so a row already stranded when the live window opens
+        // (e.g. an app restart that left an `Uploading` row) recovers promptly
+        // instead of waiting a full backoff for the first poll tick.
+        sweepStaleInFlight()
         while (isActive) {
             delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
+            sweepStaleInFlight()
             controller.onQueueSnapshotChanged(sessionLive, retryNext)
         }
     }

@@ -2473,6 +2473,70 @@ class TmuxSessionScreenTest {
         job.cancelAndJoin()
     }
 
+    @Test
+    fun pollLaneSweepsStrandedUploadingRowSoRetryLaneClaimsItWithoutWindowFlip() = runTest {
+        // Issue #1531 (audit RC3 — the LOAD-BEARING stale-in-flight sweep on the poll
+        // cadence). A row stranded in `Uploading` (process death mid-upload) is NOT
+        // retryable by the retry lane (`isComposerQueueRetryable` = Queued|Failed) and
+        // was recovered ONLY when the connection window FLIPPED — so on a session that
+        // stayed live it read "Uploading attachments…" forever. `runOutboundQueueAutoFlush`
+        // now runs `sweepStaleInFlight` on the SAME poll cadence, re-arming the stranded
+        // row to `Queued` so the retry lane can claim it with NO window flip.
+        //
+        // Delete the poll-lane `sweepStaleInFlight()` call and this test goes RED (the
+        // stranded row is never re-armed, `dispatched` stays empty) — it covers the
+        // load-bearing mechanism, not a structural proxy.
+        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/stranded") {}
+
+        // Model the stranded `Uploading` row: NOT retryable until a stale-in-flight
+        // sweep re-arms it. Gate recovery on the SECOND sweep so the UP-FRONT sweep
+        // alone can't satisfy it — only a POLL-cadence sweep recovers the row, proving
+        // the poll sweep (not just the start-up one) is exercised.
+        var sweepCount = 0
+        var recovered = false
+        val dispatched = mutableListOf<String>()
+        val quietQueue = flow<Any?> {
+            emit(Unit)
+            awaitCancellation()
+        }
+
+        val job = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true,
+                outboundQueueItems = quietQueue,
+                controller = controller,
+                retryNext = { _ ->
+                    if (recovered) "row-1".also { dispatched += it } else null
+                },
+                sweepStaleInFlight = {
+                    sweepCount++
+                    if (sweepCount >= 2) recovered = true
+                },
+            )
+        }
+
+        // Start-up: the up-front sweep runs (count=1, not yet recovered); the initial
+        // snapshot's retry finds nothing claimable (row still stranded).
+        runCurrent()
+        assertTrue("the up-front sweep must have run", sweepCount >= 1)
+        assertEquals("a stranded Uploading row is not yet claimable", emptyList<String>(), dispatched)
+
+        // Advance past the poll backoff so ONLY the poll-cadence sweep can act. It
+        // re-arms the stranded row and the following retry claims it.
+        advanceTimeBy(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS + 1L)
+        runCurrent()
+        assertTrue("the poll-cadence sweep must have run", sweepCount >= 2)
+        assertEquals(
+            "the POLL sweep re-armed the stranded Uploading row and the retry lane claimed " +
+                "it with NO window flip — the load-bearing RC3 recovery",
+            listOf("row-1"),
+            dispatched,
+        )
+
+        job.cancelAndJoin()
+    }
+
     // --- Issue #993: kebab "Reconnect" enable gate ---------------------------------
 
     @Test

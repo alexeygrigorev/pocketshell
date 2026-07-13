@@ -69,6 +69,11 @@ internal fun TmuxSessionBottomControlsCallSite(
     onAddSnippetTap: (() -> Unit)?,
     onShowHotkeysTap: (() -> Unit)? = null,
     leadingChipContent: (@Composable () -> Unit)? = null,
+    // Issue #1531 (audit RC1): the unsent-queue badge shown on the docked composer
+    // launcher so a queued / deferred / uploading / failed send is VISIBLE on the
+    // session screen (not only inside the opened composer sheet).
+    unsentCount: Int = 0,
+    unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     // Issue #805 (regression of #744/#716): bottom-bar chrome follows the
@@ -93,6 +98,8 @@ internal fun TmuxSessionBottomControlsCallSite(
         onAddSnippetTap = onAddSnippetTap,
         onShowHotkeysTap = onShowHotkeysTap,
         leadingChipContent = leadingChipContent,
+        unsentCount = unsentCount,
+        unsentHasFailure = unsentHasFailure,
         modifier = modifier,
     )
 }
@@ -119,6 +126,10 @@ internal fun TmuxTerminalBottomControls(
     // Conversation tab).
     onShowHotkeysTap: (() -> Unit)? = null,
     leadingChipContent: (@Composable () -> Unit)? = null,
+    // Issue #1531 (audit RC1): the unsent-queue badge for the docked composer
+    // launcher (see [TmuxSessionBottomControlsCallSite]).
+    unsentCount: Int = 0,
+    unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val chromeMode = tmuxTerminalKeyboardChromeMode(
@@ -184,6 +195,8 @@ internal fun TmuxTerminalBottomControls(
                         onDictateTap = onDictateTap,
                         onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                         inputEnabled = sessionLive,
+                        unsentCount = unsentCount,
+                        unsentHasFailure = unsentHasFailure,
                         modifier = modifier,
                     )
                 }
@@ -214,6 +227,8 @@ internal fun TmuxTerminalBottomControls(
                     // project-root wiring.
                     onProjectNavigationTap = null,
                     inputEnabled = sessionLive,
+                    unsentCount = unsentCount,
+                    unsentHasFailure = unsentHasFailure,
                     modifier = modifier,
                 )
             }

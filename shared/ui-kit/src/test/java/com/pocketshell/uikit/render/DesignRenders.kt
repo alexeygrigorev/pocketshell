@@ -614,6 +614,20 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1531 (audit RC1): the docked composer launcher's unsent-queue badge.
+     * The real `ComposerLauncherButton` is an app-module PRIVATE composable, so
+     * this MIRRORS its geometry (the `>_` glyph box) with the shared ui-kit [Badge]
+     * overlaid at the top-end corner — the fast first visual check that the badge
+     * is legible and doesn't occlude the glyph. Three states side by side: no badge
+     * (empty queue), a calm in-flight count (Active role), and a failure count
+     * (Error role). The app's real launcher-with-badge is the emulator acceptance.
+     */
+    @Test
+    fun composerLauncherUnsentBadge() = render("composer-launcher-unsent-badge") {
+        ComposerLauncherUnsentBadgeRender()
+    }
+
+    /**
      * Issue #1237: the agent-state chip (idle / working / waiting-for-input) on
      * host cards + the three standalone chip variants.
      */
@@ -1701,6 +1715,57 @@ class DesignRenders {
                 color = PocketShellColors.Text,
                 style = PocketShellType.bodyDense,
             )
+        }
+    }
+
+    /**
+     * Issue #1531 (audit RC1): mirror of the docked launcher's `>_` glyph box with
+     * the shared [Badge] overlaid at the top-end corner. Rendered in the three
+     * production states so the badge placement/legibility is checked at a glance.
+     */
+    @Composable
+    private fun ComposerLauncherUnsentBadgeRender() {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 24.dp),
+            horizontalArrangement = Arrangement.spacedBy(28.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LauncherGlyphWithBadge(count = 0, hasFailure = false)
+            LauncherGlyphWithBadge(count = 2, hasFailure = false)
+            LauncherGlyphWithBadge(count = 3, hasFailure = true)
+        }
+    }
+
+    @Composable
+    private fun LauncherGlyphWithBadge(count: Int, hasFailure: Boolean) {
+        Box(
+            modifier = Modifier.size(44.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(color = PocketShellColors.SurfaceElev, shape = PocketShellShapes.small)
+                    .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = PocketShellShapes.small),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = ">_",
+                    color = PocketShellColors.Accent,
+                    style = PocketShellType.bodyMono,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            if (count > 0) {
+                Badge(
+                    label = count.toString(),
+                    role = if (hasFailure) BadgeRole.Error else BadgeRole.Active,
+                    mono = false,
+                    modifier = Modifier.align(Alignment.TopEnd),
+                )
+            }
         }
     }
 

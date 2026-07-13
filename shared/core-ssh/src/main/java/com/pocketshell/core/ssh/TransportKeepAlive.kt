@@ -159,6 +159,21 @@ internal class TransportKeepAlive(
     private var consecutiveMisses: Int = 0
 
     /**
+     * Issue #928 (T1a) — the inbound-activity watermark produced by the loop's
+     * OWN most recent successful keepalive reply (snapshotted right after
+     * [sendOne] returns true, when the reply has bumped
+     * [KeepAliveIo.lastInboundActivityNanos]). The reset-on-activity skip must
+     * key off REAL user/agent traffic only: if the watermark still equals this
+     * snapshot at the next tick, the only "recent inbound" is our own ping's
+     * reply — the link is genuinely idle and MUST be pinged on cadence, never
+     * skipped. Any newer watermark is real traffic (or a late reply after a
+     * miss — the #1059 proof-of-life, which must keep counting). The check errs
+     * toward pinging: a real byte racing the snapshot to the same nanosecond
+     * costs one extra harmless ping, never a suppressed one.
+     */
+    private var lastOwnKeepAliveReplyActivityNanos: Long = Long.MIN_VALUE
+
+    /**
      * Issue #1059 (R2) — the inbound-activity watermark captured at the START of the
      * current miss streak. If it ADVANCES before the streak would declare the peer
      * dead, a late keepalive reply (or any server byte) landed mid-streak — the link
@@ -172,11 +187,35 @@ internal class TransportKeepAlive(
 
     /**
      * Start the keepalive loop in [scope]. Idempotent: a second [start] while a
-     * loop is active is a no-op. Each tick sleeps [intervalMs], then — only if
-     * [KeepAliveIo.isAlive] and there was no recent inbound activity — sends one
-     * keepalive through the dispatcher, counting consecutive misses; on
-     * [countMax] it fires [KeepAliveIo.onKeepAliveDead] ONCE and stops counting
-     * (the recovery path now owns the transport).
+     * loop is active is a no-op. Each tick — only if [KeepAliveIo.isAlive] and
+     * there was no recent REAL inbound/outbound activity — sends one keepalive
+     * through the dispatcher, counting consecutive misses; on [countMax] it
+     * fires [KeepAliveIo.onKeepAliveDead] ONCE and stops counting (the recovery
+     * path now owns the transport).
+     *
+     * ## Issue #928 (T1a) — true-cadence anchoring (no tick-grid aliasing)
+     *
+     * The pre-#928 loop slept a FULL [intervalMs] from every tick, including a
+     * tick that SKIPPED its ping because real activity landed mid-sleep. A
+     * server byte arriving just after a tick was therefore next protected by a
+     * keep-warm ping only ~2×interval later, and a peer dying right after it was
+     * declared dead only at ~(countMax+1)×interval — so any carrier NAT whose
+     * idle window sits in the (interval, 2×interval) band reaped the idle
+     * mapping BETWEEN pings (the per-host idle flap: the busy host's own traffic
+     * keeps its mapping warm, the idle host's does not). Two corrections:
+     *
+     *  1. the skip path anchors the NEXT wake at `activity + intervalMs` (sleeps
+     *     only the remainder), so an idle-going link is pinged within one
+     *     interval of its LAST real activity regardless of tick phase; and
+     *  2. the loop's OWN reply is excluded from the skip decision
+     *     ([lastOwnKeepAliveReplyActivityNanos]), so a fully idle link holds the
+     *     true `ServerAliveInterval`-style cadence — the ping's reply can never
+     *     suppress the next scheduled ping.
+     *
+     * The busy-link intent is unchanged: REAL inbound/outbound within the last
+     * interval still skips the ping (OpenSSH reset-on-server-traffic), and the
+     * #1059/#1072 late-reply/upload ride-through still keys off the watermark
+     * advancing across a miss streak.
      *
      * ## Issue #1059 (R2) — idle high-RTT / bufferbloat false-positive bound
      *
@@ -196,9 +235,12 @@ internal class TransportKeepAlive(
         if (job?.isActive == true) return
         consecutiveMisses = 0
         missStreakStartActivityNanos = 0L
+        lastOwnKeepAliveReplyActivityNanos = Long.MIN_VALUE
         job = scope.launch {
+            var sleepMs = intervalMs
             while (isActive) {
-                delay(intervalMs)
+                delay(sleepMs)
+                sleepMs = intervalMs
                 if (!io.isAlive()) {
                     // Transport gone (closed/disconnected): end the loop. The
                     // recovery machinery owns it now.
@@ -212,16 +254,31 @@ internal class TransportKeepAlive(
                 // This is why a heavy `%output` burst is POSITIVE proof of life,
                 // not a missed probe; and why a steadily-streaming attachment
                 // upload (pure outbound) must NOT be torn down mid-upload (#1072).
-                val sinceActivityNanos = now() - io.lastActivityNanos()
-                if (sinceActivityNanos in 0 until intervalNanos()) {
+                // Issue #928 (T1a): our OWN reply is NOT such activity — a fully
+                // idle link must hold the true cadence, never skip off its own
+                // ping's echo.
+                val activityNanos = io.lastActivityNanos()
+                val sinceActivityNanos = now() - activityNanos
+                val ownReplyOnly = activityNanos == lastOwnKeepAliveReplyActivityNanos
+                if (!ownReplyOnly && sinceActivityNanos in 0 until intervalNanos()) {
                     if (consecutiveMisses != 0) {
                         log("keepalive: inbound activity, reset after $consecutiveMisses miss(es)")
                     }
                     consecutiveMisses = 0
+                    // Issue #928 (T1a): anchor the NEXT ping one interval after
+                    // the REAL activity (sleep only the remainder). Re-sleeping a
+                    // full interval from the tick grid let the wire-idle gap
+                    // reach ~2×interval — the aliasing that reaped idle carrier-
+                    // NAT mappings between pings.
+                    sleepMs = remainingMsUntil(activityNanos + intervalNanos())
                     continue
                 }
                 val alive = sendOne()
                 if (alive) {
+                    // Issue #928 (T1a): snapshot the watermark our own reply just
+                    // bumped so it can never masquerade as real inbound at the
+                    // next tick's skip decision.
+                    lastOwnKeepAliveReplyActivityNanos = io.lastActivityNanos()
                     if (consecutiveMisses != 0) {
                         log("keepalive: recovered after $consecutiveMisses miss(es)")
                     }
@@ -290,6 +347,18 @@ internal class TransportKeepAlive(
     private fun intervalNanos(): Long = intervalMs * 1_000_000L
 
     /**
+     * Issue #928 (T1a) — milliseconds (ceil, ≥1) until [deadlineNanos] on the
+     * loop's [now] clock. Ceil so the wake never lands before the deadline in
+     * this clock domain; the ≥1 floor keeps a raced/past deadline from becoming
+     * a hot `delay(0)` spin — the next tick then pings promptly.
+     */
+    private fun remainingMsUntil(deadlineNanos: Long): Long {
+        val remainingNanos = deadlineNanos - now()
+        if (remainingNanos <= 0L) return 1L
+        return ((remainingNanos + 999_999L) / 1_000_000L).coerceAtLeast(1L)
+    }
+
+    /**
      * Issue #1072 — the single "most recent proof of life" timestamp the loop
      * keys every reset/ride-through decision off: the LATER of the last inbound
      * server byte and the last outbound upload progress. Either one proves the
@@ -335,6 +404,11 @@ internal class TransportKeepAlive(
          * counter has not yet reached [countMax] when the link recovers and the
          * next keepalive (or any inbound byte) resets it — exactly the Terminus
          * "absorb the blip" behaviour PocketShell lacked.
+         *
+         * Issue #928 (T1a) made this arithmetic TRUE for every tick phase: the
+         * anchored cadence pings within one interval of the last real activity,
+         * so the worst case is genuinely countMax × interval — not the aliased
+         * (countMax+1) × interval the fixed tick grid allowed.
          */
 
         /**

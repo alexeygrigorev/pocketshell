@@ -70,7 +70,12 @@ import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.app.tmux.connection.NetworkChangeArm
 import com.pocketshell.app.tmux.connection.NetworkChangeEffects
+import com.pocketshell.app.tmux.connection.KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
+import com.pocketshell.app.tmux.connection.KeepaliveDeathRedialAmortizer
 import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
+import com.pocketshell.app.tmux.connection.recordPassiveDisconnect
+import com.pocketshell.app.tmux.connection.recordSilentReattachFail
+import com.pocketshell.app.tmux.connection.recordSilentReattachStart
 import com.pocketshell.app.tmux.connection.recordNetworkLossBandPainted
 import com.pocketshell.app.tmux.connection.recordNetworkLossBandSuppressed
 import com.pocketshell.app.tmux.connection.recordNetworkLossHold
@@ -112,6 +117,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshSessionCloseCause
 import com.pocketshell.core.terminal.bridge.TerminalSeedGateOverflowException
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -1806,6 +1812,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
     private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
+    private var keepaliveDeathQuietResetMs: Long = KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
 
     /**
      * Issue #448 (epic #432 slice C): a newly-listening remote port the
@@ -3211,9 +3218,11 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setPassiveDisconnectRecoveryForTest(
         graceMs: Long = passiveDisconnectGraceMs,
         silentReattachTimeoutMs: Long = this.silentReattachTimeoutMs,
+        keepaliveDeathQuietResetMs: Long = this.keepaliveDeathQuietResetMs,
     ) {
         passiveDisconnectGraceMs = graceMs
         this.silentReattachTimeoutMs = silentReattachTimeoutMs
+        this.keepaliveDeathQuietResetMs = keepaliveDeathQuietResetMs
     }
 
     private fun refreshReconnectAvailability() {
@@ -5300,6 +5309,18 @@ public class TmuxSessionViewModel @Inject constructor(
         backoffLadderMs = { autoReconnectDelaysMs },
         quietResetMs = NETWORK_LOSS_BAND_BACKOFF_QUIET_RESET_MS,
         transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },
+    )
+
+    /**
+     * Issue #928 (T6): cross-episode amortizer for the KEEPALIVE-DEATH redial —
+     * the per-host idle-flap path outside the #1522 debouncer. Consulted by
+     * [silentReattachWithinPassiveGrace] only when the dropped transport's close
+     * cause is [SshSessionCloseCause.KeepaliveDead].
+     */
+    private val keepaliveDeathRedialAmortizer = KeepaliveDeathRedialAmortizer(
+        scope = viewModelScope,
+        backoffLadderMs = { autoReconnectDelaysMs },
+        quietResetMs = { keepaliveDeathQuietResetMs },
     )
 
     /**
@@ -7835,46 +7856,20 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget?,
         disconnectEvent: TmuxDisconnectEvent,
     ) {
-        DiagnosticEvents.record(
-            "connection",
-            "passive_disconnect",
-            "source" to "tmux_client_disconnected",
-            "classification" to "real_tmux_control_channel_closed",
-            "disconnectReason" to disconnectEvent.reason.logValue,
-            "disconnectSource" to disconnectEvent.source,
-            "disconnectIntent" to disconnectEvent.intent,
-            "commandKind" to disconnectEvent.commandKind,
-            "timeoutMode" to disconnectEvent.timeoutMode,
-            "exceptionClass" to disconnectEvent.exceptionClass,
-            "message" to disconnectEvent.message,
-            "hostId" to target?.hostId,
-            "host" to target?.host,
-            "port" to target?.port,
-            "user" to target?.user,
-            "session" to target?.sessionName,
-            "clientHash" to System.identityHashCode(client),
-            "generation" to connectGeneration,
-            "attempt" to activeAttachMilestone?.attempt,
-            "activeTrigger" to activeAttachMilestone?.trigger?.logValue,
-            "status" to _connectionStatus.value.javaClass.simpleName,
-            *shortAppSwitchReconnectFields(
+        // Issue #928 (VM-shrink extraction): body lives in the connection sibling.
+        recordPassiveDisconnect(
+            clientHash = System.identityHashCode(client),
+            target = target,
+            disconnectEvent = disconnectEvent,
+            generation = connectGeneration,
+            attempt = activeAttachMilestone?.attempt,
+            activeTrigger = activeAttachMilestone?.trigger?.logValue,
+            status = _connectionStatus.value.javaClass.simpleName,
+            shortAppSwitchFields = shortAppSwitchReconnectFields(
                 trigger = TmuxConnectTrigger.AutoReconnect,
                 target = target,
                 sourceCandidate = "passive_disconnect",
             ),
-        )
-        ReconnectCauseTrail.record(
-            stage = "session_disconnect",
-            outcome = "passive_disconnect",
-            cause = disconnectEvent.reason.logValue,
-            trigger = TmuxConnectTrigger.AutoReconnect.logValue,
-            "hostId" to target?.hostId,
-            "generation" to connectGeneration,
-            "attempt" to activeAttachMilestone?.attempt,
-            "clientHash" to System.identityHashCode(client),
-            "status" to _connectionStatus.value.javaClass.simpleName,
-            "disconnectSource" to disconnectEvent.source,
-            "disconnectIntent" to disconnectEvent.intent,
         )
     }
 
@@ -8037,6 +8032,11 @@ public class TmuxSessionViewModel @Inject constructor(
         disconnectEvent: TmuxDisconnectEvent,
     ) {
         passiveDisconnectGraceJob?.cancel()
+        // Issue #928 (T6): capture the #969 close attribution BEFORE the redial
+        // machinery swaps sessionRef — a keepalive-declared death enters the
+        // per-host amortizer below; every other drop class keeps today's
+        // instant silent reattach.
+        val keepaliveDeath = sessionRef?.closeCause == SshSessionCloseCause.KeepaliveDead
         // Issue #896: this silent-reattach grace loop re-dials the transport and
         // re-reads the (possibly now-gone) session right on the kill→EOF cascade,
         // racing the scope teardown — exactly where an unguarded IO throw against
@@ -8045,6 +8045,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // same handler explicitly so a teardown-race throw here is swallowed +
         // recorded, never a process death.
         val graceJob = viewModelScope.launch(bridgeExceptionHandler) {
+            if (keepaliveDeath && target != null) {
+                // Issue #928 (T6): the Nth-in-a-row keepalive-death episode waits
+                // an escalating grace (honest calm band + #1521 Reconnect button
+                // shown) instead of reloading on a fixed cadence; a manual
+                // reconnect cancels this job and dials immediately (T8 bypass).
+                keepaliveDeathRedialAmortizer.awaitRedialGrace(target, connectGeneration)
+            }
             val recovered = target != null && silentlyReattachWithinPassiveGrace(
                 staleClient = client,
                 target = target,
@@ -8089,20 +8096,12 @@ public class TmuxSessionViewModel @Inject constructor(
         // drain), and never short-circuit a HEALTHY warm reattach (the #635/#553
         // within-grace warm path still runs first when no fresh transport is preferred).
         var transportReattachAttempts = 0
-        DiagnosticEvents.record(
-            "connection",
-            "silent_reattach_start",
-            "source" to "passive_disconnect",
-            "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-            "hostId" to target.hostId,
-            "host" to target.host,
-            "port" to target.port,
-            "user" to target.user,
-            "session" to target.sessionName,
-            "clientHash" to System.identityHashCode(staleClient),
-            "timeoutMs" to passiveDisconnectGraceMs,
-            "preferFreshTransport" to preferFreshTransport,
-            *shortAppSwitchReconnectFields(
+        recordSilentReattachStart(
+            target = target,
+            staleClientHash = System.identityHashCode(staleClient),
+            graceMs = passiveDisconnectGraceMs,
+            preferFreshTransport = preferFreshTransport,
+            shortAppSwitchFields = shortAppSwitchReconnectFields(
                 trigger = TmuxConnectTrigger.AutoReconnect,
                 target = target,
                 sourceCandidate = "passive_disconnect",
@@ -8163,22 +8162,11 @@ public class TmuxSessionViewModel @Inject constructor(
             false
         }.also { recovered ->
             if (recovered != true) {
-                DiagnosticEvents.record(
-                    "connection",
-                    "silent_reattach_fail",
-                    "source" to "passive_disconnect",
-                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                    "hostId" to target.hostId,
-                    "host" to target.host,
-                    "port" to target.port,
-                    "user" to target.user,
-                    "session" to target.sessionName,
-                    "clientHash" to System.identityHashCode(staleClient),
-                    "cause" to "grace_elapsed",
-                    // EPIC #792 #833: how many fresh-transport re-dials the resilient
-                    // grace loop made across the outage window before grace elapsed.
-                    "transportReattachAttempts" to transportReattachAttempts,
-                    *shortAppSwitchReconnectFields(
+                recordSilentReattachFail(
+                    target = target,
+                    staleClientHash = System.identityHashCode(staleClient),
+                    transportReattachAttempts = transportReattachAttempts,
+                    shortAppSwitchFields = shortAppSwitchReconnectFields(
                         trigger = TmuxConnectTrigger.AutoReconnect,
                         target = target,
                         sourceCandidate = "passive_disconnect",

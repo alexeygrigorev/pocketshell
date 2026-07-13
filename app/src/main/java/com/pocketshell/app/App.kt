@@ -1041,6 +1041,22 @@ internal const val GRACE_LIFECYCLE_TAG: String = "PsAppBgGrace"
 internal const val BACKGROUND_GRACE_MILLIS: Long = AppSettings.DEFAULT_BACKGROUND_GRACE_MILLIS
 
 /**
+ * Issue #1544 — the boot-clock re-check cadence for the bounded grace teardown
+ * timer. Instead of one uptime-clock `delay(graceMillis)` (which Doze suspends,
+ * stretching the effective grace to minutes — maintainer log seq 64937 fired
+ * 582 s late against a 90 s window), the teardown timer sleeps in bounded chunks
+ * and re-derives the remaining time from the SAME boot clock the grace decision
+ * uses (#1080). On the first wake AFTER the boot deadline the timer over-serves
+ * by at most one chunk of uptime rather than a full remaining `graceMillis` of
+ * accumulated awake time. Small enough to keep "90 s grace" honest across a Doze
+ * gap; large enough that it schedules no busy wakeups (still no wakelock /
+ * AlarmManager / WorkManager — the D21 relaxation for #450 is preserved). The
+ * `coerceAtMost` in the loop makes the final chunk land exactly on the deadline,
+ * so the sub-`graceMillis` unit tests keep their exact-boundary semantics.
+ */
+internal const val GRACE_TEARDOWN_POLL_CHUNK_MS: Long = 15_000L
+
+/**
  * Test-only override for connected lifecycle proofs that need a short grace
  * window without adding unsupported values to user-facing Settings.
  */
@@ -1072,8 +1088,12 @@ internal object BackgroundGraceTestOverride {
  * reattach.
  *
  * The controller deliberately holds NO repeating timer, no
- * `WorkManager`/`AlarmManager`, and no wakelock — it is a one-shot,
- * self-cancelling [delay] coroutine. Once the teardown has fired (or
+ * `WorkManager`/`AlarmManager`, and no wakelock — it is a single,
+ * self-cancelling [delay] coroutine that sleeps in bounded chunks and
+ * re-checks the boot-clock deadline each chunk (issue #1544, so a
+ * Doze-suspended uptime clock cannot stretch the effective grace). It
+ * never wakes the CPU on its own: a chunk resumes only when the process is
+ * already awake, so no wakelock is held. Once the teardown has fired (or
  * before any background event) it owns no scheduled work at all, so it
  * cannot keep the process awake. This is the bounded relaxation of D21
  * sanctioned for issue #450.
@@ -1171,7 +1191,24 @@ internal class BackgroundGraceController(
             "backgroundCycleId" to backgroundCycleId,
         )
         graceJob = scope.launch {
-            delay(backgroundGraceMillisForCycle)
+            // Issue #1544 — sleep in bounded chunks and re-derive the remaining
+            // time from the boot clock ([nowMillis], `SystemClock.elapsedRealtime`)
+            // that the grace decision (#1080) already uses, rather than a single
+            // uptime-clock `delay(backgroundGraceMillisForCycle)`. A single uptime
+            // delay is frozen by Doze, so the effective grace stretched to minutes
+            // (seq 64937: `elapsedMs=582480` against `graceMs=90000`). Chunking
+            // means the FIRST wake past the boot deadline fires the teardown —
+            // over-serving by at most one [GRACE_TEARDOWN_POLL_CHUNK_MS] of uptime,
+            // not a full remaining `graceMillis` of accumulated awake time. The
+            // `coerceAtMost` lands the final chunk exactly on the boot deadline so
+            // an on-time (no-Doze) window still fires at ~graceMillis. If cancelled
+            // by an in-grace [onForeground], `delay` throws and the dispatch below
+            // is skipped — identical to the old single-delay cancellation contract.
+            while (true) {
+                val remainingMs = backgroundDeadlineAtMs - nowMillis()
+                if (remainingMs <= 0L) break
+                delay(remainingMs.coerceAtMost(GRACE_TEARDOWN_POLL_CHUNK_MS))
+            }
             dispatchGraceElapsedIfNeeded(source = "timer", trigger = "grace_timeout")
         }
     }

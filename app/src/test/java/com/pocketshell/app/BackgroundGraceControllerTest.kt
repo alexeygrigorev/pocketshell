@@ -111,6 +111,9 @@ class BackgroundGraceControllerTest {
                 graceMillis = graceMillis,
                 onGraceElapsed = {},
                 onForeground = {},
+                // Issue #1544: the teardown timer now counts on the boot clock
+                // (`nowMillis`), so align it with the virtual delay clock.
+                nowMillis = { currentTime },
             )
 
             controller.onBackground()
@@ -201,6 +204,9 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "foreground:$resumedWithinGrace"
             },
+            // Issue #1544: the teardown timer now counts on the boot clock
+            // (`nowMillis`), so align it with the virtual delay clock.
+            nowMillis = { currentTime },
         )
 
         controller.onBackground()
@@ -601,6 +607,9 @@ class BackgroundGraceControllerTest {
                     pendingNetworkChange = null
                 }
             },
+            // Issue #1544: the teardown timer now counts on the boot clock
+            // (`nowMillis`), so align it with the virtual delay clock.
+            nowMillis = { currentTime },
         )
 
         controller.onBackground()
@@ -1241,6 +1250,9 @@ class BackgroundGraceControllerTest {
                 // Issue #548: always run foreground probe.
                 activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
             },
+            // Issue #1544: the teardown timer now counts on the boot clock
+            // (`nowMillis`), so align it with the virtual delay clock.
+            nowMillis = { currentTime },
         )
 
         controller.onBackground()
@@ -1273,6 +1285,9 @@ class BackgroundGraceControllerTest {
             onForeground = { resumedWithinGrace ->
                 events += "tmux:foreground:resumedWithinGrace=$resumedWithinGrace"
             },
+            // Issue #1544: the teardown timer now counts on the boot clock
+            // (`nowMillis`), so align it with the virtual delay clock.
+            nowMillis = { currentTime },
         )
 
         controller.onBackground()
@@ -1332,6 +1347,9 @@ class BackgroundGraceControllerTest {
                 // Issue #548: always run foreground probe.
                 activeTmuxClients.lifecycleHooksSnapshot().forEach { it.onForeground(resumedWithinGrace) }
             },
+            // Issue #1544: the teardown timer now counts on the boot clock
+            // (`nowMillis`), so align it with the virtual delay clock.
+            nowMillis = { currentTime },
         )
 
         controller.onBackground()
@@ -1459,6 +1477,130 @@ class BackgroundGraceControllerTest {
         assertEquals(
             "the ordinary bounded timer still fires the teardown at its deadline",
             listOf("teardown"),
+            events,
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #1544 — the bounded grace teardown timer must count on the BOOT
+    // clock (SystemClock.elapsedRealtime, which counts deep sleep), the same
+    // clock the within/beyond-grace decision uses (#1080), NOT the uptime clock
+    // that backs a plain `delay()`. Under Doze the uptime clock is suspended, so
+    // the old single `delay(graceMillis)` stretched the effective 90 s grace to
+    // minutes — the maintainer's log seq 64937 fired the teardown at
+    // elapsedMs=582480 against graceMs=90000.
+    //
+    // The tests below model the two clock domains as separate seams: `delay()`
+    // advances on the runTest virtual clock (= the uptime clock), while
+    // `nowMillis` reads a test-controlled `bootNow` (= the boot clock). Doze is
+    // injected synthetically (the #780 model, no `assumeTrue`/CI-skip): between
+    // teardown-poll wakes the boot clock jumps forward while the uptime clock
+    // (virtual time) advances only a chunk. Each `advanceTimeBy(chunk + 1)` is
+    // one wake that completes exactly one poll chunk (the +1 clears the
+    // exclusive-boundary semantics of `advanceTimeBy`).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `grace teardown under doze fires on the boot clock not stretched to the uptime clock`() = runTest {
+        val graceMs = 90_000L
+        val uptimeChunk = 15_000L
+        // Deep sleep between wakes: the boot clock runs at ~2x the uptime clock
+        // (the awake uptime is a fraction of real/boot time — the Doze signature).
+        val bootPerWake = 30_000L
+        var bootNow = 0L
+        val teardownAtBootElapsed = mutableListOf<Long>()
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMs,
+            onGraceElapsed = { teardownAtBootElapsed += bootNow },
+            onForeground = {},
+            nowMillis = { bootNow },
+        )
+
+        controller.onBackground()
+        runCurrent()
+
+        var wakes = 0
+        while (teardownAtBootElapsed.isEmpty() && wakes < 40) {
+            // The boot clock advanced during deep sleep, then the process wakes
+            // for one poll chunk of uptime.
+            bootNow += bootPerWake
+            advanceTimeBy(uptimeChunk + 1)
+            runCurrent()
+            wakes++
+        }
+
+        assertTrue("the grace teardown must eventually fire under Doze", teardownAtBootElapsed.isNotEmpty())
+        val firedAtBootElapsed = teardownAtBootElapsed.single()
+        assertTrue(
+            "the bounded grace teardown must fire on the BOOT clock within tolerance of graceMs " +
+                "(fired at boot elapsedMs=$firedAtBootElapsed vs graceMs=$graceMs). The old uptime-clock " +
+                "delay(graceMillis) stretches this far past graceMs under Doze — seq 64937 fired at " +
+                "elapsedMs=582480 against graceMs=90000.",
+            firedAtBootElapsed <= graceMs + bootPerWake,
+        )
+    }
+
+    @Test
+    fun `no doze - the ninety second grace still fires at the configured deadline`() = runTest {
+        // Regression guard: when the clocks agree (no Doze) the chunked boot-clock
+        // teardown timer must still fire at ~graceMs, not early and not stretched.
+        val graceMs = 90_000L
+        val events = mutableListOf<Pair<String, Long>>()
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMs,
+            onGraceElapsed = { events += "teardown" to currentTime },
+            onForeground = {},
+            nowMillis = { currentTime },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMs - 1L) // just before the deadline — must not fire yet
+        runCurrent()
+        assertEquals("teardown must not fire before the deadline", emptyList<Pair<String, Long>>(), events)
+
+        advanceTimeBy(1L) // reach the deadline
+        runCurrent()
+        assertEquals(
+            "with agreeing clocks the teardown fires at the configured 90 s deadline",
+            listOf("teardown" to graceMs),
+            events,
+        )
+    }
+
+    @Test
+    fun `within grace foreground return under doze still reattaches without teardown`() = runTest {
+        // Class coverage (G2): the within-grace foreground return. Even when the
+        // uptime clock is frozen by Doze, the boot clock is the source of truth —
+        // returning to the foreground while the BOOT clock is still inside the 90 s
+        // window must reattach (resumedWithinGrace = true) and never tear down.
+        val graceMs = 90_000L
+        var bootNow = 0L
+        val events = mutableListOf<String>()
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMs,
+            onGraceElapsed = { events += "teardown" },
+            onForeground = { resumedWithinGrace -> events += "foreground:within=$resumedWithinGrace" },
+            nowMillis = { bootNow },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        // Doze: the uptime clock barely moves (one poll wake), but the boot clock
+        // jumps to 45 s — still inside the 90 s window.
+        bootNow = 45_000L
+        advanceTimeBy(15_001L)
+        runCurrent()
+        assertEquals("teardown must not fire before the boot deadline", emptyList<String>(), events)
+
+        controller.onForeground()
+        runCurrent()
+        assertEquals(
+            "returning within the boot-clock grace window must reattach without a teardown",
+            listOf("foreground:within=true"),
             events,
         )
     }

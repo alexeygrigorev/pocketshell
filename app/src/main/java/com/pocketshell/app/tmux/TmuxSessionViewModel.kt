@@ -927,24 +927,24 @@ public class TmuxSessionViewModel @Inject constructor(
             // owner ([graceEffects.onBackgrounded] -> launchBackgroundDetachTeardown).
             backgroundedEffect = { onControllerBackgrounded() },
             // Slice 1c-iv-c (#754): the driver OWNS the within-grace FOREGROUND reattach.
-            // On the controller's Backgrounded→Reattaching edge (within grace + warm
-            // lease) it fires the RESEED-ONLY body — re-promote Live + heal blank panes
-            // over the still-warm `-CC` lease, NO connect(), NO "Attaching…" overlay.
+            // On the controller's Backgrounded→Reattaching edge (within grace + warm lease)
+            // it fires the RESEED-ONLY body — re-promote Live + heal blank panes over the
+            // still-warm `-CC` lease, NO connect(), NO "Attaching…" overlay.
             // The same body runs directly from `onAppForegrounded(resumedWithinGrace)`
             // in production (the controller does not reach that edge there because the
             // teardown — and thus the controller's Background — is deferred to
-            // grace-elapsed); both paths route through the one [GraceEffects] owner.
-            // The deleted inline `probeCurrentRuntimeOnForegroundIfNeeded →
+            // grace-elapsed); both paths route through the one [GraceEffects] owner (EPIC #792
+            // Slice B). The deleted inline `probeCurrentRuntimeOnForegroundIfNeeded →
             // connect(LifecycleReattach)` path is the superseded behavior (D22 hard-cut).
-            // EPIC #792 Slice B: routes through the single [GraceEffects] owner.
             foregroundReattachEffect = { graceEffects.onForegroundReattachReseed() },
+            // Issue #1545 (R1, extends #904): suppress the reattach-edge reseed while a
+            // `pendingReattach` is outstanding — the pending replay owns recovery (see driver).
+            hasPendingReattach = { pendingReattach != null },
             // EPIC #766 Slice 2a: the controller's Backgrounded -> Reconnecting edge (the
-            // BEYOND-grace foreground) now DRIVES the foreground arm dispatch (the re-home
-            // of the inline foreground dispatch). [onControllerForegrounded] delegates to
-            // the connection-core [ForegroundReturnEffects] (EPIC #687 Slice 0 / #1047),
-            // which selects replay-vs-resume from the live pendingReattach /
-            // pausedAutoReconnect payloads — the controller edge is only the TRIGGER, not
-            // the divergent display-status gate.
+            // BEYOND-grace foreground) DRIVES the foreground arm dispatch. [onControllerForegrounded]
+            // delegates to the connection-core [ForegroundReturnEffects] (EPIC #687 Slice 0 / #1047),
+            // re-reading the live pendingReattach / pausedAutoReconnect payloads — the edge is only
+            // the TRIGGER, not the display-status gate.
             foregroundReconnectEffect = { onControllerForegrounded() },
             // Slice 1c-iv-b-B2 (#742): after the driver submits a TransportLive /
             // TransportDropped from the real flows, re-project _connectionStatus from

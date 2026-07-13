@@ -166,6 +166,22 @@ class ConnectionEffectDriver(
     private val scope: CoroutineScope,
     private val backgroundedEffect: () -> Unit = {},
     private val foregroundReattachEffect: () -> Unit = {},
+    // Issue #1545 (Fable race audit R1, extends #904): the driver's reattach-edge
+    // suppression predicate. When it returns true a `pendingReattach` (the stashed
+    // beyond-grace replay arm) is OUTSTANDING, so the single pending path owns
+    // recovery and the driver MUST NOT ALSO fire [foregroundReattachEffect]. This
+    // closes the two-recovery-writers race: a `Foreground` arriving while a post-grace
+    // teardown close is still in flight walks `Backgrounded → Reattaching` (the
+    // controller's `isWarm` snapshot is still true because the `NonCancellable` close
+    // has not yet evicted the lease, and `now < deadline`), so this reattach edge would
+    // reseed over the DYING client WHILE `replayPendingReattach` dials a fresh transport
+    // in parallel — two writers racing on the one host. Gating on `pendingReattach ==
+    // null` here mirrors the #904 guard on the sibling Reconnecting edge (where
+    // `replayPendingReattach` consumes the stashed arm and the duplicate driver callback
+    // is a no-op). Default `{ false }` keeps the always-reseed behavior for the
+    // observe-only test harness and every within-grace reattach where nothing is
+    // pending (the normal single-reseed path is unchanged).
+    private val hasPendingReattach: () -> Boolean = { false },
     private val foregroundReconnectEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
     private val controlChannelDrops: Flow<TmuxClient>? = null,
@@ -274,7 +290,19 @@ class ConnectionEffectDriver(
             // Backgrounded -> Reattaching edge fires this; a Reattaching reached from a
             // transport DROP (the silent heal) is NOT a foreground return.
             if (current is ConnectionState.Reattaching && previous is ConnectionState.Backgrounded) {
-                foregroundReattachEffect()
+                // Issue #1545 (R1, extends #904): SUPPRESS this reseed while a
+                // `pendingReattach` is outstanding. A `Foreground` during a post-grace
+                // teardown-in-flight still resolves to Reattaching (warm-lease snapshot
+                // true + within the controller's 90 s deadline), but the App-grace
+                // teardown already stashed a `pendingReattach` that `replayPendingReattach`
+                // will dial fresh. Reseeding here too would open a SECOND recovery writer
+                // over the dying `-CC` client (the two-writers race). Let the single
+                // pending path own recovery — mirror of the #904 Reconnecting-edge guard.
+                if (!hasPendingReattach()) {
+                    foregroundReattachEffect()
+                } else {
+                    record(Observation.ReattachReseedSuppressedPendingReplay)
+                }
             }
             // Slice 2a (#766): the driver OWNS the BEYOND-grace FOREGROUND return — the
             // re-home of the inline `reduceConnection(Foreground)` arm dispatch. The
@@ -489,6 +517,17 @@ class ConnectionEffectDriver(
          */
         data object DropSuppressed : Observation {
             override fun logLine(): String = "tmux.disconnected=true SUPPRESSED (single-grace-owner)"
+        }
+
+        /**
+         * Issue #1545 (R1, extends #904): the Backgrounded -> Reattaching foreground reseed
+         * the driver SUPPRESSED because a `pendingReattach` was outstanding (a post-grace
+         * teardown-in-flight foreground). Recovery is left to the single pending replay path
+         * so no second recovery writer opens over the dying `-CC` client.
+         */
+        data object ReattachReseedSuppressedPendingReplay : Observation {
+            override fun logLine(): String =
+                "foreground reattach reseed SUPPRESSED (pending-replay owns recovery)"
         }
 
         /** A [TransportPort.transportEvents] lease up/down edge. */

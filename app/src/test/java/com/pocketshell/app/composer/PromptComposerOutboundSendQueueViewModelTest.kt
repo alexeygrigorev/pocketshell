@@ -9,6 +9,10 @@ import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
+import com.pocketshell.app.tmux.OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS
+import com.pocketshell.app.tmux.OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS
+import com.pocketshell.app.tmux.OutboundQueueAutoFlushController
+import com.pocketshell.app.tmux.runOutboundQueueAutoFlush
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
@@ -842,6 +846,171 @@ class PromptComposerOutboundSendQueueViewModelTest {
         assertEquals("still exactly one send", 1, sent2.size)
         assertTrue(queue.itemsFor("1/session-a").isEmpty())
         assertTrue("no residual durable draft", draftStore.load("1/session-a").isNullOrEmpty())
+    }
+
+    // --- Issue #1542 (finding D7): orphaned InFlight row parks on "Sending…" ---
+
+    /** Seed a durable row already left InFlight by a prior VM (the orphan). */
+    private fun InMemoryOutboundQueueStore.seedOrphanInFlightRow(
+        sessionKey: String,
+        cleanText: String,
+        claimAtMs: Long = 0L,
+    ): OutboundItem {
+        // A prior VM claimed this row InFlight (Q1 stamps the claim timestamp) and
+        // then died mid-send. `enqueueExisting` writes it verbatim so the sweep can
+        // age it against the (virtual) test clock deterministically.
+        val row = OutboundItem(
+            id = "orphan-${cleanText.hashCode()}",
+            sessionKey = sessionKey,
+            cleanText = cleanText,
+            state = OutboundState.InFlight,
+            createdAtMs = claimAtMs,
+            lastAttemptAtMs = claimAtMs,
+            attemptCount = 1,
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "codex",
+            wireAttempted = true,
+            wireAttemptedAtMs = claimAtMs,
+        )
+        return enqueueExisting(row)
+    }
+
+    @Test
+    fun issue1542_D7_orphanedInFlightRowOnStableConnectionIsSweptAndReDispatchedExactlyOnceWithinShortBound() = runTest {
+        // Reproduce-first (D33/G10): a row left InFlight by VM churn / process death
+        // mid-send. On a STABLE, connected session the #1532 auto-flush poll un-parks
+        // only Queued rows via the snapshot lane; the InFlight orphan is recovered
+        // only by the stale-in-flight sweep — whose bound was the ~160s send watchdog.
+        // So the orphan parked on "Sending…" for ~160s ("sent long after / never").
+        //
+        // RED (base, or with OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS reverted to the 160s
+        // OUTBOUND_IN_FLIGHT_STALE_MS): advancing well past the SHORT bound but below
+        // 160s never sweeps the orphan → `sent` stays EMPTY (row parks InFlight).
+        // GREEN (fix): the poll's SHORT orphan bound sweeps it → the retry lane
+        // re-dispatches it EXACTLY ONCE within the bound.
+        //
+        // Poll-lane coverage: deleting the `sweepStaleInFlight(...)` calls from
+        // `runOutboundQueueAutoFlush` also turns this RED (the orphan is never
+        // re-armed) — the load-bearing lane, not a structural proxy.
+        val queue = InMemoryOutboundQueueStore()
+        val orphan = queue.seedOrphanInFlightRow("1/session-a", "orphaned prompt")
+        assertEquals(OutboundState.InFlight, queue.item(orphan.id)!!.state)
+
+        // The bound must be genuinely SHORTER than the ~160s send watchdog (that
+        // coupling was the D7 bug), and within the fixed 30s window this test uses
+        // to distinguish "recovers fast (fix)" from "waits ~160s (base)".
+        assertTrue(
+            "the orphan bound must be shorter than the 160s send watchdog",
+            OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS < PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS,
+        )
+        assertTrue(
+            "the orphan bound must fit the fixed 30s RED/GREEN window",
+            OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS <= 30_000L,
+        )
+
+        // Fresh VM (the churn): sendInFlight=false, but the durable row is InFlight.
+        // Clock tied to virtual time so the sweep's claim-age math advances with it.
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            clock = { testScheduler.currentTime },
+        )
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        // Drive the REAL poll lane. The sweep bound comes from INSIDE
+        // `runOutboundQueueAutoFlush` (OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS), so the
+        // test exercises production's actual bound choice, not a hardcoded one.
+        val job = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true,
+                outboundQueueItems = vm.outboundQueueItems,
+                controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime }),
+                retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                sweepStaleInFlight = { staleAfterMs ->
+                    vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
+                },
+            )
+        }
+        runCurrent()
+
+        // Sanity: at the very first poll tick (well below any orphan bound) the row
+        // is NOT yet swept — an in-flight attempt that just started must not be yanked.
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertTrue(
+            "below the orphan bound the InFlight row must not be swept/dispatched yet",
+            sent.isEmpty(),
+        )
+        assertEquals(OutboundState.InFlight, queue.item(orphan.id)!!.state)
+
+        // Advance to a FIXED 30s (independent of the bound constant, so the RED/GREEN
+        // is real): far above the SHORT orphan bound but WELL below the ~160s
+        // watchdog. RED on base (160s) — the orphan is never swept inside 30s, so
+        // `sent` stays empty. GREEN (fix) — the SHORT bound sweeps it → Queued → the
+        // retry lane re-dispatches it exactly once.
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        assertEquals("the orphan must be re-dispatched exactly once", 1, sent.size)
+        assertEquals("orphaned prompt", sent.single().cleanDraft)
+        assertEquals(orphan.id, sent.single().outboundQueueItemId)
+
+        // Delivery prunes the row (occurrence 1): there is nothing left to re-send,
+        // and no second deliverable representation exists.
+        vm.markSendDelivered(sent.single())
+        assertTrue("delivered row is pruned", queue.itemsFor("1/session-a").isEmpty())
+        assertNull("no second deliverable representation after delivery", vm.retryNextOutboundItem())
+        assertEquals("still exactly one send", 1, sent.size)
+
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun issue1542_D7_freshQueuedRowStillDispatchedByPollLane_noRegression() = runTest {
+        // Class coverage (G2): the fresh-Queued path must keep working — the D7
+        // orphan-InFlight sweep must not regress the #1532 Queued re-dispatch.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            clock = { testScheduler.currentTime },
+        )
+        val sent = collectSendRequests(vm)
+        val queued = queue.enqueue(
+            "1/session-a",
+            "fresh queued prompt",
+            createdAtMs = 0L,
+            paneId = "%7",
+            route = OutboundRoute.AgentPayload,
+        )
+        assertEquals(OutboundState.Queued, queue.item(queued.id)!!.state)
+        // Pull the durable row into the VM snapshot (as a real target focus would).
+        vm.onComposerTargetChanged("1/session-a")
+
+        val job = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true,
+                outboundQueueItems = vm.outboundQueueItems,
+                controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime }),
+                retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                sweepStaleInFlight = { staleAfterMs ->
+                    vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
+                },
+            )
+        }
+        // The snapshot lane dispatches a fresh Queued row immediately — no sweep,
+        // no bound wait.
+        runCurrent()
+
+        assertEquals("a fresh Queued row is dispatched by the poll lane", 1, sent.size)
+        assertEquals("fresh queued prompt", sent.single().cleanDraft)
+        assertEquals(queued.id, sent.single().outboundQueueItemId)
+
+        vm.markSendDelivered(sent.single())
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+        job.cancelAndJoin()
     }
 
     @Test

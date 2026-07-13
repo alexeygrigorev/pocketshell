@@ -2509,7 +2509,9 @@ class TmuxSessionScreenTest {
                 retryNext = { _ ->
                     if (recovered) "row-1".also { dispatched += it } else null
                 },
-                sweepStaleInFlight = {
+                sweepStaleInFlight = { staleAfterMs ->
+                    // Issue #1542 (D7): the poll now supplies the SHORT orphan bound.
+                    assertEquals(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS, staleAfterMs)
                     sweepCount++
                     if (sweepCount >= 2) recovered = true
                 },

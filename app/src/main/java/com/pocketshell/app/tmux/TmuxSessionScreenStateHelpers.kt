@@ -91,6 +91,35 @@ internal fun rememberTmuxSessionTabState(
 internal const val OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS: Long = 3_000L
 
 /**
+ * Issue #1542 (finding D7): the age past which the auto-flush poll treats an
+ * [OutboundState.InFlight][com.pocketshell.app.composer.OutboundState.InFlight]
+ * row as ORPHANED and sweeps it back to `Queued` for a verified re-dispatch.
+ *
+ * ## Why a dedicated, SHORT bound (not the 160s send watchdog)
+ *
+ * A row claimed InFlight and then abandoned mid-send — the send coroutine died,
+ * the VM churned, or the process died between the paste and the ack — is never
+ * re-examined by the snapshot lane (it only un-parks `Queued` rows). Stale
+ * recovery re-arms InFlight rows too, but its bound was tied to
+ * `OUTBOUND_IN_FLIGHT_STALE_MS` (= the ~160s whole-send watchdog), so on a
+ * STABLE, connected session an orphaned row parked on "Sending…" for ~160s — the
+ * maintainer's "sent long after / never." The watchdog is long because an ACTIVE
+ * send can legitimately take up to `upload(90s)+onSend(50s)`; but an orphan on a
+ * stable connection has NO active send coroutine, so it can recover far sooner.
+ *
+ * A shorter orphan bound is exactly-once-safe because an actually-active send is
+ * still protected on two independent layers even if this sweep re-arms its row
+ * early: the dispatch gates (`sendInFlight` for the send leg,
+ * `outboundSidecarDispatchInFlight` for the upload leg) block a concurrent
+ * re-dispatch, and the #1526/#1541 DURABLE verify-before-resend ledger suppresses
+ * a re-paste of a payload that already landed (occurrence stays 1). The row's
+ * age is measured from its CLAIM ([OutboundItem.lastAttemptAtMs], stamped by the
+ * #1542 Q1 change), not its enqueue time, so a row that sat Queued a while before
+ * being claimed is aged from the actual in-flight attempt.
+ */
+internal const val OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS: Long = 15_000L
+
+/**
  * Issue #1531 (audit RC1): the current session's undelivered-outbound summary for
  * the DOCKED composer launcher badge (null when nothing pending). Extracted here
  * (not the ratchet-guarded `TmuxSessionScreen` god-file) so the screen call site
@@ -129,7 +158,16 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
             // claim it. Without this a stranded `Uploading` row was unretryable
             // by the user and unclaimable by auto-flush until the window flipped —
             // "Uploading attachments…" forever on a session that stayed live.
-            sweepStaleInFlight = { promptComposerViewModel.requeueStaleOutboundInFlight() },
+            //
+            // Issue #1542 (finding D7): the poll passes the SHORT orphan bound
+            // ([OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS]) so an InFlight row abandoned
+            // mid-send (coroutine death / VM churn / process death) recovers fast on
+            // a stable connection instead of parking on "Sending…" for the ~160s send
+            // watchdog. Exactly-once is preserved by the dispatch gates + durable
+            // verify-before-resend (see the constant's KDoc).
+            sweepStaleInFlight = { staleAfterMs ->
+                promptComposerViewModel.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
+            },
         )
     }
 }
@@ -162,12 +200,16 @@ internal suspend fun runOutboundQueueAutoFlush(
     outboundQueueItems: Flow<*>,
     controller: OutboundQueueAutoFlushController,
     retryNext: (excludingIds: Set<String>) -> String?,
-    // Issue #1531 (audit RC3): re-arm a stranded `Uploading`/`InFlight` row past
-    // the stale cutoff back to `Queued` so the retry lane can claim it WITHOUT a
-    // connection-window flip. A no-op for genuinely-active uploads (their attempt
-    // is younger than the cutoff). Defaulted to a no-op so existing unit tests
-    // that only exercise the redispatch lanes keep compiling unchanged.
-    sweepStaleInFlight: () -> Unit = {},
+    // Issue #1531 (audit RC3) / #1542 (finding D7): re-arm a stranded
+    // `Uploading`/`InFlight` row whose CLAIM age exceeds [staleAfterMs] back to
+    // `Queued` so the retry lane can claim it WITHOUT a connection-window flip. A
+    // no-op for a genuinely-active attempt (its claim is younger than the bound).
+    // `runOutboundQueueAutoFlush` supplies [OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS] —
+    // the SHORT orphan bound — so an orphaned InFlight row recovers fast on a
+    // stable connection (D7) rather than parking for the ~160s send watchdog.
+    // Defaulted to a no-op so existing unit tests that only exercise the redispatch
+    // lanes keep compiling unchanged.
+    sweepStaleInFlight: (staleAfterMs: Long) -> Unit = {},
 ): Unit = coroutineScope {
     launch {
         outboundQueueItems.collect {
@@ -176,12 +218,12 @@ internal suspend fun runOutboundQueueAutoFlush(
     }
     if (sessionLive) {
         // One sweep up front so a row already stranded when the live window opens
-        // (e.g. an app restart that left an `Uploading` row) recovers promptly
-        // instead of waiting a full backoff for the first poll tick.
-        sweepStaleInFlight()
+        // (e.g. an app restart that left an `Uploading`/`InFlight` row) recovers
+        // promptly instead of waiting a full backoff for the first poll tick.
+        sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
         while (isActive) {
             delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
-            sweepStaleInFlight()
+            sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
             controller.onQueueSnapshotChanged(sessionLive, retryNext)
         }
     }

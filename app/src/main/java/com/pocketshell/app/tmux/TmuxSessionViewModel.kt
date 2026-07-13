@@ -56,7 +56,6 @@ import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.canRetryAgentStream
 import com.pocketshell.app.session.markOptimisticFailed
-import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.connection.BackgroundArm
 import com.pocketshell.app.tmux.connection.BackgroundEffects
@@ -153,7 +152,6 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -14907,28 +14905,6 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
     }
-
-    private fun ConversationEvent.portOfferText(): String? = when (this) {
-        is ConversationEvent.Message -> text.takeIf {
-            role == ConversationRole.Assistant && it.isNotBlank()
-        }
-        is ConversationEvent.ToolResult -> output.takeIf { it.isNotBlank() }
-        is ConversationEvent.SystemNote -> content.takeIf { it.isNotBlank() }
-        is ConversationEvent.ToolCall -> null
-    }
-
-    /**
-     * Issue #495: two detections describe the same live agent session when
-     * the agent kind and the log source path match. Confidence and
-     * sessionId can drift between a seeded reconnect verdict and the live
-     * re-detection without meaning "a different agent" — treating that as a
-     * new agent would discard the user's tab choice.
-     */
-    private fun sameAgentSource(left: AgentDetection?, right: AgentDetection?): Boolean =
-        left != null &&
-            right != null &&
-            left.agent == right.agent &&
-            left.sourcePath == right.sourcePath
 
     private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
         _agentConversations.update { it + (paneId to state) }

@@ -11,10 +11,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Issue #1063 (R3, from the #843 round-2 mobile audit / gap C2) — the carrier-NAT
- * idle-mapping SURVIVAL regression guard for the always-on transport keepalive
- * INTERVAL. D31/D32 (G2/G6) / D33 (reproduce → fix → verify) / G9 (a test per
- * acceptance criterion).
+ * Issue #1063 (R3, from the #843 round-2 mobile audit / gap C2) + issue #928
+ * Slice 1a — the carrier-NAT idle-mapping SURVIVAL regression guard for the
+ * always-on transport keepalive CADENCE. D31/D32 (G2/G6) / D33 (reproduce →
+ * fix → verify) / G9 (a test per acceptance criterion).
  *
  * --------------------------------------------------------------------------
  * THE REAL-WORLD TRIGGER IT PINS
@@ -24,92 +24,76 @@ import org.junit.Test
  * below RFC 5382's 2h4m floor, which mobile carriers routinely violate). Once the
  * mapping is gone the path is HALF-OPEN: both ends still believe the socket is up,
  * but packets are silently dropped. PocketShell's always-on
- * [TransportKeepAlive] (#945) prevents this: on an idle link it sends one
- * `keepalive@openssh.com` per [TransportKeepAlive] `intervalMs`, and EVERY reply is
- * inbound traffic that resets the carrier-NAT idle timer — so the mapping never
- * sits idle long enough to be reaped. This is *by design*, but nothing pinned it.
- * A future interval retune (e.g. bumping it past W to "save battery") would
- * silently break long-idle survival on cellular and the maintainer would only find
- * out by losing a session after reading/recording a voice note for a minute.
+ * [TransportKeepAlive] (#945) prevents this: on an idle link it keeps the wire-idle
+ * gap below one `intervalMs`, so the mapping never sits idle long enough to be
+ * reaped. This is *by design*, but two distinct regressions can break it:
+ *
+ *  1. an interval RETUNE past W ("save battery") — the original #1063 guard; and
+ *  2. the #928 T1a TICK-GRID ALIASING: the loop skipped the ping when real
+ *     activity landed within the last interval, then re-slept a FULL interval
+ *     from the tick — so the wire-idle gap after a mid-sleep server byte could
+ *     reach ~2×interval, and any NAT window in the (interval, 2×interval) band
+ *     was reaped BETWEEN pings even though `interval < W` held on paper.
  *
  * --------------------------------------------------------------------------
- * WHY THIS LIVES AT THE KEEPALIVE LAYER, NOT THE CONNECTED `-CC` ORACLE (round 2)
+ * WHY THE PRE-#928 SHAPE OF THIS TEST MASKED THE ALIASING (the corrected model)
  *
- * Round 1 tried to prove this on the live connected session by disabling the
- * foreground `-CC` LivenessProbe and reading the production transport-liveness
- * oracle [RealSshSession.isTransportProvenAliveWithinKeepAliveWindow] across a long
- * idle, claiming the keepalive was then the SOLE inbound source. The reviewer RAN
- * it on emulator + Docker and proved that premise FALSE: with the keepalive retuned
- * to 600s (effectively OFF) the oracle still stayed proven-alive for the whole 130s
- * — so something OTHER than the keepalive refreshes inbound activity inside the
- * window. That something is the tmux `-CC` control channel itself: every byte its
- * reader decodes calls `recordInboundActivity()`
- * (`RealSshSession.startInteractiveShell`, `onInboundActivity = ::recordInbound-`
- * `Activity`), and an attached `-CC` session is never fully silent (status / layout
- * notifications). On a live attached session the keepalive can therefore NEVER be
- * isolated as the sole inbound source, so the connected oracle CANNOT give a true
- * red→green for "interval < NAT window" — the GREEN passes vacuously (it would stay
- * green through the exact interval regression it claims to guard).
+ * The old fake reported an always-stale inbound watermark (`now − 100×interval`),
+ * so the loop's reset-on-inbound skip NEVER fired — the model pinged on every
+ * tick by construction and could not exhibit the aliasing. And its parameters
+ * (1s interval vs 3s NAT window) meant even a genuinely aliased 2s effective
+ * cadence still fit inside the window. This corrected model is FAITHFUL to
+ * production [RealSshSession] semantics instead:
  *
- * So the load-bearing red→green pivots HERE, to the layer where the keepalive IS
- * the deciding factor (the #1059 / [TransportKeepAliveIdleHighRttTest] model): the
- * real [TransportKeepAlive] loop drives the inbound-refresh cadence, a faithful
- * carrier-NAT idle-timer model reaps the mapping when an idle gap exceeds W, and
- * the keepalive INTERVAL is the sole variable. The connected, real-wire RECOVERY
- * proof (the carrier NAT actually reaps the mapping mid-idle and the keepalive
- * drives recovery) stays in `app/.../proof/NatIdleMappingSurvivalE2eTest.kt` over
- * the toxiproxy half-open harness (Arm 2). This JVM pair is Arm 1 (survival) and
- * runs in the per-push Unit gate (`:shared:core-ssh:test`).
+ *  - the loop's `now` clock is the VIRTUAL scheduler clock;
+ *  - the inbound watermark starts at attach (t=0) and every successful keepalive
+ *    REPLY bumps it (issue #974 — the reply IS decoded inbound bytes);
+ *  - sporadic REAL server bytes (`-CC` status lines on a mostly-idle agent host)
+ *    bump the watermark AND refresh the NAT idle timer, exactly as on the wire;
+ *  - the NAT window sits BETWEEN 1× and 2× the interval, the band the aliasing
+ *    defect exposes and a correct anchored cadence protects.
  *
  * --------------------------------------------------------------------------
  * THE MODEL (faithful, deterministic, virtual-time)
  *
  * - [CarrierNatIdleMapping] is the carrier NAT's idle timer: it records every
- *   inbound refresh (the keepalive reply) at the VIRTUAL clock time and is "reaped"
- *   the instant the gap since the last refresh exceeds the modelled idle window W.
- *   The session attach itself is the first refresh (t=0), as on the real wire.
+ *   inbound refresh (keepalive reply or real server byte) at the VIRTUAL clock
+ *   time and is "reaped" the instant the gap since the last refresh exceeds the
+ *   modelled idle window W. The session attach itself is the first refresh (t=0).
  * - [KeepAliveDrivenNatIo] is the [TransportKeepAlive.KeepAliveIo] the real loop
- *   ticks. Its [TransportKeepAlive.KeepAliveIo.lastInboundActivityNanos] is reported
- *   far-older-than-one-interval (the #1059 trick) so reset-on-inbound never skips the
- *   ping on this idle link — i.e. the loop genuinely sends one ping per interval,
- *   exactly as on a quiet cellular link. Each
- *   [TransportKeepAlive.KeepAliveIo.sendKeepAlive] models the server answering: it
- *   refreshes the NAT mapping at the current virtual time and returns alive=true.
+ *   ticks, with the faithful watermark semantics above.
  *
- * The mapping survives iff the keepalive refreshes it within W — i.e. iff the
- * keepalive INTERVAL < W. That is the whole contract, and the interval is the only
- * thing that differs between the GREEN and the RED-control arms.
+ * The mapping survives iff the keepalive keeps every wire-idle gap below W.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class NatIdleMappingSurvivalKeepAliveTest {
 
     private companion object {
-        /**
-         * The modelled carrier-NAT idle window W. The keepalive must refresh the
-         * mapping more often than this or the NAT reaps it.
-         */
-        const val NAT_WINDOW_MS = 3_000L
+        /** The keepalive interval driving every arm below. */
+        const val INTERVAL_MS = 1_000L
 
         /**
-         * LIVE keepalive (Arm 1, GREEN): a reply lands every 1s, comfortably inside
-         * the 3s NAT window — the NAT idle timer is reset before it can fire.
+         * Issue #928 (T1a): the modelled carrier-NAT idle window W sits BETWEEN
+         * 1× and 2× the keepalive interval — the exact band the tick-grid
+         * aliasing exposed (effective idle gap up to ~2×interval) and that the
+         * anchored true-cadence loop protects (gap ≤ interval).
          */
-        const val LIVE_INTERVAL_MS = 1_000L
+        const val NAT_WINDOW_MS = 1_500L
 
         /**
-         * OVER-LONG keepalive (Arm 1, RED CONTROL / the regression): a reply lands
-         * only every 5s, longer than the 3s NAT window — so the idle mapping ages
-         * past W between refreshes and the carrier NAT reaps it.
+         * OVER-LONG keepalive (RED CONTROL / the original #1063 regression): a
+         * refresh lands only every 5s, longer than the NAT window — so the idle
+         * mapping ages past W between refreshes and the carrier NAT reaps it.
          */
         const val OVER_LONG_INTERVAL_MS = 5_000L
 
         const val COUNT_MAX = 3
 
         /** Idle hold: several NAT windows so the survival/reap outcome is stable. */
-        const val IDLE_HOLD_MS = 24_000L
+        const val IDLE_HOLD_MS = 12_000L
 
-        /** Sample the NAT idle timer this often (well below W) to catch any reap. */
-        const val SAMPLE_MS = 250L
+        /** Virtual-time step: fine enough to place chatter/samples precisely. */
+        const val STEP_MS = 50L
 
         /**
          * The minimum realistic AGGRESSIVE carrier-NAT TCP idle window. Real CGNAT
@@ -140,35 +124,40 @@ class NatIdleMappingSurvivalKeepAliveTest {
     }
 
     /**
-     * The [TransportKeepAlive.KeepAliveIo] the real loop ticks. Each keepalive
-     * reply refreshes the carrier-NAT mapping at the current virtual time.
+     * The FAITHFUL [TransportKeepAlive.KeepAliveIo]: the inbound watermark starts
+     * at attach and every successful keepalive reply bumps it (production #974
+     * semantics — this is what the pre-#928 fake masked); every reply and every
+     * real server byte refreshes the carrier-NAT idle timer at virtual time.
      */
     private class KeepAliveDrivenNatIo(
-        private val intervalMs: Long,
         private val nat: CarrierNatIdleMapping,
-        private val virtualNowMs: () -> Long,
+        private val virtualNowNanos: () -> Long,
     ) : TransportKeepAlive.KeepAliveIo {
         var pingsSent: Int = 0
         var deadDeclaredWith: Int? = null
+        private var inboundWatermarkNanos: Long = virtualNowNanos()
 
         override fun isAlive(): Boolean = true
 
-        // Far older than one interval (the #1059 trick) so reset-on-inbound never
-        // skips the ping on this idle link: the loop sends exactly one ping per
-        // interval, as on a quiet cellular link.
-        override fun lastInboundActivityNanos(): Long =
-            System.nanoTime() - 100L * intervalMs * 1_000_000L
+        override fun lastInboundActivityNanos(): Long = inboundWatermarkNanos
 
         override suspend fun sendKeepAlive(): Boolean {
             pingsSent += 1
-            // The server answered — an inbound byte that resets the carrier-NAT
-            // idle timer at the current virtual time.
-            nat.refresh(virtualNowMs())
+            // The server answered — decoded inbound bytes that reset BOTH the
+            // carrier-NAT idle timer and the session's inbound watermark (#974).
+            nat.refresh(virtualNowNanos() / 1_000_000L)
+            inboundWatermarkNanos = virtualNowNanos()
             return true
         }
 
         override fun onKeepAliveDead(consecutiveMisses: Int) {
             deadDeclaredWith = consecutiveMisses
+        }
+
+        /** A real server byte (a `-CC` status line) lands NOW: watermark + NAT. */
+        fun chatter() {
+            nat.refresh(virtualNowNanos() / 1_000_000L)
+            inboundWatermarkNanos = virtualNowNanos()
         }
     }
 
@@ -179,7 +168,9 @@ class NatIdleMappingSurvivalKeepAliveTest {
 
     /**
      * Drives the real [TransportKeepAlive] loop at [intervalMs] across the idle
-     * hold, sampling the modelled carrier NAT each [SAMPLE_MS] of virtual time.
+     * hold, sampling the modelled carrier NAT each [STEP_MS] of virtual time and
+     * injecting a real server byte at each of [chatterAtMs] (multiples of
+     * [STEP_MS]).
      *
      * Virtual time is driven by a STANDALONE [TestCoroutineScheduler] +
      * [StandardTestDispatcher], NOT `runTest`. The keepalive loop is `while (isActive)`
@@ -199,23 +190,31 @@ class NatIdleMappingSurvivalKeepAliveTest {
      * sibling's latent leak is tracked separately; the durable fix is a
      * `CoroutineExceptionHandler` on `RealSshSession`'s background scope.)
      */
-    private fun runIdleHold(intervalMs: Long): IdleHoldResult {
+    private fun runIdleHold(
+        intervalMs: Long,
+        chatterAtMs: Set<Long> = emptySet(),
+    ): IdleHoldResult {
         val scheduler = TestCoroutineScheduler()
         val scope = CoroutineScope(StandardTestDispatcher(scheduler))
         val nat = CarrierNatIdleMapping(NAT_WINDOW_MS)
         val io = KeepAliveDrivenNatIo(
-            intervalMs = intervalMs,
             nat = nat,
-            virtualNowMs = { scheduler.currentTime },
+            virtualNowNanos = { scheduler.currentTime * 1_000_000L },
         )
-        val keepAlive = TransportKeepAlive(io = io, intervalMs = intervalMs, countMax = COUNT_MAX)
+        val keepAlive = TransportKeepAlive(
+            io = io,
+            intervalMs = intervalMs,
+            countMax = COUNT_MAX,
+            now = { scheduler.currentTime * 1_000_000L },
+        )
         keepAlive.start(scope)
 
         var elapsed = 0L
         while (elapsed < IDLE_HOLD_MS) {
-            scheduler.advanceTimeBy(SAMPLE_MS)
+            scheduler.advanceTimeBy(STEP_MS)
             scheduler.runCurrent()
-            elapsed += SAMPLE_MS
+            elapsed += STEP_MS
+            if (scheduler.currentTime in chatterAtMs) io.chatter()
             nat.sample(scheduler.currentTime)
         }
         keepAlive.stop()
@@ -225,13 +224,14 @@ class NatIdleMappingSurvivalKeepAliveTest {
         return IdleHoldResult(io, nat)
     }
 
-    // ---- ARM 1: idle-mapping survival, the deterministic red→green pin ----
+    // ---- ARM 1: idle-mapping survival on the TRUE cadence (the #928 red→green pin) ----
 
     @Test
     fun liveKeepAliveKeepsIdleNatMappingWarmAcrossLongIdle() {
-        // GREEN: interval (1s) < NAT window (3s) — every reply resets the idle timer
-        // before it fires, so the carrier NAT never reaps the idle mapping.
-        val result = runIdleHold(LIVE_INTERVAL_MS)
+        // GREEN: interval (1s) < NAT window (1.5s) and the loop holds the TRUE
+        // cadence — every wire-idle gap stays ≤ interval, so the carrier NAT never
+        // reaps the fully idle mapping.
+        val result = runIdleHold(INTERVAL_MS)
 
         assertTrue(
             "the keepalive must have actually pinged the idle link (one per interval)",
@@ -243,19 +243,48 @@ class NatIdleMappingSurvivalKeepAliveTest {
         )
         assertFalse(
             "the carrier NAT must NEVER reap the mapping while the keepalive interval " +
-                "(${LIVE_INTERVAL_MS}ms) is shorter than the ${NAT_WINDOW_MS}ms idle " +
+                "(${INTERVAL_MS}ms) is shorter than the ${NAT_WINDOW_MS}ms idle " +
                 "window — every reply resets the idle timer. If this fails the keepalive " +
-                "interval was retuned past the NAT window (the regression this guards).",
+                "cadence regressed past the NAT window.",
+            result.nat.everReaped,
+        )
+    }
+
+    @Test
+    fun sporadicChatterOnIdleLinkMustNotOpenANatWindowSizedPingGap() {
+        // Issue #928 (T1a) — THE ALIASING PIN (RED on the pre-#928 loop, GREEN with
+        // the anchored cadence). A real server byte lands just AFTER a tick
+        // (t=2100, ticks on the 1000ms grid). The aliased loop then skipped the
+        // t=3000 ping and re-slept a FULL interval — no wire packet until t=4000,
+        // a 1900ms idle gap that BLOWS the 1500ms NAT window even though
+        // `interval < W` holds. The anchored loop pings at t≈3100 (one interval
+        // after the byte), keeping every gap ≤ interval and the mapping warm.
+        val result = runIdleHold(INTERVAL_MS, chatterAtMs = setOf(2_100L))
+
+        assertTrue(
+            "the keepalive must still be pinging the mostly-idle link",
+            result.io.pingsSent > 0,
+        )
+        assertNull(
+            "a live link is never declared dead while its keepalive replies keep arriving",
+            result.io.deadDeclaredWith,
+        )
+        assertFalse(
+            "issue #928 (T1a): a sporadic real server byte landing mid-sleep must NOT " +
+                "open a wire-idle gap of ~2×interval before the next keep-warm ping. The " +
+                "carrier NAT (window ${NAT_WINDOW_MS}ms, between 1× and 2× the " +
+                "${INTERVAL_MS}ms interval) reaped the idle mapping — the tick-grid " +
+                "aliasing defect that flapped exactly the maintainer's idle host.",
             result.nat.everReaped,
         )
     }
 
     @Test
     fun overLongKeepAliveLetsIdleNatMappingAgeOut() {
-        // RED CONTROL (G6): interval (5s) > NAT window (3s) — between keepalive
+        // RED CONTROL (G6): interval (5s) > NAT window (1.5s) — between keepalive
         // refreshes the mapping sits idle longer than W, so the carrier NAT reaps it.
-        // This proves the GREEN assertion above is LOAD-BEARING: with the keepalive
-        // retuned past the NAT window the mapping is genuinely lost.
+        // This proves the GREEN assertions above are LOAD-BEARING: with the keepalive
+        // cadence past the NAT window the mapping is genuinely lost.
         val result = runIdleHold(OVER_LONG_INTERVAL_MS)
 
         assertTrue(
@@ -266,7 +295,7 @@ class NatIdleMappingSurvivalKeepAliveTest {
             "with the keepalive interval (${OVER_LONG_INTERVAL_MS}ms) retuned PAST the " +
                 "${NAT_WINDOW_MS}ms NAT idle window, the idle mapping MUST age out between " +
                 "refreshes (the carrier NAT reaps it). If this does not happen the survival " +
-                "assertion in the sibling GREEN test would be vacuous.",
+                "assertions in the sibling GREEN tests would be vacuous.",
             result.nat.everReaped,
         )
     }

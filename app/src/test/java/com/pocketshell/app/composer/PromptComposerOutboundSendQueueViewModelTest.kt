@@ -2272,4 +2272,93 @@ class PromptComposerOutboundSendQueueViewModelTest {
         assertFalse(vm.uiState.value.sendInFlight)
     }
 
+    // --- Issue #1532 (RC-A / audit D1): dispatcher cancel budget vs connect budget ---
+
+    /**
+     * Issue #1532 (RC-A / audit D1 — the S2 budget inversion). The composer's
+     * `PromptComposerSendDispatcher` bounds the host `onSend` in
+     * `withTimeoutOrNull(SEND_TIMEOUT_MS)`. That cap MUST NOT be shorter than the
+     * connect-wait budget it gates
+     * ([com.pocketshell.app.tmux.SEND_SESSION_WAIT_TIMEOUT_MS], 30s) — else any
+     * reconnect that takes 12–30s is ALWAYS cancelled-and-deferred at the cap even
+     * though the inner wait would have delivered. Guards against re-introducing the
+     * inversion (they now derive from one source so they cannot drift).
+     *
+     * RED on base (SEND_TIMEOUT_MS = 12_000): 12_000 >= 30_000 is false.
+     */
+    @Test
+    fun dispatcherSendBudgetIsNotShorterThanConnectWaitBudget() {
+        assertTrue(
+            "the dispatcher SEND_TIMEOUT_MS (${PromptComposerViewModel.SEND_TIMEOUT_MS}ms) must be " +
+                ">= the connect-wait budget SEND_SESSION_WAIT_TIMEOUT_MS " +
+                "(${com.pocketshell.app.tmux.SEND_SESSION_WAIT_TIMEOUT_MS}ms) it gates, or a 12–30s " +
+                "reconnect is always cancelled-and-deferred (audit D1)",
+            PromptComposerViewModel.SEND_TIMEOUT_MS >=
+                com.pocketshell.app.tmux.SEND_SESSION_WAIT_TIMEOUT_MS,
+        )
+        // Issue #1532 (Finding 2 — #891 budget-sum invariant). The whole-send
+        // watchdog OVERALL_SEND_TIMEOUT_MS must stay strictly ABOVE the WORST-CASE
+        // SEQUENTIAL LEG SUM (attachment upload leg + onSend leg), not merely above
+        // one leg. When RC-A grew SEND_TIMEOUT_MS to 50s, the leg sum became
+        // 90s + 50s = 140s; a flat 110s ceiling would sit BELOW it, reopening the
+        // spurious-fail / duplicate-dispatch window this epic targets. Assert the
+        // leg-sum invariant WITH headroom so the overall watchdog remains a pure
+        // last-resort backstop that fires only after every per-leg bound has.
+        val worstCaseLegSum =
+            PromptComposerViewModel.ATTACHMENT_UPLOAD_TIMEOUT_MS +
+                PromptComposerViewModel.SEND_TIMEOUT_MS
+        assertTrue(
+            "the #891 budget-sum invariant is broken: the worst-case leg sum " +
+                "(upload ${PromptComposerViewModel.ATTACHMENT_UPLOAD_TIMEOUT_MS}ms + onSend " +
+                "${PromptComposerViewModel.SEND_TIMEOUT_MS}ms = ${worstCaseLegSum}ms) must stay " +
+                "strictly below the whole-send watchdog OVERALL_SEND_TIMEOUT_MS " +
+                "(${PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS}ms), or exceeding it opens a " +
+                "spurious-fail / duplicate-dispatch window (audit Finding 2)",
+            worstCaseLegSum < PromptComposerViewModel.OVERALL_SEND_TIMEOUT_MS,
+        )
+        // OUTBOUND_IN_FLIGHT_STALE_MS (when an InFlight row is treated as abandoned
+        // and requeued) must never be below the longest a legit send can take, or a
+        // still-live send is duplicated — the same class this epic targets.
+        assertTrue(
+            "OUTBOUND_IN_FLIGHT_STALE_MS (${PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS}ms) " +
+                "must be >= the worst-case leg sum (${worstCaseLegSum}ms) so a live send is never " +
+                "requeued-and-duplicated",
+            PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS >= worstCaseLegSum,
+        )
+    }
+
+    /**
+     * Issue #1532 (RC-A) behavioural proof: model the dispatcher's exact
+     * `withTimeoutOrNull(SEND_TIMEOUT_MS) { onSend() }` where the host `onSend`
+     * spends ~15s (12s < t < 30s) waiting for a slow reconnect to become live and
+     * THEN delivers. The dispatcher must NOT cancel it before the connect budget
+     * elapses.
+     *
+     * RED on base (SEND_TIMEOUT_MS = 12_000): the 12s cap fires before the 15s
+     * connect-wait completes ⇒ `withTimeoutOrNull` returns null ⇒ delivered=false
+     * (cancelled-and-deferred). GREEN with the fix: the derived cap (50s) covers
+     * the wait ⇒ delivered.
+     */
+    @Test
+    fun sendDuringSlowReconnectIsNotCancelledBeforeConnectBudget() = runTest {
+        val connectWaitMs = 15_000L // 12s < t < the 30s connect-wait budget
+        var onSendReachedDelivery = false
+
+        val delivered = kotlinx.coroutines.withTimeoutOrNull(
+            PromptComposerViewModel.SEND_TIMEOUT_MS,
+        ) {
+            // The connect-on-action host onSend: awaitLiveTmuxClientForSend polls up
+            // to SEND_SESSION_WAIT_TIMEOUT_MS for the reconnect to land, then delivers.
+            kotlinx.coroutines.delay(connectWaitMs)
+            onSendReachedDelivery = true
+            true
+        } == true
+
+        assertTrue(
+            "a send whose reconnect completes at t=15s (inside the 30s connect budget) must " +
+                "NOT be cancelled by the dispatcher cap and must deliver (audit D1)",
+            delivered,
+        )
+        assertTrue("onSend must have reached its delivery leg, not been cancelled mid-wait", onSendReachedDelivery)
+    }
 }

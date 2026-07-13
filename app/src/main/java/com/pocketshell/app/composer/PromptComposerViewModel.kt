@@ -3499,39 +3499,36 @@ public class PromptComposerViewModel @Inject constructor(
          */
         public const val ATTACHMENT_UPLOAD_TIMEOUT_MS: Long = 90_000L
 
-        /**
-         * Issue #745: a send must resolve to success or failure within a
-         * BOUNDED time so the composer never hangs in the in-flight state.
-         * The host's send path is a connect-on-action call (#548) that can
-         * legitimately kick a reconnect and wait for the live client; this
-         * cap is generous enough to cover a normal reconnect attempt yet
-         * short enough that a truly dead link surfaces the "Not sent" banner
-         * promptly instead of leaving the user waiting blind. The sheet's
-         * `sendRequests` collector wraps the host `onSend` in
-         * `withTimeoutOrNull(SEND_TIMEOUT_MS)`; a null/timeout result is
-         * treated as a failed send.
-         */
-        public const val SEND_TIMEOUT_MS: Long = 12_000L
+        /** Issue #1532 (RC-A): headroom for delivery (paste, ack, Enter) atop the connect-wait. */
+        internal const val SEND_DELIVERY_HEADROOM_MS: Long = 20_000L
 
         /**
-         * Issue #891: the ViewModel-owned ceiling on the WHOLE send operation —
-         * the backstop that guarantees the composer can never sit on "Sending…"
-         * forever (the maintainer's restart-the-app bug, with a PNG attachment).
-         *
-         * Each leg of a send is already individually bounded: the
-         * [ATTACHMENT_UPLOAD_TIMEOUT_MS] (90s) upload `withTimeout`, the #886
-         * absolute per-command ceiling on the tmux control channel (30s), and
-         * the sheet's [SEND_TIMEOUT_MS] (12s) `withTimeoutOrNull` around the host
-         * `onSend`. But nothing bounded the operation END-TO-END: if the
-         * upload-await coroutine wedged, or the `sendRequests` emission landed
-         * with no live collector, `sendInFlight` never cleared. This ceiling sits
-         * deliberately ABOVE the worst-case sum of the per-leg bounds
-         * (upload 90s + onSend 12s) so the normal failure paths surface their own
-         * banner first; the watchdog only fires when NONE of them resolved the
-         * in-flight state at all, and then routes to the retryable failed-send
-         * state ([restoreFailedSend]) with the draft + attachment preserved.
+         * Issue #745 / #1532 (RC-A, audit D1): bounded cap the sheet wraps host
+         * `onSend` in (null/timeout = failed send). A flat 12s was shorter than the
+         * connect-wait it gates ([com.pocketshell.app.tmux.SEND_SESSION_WAIT_TIMEOUT_MS],
+         * 30s), so a 12-30s reconnect was always cancelled-and-deferred though the
+         * inner wait would deliver. Now DERIVED so it can't drift shorter (guarded).
          */
-        public const val OVERALL_SEND_TIMEOUT_MS: Long = 110_000L
+        public const val SEND_TIMEOUT_MS: Long =
+            com.pocketshell.app.tmux.SEND_SESSION_WAIT_TIMEOUT_MS + SEND_DELIVERY_HEADROOM_MS
+
+        /** Issue #891/#1532 (Finding 2): headroom the watchdog sits above the leg sum. */
+        internal const val OVERALL_SEND_WATCHDOG_HEADROOM_MS: Long = 20_000L
+
+        /**
+         * Issue #891 / #1532 (Finding 2): the whole-send watchdog — the backstop
+         * so the composer can never sit on "Sending…" forever. The two legs run
+         * SEQUENTIALLY: [ATTACHMENT_UPLOAD_TIMEOUT_MS] (90s) upload, then the sheet's
+         * [SEND_TIMEOUT_MS] `withTimeoutOrNull` onSend. The #891 invariant is that
+         * this ceiling stays strictly ABOVE the worst-case leg sum (`upload+onSend`)
+         * so each per-leg banner fires first and the watchdog only fires when none
+         * resolved (routing to [restoreFailedSend] with draft+attachment kept). RC-A
+         * grew onSend to 50s ⇒ leg sum 140s, ABOVE the old flat 110s ceiling (that
+         * inversion reopens the spurious-fail/duplicate window). Now DERIVED from the
+         * leg sum + headroom so it can never invert again, whichever leg grows.
+         */
+        public const val OVERALL_SEND_TIMEOUT_MS: Long =
+            ATTACHMENT_UPLOAD_TIMEOUT_MS + SEND_TIMEOUT_MS + OVERALL_SEND_WATCHDOG_HEADROOM_MS
 
         /**
          * Issue #900: an [OutboundState.InFlight] row older than the whole-send

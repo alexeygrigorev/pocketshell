@@ -272,6 +272,56 @@ class OutboundDeliveryGuardTest {
         assertTrue(longText.filterNot { it.isWhitespace() }.endsWith(needle))
     }
 
+    /**
+     * Issue #1532 (RC-B no-duplicate guard): the RC-B silent-heal re-dispatch
+     * (TmuxSessionScreenStateHelpers per-row backoff) funnels back into the SAME
+     * composer-lane send that runs [verifyBeforeAgentResend] first. When the row's
+     * earlier attempt ended ambiguously (recorded on the ledger) but actually
+     * LANDED server-side, a re-dispatch MUST resolve `AlreadyLanded` so the send
+     * path submits Enter only and never re-pastes — the payload reaches the agent
+     * exactly ONCE. RED if the ledger were bypassed (a blind re-paste ⇒ occurrence
+     * 2, the maintainer's "delivered twice" class the S1 slice fixed).
+     */
+    @Test
+    fun reDispatchOfAlreadyLandedPayloadResolvesAlreadyLandedForExactlyOnce() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "deliver this exactly once please"
+        // First attempt reached the wire ambiguously (recorded) AND landed — the
+        // pane shows the payload.
+        ledger.recordWireAttempt(paneId, payload)
+        val client = captureShowing("$ $payload")
+
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+
+        assertEquals(
+            "a re-dispatched already-landed payload must resolve AlreadyLanded so the send path " +
+                "submits Enter only and never re-pastes (occurrence stays 1)",
+            DeliveryProbeOutcome.AlreadyLanded,
+            outcome,
+        )
+    }
+
+    /**
+     * Issue #1532 (RC-B ordering/fresh-send guard): a FRESH send — no prior
+     * ambiguous attempt on the ledger — must NOT probe (null ⇒ the caller does the
+     * normal full send). The RC-B backoff never turns a fresh send into a
+     * verify-gated one, so a fresh send is not slowed or reordered by the guard.
+     */
+    @Test
+    fun freshSendWithNoPriorAttemptDoesNotProbe() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val client = FakeTmuxClient()
+
+        val outcome = verifyBeforeAgentResend(ledger, client, "%0", "a brand new prompt")
+
+        assertNull("a fresh send with no ambiguous prior attempt must not probe (null ⇒ normal send)", outcome)
+        assertTrue(
+            "a fresh send must not pay a capture-pane probe round-trip",
+            client.capturePaneTextViaExecCalls.isEmpty(),
+        )
+    }
+
     @Test
     fun ledgerTracksRecordsClearsAndEvictsOldestBeyondCapacity() {
         val ledger = OutboundDeliveryLedger(maxEntries = 2)

@@ -25,6 +25,13 @@ import com.pocketshell.core.connection.terminalHeld
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -2355,6 +2362,115 @@ class TmuxSessionScreenTest {
         assertEquals("failed-1", retryAfterReconnect)
         assertEquals(listOf("1/session-a", "1/session-a"), requeuedTargets)
         assertEquals(emptySet<String>(), retryExclusions.last())
+    }
+
+    @Test
+    fun deferredRowReDispatchesAfterBackoffWithinUnchangedLiveWindow_silentHeal() {
+        // Issue #1532 (RC-B / audit D2): a row deferred during a SILENTLY-healed
+        // flap. The status never leaves Connected, so the `(sessionLive, target)`
+        // window NEVER flips. On base the once-per-window `autoRetriedIds` set
+        // excludes the just-tried row forever ⇒ it parks "Will send when
+        // reconnected." indefinitely while the connection is fine (the dominant
+        // "sent long after / never" mechanic). With the per-row backoff it becomes
+        // eligible again after OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS and
+        // re-dispatches on the SAME live window.
+        var nowMs = 100_000L
+        val controller = OutboundQueueAutoFlushController(clock = { nowMs })
+        controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/silent") {}
+
+        // 1) First dispatch — the send that the silent drop will defer.
+        val first = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            assertTrue("the first attempt excludes nothing", excludingIds.isEmpty())
+            "row-1"
+        }
+        assertEquals("row-1", first)
+
+        // 2) The send fails; the deferral emits a fresh snapshot in the SAME live
+        //    window. Within the backoff the just-tried row must be suppressed so a
+        //    snapshot burst cannot hot-loop it (excludingIds carries the row).
+        nowMs += 10L // sub-backoff
+        val immediate = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            assertTrue("within the backoff the just-tried row is suppressed", "row-1" in excludingIds)
+            if ("row-1" in excludingIds) null else "row-1"
+        }
+        assertNull("within the backoff the row is not re-dispatched (no hot loop)", immediate)
+
+        // 3) Time passes past the backoff and the transport heals SILENTLY — NO
+        //    window flip (onConnectionWindowChanged is NOT called; the same
+        //    sessionLive=true/target window). The parked row must re-dispatch.
+        nowMs += OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS
+        val reDispatched = controller.onQueueSnapshotChanged(sessionLive = true) { excludingIds ->
+            assertTrue("after the backoff the row is no longer suppressed", "row-1" !in excludingIds)
+            if ("row-1" in excludingIds) null else "row-1"
+        }
+        assertEquals(
+            "a row deferred inside an UNCHANGED live window must re-dispatch after the backoff " +
+                "(D2 silent-heal) instead of parking forever",
+            "row-1",
+            reDispatched,
+        )
+    }
+
+    @Test
+    fun pollLaneReDispatchesDeferredRowOnQuietScreenWithNoQueueEmission() = runTest {
+        // Issue #1532 (Finding 1 — the LOAD-BEARING poll lane). RC-B's silent-heal
+        // shape: a row deferred inside an UNCHANGED live window. The queue emits ONE
+        // initial snapshot (which dispatches-then-parks the row) and then NOTHING
+        // more — no queue mutation, no `(sessionLive, target)` window flip. On a
+        // QUIET screen the snapshot lane can never fire again, so the ONLY mechanism
+        // that can un-park the row is the POLL inside `runOutboundQueueAutoFlush`.
+        //
+        // The controller clock is tied to the coroutine's virtual clock so the
+        // per-row backoff and the poll's `delay` advance together. Delete the poll
+        // block from `runOutboundQueueAutoFlush` and this test goes RED (the parked
+        // row is never re-dispatched: `dispatched` stays a single element) — proving
+        // it covers the load-bearing mechanism, not a structural proxy.
+        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/silent") {}
+
+        val dispatched = mutableListOf<String>()
+        // One deferred row that stays eligible whenever it is not currently
+        // suppressed by its own backoff.
+        val retryEligibleRow: (Set<String>) -> String? = { excludingIds ->
+            if ("row-1" in excludingIds) null else "row-1"
+        }
+        // A quiet queue: emit the initial snapshot once (the StateFlow-on-subscribe
+        // value), then never emit again — the silent-heal shape.
+        val quietQueue = flow<Any?> {
+            emit(Unit)
+            awaitCancellation()
+        }
+
+        val job = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true,
+                outboundQueueItems = quietQueue,
+                controller = controller,
+                retryNext = { excludingIds -> retryEligibleRow(excludingIds)?.also { dispatched += it } },
+            )
+        }
+
+        // Let the initial snapshot dispatch run. The row is dispatched once and
+        // parks; the poll's first backoff `delay` is now pending.
+        runCurrent()
+        assertEquals(
+            "the initial snapshot dispatches the row exactly once, then it parks",
+            listOf("row-1"),
+            dispatched,
+        )
+
+        // NO further queue emission. Advance virtual time past the backoff so ONLY
+        // the poll can act. It must un-park the row and re-dispatch it.
+        advanceTimeBy(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS + 1L)
+        runCurrent()
+        assertEquals(
+            "the POLL re-dispatched the parked row on a quiet screen with no queue emission " +
+                "and no window flip (D2 silent-heal) — this is the load-bearing lane",
+            listOf("row-1", "row-1"),
+            dispatched,
+        )
+
+        job.cancelAndJoin()
     }
 
     // --- Issue #993: kebab "Reconnect" enable gate ---------------------------------

@@ -11,6 +11,11 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Issue #1158 (R2 ART VerifyError fix): the session's Terminal/Conversation
@@ -70,6 +75,19 @@ internal fun rememberTmuxSessionTabState(
     }
 }
 
+/**
+ * Issue #1532 (RC-B / audit D2): the per-row backoff between successive
+ * auto-flush re-dispatch attempts of the SAME deferred row inside one live
+ * window. Long enough that a rapid burst of queue snapshots (a deferral emits
+ * one immediately) can't hot-loop a just-tried row, short enough that a row
+ * deferred during a SILENTLY-healed flap (status never leaves `Connected`, so
+ * the `(sessionLive, target)` window never flips) still re-dispatches promptly
+ * once the transport recovers — instead of parking "Will send when reconnected."
+ * forever. Each re-dispatch funnels through the #1526 S1 verify-before-resend
+ * ledger, so a silently-landed payload is never doubled.
+ */
+internal const val OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS: Long = 3_000L
+
 @Composable
 internal fun TmuxOutboundQueueAutoFlushEffect(
     sessionLive: Boolean,
@@ -78,23 +96,87 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
     controller: OutboundQueueAutoFlushController,
 ) {
     LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
-        promptComposerViewModel.outboundQueueItems.collect {
-            controller.onQueueSnapshotChanged(sessionLive) { excludingIds ->
+        runOutboundQueueAutoFlush(
+            sessionLive = sessionLive,
+            outboundQueueItems = promptComposerViewModel.outboundQueueItems,
+            controller = controller,
+            retryNext = { excludingIds ->
                 promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
-            }
+            },
+        )
+    }
+}
+
+/**
+ * Issue #1532 (RC-B / audit D2): the outbound auto-flush body, extracted from
+ * [TmuxOutboundQueueAutoFlushEffect] so the LOAD-BEARING poll lane is reachable
+ * under virtual time in a plain unit test (the composable just forwards to it —
+ * no behaviour change). Two lanes race under one structured-concurrency scope:
+ *
+ *  - **Snapshot lane** — re-attempt one eligible row whenever the queue changes
+ *    (the #900 path). A deferral emits a fresh snapshot, so a row whose attempt
+ *    already outlasted the backoff (a slow connect-wait takes tens of seconds)
+ *    re-dispatches on that emission.
+ *  - **Poll lane** — re-attempt one eligible row on the
+ *    [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] cadence while the session is live.
+ *    This is the ONLY thing that un-parks a row deferred inside an UNCHANGED live
+ *    window (the #928/#822 silent-heal shape emits NO further snapshot once the
+ *    row parks, so the snapshot lane alone would leave it stuck "Will send when
+ *    reconnected." forever). No window flip required. `retryNext` self-gates on
+ *    `sendInFlight` / `composerTarget`, so a poll with nothing to do is a cheap
+ *    no-op.
+ *
+ * Bounded: [coroutineScope] returns only when both children complete, and both
+ * are cancelled the moment the enclosing [LaunchedEffect] key set (sessionLive,
+ * target, VM, controller) changes or the screen leaves composition.
+ */
+internal suspend fun runOutboundQueueAutoFlush(
+    sessionLive: Boolean,
+    outboundQueueItems: Flow<*>,
+    controller: OutboundQueueAutoFlushController,
+    retryNext: (excludingIds: Set<String>) -> String?,
+): Unit = coroutineScope {
+    launch {
+        outboundQueueItems.collect {
+            controller.onQueueSnapshotChanged(sessionLive, retryNext)
+        }
+    }
+    if (sessionLive) {
+        while (isActive) {
+            delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
+            controller.onQueueSnapshotChanged(sessionLive, retryNext)
         }
     }
 }
 
 /**
- * Issue #900: state holder for the screen-level outbound queue auto-flush
- * effects. It resets the per-live-window failure exclusion set when the
- * connection window changes, requeues stale in-flight rows when a target becomes
- * live, and retries at most one queue row per queue snapshot.
+ * Issue #900 / #1532: state holder for the screen-level outbound queue
+ * auto-flush effects. It requeues stale in-flight rows when a target becomes
+ * live and retries at most one queue row per queue snapshot.
+ *
+ * Issue #1532 (RC-B / audit D2): the old design remembered a permanent
+ * `autoRetriedIds` exclusion set that only reset on a `(sessionLive, target)`
+ * WINDOW FLIP — so a row deferred during a SILENTLY-healed flap (status never
+ * leaves `Connected`, the window never flips) was excluded FOREVER and parked
+ * "Will send when reconnected." while the connection was actually fine (the
+ * dominant "sent long after / never" mechanic). That once-per-window exclusion
+ * is replaced by a PER-ROW time-bounded backoff: a dispatched row is suppressed
+ * only for [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] after its attempt (so a
+ * snapshot burst can't hot-loop it), then becomes eligible to re-dispatch again
+ * even within the SAME live window. Exactly-once is preserved by the #1526 S1
+ * verify-before-resend ledger in the send path — a re-dispatch of an
+ * already-landed payload is suppressed there, never doubled.
  */
-internal class OutboundQueueAutoFlushController {
+internal class OutboundQueueAutoFlushController(
+    private val clock: () -> Long = { System.currentTimeMillis() },
+) {
     private var windowKey: Pair<Boolean, String>? = null
-    private var autoRetriedIds: Set<String> = emptySet()
+
+    // Issue #1532 (RC-B): per-row timestamp of the last auto-flush dispatch
+    // attempt. A row is suppressed from re-dispatch only while it is still within
+    // its [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] backoff; expired entries are
+    // pruned each snapshot, which also bounds the map on a long-lived screen.
+    private val lastAttemptAtMs = mutableMapOf<String, Long>()
 
     fun onConnectionWindowChanged(
         sessionLive: Boolean,
@@ -104,7 +186,9 @@ internal class OutboundQueueAutoFlushController {
         val nextKey = sessionLive to targetSessionId
         if (nextKey == windowKey) return
         windowKey = nextKey
-        autoRetriedIds = emptySet()
+        // A genuine window flip is a fresh slate — clear all per-row backoffs so a
+        // reconnect re-arms every row immediately (the existing #900/#993 path).
+        lastAttemptAtMs.clear()
         if (sessionLive) requeueStaleInFlight()
     }
 
@@ -113,8 +197,14 @@ internal class OutboundQueueAutoFlushController {
         retryNext: (excludingIds: Set<String>) -> String?,
     ): String? {
         if (!sessionLive) return null
-        val retriedId = retryNext(autoRetriedIds) ?: return null
-        autoRetriedIds = autoRetriedIds + retriedId
+        val now = clock()
+        // Drop rows whose backoff has elapsed — they are eligible to re-dispatch
+        // again (this is what un-parks a silently-healed deferred row) and pruning
+        // keeps the map bounded.
+        lastAttemptAtMs.entries.removeAll { now - it.value >= OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS }
+        val suppressed = lastAttemptAtMs.keys.toSet()
+        val retriedId = retryNext(suppressed) ?: return null
+        lastAttemptAtMs[retriedId] = now
         return retriedId
     }
 }

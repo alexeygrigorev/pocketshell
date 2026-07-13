@@ -1,6 +1,9 @@
 package com.pocketshell.app.tmux
 
 import android.util.Log
+import com.pocketshell.app.composer.OutboundWireAttemptDurableStore
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
+import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -115,8 +118,23 @@ internal const val INPUT_BATCH_PROBE_MIN_NEEDLE_CHARS: Int = 8
  * exactly-once guarantees end at the client store (#961), and the watchdog /
  * strand paths can re-mint requests for the same payload. Bounded LRU so a
  * long-lived VM cannot accumulate stale entries.
+ *
+ * ## Durability across VM-clear (issue #1541)
+ *
+ * The volatile in-memory set dies with the VM — which happens on a plain
+ * **back-navigation** (VM clear), not only on process death. That let the P9
+ * duplicate through: send → tap Back mid-delivery → the row is deferred → reopen
+ * → the FRESH ledger has no memory of the in-flight attempt → the row is blindly
+ * re-pasted → server occurrence 2. [durable] closes that: a wire attempt is
+ * ALSO recorded on the durable [OutboundQueueStore][com.pocketshell.app.composer.OutboundQueueStore]
+ * row (`wireAttempted`), so a ledger rebuilt after a VM-clear consults the durable
+ * flag ([hasAmbiguousAttempt]) and runs verify-before-resend instead of a blind
+ * re-paste. Null [durable] (unit-test constructors) ⇒ in-memory only (base S1).
  */
-internal class OutboundDeliveryLedger(private val maxEntries: Int = 64) {
+internal class OutboundDeliveryLedger(
+    private val maxEntries: Int = 64,
+    private val durable: OutboundWireAttemptDurableStore? = null,
+) {
     private val lock = Any()
     private val entries = LinkedHashSet<String>()
 
@@ -130,16 +148,39 @@ internal class OutboundDeliveryLedger(private val maxEntries: Int = 64) {
         while (entries.size > maxEntries) {
             entries.remove(entries.first())
         }
+        // Issue #1541: also persist on the durable row so the attempt survives a
+        // VM-clear / back-navigation, not only this live VM.
+        durable?.recordWireAttempt(paneId, payload, System.currentTimeMillis())
     }
 
     fun clear(paneId: String, payload: String): Unit = synchronized(lock) {
+        // Only clears the volatile set: the durable flag is tied to the row's
+        // lifetime (dropped when the row is delivered-pruned / removed, PRESERVED
+        // across requeue), so an as-yet-un-acked in-flight row keeps verifying.
         entries.remove(key(paneId, payload))
     }
 
     fun hasAmbiguousAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
-        key(paneId, payload) in entries
+        // Issue #1541: the durable flag makes a back-nav-rebuilt ledger (empty
+        // in-memory set) still see a prior wire attempt.
+        key(paneId, payload) in entries || durable?.hasWireAttempt(paneId, payload) == true
     }
 }
+
+/**
+ * Issue #1541: build the production [OutboundDeliveryLedger] with its durable
+ * wire-attempt backing wired to the persisted outbound queue rows. A fresh
+ * [SharedPrefsOutboundQueueStore][com.pocketshell.app.composer.SharedPrefsOutboundQueueStore]
+ * shares the process-cached `outbound_queue` SharedPreferences with the composer's
+ * singleton, so the `wireAttempted` flag written on one instance is visible to the
+ * ledger rebuilt on the next VM — surviving VM-clear / back-navigation. A null
+ * [context] (narrow unit-test VM constructors) falls back to the in-memory-only
+ * ledger (base S1 behaviour).
+ */
+internal fun outboundDeliveryLedgerFor(context: android.content.Context?): OutboundDeliveryLedger =
+    OutboundDeliveryLedger(
+        durable = context?.let { SharedPrefsOutboundQueueStore(it).asWireAttemptDurableStore() },
+    )
 
 /**
  * Probe whether [payload] is ALREADY visible in [paneId] — i.e. a prior,

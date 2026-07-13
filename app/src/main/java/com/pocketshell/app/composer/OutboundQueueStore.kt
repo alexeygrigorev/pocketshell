@@ -285,7 +285,67 @@ public interface OutboundQueueStore {
 
     /** Drop every item for [sessionKey]. */
     public fun clearSession(sessionKey: String)
+
+    /**
+     * Issue #1541 (finding P9): durably mark that any un-delivered row targeting
+     * [paneId] with [payload] as its [OutboundItem.cleanText] has been **pushed to
+     * the wire** — a delivery attempt started that may have landed server-side.
+     * The flag ([OutboundItem.wireAttempted]) is persisted ON THE ROW, so it
+     * survives a plain **VM-clear / back-navigation** (which destroys the volatile
+     * [OutboundDeliveryLedger][com.pocketshell.app.tmux.OutboundDeliveryLedger]),
+     * not only live-VM retries. A rebuilt ledger reads it back via [hasWireAttempt]
+     * and runs verify-before-resend instead of a blind re-paste (server occurrence
+     * 2). No-op when no un-delivered row matches. Returns the updated row, or null.
+     *
+     * The flag lives and dies with the row: it is set here and by the InFlight
+     * claim ([claimNext] / [claim] / [markInFlight]); it is CLEARED only when the
+     * row leaves the queue ([markDelivered] prune / [remove] / [clearSession]), and
+     * PRESERVED across [requeueForRetry] / [requeueStaleInFlight] so a requeued row
+     * still verifies before re-pasting. That is what also closes the
+     * `markDelivered`-lost-on-`apply()` corner: a delivered row whose prune write
+     * was lost survives with the flag still set, so the rebuild verifies (already
+     * landed ⇒ occurrence 1) instead of blindly re-pasting.
+     */
+    public fun markWireAttempted(
+        paneId: String,
+        payload: String,
+        atMs: Long = System.currentTimeMillis(),
+    ): OutboundItem?
+
+    /**
+     * Issue #1541: whether any persisted row targeting [paneId] with [payload] as
+     * its [OutboundItem.cleanText] carries a durable [OutboundItem.wireAttempted]
+     * flag — i.e. a prior wire attempt survived a VM-clear. This is what a rebuilt
+     * ledger consults so back-navigation mid-delivery re-enters verify-before-resend.
+     */
+    public fun hasWireAttempt(paneId: String, payload: String): Boolean
 }
+
+/**
+ * Issue #1541: the durable backing the verify-before-resend
+ * [OutboundDeliveryLedger][com.pocketshell.app.tmux.OutboundDeliveryLedger] reads
+ * so a wire attempt survives VM-clear (plain back-navigation) / process death.
+ * Implemented over [OutboundQueueStore.markWireAttempted] / [OutboundQueueStore.hasWireAttempt]
+ * (the flag lives on the persisted row); see [OutboundQueueStore.asWireAttemptDurableStore].
+ */
+public interface OutboundWireAttemptDurableStore {
+    /** Persist that (`paneId`, `payload`) has been pushed to the wire. */
+    public fun recordWireAttempt(paneId: String, payload: String, atMs: Long)
+
+    /** Whether a durable wire attempt is recorded for (`paneId`, `payload`). */
+    public fun hasWireAttempt(paneId: String, payload: String): Boolean
+}
+
+/** Issue #1541: adapt this store as the ledger's durable wire-attempt backing. */
+public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDurableStore =
+    object : OutboundWireAttemptDurableStore {
+        override fun recordWireAttempt(paneId: String, payload: String, atMs: Long) {
+            markWireAttempted(paneId, payload, atMs)
+        }
+
+        override fun hasWireAttempt(paneId: String, payload: String): Boolean =
+            this@asWireAttemptDurableStore.hasWireAttempt(paneId, payload)
+    }
 
 /**
  * Issue #900: the durable, process-death-survivable representation of one
@@ -314,6 +374,14 @@ public interface OutboundQueueStore {
  *   double-send (a post-failure re-Send of the restored draft must not create a
  *   second deliverable row). Empty for legacy rows / callers that do not supply
  *   a logical key; an empty `sendKey` never coalesces (each is its own row).
+ * @property wireAttempted issue #1541: durably records that this row has been
+ *   PUSHED TO THE WIRE at least once (a delivery attempt started that may have
+ *   landed server-side). Set when the row is claimed InFlight / marked via
+ *   [OutboundQueueStore.markWireAttempted]; PRESERVED across requeue so a rebuilt
+ *   verify-before-resend ledger consults it after a VM-clear / back-navigation
+ *   (survives the volatile ledger dying) and probes instead of blindly re-pasting.
+ *   Cleared only when the row leaves the queue (delivered-prune / remove / clear).
+ * @property wireAttemptedAtMs the time [wireAttempted] was first set, or `null`.
  */
 public data class OutboundItem(
     val id: String,
@@ -330,6 +398,8 @@ public data class OutboundItem(
     val route: OutboundRoute = OutboundRoute.RawBytes,
     val agentKind: String? = null,
     val sendKey: String = "",
+    val wireAttempted: Boolean = false,
+    val wireAttemptedAtMs: Long? = null,
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -561,6 +631,21 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
     override fun clearSession(sessionKey: String): Unit = synchronized(lock) {
         items.values.removeAll { it.sessionKey == sessionKey }
     }
+
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? =
+        synchronized(lock) {
+            val target = items.values
+                .filter { it.matchesWireTarget(paneId, payload) }
+                .minByOrNull { it.createdAtMs }
+                ?: return null
+            val updated = target.markedWireAttempted(atMs)
+            items[updated.id] = updated
+            updated
+        }
+
+    override fun hasWireAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
+        items.values.any { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
+    }
 }
 
 /**
@@ -605,6 +690,8 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? = null
+    override fun hasWireAttempt(paneId: String, payload: String): Boolean = false
 }
 
 /**
@@ -870,6 +957,27 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         storeSession(sessionKey, emptyList())
     }
 
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? =
+        synchronized(lock) {
+            for (sessionKey in sessionKeys()) {
+                val list = loadSession(sessionKey)
+                val target = list
+                    .filter { it.matchesWireTarget(paneId, payload) }
+                    .minByOrNull { it.createdAtMs }
+                    ?: continue
+                val updated = target.markedWireAttempted(atMs)
+                replaceAndStore(sessionKey, list, updated)
+                return@synchronized updated
+            }
+            null
+        }
+
+    override fun hasWireAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
+        sessionKeys().any { key ->
+            loadSession(key).any { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
+        }
+    }
+
     private fun replaceAndStore(sessionKey: String, list: MutableList<OutboundItem>, updated: OutboundItem) {
         val idx = list.indexOfFirst { it.id == updated.id }
         if (idx >= 0) list[idx] = updated else list.add(updated)
@@ -884,6 +992,15 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
 
 private val OutboundState.isExactClaimable: Boolean
     get() = this == OutboundState.Queued || this == OutboundState.Failed
+
+/**
+ * Issue #1541: whether this row is the durable wire-attempt record for
+ * (`paneId`, `payload`) — the ledger keys a wire attempt by pane + payload, and
+ * a row's payload is its [OutboundItem.cleanText]. `Delivered` rows are pruned
+ * so never seen here; the guard is belt-and-suspenders.
+ */
+private fun OutboundItem.matchesWireTarget(paneId: String, payload: String): Boolean =
+    this.paneId == paneId && cleanText == payload && state != OutboundState.Delivered
 
 /**
  * Issue #961: a row that a same-[OutboundItem.sendKey] enqueue should COALESCE
@@ -931,13 +1048,26 @@ private fun OutboundItem.reArmedForCoalesce(): OutboundItem =
 
 private fun OutboundItem.claimedForAttempt(): OutboundItem =
     if (state == OutboundState.InFlight) {
-        this
+        // Already InFlight — still stamp the durable wire-attempt flag (issue
+        // #1541) if a prior claim predates the flag, so verify-before-resend
+        // survives a VM-clear on this row.
+        markedWireAttempted(System.currentTimeMillis())
     } else {
         copy(
             state = OutboundState.InFlight,
             attemptCount = attemptCount + 1,
-        )
+        ).markedWireAttempted(System.currentTimeMillis())
     }
+
+/**
+ * Issue #1541: stamp the durable [OutboundItem.wireAttempted] flag (idempotent —
+ * the first-set timestamp is preserved). A claimed / wire-pushed row carries this
+ * across requeue so a rebuilt verify-before-resend ledger consults it after a
+ * VM-clear / back-navigation instead of blindly re-pasting a payload that may
+ * already have landed.
+ */
+private fun OutboundItem.markedWireAttempted(atMs: Long): OutboundItem =
+    if (wireAttempted) this else copy(wireAttempted = true, wireAttemptedAtMs = atMs)
 
 private fun OutboundItem.isStaleRecoverableAttempt(cutoffMs: Long): Boolean =
     (state == OutboundState.InFlight || state == OutboundState.Uploading) &&
@@ -949,12 +1079,13 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
 /**
  * Issue #900: encode a session's outbound items as newline-separated rows.
  * Each row is tab-delimited:
- * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey`
+ * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey \t wireAttempted \t wireAttemptedAtMs`
  * with the same `\`-escaping [ComposerDraftStore] uses so text/paths containing
  * tabs/newlines round-trip losslessly. The attachments field reuses
- * [encodeAttachments], itself escaped as a single field. The trailing `sendKey`
- * (issue #961) is appended last so legacy rows without it decode to an empty
- * `sendKey` (never-coalesce) rather than a malformed row.
+ * [encodeAttachments], itself escaped as a single field. Trailing fields
+ * (`sendKey` #961, `wireAttempted`/`wireAttemptedAtMs` #1541) are appended last
+ * so legacy rows without them decode to their defaults (empty `sendKey`,
+ * `wireAttempted=false`) rather than a malformed row.
  */
 internal fun encodeOutboundItems(items: List<OutboundItem>): String =
     items.joinToString(separator = "\n") { item ->
@@ -972,6 +1103,8 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.route.name,
             item.agentKind.orEmpty(),
             item.sendKey,
+            if (item.wireAttempted) "1" else "0",
+            item.wireAttemptedAtMs?.toString().orEmpty(),
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1001,6 +1134,8 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
                 .getOrDefault(OutboundRoute.RawBytes),
             agentKind = f.getOrNull(11)?.takeIf { it.isNotEmpty() },
             sendKey = f.getOrNull(12).orEmpty(),
+            wireAttempted = f.getOrNull(13) == "1",
+            wireAttemptedAtMs = f.getOrNull(14)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
         )
     }
 }

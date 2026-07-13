@@ -1,6 +1,7 @@
 package com.pocketshell.app.composer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,6 +131,40 @@ class OutboundQueueStoreEncodingTest {
         assertEquals("", decoded.paneId)
         assertEquals(OutboundRoute.RawBytes, decoded.route)
         assertEquals(null, decoded.agentKind)
+    }
+
+    @Test
+    fun encodeDecodeRoundTripsWireAttempted() {
+        // Issue #1541: the durable per-row wire-attempt flag must survive process
+        // death so a ledger rebuilt after a VM-clear / restart re-enters
+        // verify-before-resend instead of blindly re-pasting.
+        val items = listOf(
+            OutboundItem(
+                id = "id-wa",
+                sessionKey = "sessA",
+                cleanText = "wire attempted payload",
+                state = OutboundState.InFlight,
+                createdAtMs = 1L,
+                paneId = "%0",
+                wireAttempted = true,
+                wireAttemptedAtMs = 1_700_000_009_000,
+            ),
+        )
+        val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
+        assertEquals(items, decoded)
+        assertTrue(decoded.single().wireAttempted)
+        assertEquals(1_700_000_009_000, decoded.single().wireAttemptedAtMs)
+    }
+
+    @Test
+    fun decodeLegacyRowsWithoutWireAttemptedDefaultToFalse() {
+        // Issue #1541: pre-#1541 rows ended at sendKey (field 12). They must decode
+        // to wireAttempted=false (a fresh send), not a malformed row.
+        val raw = "id-legacy\tx\t1\tQueued\t100\t\t0\t\t\t%0\tRawBytes\tclaude\tsk123"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+        assertFalse(decoded.wireAttempted)
+        assertEquals(null, decoded.wireAttemptedAtMs)
+        assertEquals("sk123", decoded.sendKey)
     }
 
     @Test

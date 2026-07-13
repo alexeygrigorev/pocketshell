@@ -157,6 +157,12 @@ abstract class TmuxSessionViewModelTestBase {
             com.pocketshell.app.agents.AgentKindRemoteSource().apply {
                 setExecDispatcherForTest(StandardTestDispatcher(scheduler))
             },
+        // Issue #1541: default null keeps every existing test's ledger in-memory
+        // only (base S1). A test that needs the durable per-row `wireAttempted`
+        // flag (survives VM-clear / back-navigation) passes the Robolectric app
+        // context, so a VM's `outboundDeliveryLedgerFor(applicationContext)` wires
+        // the durable backing over the process-cached `outbound_queue` prefs.
+        applicationContext: android.content.Context? = null,
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -169,6 +175,7 @@ abstract class TmuxSessionViewModelTestBase {
             sessionLifecycleSignals = sessionLifecycleSignals,
             agentRepository = agentRepository,
             agentKindRemoteSource = agentKindRemoteSource,
+            applicationContext = applicationContext,
         ).also {
             // Issue #576 (Slice A of #792): pin the structural-reconcile
             // dispatcher to Main (the MainDispatcherRule's

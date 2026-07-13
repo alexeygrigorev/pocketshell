@@ -14029,13 +14029,11 @@ public class TmuxSessionViewModel @Inject constructor(
         return sendAgentPayloadToPaneResult(client, paneId, payload, agent)
     }
 
-    /**
-     * Issue #1526 S1: delivery-attempt ledger backing verify-before-resend. Lives
-     * on the VM (not the composer queue) because the VM spans the reconnect the
-     * ambiguity arises across; process death loses it, in which case a restart
-     * resend behaves like base (documented S1 residual).
-     */
-    private val outboundDeliveryLedger = OutboundDeliveryLedger()
+    // Issue #1526 S1 / #1541: verify-before-resend ledger. The volatile set dies
+    // on VM-clear (back-navigation), so it is backed by the durable per-row
+    // `wireAttempted` flag (see [outboundDeliveryLedgerFor]) — a rebuilt ledger
+    // verifies instead of blindly re-pasting. Null ctx (unit-test ctors) ⇒ base S1.
+    private val outboundDeliveryLedger = outboundDeliveryLedgerFor(applicationContext)
 
     private fun consumeSendResultLostSeamForTest() {
         if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return

@@ -14033,6 +14033,25 @@ public class TmuxSessionViewModel @Inject constructor(
         return sendAgentPayloadToPaneResult(client, paneId, payload, agent)
     }
 
+    /**
+     * Issue #1526 S1: delivery-attempt ledger backing verify-before-resend. Lives
+     * on the VM (not the composer queue) because the VM spans the reconnect the
+     * ambiguity arises across; process death loses it, in which case a restart
+     * resend behaves like base (documented S1 residual).
+     */
+    private val outboundDeliveryLedger = OutboundDeliveryLedger()
+
+    private fun consumeSendResultLostSeamForTest() {
+        if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return
+        // The seam models the audit's cut point (c): the paste ran server-side,
+        // then the link died before the submit Enter's result came back.
+        val dropped = triggerCleanPassiveDropForTest()
+        DiagnosticEvents.record("action", "outbound_result_lost_seam", "dropped" to dropped)
+        throw IllegalStateException(
+            "test-seam: transport dropped after paste, before submit Enter (result lost)",
+        )
+    }
+
     private suspend fun sendAgentPayloadToPaneResult(
         client: TmuxClient,
         paneId: String,
@@ -14043,8 +14062,28 @@ public class TmuxSessionViewModel @Inject constructor(
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }
+        // Issue #1526 S1 (verify-before-resend): when a PRIOR attempt at this exact
+        // (pane, payload) ended ambiguously (timeout/drop after the paste may have
+        // run server-side — audit A1/A2), do NOT blindly re-paste. Probe the pane
+        // with the #869 ack needle first: already landed ⇒ submit-Enter ONLY (a
+        // no-op on an already-submitted empty input box); unknown ⇒ fail WITHOUT
+        // resending so the durable row stays queued for a later verified retry;
+        // not landed ⇒ fall through to the normal full send.
+        when (verifyBeforeAgentResend(outboundDeliveryLedger, client, paneId, payload)) {
+            DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
+                sendNamedKeyToPane(client, paneId, "Enter")
+                    .throwIfTmuxError("submit previously pasted agent input")
+                outboundDeliveryLedger.clear(paneId, payload)
+                requestReconcile(client, paneId, ReconcileReason.Send)
+            }
+            DeliveryProbeOutcome.Unknown -> return Result.failure(
+                IllegalStateException("Prior send outcome unknown; kept queued without resend."),
+            )
+            DeliveryProbeOutcome.NotLanded, null -> Unit
+        }
         return runCatching {
             ensurePaneAcceptsInput(client, paneId)
+            outboundDeliveryLedger.recordWireAttempt(paneId, payload)
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
@@ -14052,8 +14091,10 @@ public class TmuxSessionViewModel @Inject constructor(
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
             awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
+            consumeSendResultLostSeamForTest()
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
+            outboundDeliveryLedger.clear(paneId, payload)
             // Issue #941 (black-screen B1): the maintainer's "I sent a message and
             // everything became black" symptom. After the submit Enter, a full-screen
             // agent TUI repaints — it can `clear`+redraw and emit a `%output` overpaint
@@ -15497,79 +15538,24 @@ public class TmuxSessionViewModel @Inject constructor(
         return TmuxPaneInputStream(paneId, queue)
     }
 
+    // Issue #1526 S1: extracted to [deliverDequeuedInputBatch] (OutboundDeliveryGuard.kt)
+    // with the blind attempt-2 retry (audit B2) made probe-gated (verify-before-resend).
     private suspend fun sendDequeuedInputBatch(
         client: TmuxClient,
         paneId: String,
         batch: TmuxPaneInputBatch,
         queue: TmuxPaneInputQueue,
-    ): Boolean {
-        var lastFailure: Throwable? = null
-        repeat(TMUX_INPUT_SEND_MAX_ATTEMPTS) { attempt ->
-            if (attempt > 0) delay(TMUX_INPUT_SEND_RETRY_DELAY_MS)
-            val currentClient = clientRef
-            if (client !== currentClient && !client.disconnected.value) {
-                DiagnosticEvents.record(
-                    "connection",
-                    "pane_input_send_abandoned",
-                    "pane" to paneId,
-                    "bytes" to batch.bytes.size,
-                    "attempt" to (attempt + 1),
-                    "reason" to "client_superseded",
-                    "clientHash" to System.identityHashCode(client),
-                    "currentClientHash" to currentClient?.let { System.identityHashCode(it) },
-                )
-                queue.requeueFront(batch)
-                return false
-            }
-            val outcome = runCatching { sendInputBytesToPane(client, paneId, batch.bytes) }
-            if (outcome.isSuccess) {
-                queue.recordSent(batch)
-                return true
-            }
-            lastFailure = outcome.exceptionOrNull()
-            if (lastFailure is CancellationException) throw lastFailure
-            DiagnosticEvents.record(
-                "connection",
-                "pane_input_send_failed",
-                "pane" to paneId,
-                "bytes" to batch.bytes.size,
-                "attempt" to (attempt + 1),
-                "maxAttempts" to TMUX_INPUT_SEND_MAX_ATTEMPTS,
-                "willRetry" to (attempt + 1 < TMUX_INPUT_SEND_MAX_ATTEMPTS),
-                "clientHash" to System.identityHashCode(client),
-                "currentClient" to (client === clientRef),
-                "clientDisconnected" to client.disconnected.value,
-                "exceptionClass" to lastFailure?.javaClass?.simpleName,
-                "message" to lastFailure?.message,
-            )
-        }
-        val failure = lastFailure
-        Log.w(
-            ISSUE_145_RECONNECT_TAG,
-            "tmux-pane-input-send-failed pane=$paneId bytes=${batch.bytes.size} " +
-                "clientCurrent=${client === clientRef} clientDisconnected=${client.disconnected.value}",
-            failure,
-        )
-        if (client === clientRef) {
-            handlePassiveClientDisconnect(
-                client = client,
-                disconnectEvent = TmuxDisconnectEvent(
-                    reason = if (client.disconnected.value) {
-                        TmuxDisconnectReason.ReaderEof
-                    } else {
-                        TmuxDisconnectReason.ReaderException
-                    },
-                    source = "pane_input_send",
-                    intent = "input_send_failure",
-                    commandKind = "send-keys",
-                    exceptionClass = failure?.javaClass?.simpleName,
-                    message = failure?.message,
-                ),
-            )
-        }
-        queue.recordDropped(batch)
-        return true
-    }
+    ): Boolean = deliverDequeuedInputBatch(
+        client = client,
+        paneId = paneId,
+        batch = batch,
+        queue = queue,
+        currentClient = { clientRef },
+        sendBytes = { c, p, b -> sendInputBytesToPane(c, p, b) },
+        onPersistentFailureOfCurrentClient = { event ->
+            handlePassiveClientDisconnect(client = client, disconnectEvent = event)
+        },
+    )
 
     private suspend fun sendInputBytesToPane(
         client: TmuxClient,

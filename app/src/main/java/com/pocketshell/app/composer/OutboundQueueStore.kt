@@ -288,8 +288,10 @@ public interface OutboundQueueStore {
 
     /**
      * Issue #1541 (finding P9): durably mark that any un-delivered row targeting
-     * [paneId] with [payload] as its [OutboundItem.cleanText] has been **pushed to
-     * the wire** — a delivery attempt started that may have landed server-side.
+     * [paneId] whose ON-WIRE payload is [payload] has been **pushed to the wire**
+     * — a delivery attempt started that may have landed server-side. The payload
+     * is matched against the row's [OutboundItem.cleanText] AND, for an
+     * attachment-backed row, its reconstructed on-wire form (issue #1554).
      * The flag ([OutboundItem.wireAttempted]) is persisted ON THE ROW, so it
      * survives a plain **VM-clear / back-navigation** (which destroys the volatile
      * [OutboundDeliveryLedger][com.pocketshell.app.tmux.OutboundDeliveryLedger]),
@@ -313,10 +315,14 @@ public interface OutboundQueueStore {
     ): OutboundItem?
 
     /**
-     * Issue #1541: whether any persisted row targeting [paneId] with [payload] as
-     * its [OutboundItem.cleanText] carries a durable [OutboundItem.wireAttempted]
-     * flag — i.e. a prior wire attempt survived a VM-clear. This is what a rebuilt
-     * ledger consults so back-navigation mid-delivery re-enters verify-before-resend.
+     * Issue #1541 / #1554: whether any persisted row targeting [paneId] whose
+     * on-wire payload is [payload] carries a durable [OutboundItem.wireAttempted]
+     * flag — i.e. a prior wire attempt survived a VM-clear. [payload] is matched
+     * against the row's [OutboundItem.cleanText] AND, for attachment-backed rows,
+     * its reconstructed on-wire form (`cleanText` + appended attachment paths). This
+     * is what a rebuilt ledger consults so back-navigation mid-delivery re-enters
+     * verify-before-resend — including for attachment sends whose wire payload
+     * differs from `cleanText`.
      */
     public fun hasWireAttempt(paneId: String, payload: String): Boolean
 }
@@ -1001,13 +1007,32 @@ private val OutboundState.isExactClaimable: Boolean
     get() = this == OutboundState.Queued || this == OutboundState.Failed
 
 /**
- * Issue #1541: whether this row is the durable wire-attempt record for
- * (`paneId`, `payload`) — the ledger keys a wire attempt by pane + payload, and
- * a row's payload is its [OutboundItem.cleanText]. `Delivered` rows are pruned
- * so never seen here; the guard is belt-and-suspenders.
+ * Issue #1541 / #1554: whether this row is the durable wire-attempt record for
+ * (`paneId`, `payload`) — the verify-before-resend ledger keys a wire attempt by
+ * pane + the ACTUAL ON-WIRE payload. `Delivered` rows are pruned so never seen
+ * here; the state guard is belt-and-suspenders.
+ *
+ * ## Attachment-payload awareness (issue #1554)
+ *
+ * The on-wire payload is NOT always the row's [OutboundItem.cleanText]: an
+ * attachment-backed send delivers `cleanText` with an `"Attached files:"` block
+ * of the attachment remote paths appended (see [appendAttachmentPaths] — the same
+ * composition the send path uses, `PromptComposerOutboundSend`). So the ledger's
+ * key is the composed form, which differs from `cleanText`. Matching ONLY on
+ * `cleanText == payload` (the #1541 shape) therefore failed to recognize an
+ * already-landed attachment payload after a VM-clear / back-navigation: the
+ * rebuilt ledger read `hasWireAttempt(pane, composedPayload)`, found no row whose
+ * `cleanText` equalled the composed payload, concluded "no prior attempt", and
+ * blindly re-pasted (server occurrence 2). Match on BOTH the raw `cleanText`
+ * (text-only sends — no regression) AND the reconstructed on-wire form so an
+ * attachment send that already reached the server is recognized and NOT re-sent.
  */
-private fun OutboundItem.matchesWireTarget(paneId: String, payload: String): Boolean =
-    this.paneId == paneId && cleanText == payload && state != OutboundState.Delivered
+private fun OutboundItem.matchesWireTarget(paneId: String, payload: String): Boolean {
+    if (this.paneId != paneId || state == OutboundState.Delivered) return false
+    if (cleanText == payload) return true
+    if (attachments.isEmpty()) return false
+    return appendAttachmentPaths(cleanText, attachments.map { it.remotePath }) == payload
+}
 
 /**
  * Issue #961: a row that a same-[OutboundItem.sendKey] enqueue should COALESCE

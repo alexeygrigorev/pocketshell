@@ -17406,7 +17406,12 @@ public class TmuxSessionViewModel @Inject constructor(
         val startDirectory: String?,
         val tmuxSessionId: String? = null,
         val sessionCreated: Long? = null,
-    )
+    ) {
+        // Issue #1575: identity equality EXCLUDES the secret `passphrase` (sibling helpers).
+        override fun equals(other: Any?): Boolean = connectionTargetIdentityEquals(this, other)
+
+        override fun hashCode(): Int = connectionTargetIdentityHashCode(this)
+    }
 
     /**
      * Issue #972 — wire the host connection-log mirror to its trigger. Fired by the

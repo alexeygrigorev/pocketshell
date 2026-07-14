@@ -32,6 +32,47 @@ internal fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget
         left.startDirectory == right.startDirectory
 }
 
+/**
+ * Issue #1575: identity equality for [ConnectionTarget] that EXCLUDES the secret
+ * `passphrase`. Backs [ConnectionTarget.equals]/`hashCode` (the data class delegates
+ * here so the god-object VM file stays lean). The generated data-class equality
+ * would compare `passphrase: CharArray?` by REFERENCE, so two targets built for the
+ * SAME passphrase-protected host+session (distinct CharArray instances, same chars)
+ * never compared equal — defeating the `connect()` same-session no-op dedupe and
+ * forcing a spurious reconnect on every genuine re-entry of a passphrase host. The
+ * dedupe must not depend on the secret, and the secret bytes are never
+ * content-compared or logged here. Every non-secret field still participates, so
+ * the dedupe semantics are otherwise byte-identical to the old data-class equality.
+ */
+internal fun connectionTargetIdentityEquals(target: ConnectionTarget, other: Any?): Boolean {
+    if (target === other) return true
+    if (other !is ConnectionTarget) return false
+    return target.hostId == other.hostId &&
+        target.hostName == other.hostName &&
+        target.host == other.host &&
+        target.port == other.port &&
+        target.user == other.user &&
+        target.keyPath == other.keyPath &&
+        target.sessionName == other.sessionName &&
+        target.startDirectory == other.startDirectory &&
+        target.tmuxSessionId == other.tmuxSessionId &&
+        target.sessionCreated == other.sessionCreated
+}
+
+internal fun connectionTargetIdentityHashCode(target: ConnectionTarget): Int {
+    var result = target.hostId.hashCode()
+    result = 31 * result + target.hostName.hashCode()
+    result = 31 * result + target.host.hashCode()
+    result = 31 * result + target.port
+    result = 31 * result + target.user.hashCode()
+    result = 31 * result + target.keyPath.hashCode()
+    result = 31 * result + target.sessionName.hashCode()
+    result = 31 * result + (target.startDirectory?.hashCode() ?: 0)
+    result = 31 * result + (target.tmuxSessionId?.hashCode() ?: 0)
+    result = 31 * result + (target.sessionCreated?.hashCode() ?: 0)
+    return result
+}
+
 internal fun ConnectionTarget.hasSameHostAndCredential(other: ConnectionTarget): Boolean =
     hostId == other.hostId &&
         host == other.host &&

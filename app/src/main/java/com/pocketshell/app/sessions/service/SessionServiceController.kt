@@ -67,9 +67,26 @@ class SessionServiceController @Inject constructor(
     @VisibleForTesting
     internal var nowMillis: () -> Long = { System.currentTimeMillis() }
 
+    /**
+     * Issue #1595 (round 2): debounce between the "app is going to the background" hint
+     * ([onAppPausing]) and actually starting the session FGS. The activity observer only fires
+     * that hint once EVERY activity is STOPPED (a genuine background — a mere overlay that keeps
+     * the activity STARTED, e.g. a permission dialog / share sheet / notification shade, never
+     * reaches here). A transient stop→start WITHIN this window — a recents peek, a quick
+     * app-switch that returns — is cancelled by [onAppResumed] and NEVER starts the FGS, so no
+     * Stop-able "Session connected" notification flashes into the tray on routine focus loss (the
+     * accidental-Stop footgun the #1159 comment above designs against). Kept well UNDER the
+     * ~700ms ProcessLifecycleOwner `ON_STOP` so a genuine background still starts the FGS while
+     * it is still FOREGROUND-ELIGIBLE — before Android 12+'s background-FGS-start restriction
+     * (`ForegroundServiceStartNotAllowedException`) applies.
+     */
+    @VisibleForTesting
+    internal var pauseStartDebounceMillis: Long = PAUSE_START_DEBOUNCE_MILLIS
+
     private val _snapshot = MutableStateFlow(SessionConnectionSnapshot.Empty)
     private var observeJob: Job? = null
     private var deadlineFlipJob: Job? = null
+    private var pauseDebounceJob: Job? = null
     private var holdStoppedByUser: Boolean = false
 
     /**
@@ -168,7 +185,9 @@ class SessionServiceController @Inject constructor(
                     _snapshot.value = snapshot
                     when {
                         !wasHolding && snapshot.isHoldingConnection ->
-                            SessionConnectionService.start(appContext)
+                            // Issue #1595: pass holdActive so the connection-trail diagnostic
+                            // records the hold state alongside the FGS start outcome.
+                            SessionConnectionService.start(appContext, holdActive = snapshot.isHoldingConnection)
                         wasHolding && !snapshot.isHoldingConnection ->
                             SessionConnectionService.stop(appContext)
                     }
@@ -177,12 +196,82 @@ class SessionServiceController @Inject constructor(
     }
 
     /**
+     * Issue #1595: the app is going to the BACKGROUND (the activity observer fires this once
+     * EVERY activity is STOPPED — a genuine background, not a mere overlay that keeps the
+     * activity STARTED). This is the earliest FOREGROUND-ELIGIBLE moment — the last point at
+     * which Android 12+ still permits a `startForegroundService()` before the background-FGS-start
+     * restriction applies. Starting the session FGS here (rather than only at [onAppBackgrounded],
+     * which is driven by the ProcessLifecycleOwner `ON_STOP` that fires ~700ms INTO the
+     * background) establishes the network hold while the start is still allowed, BEFORE the OS can
+     * suspend the uid's sockets.
+     *
+     * Root cause (device-log Fable audit on #1562): the FGS was started only from the
+     * backgrounded `ON_STOP`, where Android 12+ rejects the start with
+     * `ForegroundServiceStartNotAllowedException`; the hold never came up and the OS destroyed
+     * the `-CC` transport ~4.4s later, so the foreground return was a full redial instead of a
+     * silent reseed. Starting here keeps the transport alive across the grace window.
+     *
+     * Issue #1595 (round 2 — debounce): the foreground flip (and therefore the FGS start) is
+     * DEFERRED by [pauseStartDebounceMillis]. A transient stop→start WITHIN that window — a
+     * recents peek, a quick app-switch that returns — is cancelled by [onAppResumed] BEFORE the
+     * flip fires, so it NEVER starts the FGS and NO Stop-able notification flashes into the tray
+     * on routine focus loss. The delay is well under the ~700ms `ON_STOP`, so a genuine
+     * background still flips (and starts the FGS) while foreground-eligible. Overlays that keep
+     * the activity STARTED (permission dialog / share sheet / shade) never reach here at all (the
+     * observer gates on all-activities-stopped), so they never start the FGS regardless of how
+     * long they linger.
+     *
+     * Only schedules the foreground signal — the grace count-down deadline stays owned by
+     * [onAppBackgrounded] (`ON_STOP`). If no live session is held the FGS start is a no-op (the
+     * flow gates on `isHoldingConnection`). The wiring skips this on a configuration change so a
+     * rotation / dark-mode flip does not thrash the FGS (see the activity observer).
+     */
+    fun onAppPausing() {
+        // Already backgrounded (e.g. ON_STOP already flipped it) → nothing to re-arm.
+        if (!appForegrounded.value) return
+        pauseDebounceJob?.cancel()
+        pauseDebounceJob = scope.launch {
+            delay(pauseStartDebounceMillis)
+            appForegrounded.value = false
+        }
+    }
+
+    /**
+     * Issue #1595: the app RESUMED to the foreground. Mirror of [onAppPausing] — the Activity
+     * holds the connection again.
+     *
+     * Round-2 debounce: CANCELS the pending [onAppPausing] debounce so a transient stop→resume
+     * that never persisted past the window never flips the foreground signal — the FGS is never
+     * started and no notification is ever posted (no start→stop thrash). If the debounce had
+     * already fired (a longer background that then returned), flipping the signal back to `true`
+     * stops the FGS. This covers the transient that never reached `ON_STOP`, where no
+     * [onAppForegrounded] `ON_START` fires. Does NOT touch the grace deadline — a transient that
+     * never reached `ON_STOP` stamped none, and a real return clears it via [onAppForegrounded].
+     */
+    fun onAppResumed() {
+        pauseDebounceJob?.cancel()
+        pauseDebounceJob = null
+        appForegrounded.value = true
+    }
+
+    /**
      * Issue #1159 (Part 1): the app moved to the background. The FGS is (re)evaluated and
      * started if a live session is held. [disconnectAtWallClockMillis] stamps the bounded
      * count-down deadline (issue #1123) rendered by the system chronometer — no app-side
      * per-second wakeups. While a port-forward is active the deadline is ignored (Part 3).
+     *
+     * Issue #1595: [onAppPausing] normally already flipped the foreground signal false (starting
+     * the FGS foreground-eligibly), so the `appForegrounded.value = false` here is idempotent and
+     * this call is primarily the grace-deadline stamp. It remains a fallback start trigger too:
+     * if the earlier foreground-eligible start was skipped (e.g. a configuration change), the
+     * background attempt still runs exactly as before.
      */
     fun onAppBackgrounded(disconnectAtWallClockMillis: Long) {
+        // Confirmed background — the pending pause debounce is no longer needed (it either
+        // already fired the foreground flip, or was skipped for a config change and this is the
+        // fallback start). Cancel it and flip NOW so the start is idempotent / the fallback runs.
+        pauseDebounceJob?.cancel()
+        pauseDebounceJob = null
         graceDisconnectAtWallClockMillis.value = disconnectAtWallClockMillis
         // Issue #1440: a fresh grace window — clear any prior expiry and (re)schedule the flip.
         graceExpired.value = false
@@ -195,6 +284,8 @@ class SessionServiceController @Inject constructor(
      * connection, so the FGS + its tray notification are stopped and the count-down cleared.
      */
     fun onAppForegrounded() {
+        pauseDebounceJob?.cancel()
+        pauseDebounceJob = null
         cancelDeadlineFlip()
         graceDisconnectAtWallClockMillis.value = null
         appForegrounded.value = true
@@ -264,4 +355,15 @@ class SessionServiceController @Inject constructor(
         val disconnectDeadline: Long?,
         val graceExpired: Boolean,
     )
+
+    companion object {
+        /**
+         * Issue #1595 (round 2): default debounce between the all-activities-stopped background
+         * hint ([onAppPausing]) and starting the session FGS. 400ms is well UNDER the ~700ms
+         * ProcessLifecycleOwner `ON_STOP` (so a genuine background still starts the FGS while
+         * foreground-eligible) yet long enough to absorb a quick stop→resume — a recents peek /
+         * app-switch that returns — so it never flashes a Stop-able notification into the tray.
+         */
+        const val PAUSE_START_DEBOUNCE_MILLIS: Long = 400L
+    }
 }

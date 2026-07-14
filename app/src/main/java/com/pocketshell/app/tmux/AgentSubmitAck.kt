@@ -33,4 +33,30 @@ internal fun agentSubmitVisibleTextContainsNeedle(
     return visible.contains(needle)
 }
 
+/**
+ * Issue #1577: count how many times [needle] occurs (non-overlapping) in the
+ * whitespace-stripped visible text. The verify-before-resend probe uses this to
+ * tell "MY paste landed" (the occurrence count went UP vs the pre-send baseline)
+ * from "the payload text was already on the pane" — e.g. a Codex status line that
+ * permanently renders `Goal blocked (/goal resume)`, whose `/goalresume` needle a
+ * presence-only check would always false-match, dropping the send as a
+ * false-`AlreadyLanded`.
+ */
+internal fun agentSubmitVisibleTextNeedleCount(
+    visibleLines: List<String>,
+    needle: String,
+): Int {
+    if (needle.isEmpty()) return 0
+    val visible = visibleLines.joinToString(separator = "")
+        .replace(WHITESPACE_RUN_REGEX, "")
+    if (visible.isEmpty()) return 0
+    var count = 0
+    var index = visible.indexOf(needle)
+    while (index >= 0) {
+        count += 1
+        index = visible.indexOf(needle, index + needle.length)
+    }
+    return count
+}
+
 private val WHITESPACE_RUN_REGEX = Regex("\\s+")

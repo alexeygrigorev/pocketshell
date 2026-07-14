@@ -374,7 +374,14 @@ class PromptComposerAttachmentTest {
     }
 
     @Test
-    fun attachFilesTimeoutClearsBusyStateAndKeepsDraft() = runTest {
+    fun attachFilesHasNoAbsoluteWallClockCapPast90s() = runTest {
+        // Issue #1569 (U2): the absolute 90s whole-batch cap
+        // (ATTACHMENT_UPLOAD_TIMEOUT_MS) was REMOVED — it killed a progressing large
+        // upload on a healthy link and orphaned a zombie deferred that kept uploading
+        // after it fired. A progressing/unresolved staging that has NOT hit an inner
+        // (SAF / core-ssh progress) bound is therefore still Uploading after the old
+        // 90s mark, NOT force-failed to Idle + a "timed out" error. (Previously this
+        // asserted the cap cleared the busy state at 90s.)
         val vm = newVm()
         val uploadStarted = CompletableDeferred<Unit>()
         vm.onDraftChange("keep this")
@@ -386,19 +393,21 @@ class PromptComposerAttachmentTest {
         runCurrent()
         uploadStarted.await()
 
-        advanceTimeBy(PromptComposerViewModel.ATTACHMENT_UPLOAD_TIMEOUT_MS)
+        // Advance WELL past the old absolute cap.
+        advanceTimeBy(PromptComposerViewModel.ATTACHMENT_UPLOAD_TIMEOUT_MS * 3)
         runCurrent()
 
+        // The draft is kept and the upload is STILL in flight — no absolute cap fired.
         assertEquals("keep this", vm.uiState.value.draft)
         assertEquals(
-            PromptComposerViewModel.AttachmentUploadState.Idle,
+            PromptComposerViewModel.AttachmentUploadState.Uploading(3),
             vm.uiState.value.attachmentUpload,
         )
+        // Not force-failed: no "timed out" banner from a wall-clock cap.
+        assertNull(vm.uiState.value.error)
         assertTrue(vm.uiState.value.attachments.isEmpty())
-        val error = vm.uiState.value.error
-        assertNotNull(error)
-        assertTrue(error!!.contains("Attachment upload failed"))
-        assertTrue(error.contains("timed out"))
-        assertTrue(error.contains("draft was kept"))
+
+        // Clean up the never-resolving stage so the VM teardown doesn't leak it.
+        vm.discardDraft()
     }
 }

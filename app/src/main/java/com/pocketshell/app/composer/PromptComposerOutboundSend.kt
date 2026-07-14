@@ -228,6 +228,10 @@ internal fun PromptComposerViewModel.clearComposerForHandoff() {
     composerTarget?.let { target ->
         clearComposerDraft(target)
         composerDraftStore.clearAttachments(target)
+        // Issue #1569 (U1): the retained-on-failure bytes have been handed off to
+        // the queue row's own sidecars on Send — drop the now-orphaned draft-scoped
+        // durable bytes so they don't linger.
+        clearDraftAttachmentSidecars(target)
     }
     _uiState.update { current ->
         current.copy(

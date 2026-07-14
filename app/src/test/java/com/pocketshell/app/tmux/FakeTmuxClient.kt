@@ -180,6 +180,18 @@ internal class FakeTmuxClient(
 
     var throwOnCommandException: Throwable = TmuxClientException("tmux command timed out")
 
+    /**
+     * Issue #1586 (H1a): return a tmux `%error` [CommandResponse] (isError=true,
+     * carrying [errorOnCommandOutput] as stderr) for the next
+     * [errorOnCommandRemaining] commands whose text starts with this prefix —
+     * modelling a `send-keys` to a dead/closed pane. Default null ⇒ no injection.
+     */
+    var errorOnCommandPrefix: String? = null
+
+    var errorOnCommandRemaining: Int = 0
+
+    var errorOnCommandOutput: List<String> = listOf("can't find pane")
+
     var failBestEffortOnCommandPrefix: String? = null
 
     var bestEffortException: Throwable = TmuxClientException("tmux best-effort command timed out")
@@ -423,6 +435,12 @@ internal class FakeTmuxClient(
             if (cmd.startsWith(prefix) && throwOnCommandRemaining > 0) {
                 throwOnCommandRemaining -= 1
                 throw throwOnCommandException
+            }
+        }
+        errorOnCommandPrefix?.let { prefix ->
+            if (cmd.startsWith(prefix) && errorOnCommandRemaining > 0) {
+                errorOnCommandRemaining -= 1
+                return CommandResponse(number = 0L, output = errorOnCommandOutput, isError = true)
             }
         }
         if (bestEffort) {

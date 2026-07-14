@@ -312,6 +312,7 @@ public interface OutboundQueueStore {
         paneId: String,
         payload: String,
         atMs: Long = System.currentTimeMillis(),
+        baselineCount: Int? = null,
     ): OutboundItem?
 
     /**
@@ -325,6 +326,16 @@ public interface OutboundQueueStore {
      * differs from `cleanText`.
      */
     public fun hasWireAttempt(paneId: String, payload: String): Boolean
+
+    /**
+     * Issue #1577: the durable [OutboundItem.wireNeedleBaselineCount] recorded for
+     * the row matching (`paneId`, `payload`), or `null` when none was captured. A
+     * ledger rebuilt after a VM-clear reads this so a genuine resend can compare the
+     * CURRENT pane needle count against the pre-send baseline (only an INCREASE means
+     * "landed"), instead of a presence-only match that a pre-existing status line
+     * would false-trip.
+     */
+    public fun wireNeedleBaseline(paneId: String, payload: String): Int?
 }
 
 /**
@@ -335,22 +346,33 @@ public interface OutboundQueueStore {
  * (the flag lives on the persisted row); see [OutboundQueueStore.asWireAttemptDurableStore].
  */
 public interface OutboundWireAttemptDurableStore {
-    /** Persist that (`paneId`, `payload`) has been pushed to the wire. */
-    public fun recordWireAttempt(paneId: String, payload: String, atMs: Long)
+    /**
+     * Persist that (`paneId`, `payload`) has been pushed to the wire. Issue #1577:
+     * [baselineCount] is the pre-send occurrence count of the payload's verify needle
+     * on the pane (or `null` when it could not be captured), stored once with the
+     * first wire attempt so a rebuilt ledger can compare against it.
+     */
+    public fun recordWireAttempt(paneId: String, payload: String, atMs: Long, baselineCount: Int? = null)
 
     /** Whether a durable wire attempt is recorded for (`paneId`, `payload`). */
     public fun hasWireAttempt(paneId: String, payload: String): Boolean
+
+    /** Issue #1577: the durable pre-send needle baseline for (`paneId`, `payload`), or `null`. */
+    public fun wireNeedleBaseline(paneId: String, payload: String): Int?
 }
 
 /** Issue #1541: adapt this store as the ledger's durable wire-attempt backing. */
 public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDurableStore =
     object : OutboundWireAttemptDurableStore {
-        override fun recordWireAttempt(paneId: String, payload: String, atMs: Long) {
-            markWireAttempted(paneId, payload, atMs)
+        override fun recordWireAttempt(paneId: String, payload: String, atMs: Long, baselineCount: Int?) {
+            markWireAttempted(paneId, payload, atMs, baselineCount)
         }
 
         override fun hasWireAttempt(paneId: String, payload: String): Boolean =
             this@asWireAttemptDurableStore.hasWireAttempt(paneId, payload)
+
+        override fun wireNeedleBaseline(paneId: String, payload: String): Int? =
+            this@asWireAttemptDurableStore.wireNeedleBaseline(paneId, payload)
     }
 
 /**
@@ -395,6 +417,15 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
  *   (survives the volatile ledger dying) and probes instead of blindly re-pasting.
  *   Cleared only when the row leaves the queue (delivered-prune / remove / clear).
  * @property wireAttemptedAtMs the time [wireAttempted] was first set, or `null`.
+ * @property wireNeedleBaselineCount issue #1577: the pre-send occurrence count of
+ *   the payload's verify needle on the pane, captured at the FIRST wire attempt
+ *   (before the paste), or `null` when it was never captured (a legacy row / the
+ *   baseline probe failed). The verify-before-resend probe reports `AlreadyLanded`
+ *   only when the CURRENT occurrence count EXCEEDS this baseline — i.e. the paste
+ *   actually added an occurrence — so a payload that was already visible on the
+ *   pane (a Codex `Goal blocked (/goal resume)` status line) is not mistaken for a
+ *   landed send. Persisted so the refinement survives a VM-clear / back-navigation
+ *   (the rebuilt ledger reads it back); `null` falls back to presence-only (#1541).
  */
 public data class OutboundItem(
     val id: String,
@@ -413,6 +444,7 @@ public data class OutboundItem(
     val sendKey: String = "",
     val wireAttempted: Boolean = false,
     val wireAttemptedAtMs: Long? = null,
+    val wireNeedleBaselineCount: Int? = null,
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -645,19 +677,26 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         items.values.removeAll { it.sessionKey == sessionKey }
     }
 
-    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? =
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long, baselineCount: Int?): OutboundItem? =
         synchronized(lock) {
             val target = items.values
                 .filter { it.matchesWireTarget(paneId, payload) }
                 .minByOrNull { it.createdAtMs }
                 ?: return null
-            val updated = target.markedWireAttempted(atMs)
+            val updated = target.markedWireAttempted(atMs, baselineCount)
             items[updated.id] = updated
             updated
         }
 
     override fun hasWireAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
         items.values.any { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
+    }
+
+    override fun wireNeedleBaseline(paneId: String, payload: String): Int? = synchronized(lock) {
+        items.values
+            .filter { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
+            .minByOrNull { it.createdAtMs }
+            ?.wireNeedleBaselineCount
     }
 }
 
@@ -703,8 +742,9 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
-    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? = null
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long, baselineCount: Int?): OutboundItem? = null
     override fun hasWireAttempt(paneId: String, payload: String): Boolean = false
+    override fun wireNeedleBaseline(paneId: String, payload: String): Int? = null
 }
 
 /**
@@ -970,7 +1010,7 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         storeSession(sessionKey, emptyList())
     }
 
-    override fun markWireAttempted(paneId: String, payload: String, atMs: Long): OutboundItem? =
+    override fun markWireAttempted(paneId: String, payload: String, atMs: Long, baselineCount: Int?): OutboundItem? =
         synchronized(lock) {
             for (sessionKey in sessionKeys()) {
                 val list = loadSession(sessionKey)
@@ -978,7 +1018,7 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
                     .filter { it.matchesWireTarget(paneId, payload) }
                     .minByOrNull { it.createdAtMs }
                     ?: continue
-                val updated = target.markedWireAttempted(atMs)
+                val updated = target.markedWireAttempted(atMs, baselineCount)
                 replaceAndStore(sessionKey, list, updated)
                 return@synchronized updated
             }
@@ -989,6 +1029,14 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         sessionKeys().any { key ->
             loadSession(key).any { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
         }
+    }
+
+    override fun wireNeedleBaseline(paneId: String, payload: String): Int? = synchronized(lock) {
+        sessionKeys()
+            .flatMap { loadSession(it) }
+            .filter { it.wireAttempted && it.matchesWireTarget(paneId, payload) }
+            .minByOrNull { it.createdAtMs }
+            ?.wireNeedleBaselineCount
     }
 
     private fun replaceAndStore(sessionKey: String, list: MutableList<OutboundItem>, updated: OutboundItem) {
@@ -1089,18 +1137,27 @@ private fun OutboundItem.claimedForAttempt(): OutboundItem {
     // #1541's [OutboundItem.wireAttemptedAtMs], which records the FIRST wire attempt
     // ever and is preserved across re-claims; the orphan sweep needs the LATEST
     // attempt, so it needs its own timestamp.
+    //
+    // Issue #1577: the claim MUST NOT stamp the durable `wireAttempted` flag. That
+    // was a #1542 regression: a queue row is claimed InFlight (`markInFlight` /
+    // `claim`) BEFORE the composer send emits a single byte, so stamping here marked
+    // every FIRST-ever send as a prior wire attempt. That forced the #1526
+    // verify-before-resend probe on the first send, and the probe's whole-viewport
+    // needle false-matched a Codex "Goal blocked (/goal resume)" status line ⇒
+    // false-`AlreadyLanded` ⇒ the payload was never pasted (silent false-success).
+    // The ONLY correct place to set `wireAttempted` is the actual wire push
+    // ([OutboundQueueStore.markWireAttempted], driven by the ledger's
+    // `recordWireAttempt` right before the first byte). A first send now has
+    // `wireAttempted=false`, so it is delivered normally with no probe.
     val atMs = System.currentTimeMillis()
     return if (state == OutboundState.InFlight) {
-        // Already InFlight — refresh the attempt timestamp and (issue #1541) stamp
-        // the durable wire-attempt flag if a prior claim predates it, so
-        // verify-before-resend survives a VM-clear on this row.
-        copy(lastAttemptAtMs = atMs).markedWireAttempted(atMs)
+        copy(lastAttemptAtMs = atMs)
     } else {
         copy(
             state = OutboundState.InFlight,
             attemptCount = attemptCount + 1,
             lastAttemptAtMs = atMs,
-        ).markedWireAttempted(atMs)
+        )
     }
 }
 
@@ -1111,8 +1168,15 @@ private fun OutboundItem.claimedForAttempt(): OutboundItem {
  * VM-clear / back-navigation instead of blindly re-pasting a payload that may
  * already have landed.
  */
-private fun OutboundItem.markedWireAttempted(atMs: Long): OutboundItem =
-    if (wireAttempted) this else copy(wireAttempted = true, wireAttemptedAtMs = atMs)
+private fun OutboundItem.markedWireAttempted(atMs: Long, baselineCount: Int? = null): OutboundItem =
+    if (wireAttempted) {
+        // Idempotent: the first wire attempt's timestamp AND baseline win. A later
+        // re-push (after a NotLanded probe) must not overwrite the pre-send baseline
+        // (issue #1577) — it is the ONE pre-first-paste snapshot the probe compares.
+        this
+    } else {
+        copy(wireAttempted = true, wireAttemptedAtMs = atMs, wireNeedleBaselineCount = baselineCount)
+    }
 
 private fun OutboundItem.isStaleRecoverableAttempt(cutoffMs: Long): Boolean =
     (state == OutboundState.InFlight || state == OutboundState.Uploading) &&
@@ -1124,13 +1188,14 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
 /**
  * Issue #900: encode a session's outbound items as newline-separated rows.
  * Each row is tab-delimited:
- * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey \t wireAttempted \t wireAttemptedAtMs`
+ * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey \t wireAttempted \t wireAttemptedAtMs \t wireNeedleBaselineCount`
  * with the same `\`-escaping [ComposerDraftStore] uses so text/paths containing
  * tabs/newlines round-trip losslessly. The attachments field reuses
  * [encodeAttachments], itself escaped as a single field. Trailing fields
- * (`sendKey` #961, `wireAttempted`/`wireAttemptedAtMs` #1541) are appended last
- * so legacy rows without them decode to their defaults (empty `sendKey`,
- * `wireAttempted=false`) rather than a malformed row.
+ * (`sendKey` #961, `wireAttempted`/`wireAttemptedAtMs` #1541,
+ * `wireNeedleBaselineCount` #1577) are appended last so legacy rows without them
+ * decode to their defaults (empty `sendKey`, `wireAttempted=false`,
+ * `wireNeedleBaselineCount=null`) rather than a malformed row.
  */
 internal fun encodeOutboundItems(items: List<OutboundItem>): String =
     items.joinToString(separator = "\n") { item ->
@@ -1150,6 +1215,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.sendKey,
             if (item.wireAttempted) "1" else "0",
             item.wireAttemptedAtMs?.toString().orEmpty(),
+            item.wireNeedleBaselineCount?.toString().orEmpty(),
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1181,6 +1247,7 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             sendKey = f.getOrNull(12).orEmpty(),
             wireAttempted = f.getOrNull(13) == "1",
             wireAttemptedAtMs = f.getOrNull(14)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
+            wireNeedleBaselineCount = f.getOrNull(15)?.takeIf { it.isNotEmpty() }?.toIntOrNull(),
         )
     }
 }

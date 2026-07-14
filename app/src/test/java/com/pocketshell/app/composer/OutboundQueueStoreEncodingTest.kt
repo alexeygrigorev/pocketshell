@@ -168,6 +168,40 @@ class OutboundQueueStoreEncodingTest {
     }
 
     @Test
+    fun encodeDecodeRoundTripsWireNeedleBaselineCount() {
+        // Issue #1577: the pre-send needle baseline must survive process death so a
+        // rebuilt ledger compares the CURRENT count against it (only an increase =
+        // landed) instead of a presence-only match that a status line false-trips.
+        val items = listOf(
+            OutboundItem(
+                id = "id-baseline",
+                sessionKey = "sessA",
+                cleanText = "/goal resume",
+                state = OutboundState.InFlight,
+                createdAtMs = 1L,
+                paneId = "%0",
+                wireAttempted = true,
+                wireAttemptedAtMs = 1_700_000_009_000,
+                wireNeedleBaselineCount = 1,
+            ),
+        )
+        val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
+        assertEquals(items, decoded)
+        assertEquals(1, decoded.single().wireNeedleBaselineCount)
+    }
+
+    @Test
+    fun decodeLegacyRowsWithoutBaselineDefaultToNull() {
+        // Issue #1577: pre-#1577 rows ended at wireAttemptedAtMs (field 14). They must
+        // decode to wireNeedleBaselineCount=null (presence-only fallback), not a
+        // malformed row.
+        val raw = "id-legacy\tx\t1\tInFlight\t100\t\t0\t\t\t%0\tRawBytes\tclaude\tsk123\t1\t1700000009000"
+        val decoded = decodeOutboundItems("sessA", raw).single()
+        assertTrue(decoded.wireAttempted)
+        assertEquals(null, decoded.wireNeedleBaselineCount)
+    }
+
+    @Test
     fun decodeUnknownRouteDefaultsToRawBytes() {
         val raw = "id-unknown\tx\t1\tQueued\t100\t\t0\t\t\t%0\tFutureRoute\tclaude"
         val decoded = decodeOutboundItems("sessA", raw).single()

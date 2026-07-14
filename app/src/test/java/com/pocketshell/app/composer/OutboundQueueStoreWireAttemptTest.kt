@@ -58,25 +58,48 @@ class OutboundQueueStoreWireAttemptTest {
     }
 
     @Test
-    fun claimNextStampsWireAttemptedOnTheRow() {
+    fun claimNextDoesNotStampWireAttempted() {
+        // Issue #1577: the CLAIM (InFlight) must NOT stamp `wireAttempted` — a queue
+        // row is claimed before the composer send emits a single byte. Stamping at
+        // claim marked every FIRST send as a prior wire attempt, forcing the #1526
+        // verify-before-resend probe on the first send (the silent false-success
+        // drop). The flag is set ONLY at the actual wire push (`markWireAttempted`).
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "deploy now", paneId = "%0")
         assertFalse(store.item(row.id)!!.wireAttempted)
 
         val claimed = store.claimNext("sessA")!!
         assertEquals(OutboundState.InFlight, claimed.state)
-        assertTrue("claiming for a wire attempt sets the durable flag", claimed.wireAttempted)
-        assertNotNull(claimed.wireAttemptedAtMs)
-        assertTrue(store.hasWireAttempt("%0", "deploy now"))
+        assertFalse("claiming must NOT set the durable wire-attempt flag (#1577)", claimed.wireAttempted)
+        assertFalse(store.hasWireAttempt("%0", "deploy now"))
     }
 
     @Test
-    fun markInFlightStampsWireAttempted() {
+    fun markInFlightDoesNotStampWireAttempted() {
+        // Issue #1577: as with claimNext, markInFlight (what the composer runs before
+        // dispatch) must not stamp the flag before any byte is pushed.
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "restart pool", paneId = "%0")
         val updated = store.markInFlight(row.id)!!
-        assertTrue(updated.wireAttempted)
-        assertTrue(store.hasWireAttempt("%0", "restart pool"))
+        assertFalse(updated.wireAttempted)
+        assertFalse(store.hasWireAttempt("%0", "restart pool"))
+    }
+
+    @Test
+    fun wirePushStampsWireAttemptedWithBaseline() {
+        // Issue #1541/#1577: the ONLY correct write site — the actual wire push —
+        // sets the flag and records the pre-send needle baseline on the row.
+        val store = InMemoryOutboundQueueStore()
+        val row = store.enqueue("sessA", "deploy now", paneId = "%0")
+        store.claim(row.id) // InFlight, but no flag yet (#1577)
+        assertFalse(store.hasWireAttempt("%0", "deploy now"))
+
+        val pushed = store.markWireAttempted("%0", "deploy now", baselineCount = 0)!!
+        assertTrue("the wire push sets the durable flag", pushed.wireAttempted)
+        assertNotNull(pushed.wireAttemptedAtMs)
+        assertEquals(0, pushed.wireNeedleBaselineCount)
+        assertTrue(store.hasWireAttempt("%0", "deploy now"))
+        assertEquals(0, store.wireNeedleBaseline("%0", "deploy now"))
     }
 
     @Test
@@ -99,6 +122,8 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "deferred payload", paneId = "%0")
         store.markInFlight(row.id)
+        // Issue #1577: the flag is set at the wire push, not the claim.
+        store.markWireAttempted("%0", "deferred payload")
         // The drop-failure path defers the row back to Queued (issue #987) — the
         // wire attempt MUST persist so the re-flush verifies before re-pasting.
         val requeued = store.requeueForRetry(row.id)!!
@@ -112,6 +137,7 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "stale payload", paneId = "%0", createdAtMs = 1_000L)
         store.markInFlight(row.id)
+        store.markWireAttempted("%0", "stale payload") // #1577: flag set at the wire push
         val requeued = store.requeueStaleInFlight("sessA", cutoffMs = Long.MAX_VALUE)
         assertEquals(1, requeued.size)
         assertTrue("a stale-recovered row keeps its durable wire attempt", requeued.single().wireAttempted)
@@ -123,6 +149,7 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "delivered payload", paneId = "%0")
         store.markInFlight(row.id)
+        store.markWireAttempted("%0", "delivered payload") // #1577: flag set at the wire push
         assertTrue(store.hasWireAttempt("%0", "delivered payload"))
         assertTrue(store.markDelivered(row.id))
         assertFalse(
@@ -137,11 +164,14 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "cancel me", paneId = "%0")
         store.markInFlight(row.id)
+        store.markWireAttempted("%0", "cancel me") // #1577: flag set at the wire push
+        assertTrue(store.hasWireAttempt("%0", "cancel me"))
         assertTrue(store.remove(row.id))
         assertFalse(store.hasWireAttempt("%0", "cancel me"))
 
         val other = store.enqueue("sessA", "clear me", paneId = "%0")
         store.markInFlight(other.id)
+        store.markWireAttempted("%0", "clear me")
         store.clearSession("sessA")
         assertFalse(store.hasWireAttempt("%0", "clear me"))
     }
@@ -159,7 +189,8 @@ class OutboundQueueStoreWireAttemptTest {
     fun wireAttemptSurvivesProcessRestartForTheRebuiltLedger() {
         val first = SharedPrefsOutboundQueueStore(context)
         val row = first.enqueue("sessA", "survive the restart", paneId = "%0")
-        first.markInFlight(row.id) // pushed to the wire → durable flag persisted
+        first.markInFlight(row.id)
+        first.markWireAttempted("%0", "survive the restart") // #1577: pushed to the wire → durable flag persisted
 
         // A brand-new store over the same on-disk prefs = the fresh process / the
         // VM-clear-rebuilt ledger's durable backing.
@@ -182,6 +213,7 @@ class OutboundQueueStoreWireAttemptTest {
         val first = SharedPrefsOutboundQueueStore(context)
         val row = first.enqueue("sessA", "delivered but prune lost", paneId = "%0")
         first.markInFlight(row.id)
+        first.markWireAttempted("%0", "delivered but prune lost") // #1577: flag set at the wire push
         // markDelivered() is NEVER persisted (its apply() was lost) — the InFlight
         // row survives the restart with the flag intact.
         val afterRestart = SharedPrefsOutboundQueueStore(context)

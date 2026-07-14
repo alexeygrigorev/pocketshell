@@ -399,31 +399,37 @@ class OutboundDeliveryGuardTest {
 
     /**
      * Issue #1542 (finding D7) — class-coverage limb: an orphaned InFlight row that
-     * ACTUALLY landed. A row claimed InFlight stamps the durable `wireAttempted`
-     * flag on the row itself (via the InFlight claim → #1541); when that VM churns /
+     * ACTUALLY landed. When a send reaches the wire it durably stamps `wireAttempted`
+     * on the row (issue #1577: at the WIRE PUSH, not the claim); when that VM churns /
      * dies mid-send, the poll-lane orphan sweep re-arms the row and the retry lane
      * re-dispatches it through the SAME verify-before-resend send path with a ledger
      * REBUILT from the durable store. Because the earlier attempt landed server-side,
      * the probe must resolve `AlreadyLanded` — so the re-dispatch submits Enter only
-     * and never re-pastes (occurrence stays 1, no duplicate). RED if the claim did
+     * and never re-pastes (occurrence stays 1, no duplicate). RED if the wire push did
      * not stamp the durable flag (rebuilt ledger has no memory ⇒ blind re-paste ⇒
      * occurrence 2). This composes with #1541 rather than adding a second flag.
      */
     @Test
-    fun issue1542_D7_orphanedInFlightThatLandedVerifiesAlreadyLandedViaClaimStampedDurableFlag() = runTest {
+    fun issue1542_D7_orphanedInFlightThatLandedVerifiesAlreadyLandedViaWirePushDurableFlag() = runTest {
         val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
         val paneId = "%7"
         val payload = "orphaned prompt that already landed"
-        // The prior VM enqueued and CLAIMED the row InFlight (its send began). The
-        // InFlight claim durably stamps `wireAttempted` on the row (#1541).
+        // The prior VM enqueued and CLAIMED the row InFlight (its send began), then
+        // PUSHED it to the wire — the push durably stamps `wireAttempted` (#1577: the
+        // claim itself no longer stamps).
         val row = store.enqueue("sessA", payload, paneId = paneId)
         store.claim(row.id)
         assertEquals(
             com.pocketshell.app.composer.OutboundState.InFlight,
             store.item(row.id)!!.state,
         )
+        assertFalse(
+            "the claim alone must NOT record a wire attempt (#1577)",
+            store.hasWireAttempt(paneId, payload),
+        )
+        store.markWireAttempted(paneId, payload) // the actual wire push
         assertTrue(
-            "the InFlight claim must durably record the wire attempt on the row",
+            "the wire push must durably record the wire attempt on the row",
             store.hasWireAttempt(paneId, payload),
         )
 
@@ -444,6 +450,76 @@ class OutboundDeliveryGuardTest {
             "an orphaned InFlight row that actually landed must verify AlreadyLanded (occurrence 1)",
             DeliveryProbeOutcome.AlreadyLanded,
             outcome,
+        )
+    }
+
+    /**
+     * Issue #1577: when the payload is NOT already on the pane's LOCAL render at push
+     * time (the common case — a fresh prompt), the wire attempt records baseline 0
+     * with NO capture round-trip; a later probe finding the payload (count 1 > 0)
+     * resolves `AlreadyLanded` (presence is unambiguous — our paste added it).
+     */
+    @Test
+    fun baselineFromLocalRenderSkipsCaptureWhenPayloadNotAlreadyVisible() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val client = captureShowing("$ /goal resume") // the resend probe sees it landed
+
+        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", localRenderText = "$ ")
+
+        assertTrue(
+            "no baseline capture round-trip when the payload is not already on the render",
+            client.capturePaneTextViaExecCalls.isEmpty(),
+        )
+        assertEquals(0, ledger.needleBaseline("%0", "/goal resume"))
+        assertEquals(
+            "a resend that finds the payload (count 1 > baseline 0) is AlreadyLanded",
+            DeliveryProbeOutcome.AlreadyLanded,
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
+        )
+    }
+
+    /**
+     * Issue #1577 — THE reported class at the guard level: the payload text is ALREADY
+     * on the pane (a Codex `Goal blocked (/goal resume)` status line). The wire attempt
+     * takes ONE authoritative capture to record the precise pre-send baseline, so a
+     * genuine resend requires the occurrence count to INCREASE:
+     *  - paste did NOT land (still only the status line, count == baseline) ⇒ NotLanded
+     *    ⇒ the caller re-sends (NO false-`AlreadyLanded` silent drop — the #1577 bug), and
+     *  - paste DID land (status line + submitted command, count > baseline) ⇒ AlreadyLanded
+     *    ⇒ deduped to exactly-once (the #1526 guarantee is preserved).
+     */
+    @Test
+    fun baselineCapturesPreSendCountWhenPayloadAlreadyOnRenderSoResendRequiresIncrease() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val client = FakeTmuxClient()
+        val statusLine = "gpt-5.6-sol medium · Goal blocked (/goal resume)"
+
+        // The payload is already visible on the local render ⇒ ONE authoritative
+        // baseline capture: the status line shows the needle once ⇒ baseline 1.
+        client.capturePaneResponses.addLast(CommandResponse(number = 0L, output = listOf(statusLine), isError = false))
+        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", localRenderText = statusLine)
+        assertEquals("the pre-send baseline is captured authoritatively", 1, ledger.needleBaseline("%0", "/goal resume"))
+        assertEquals("exactly one baseline capture round-trip", 1, client.capturePaneTextViaExecCalls.size)
+
+        // A genuine resend whose paste did NOT land: the pane still shows ONLY the
+        // status line (count 1 == baseline 1) ⇒ NotLanded ⇒ re-send (no false drop).
+        client.capturePaneResponses.addLast(CommandResponse(number = 0L, output = listOf(statusLine), isError = false))
+        assertEquals(
+            "a payload still only on the status line (count == baseline) must NOT be " +
+                "falsely AlreadyLanded (the #1577 false-success drop)",
+            DeliveryProbeOutcome.NotLanded,
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
+        )
+
+        // A resend whose paste DID land: the pane now shows the status line AND the
+        // submitted command (count 2 > baseline 1) ⇒ AlreadyLanded ⇒ deduped.
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf(statusLine, "> /goal resume"), isError = false),
+        )
+        assertEquals(
+            "a payload whose occurrence count INCREASED (our paste landed) is AlreadyLanded",
+            DeliveryProbeOutcome.AlreadyLanded,
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
         )
     }
 

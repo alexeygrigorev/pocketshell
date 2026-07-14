@@ -76,7 +76,10 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
     fun resendAfterAmbiguousFailureDoesNotRepasteWhenPayloadAlreadyLanded() = runTest(scheduler) {
         val client = FakeTmuxClient()
         // The pane's visible text reflects the landed paste — what the #869
-        // needle probe (and the ack gate) will see.
+        // needle probe (and the ack gate) will see. Issue #1577: the unit VM has no
+        // attached emulator render, so the pre-send baseline is 0 (payload not on the
+        // local render) with no capture round-trip; the resend probe then sees count
+        // 1 > 0 ⇒ AlreadyLanded.
         client.defaultCaptureResponse = CommandResponse(
             number = 0L,
             output = listOf("> deploy the staging build now"),

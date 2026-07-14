@@ -86,12 +86,20 @@ internal suspend fun verifyBeforeAgentResend(
     payload: String,
 ): DeliveryProbeOutcome? {
     if (!ledger.hasAmbiguousAttempt(paneId, payload)) return null
-    val outcome = probeOutboundPayloadAlreadyLanded(client, paneId, payload)
+    // Issue #1577: compare the CURRENT needle count against the pre-send baseline
+    // captured at the first wire attempt. `AlreadyLanded` requires the count to have
+    // INCREASED (our paste actually added an occurrence) — so a payload that was
+    // already on the pane before we ever pushed (a Codex `Goal blocked (/goal resume)`
+    // status line) is not a false-positive. A null baseline (legacy row / baseline
+    // capture failed) falls back to presence-only (#1541 behaviour).
+    val baseline = ledger.needleBaseline(paneId, payload)
+    val outcome = probeOutboundPayloadAlreadyLanded(client, paneId, payload, baseline)
     DiagnosticEvents.record(
         "action",
         "outbound_verify_before_resend",
         "pane" to paneId,
         "outcome" to outcome.name,
+        "baseline" to (baseline?.toString() ?: "none"),
     )
     return outcome
 }
@@ -138,32 +146,56 @@ internal class OutboundDeliveryLedger(
     private val lock = Any()
     private val entries = LinkedHashSet<String>()
 
+    // Issue #1577: the pre-send needle occurrence count captured with the FIRST
+    // wire attempt, keyed the same way. Bounded alongside [entries]. Backed durably
+    // so a VM-clear-rebuilt ledger reads it back (via [needleBaseline]).
+    private val baselines = HashMap<String, Int>()
+
     private fun key(paneId: String, payload: String): String =
         "$paneId|${payload.length}|${payload.hashCode()}"
 
-    fun recordWireAttempt(paneId: String, payload: String): Unit = synchronized(lock) {
+    fun recordWireAttempt(paneId: String, payload: String, baselineCount: Int? = null): Unit = synchronized(lock) {
         val key = key(paneId, payload)
         entries.remove(key)
         entries.add(key)
+        // Issue #1577: keep the FIRST captured baseline (idempotent) — a re-push after
+        // a NotLanded probe must not overwrite the one pre-first-paste snapshot.
+        if (baselineCount != null && key !in baselines) {
+            baselines[key] = baselineCount
+        }
         while (entries.size > maxEntries) {
-            entries.remove(entries.first())
+            val evicted = entries.first()
+            entries.remove(evicted)
+            baselines.remove(evicted)
         }
         // Issue #1541: also persist on the durable row so the attempt survives a
-        // VM-clear / back-navigation, not only this live VM.
-        durable?.recordWireAttempt(paneId, payload, System.currentTimeMillis())
+        // VM-clear / back-navigation, not only this live VM. Issue #1577: the
+        // baseline rides the same durable row.
+        durable?.recordWireAttempt(paneId, payload, System.currentTimeMillis(), baselineCount)
     }
 
     fun clear(paneId: String, payload: String): Unit = synchronized(lock) {
         // Only clears the volatile set: the durable flag is tied to the row's
         // lifetime (dropped when the row is delivered-pruned / removed, PRESERVED
         // across requeue), so an as-yet-un-acked in-flight row keeps verifying.
-        entries.remove(key(paneId, payload))
+        val key = key(paneId, payload)
+        entries.remove(key)
+        baselines.remove(key)
     }
 
     fun hasAmbiguousAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
         // Issue #1541: the durable flag makes a back-nav-rebuilt ledger (empty
         // in-memory set) still see a prior wire attempt.
         key(paneId, payload) in entries || durable?.hasWireAttempt(paneId, payload) == true
+    }
+
+    /**
+     * Issue #1577: the pre-send needle baseline for (pane, payload) — the volatile
+     * value first, else the durable one (a VM-clear-rebuilt ledger). `null` when
+     * none was captured; the caller then falls back to presence-only verification.
+     */
+    fun needleBaseline(paneId: String, payload: String): Int? = synchronized(lock) {
+        baselines[key(paneId, payload)] ?: durable?.wireNeedleBaseline(paneId, payload)
     }
 }
 
@@ -196,7 +228,81 @@ internal suspend fun probeOutboundPayloadAlreadyLanded(
     client: TmuxClient,
     paneId: String,
     payload: String,
-): DeliveryProbeOutcome = probeNeedleAlreadyLanded(client, paneId, agentSubmitAckNeedle(payload))
+    baselineCount: Int? = null,
+): DeliveryProbeOutcome {
+    val needle = agentSubmitAckNeedle(payload) ?: return DeliveryProbeOutcome.Unknown
+    val response = try {
+        client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        return DeliveryProbeOutcome.Unknown
+    }
+    if (response.isError) return DeliveryProbeOutcome.Unknown
+    val count = agentSubmitVisibleTextNeedleCount(response.output, needle)
+    // Issue #1577: a captured baseline demands the count INCREASE (our paste landed);
+    // no baseline (legacy/failed capture) falls back to the #1541 presence check.
+    val landed = if (baselineCount != null) count > baselineCount else count >= 1
+    return if (landed) DeliveryProbeOutcome.AlreadyLanded else DeliveryProbeOutcome.NotLanded
+}
+
+/**
+ * Issue #1577: capture the pane's CURRENT needle occurrence count (via the exec
+ * lane, the same lane the probe uses) so a wire attempt can be recorded WITH a
+ * pre-send baseline. Returns `null` when the needle is underivable or the capture
+ * failed — the caller records the attempt with a null baseline and the later probe
+ * falls back to presence-only.
+ */
+internal suspend fun captureNeedleBaseline(
+    client: TmuxClient,
+    paneId: String,
+    payload: String,
+): Int? {
+    val needle = agentSubmitAckNeedle(payload) ?: return null
+    val response = try {
+        client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        return null
+    }
+    if (response.isError) return null
+    return agentSubmitVisibleTextNeedleCount(response.output, needle)
+}
+
+/**
+ * Issue #1577: record a wire attempt for (pane, payload) AND, on the FIRST push
+ * (no baseline yet), record the pre-send needle occurrence count as the baseline
+ * the later verify-before-resend compares against. Captured once — a re-push after
+ * a NotLanded probe keeps the original baseline (idempotent in [recordWireAttempt]).
+ *
+ * Cost-aware: [localRenderText] is the pane's ALREADY-rendered visible text (a free,
+ * in-memory read — no round-trip). When the payload's needle is NOT already on the
+ * local render (the overwhelmingly common case — a fresh prompt), the baseline is 0
+ * and NO capture is issued: a later probe finding the needle unambiguously means our
+ * paste landed, so presence-only is correct and the hot send path pays nothing. Only
+ * when the payload text is ALREADY visible (e.g. a Codex `Goal blocked (/goal resume)`
+ * status line — the exact #1577 false-positive) is ONE bounded authoritative capture
+ * taken to record the precise pre-send count, so a genuine resend requires the count
+ * to INCREASE and is not falsely `AlreadyLanded`.
+ */
+internal suspend fun OutboundDeliveryLedger.recordWireAttemptWithBaseline(
+    client: TmuxClient,
+    paneId: String,
+    payload: String,
+    localRenderText: String,
+) {
+    if (needleBaseline(paneId, payload) != null) {
+        // A prior push already captured the pre-send baseline; keep it (idempotent).
+        recordWireAttempt(paneId, payload, null)
+        return
+    }
+    val needle = agentSubmitAckNeedle(payload)
+    val alreadyVisible = needle != null &&
+        agentSubmitVisibleTextNeedleCount(listOf(localRenderText), needle) > 0
+    val baseline = if (alreadyVisible) captureNeedleBaseline(client, paneId, payload) else 0
+    recordWireAttempt(paneId, payload, baseline)
+}
 
 internal suspend fun probeNeedleAlreadyLanded(
     client: TmuxClient,

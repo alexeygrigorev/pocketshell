@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.portfwd.DefaultDispatcher
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -64,15 +65,55 @@ class SessionConnectionService : Service() {
         const val ACTION_START = "com.pocketshell.app.sessions.action.START_SESSION_HOLD"
         const val ACTION_STOP = "com.pocketshell.app.sessions.action.STOP_SESSION_HOLD"
 
-        fun start(context: Context): Boolean {
+        /**
+         * Issue #1595: the connection-trail event recording every session-FGS start/promotion
+         * outcome. Category `connection` so it lands on the same trail the device-log audit
+         * reads (mirrors [com.pocketshell.core.tmux.TmuxClientDiagnostics], which the App wires
+         * into `DiagnosticEvents.record("connection", …)`).
+         */
+        const val DIAG_EVENT_FGS = "session_fgs"
+
+        /**
+         * Issue #1595: test seam for the `startForegroundService()` call so a JVM test can inject
+         * a background-restricted rejection (the on-device
+         * `ForegroundServiceStartNotAllowedException`). Null → the real platform call.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal var startForegroundServiceForTest: ((Context, Intent) -> Unit)? = null
+
+        fun start(context: Context, holdActive: Boolean = true): Boolean {
             val intent = Intent(context, SessionConnectionService::class.java).apply {
                 action = ACTION_START
             }
             return runCatching {
-                ContextCompat.startForegroundService(context, intent)
+                startForegroundServiceForTest?.invoke(context, intent)
+                    ?: ContextCompat.startForegroundService(context, intent)
+                // Issue #1595: record the SUCCESSFUL request too, so a device background proves
+                // the foreground-eligible start actually fired (the audit could not see it —
+                // both failure paths were swallowed with a bare Log.w and NO DiagnosticEvent).
+                DiagnosticEvents.record(
+                    "connection",
+                    DIAG_EVENT_FGS,
+                    "phase" to "request",
+                    "outcome" to "ok",
+                    "hold_active" to holdActive,
+                )
                 true
             }.getOrElse {
+                // Issue #1595: was a swallowed Log.w. Emit a DiagnosticEvent capturing the
+                // exception CLASS (`ForegroundServiceStartNotAllowedException` vs a real socket
+                // error) so the connection-log can attribute the ~4.4s-after-background transport
+                // death to the background-FGS-start restriction instead of staying structurally
+                // blind to it.
                 Log.w(TAG, "session foreground service start was rejected", it)
+                DiagnosticEvents.record(
+                    "connection",
+                    DIAG_EVENT_FGS,
+                    "phase" to "request",
+                    "outcome" to "denied",
+                    "error" to it.javaClass.simpleName,
+                    "hold_active" to holdActive,
+                )
                 false
             }
         }
@@ -153,10 +194,21 @@ class SessionConnectionService : Service() {
         stopSelf()
     }
 
+    /**
+     * Issue #1595: test seam for the `startForeground()` promotion so a JVM test can inject the
+     * background-restricted `ForegroundServiceStartNotAllowedException` thrown at promotion time
+     * (Android 12+; 14+ adds specialUse throw conditions). Null → the real platform call.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var promoteForegroundForTest: ((Notification) -> Unit)? = null
+
     private fun promoteToForegroundIfNeeded(notification: Notification): Boolean {
         if (hasStartedForeground) return true
         return runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val promoter = promoteForegroundForTest
+            if (promoter != null) {
+                promoter(notification)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
@@ -166,9 +218,26 @@ class SessionConnectionService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
             hasStartedForeground = true
+            DiagnosticEvents.record(
+                "connection",
+                DIAG_EVENT_FGS,
+                "phase" to "promote",
+                "outcome" to "ok",
+            )
             true
         }.getOrElse {
+            // Issue #1595: was a swallowed Log.w. Emit a DiagnosticEvent with the exception CLASS
+            // so a device background captures whether promotion was rejected by the
+            // background-FGS-start restriction (`ForegroundServiceStartNotAllowedException`) —
+            // previously invisible to the connection-log.
             Log.w(TAG, "session foreground service promotion failed", it)
+            DiagnosticEvents.record(
+                "connection",
+                DIAG_EVENT_FGS,
+                "phase" to "promote",
+                "outcome" to "denied",
+                "error" to it.javaClass.simpleName,
+            )
             false
         }
     }

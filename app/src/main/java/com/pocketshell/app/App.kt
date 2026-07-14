@@ -23,6 +23,7 @@ import com.pocketshell.app.release.UpdateCheckScheduler
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.service.SessionForegroundServiceActivityObserver
 import com.pocketshell.app.sessions.service.SessionServiceController
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
@@ -439,6 +440,21 @@ class App : Application() {
         // app-switch that returns within the grace window never tears the
         // terminal connection down.
         ProcessLifecycleOwner.get().lifecycle.addObserver(terminalLifecycleObserver)
+        // Issue #1595: start the session FGS off the ACTIVITY lifecycle (all activities STOPPED)
+        // — a FOREGROUND-ELIGIBLE moment that fires promptly — instead of only the backgrounded
+        // ProcessLifecycleOwner ON_STOP above. ProcessLifecycleOwner ON_STOP fires ~700ms into the
+        // background (a single delayed runnable), where Android 12+ rejects startForegroundService()
+        // with ForegroundServiceStartNotAllowedException — so the hold never came up and the OS
+        // killed the -CC socket ~4.4s later (device-log audit #1562). The activity's own onStop
+        // fires far earlier (still foreground-eligible), so the hold comes up before the OS can
+        // suspend the socket and the transport survives the grace window (silent reseed on return,
+        // not a redial). Round 2: keyed off the activity STARTED-count (not onPause) so transient
+        // overlays that keep the activity visible — permission dialog / share sheet / shade —
+        // never flash the FGS notification, and a short controller debounce absorbs a quick
+        // stop→resume (recents peek). Config-change stops are skipped (see the observer).
+        registerActivityLifecycleCallbacks(
+            SessionForegroundServiceActivityObserver(sessionServiceController),
+        )
         terminalNetworkScope.launch {
             terminalNetworkObserver.changes.collect { change ->
                 val runtimeDiagnostics = terminalRuntimeDiagnostics()

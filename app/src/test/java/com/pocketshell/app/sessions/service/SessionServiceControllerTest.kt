@@ -110,6 +110,160 @@ class SessionServiceControllerTest {
     }
 
     @Test
+    fun `onAppPausing starts the FGS foreground-eligibly after the debounce and onAppResumed stops it (issue 1595)`() = runTest {
+        // Issue #1595: the foreground-eligible start path. onAppPausing() (driven by the ACTIVITY
+        // going background — all activities stopped, the earliest point Android 12+ allows
+        // startForegroundService) starts the FGS BEFORE the backgrounded onAppBackgrounded
+        // (ON_STOP) ever runs; onAppResumed() stops it. On base the FGS could only start from
+        // onAppBackgrounded (background) — this method did not exist.
+        //
+        // Round 2 (debounce): the start is DEFERRED by PAUSE_START_DEBOUNCE_MILLIS so a transient
+        // stop→resume never flashes the FGS. A PERSISTED background — no resume before the window
+        // elapses — must still start the FGS (well under the ~700ms ON_STOP, so eligible).
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        drainStartedServices()
+
+        controller.onAppPausing()
+        runCurrent()
+        // Within the debounce window the FGS has NOT started yet (a transient could still resume).
+        assertNull(
+            "the FGS must not start until the debounce elapses — a transient could still resume",
+            shadow.nextStartedService,
+        )
+        assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+
+        // The background persisted past the debounce → the FGS starts, still foreground-eligible.
+        testScheduler.advanceTimeBy(SessionServiceController.PAUSE_START_DEBOUNCE_MILLIS + 1)
+        runCurrent()
+
+        val started = shadow.nextStartedService
+        assertNotNull(
+            "a persisted background must start the FGS once the debounce elapses (#1595)",
+            started,
+        )
+        assertEquals(SessionConnectionService.ACTION_START, started?.action)
+        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
+
+        controller.onAppResumed()
+        runCurrent()
+
+        val stopped = shadow.nextStartedService
+        assertNotNull("onAppResumed must stop the FGS (the Activity holds the connection)", stopped)
+        assertEquals(SessionConnectionService.ACTION_STOP, stopped?.action)
+        assertFalse(controller.flowOfSnapshot().value.isHoldingConnection)
+    }
+
+    @Test
+    fun `a quick pause then resume within the debounce never starts the FGS — no thrash (issue 1595 round 2)`() = runTest {
+        // Reviewer finding (round 2): onActivityPaused fired on EVERY transient focus loss and the
+        // FGS promoted IMMEDIATELY, flashing a Stop-able notification into the tray on a routine
+        // pause→resume (recents peek / shade / quick app-switch return). This is the RED→GREEN
+        // regression: a quick stop→resume WITHIN the debounce must post NO notification and leave
+        // NO running FGS — neither a START nor a STOP intent is issued.
+        //
+        // RED on the pre-debounce code: onAppPausing() flipped foreground=false synchronously, so
+        // a START intent was issued at once (and onAppResumed then a STOP) — the start-then-stop
+        // thrash. GREEN: the debounce is cancelled before it fires, so nothing is ever started.
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        drainStartedServices()
+
+        controller.onAppPausing()
+        runCurrent()
+        // Resume WELL within the debounce window (a permission dialog dismissed, picker returned,
+        // shade closed, recents peek — a quick return).
+        testScheduler.advanceTimeBy(SessionServiceController.PAUSE_START_DEBOUNCE_MILLIS / 2)
+        runCurrent()
+        controller.onAppResumed()
+        runCurrent()
+        // Advance well PAST the original debounce deadline — the cancelled debounce must not fire.
+        testScheduler.advanceTimeBy(SessionServiceController.PAUSE_START_DEBOUNCE_MILLIS * 4)
+        runCurrent()
+
+        assertNull(
+            "a quick pause→resume within the debounce must issue NO service intent — no START " +
+                "(no notification flash) and no STOP (no thrash) (#1595 round 2)",
+            shadow.nextStartedService,
+        )
+        assertFalse(
+            "no FGS hold may linger after a transient pause→resume",
+            controller.flowOfSnapshot().value.isHoldingConnection,
+        )
+    }
+
+    @Test
+    fun `onAppBackgrounded after onAppPausing stamps the deadline without a duplicate start (issue 1595)`() = runTest {
+        // Issue #1595: onAppPausing already started the FGS foreground-eligibly, so the later
+        // ON_STOP onAppBackgrounded is idempotent for the start (no duplicate intent) and only
+        // stamps the bounded count-down deadline onto the already-held snapshot.
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        drainStartedServices()
+
+        controller.onAppPausing()
+        runCurrent()
+        // The background persisted past the debounce → the foreground-eligible start fires.
+        testScheduler.advanceTimeBy(SessionServiceController.PAUSE_START_DEBOUNCE_MILLIS + 1)
+        runCurrent()
+        assertEquals(SessionConnectionService.ACTION_START, shadow.nextStartedService?.action)
+
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 5_000L)
+        runCurrent()
+
+        assertNull(
+            "ON_STOP after a foreground-eligible pause must NOT re-issue a start intent",
+            shadow.nextStartedService,
+        )
+        val snapshot = controller.flowOfSnapshot().value
+        assertTrue(snapshot.isHoldingConnection)
+        assertEquals(
+            "ON_STOP stamps the bounded count-down deadline onto the already-held snapshot",
+            5_000L,
+            snapshot.disconnectAtWallClockMillis,
+        )
+    }
+
+    @Test
+    fun `onAppBackgrounded still starts the FGS as a fallback when onAppPausing was skipped (issue 1595)`() = runTest {
+        // Issue #1595: config-change pauses skip onAppPausing, so the background onAppBackgrounded
+        // (ON_STOP) must still start the FGS exactly as before — the fix ADDS an earlier
+        // foreground-eligible attempt, it never removes the background fallback.
+        val activeClients = ActiveTmuxClients()
+        val controller = controller(activeClients, testScheduler)
+
+        controller.observeActiveSessions()
+        runCurrent()
+        registerLive(activeClients, "alpha")
+        runCurrent()
+        drainStartedServices()
+
+        // No onAppPausing() call (e.g. the pause was a configuration change and was skipped).
+        controller.onAppBackgrounded(disconnectAtWallClockMillis = 1_000L)
+        runCurrent()
+
+        val started = shadow.nextStartedService
+        assertNotNull("onAppBackgrounded must remain a fallback FGS start (#1595)", started)
+        assertEquals(SessionConnectionService.ACTION_START, started?.action)
+        assertTrue(controller.flowOfSnapshot().value.isHoldingConnection)
+    }
+
+    @Test
     fun `port-forward active stops the session FGS so ForwardingService owns the single notification`() = runTest {
         // Issue #1202 + #1198 (reported on-device, v0.4.23): a hetzner session is held in the
         // background — the session FGS is up and its notification (reworded "Port forwarding

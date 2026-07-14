@@ -160,9 +160,19 @@ abstract class TmuxSessionViewModelTestBase {
         // Issue #1541: default null keeps every existing test's ledger in-memory
         // only (base S1). A test that needs the durable per-row `wireAttempted`
         // flag (survives VM-clear / back-navigation) passes the Robolectric app
-        // context, so a VM's `outboundDeliveryLedgerFor(applicationContext)` wires
-        // the durable backing over the process-cached `outbound_queue` prefs.
+        // context.
         applicationContext: android.content.Context? = null,
+        // Issue #1587 (H3): the verify-before-resend ledger's durable backing now
+        // comes from the INJECTED @Singleton OutboundQueueStore (one instance, one
+        // lock — no lost-update race with the orphan sweep), not a store the VM
+        // news up from the context. Default: build one over the same app context so
+        // durable-flag tests keep their backing over the shared `outbound_queue`
+        // prefs (production injects the singleton over the SAME prefs). A test can
+        // pass a spy/shared store to prove the VM threads that exact instance.
+        outboundQueueStore: com.pocketshell.app.composer.OutboundQueueStore? =
+            applicationContext?.let {
+                com.pocketshell.app.composer.SharedPrefsOutboundQueueStore(it)
+            },
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = TmuxClientFactory(factoryScope),
@@ -176,6 +186,7 @@ abstract class TmuxSessionViewModelTestBase {
             agentRepository = agentRepository,
             agentKindRemoteSource = agentKindRemoteSource,
             applicationContext = applicationContext,
+            outboundQueueStore = outboundQueueStore,
         ).also {
             // Issue #576 (Slice A of #792): pin the structural-reconcile
             // dispatcher to Main (the MainDispatcherRule's

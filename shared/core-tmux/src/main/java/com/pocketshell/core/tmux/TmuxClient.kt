@@ -174,16 +174,19 @@ public interface TmuxClient : AutoCloseable {
     }
 
     /**
-     * Capture the pane's visible text on the independent exec lane. This is for
-     * acknowledgement probes that only need `capture-pane -p`, not cursor or
-     * scrollback state. The default keeps test doubles compatible by falling
-     * back to the existing best-effort control-mode path.
+     * Capture pane text on the exec lane (verify/ack probes). Issue #1587 (H2):
+     * [scrollbackLines] > 0 captures `-S -N` scrollback so a landed-then-scrolled-off
+     * payload is still found (else NotLanded ⇒ duplicate paste); `0` = visible-only.
      */
     public suspend fun capturePaneTextViaExec(
         paneId: String,
         timeoutMs: Long? = null,
+        scrollbackLines: Int = 0,
     ): CommandResponse =
-        sendBestEffortCommand("capture-pane -p -t $paneId")
+        sendBestEffortCommand(
+            if (scrollbackLines > 0) "capture-pane -p -S -$scrollbackLines -t $paneId"
+            else "capture-pane -p -t $paneId",
+        )
 
     /**
      * Issue #692: send several tmux control-mode commands as ONE chained
@@ -1284,12 +1287,15 @@ internal class RealTmuxClient(
     override suspend fun capturePaneTextViaExec(
         paneId: String,
         timeoutMs: Long?,
+        scrollbackLines: Int,
     ): CommandResponse {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
         val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
         val quotedPane = "'${escapeSingleQuoted(paneId)}'"
-        val command = "tmux capture-pane -p -t $quotedPane"
+        // Issue #1587 (H2): bounded scrollback (`-S -N`) for verify.
+        val command = if (scrollbackLines > 0) "tmux capture-pane -p -S -$scrollbackLines -t $quotedPane"
+        else "tmux capture-pane -p -t $quotedPane"
         val execResult =
             try {
                 withTimeoutOrNull(effectiveTimeoutMs) {

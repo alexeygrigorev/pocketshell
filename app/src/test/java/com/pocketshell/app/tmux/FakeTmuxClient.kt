@@ -392,12 +392,40 @@ internal open class FakeTmuxClient(
     override suspend fun sendBestEffortCommand(cmd: String): CommandResponse =
         handleCommand(cmd, bestEffort = true)
 
-    override suspend fun capturePaneTextViaExec(paneId: String, timeoutMs: Long?): CommandResponse {
+    /**
+     * Issue #1587 (H2): the scrollback bound each `capturePaneTextViaExec` call
+     * requested, in order — so a test can assert the verify-before-resend probe
+     * asks for scrollback (`> 0`), and can key a scrollback-vs-visible response off it.
+     */
+    val capturePaneTextViaExecScrollbackLines: MutableList<Int> = mutableListOf()
+
+    /**
+     * Issue #1587 (H2): when set, a `capturePaneTextViaExec` call with
+     * `scrollbackLines > 0` returns THIS (the scrollback-inclusive frame) instead of
+     * the visible-only [capturePaneResponses]/[defaultCaptureResponse]. Lets a test
+     * model a payload that landed but scrolled OFF the visible viewport: visible
+     * capture omits it, the bounded-scrollback capture finds it.
+     */
+    @Volatile
+    var scrollbackCaptureResponse: CommandResponse? = null
+
+    override suspend fun capturePaneTextViaExec(
+        paneId: String,
+        timeoutMs: Long?,
+        scrollbackLines: Int,
+    ): CommandResponse {
         capturePaneTextViaExecCalls += paneId
+        capturePaneTextViaExecScrollbackLines += scrollbackLines
         if (suspendForeverOnCapturePaneTextViaExec) {
             CompletableDeferred<Unit>().await()
         }
-        return handleCommand("capture-pane -p -t $paneId", bestEffort = false)
+        scrollbackCaptureResponse?.let { if (scrollbackLines > 0) return it }
+        val command = if (scrollbackLines > 0) {
+            "capture-pane -p -S -$scrollbackLines -t $paneId"
+        } else {
+            "capture-pane -p -t $paneId"
+        }
+        return handleCommand(command, bestEffort = false)
     }
 
     private suspend fun handleCommand(cmd: String, bestEffort: Boolean): CommandResponse {

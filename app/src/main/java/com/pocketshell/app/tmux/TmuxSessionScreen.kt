@@ -978,22 +978,19 @@ public fun TmuxSessionScreen(
                 false
             } else when (target.route) {
                 OutboundRoute.AgentConversation ->
-                    // Issue #1207: a TUI-only slash-command (/model, /config, any
-                    // picker) writes NOTHING to the transcript — it drives an
-                    // alt-screen picker in the covered Terminal pane. Echoing an
-                    // optimistic "/model" user bubble (the old `sendToAgentPaneResult`
-                    // path) is actively misleading: the bubble sits there as if a
-                    // normal turn ran while the picker is invisible on the
-                    // Conversation surface by construction. So for a slash-command we
-                    // send the keystrokes to the pane WITHOUT the optimistic echo (the
-                    // same raw text+Enter delivery a confirmed agent uses on the
-                    // Terminal tab) and raise the inline "Open in Terminal" notice.
+                    // Issue #1207: a TUI-only slash-command drives an alt-screen picker in
+                    // the covered Terminal pane, so it gets NO optimistic echo and raises
+                    // the inline "Open in Terminal" notice. Issue #1577b: deliver it through
+                    // the SAME gated agent submit (`sendAgentPayloadToPaneResult`: floor +
+                    // count-baseline ack gate + Enter) the Terminal tab uses — NOT a raw
+                    // ungated `text+"\r"` whose CR lands in Codex's same stdin read batch as
+                    // the text (paste-burst swallow → `/goal resume` unsubmitted). Hard-cut
+                    // (D22): one gated submit path for both tabs.
                     when (tmuxAgentConversationSend(request.text)) {
                         TmuxAgentConversationSend.TuiCommandNoEcho -> {
-                            val ok = viewModel.writeInputToPaneResult(
-                                paneId,
-                                (request.text.trimEnd('\n') + "\r").toByteArray(Charsets.UTF_8),
-                            ).isSuccess
+                            val ok = tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
+                                viewModel.sendAgentPayloadToPaneResult(paneId, request.text, agentKind).isSuccess
+                            } ?: false
                             if (ok) {
                                 tuiCommandNotice = request.text.trim()
                             }

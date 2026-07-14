@@ -90,8 +90,13 @@ internal suspend fun verifyBeforeAgentResend(
     // captured at the first wire attempt. `AlreadyLanded` requires the count to have
     // INCREASED (our paste actually added an occurrence) — so a payload that was
     // already on the pane before we ever pushed (a Codex `Goal blocked (/goal resume)`
-    // status line) is not a false-positive. A null baseline (legacy row / baseline
-    // capture failed) falls back to presence-only (#1541 behaviour).
+    // status line) is not a false-positive.
+    // Issue #1577b: a NULL baseline (a legacy pre-baseline row, or a failed baseline
+    // capture) is UNTRUSTWORTHY — it CANNOT distinguish "landed" from a permanent
+    // footer occurrence, so it must NEVER resolve `AlreadyLanded` (which would submit
+    // a bare Enter and silently drop the payload). [probeOutboundPayloadAlreadyLanded]
+    // reports `NotLanded` for a null baseline instead, so the caller does a REAL gated
+    // resend that records a fresh baseline (self-healing), never a bare Enter.
     val baseline = ledger.needleBaseline(paneId, payload)
     val outcome = probeOutboundPayloadAlreadyLanded(client, paneId, payload, baseline)
     DiagnosticEvents.record(
@@ -319,6 +324,12 @@ internal suspend fun probeOutboundPayloadAlreadyLanded(
     baselineCount: Int? = null,
 ): DeliveryProbeOutcome {
     val needle = agentSubmitAckNeedle(payload) ?: return DeliveryProbeOutcome.Unknown
+    // Issue #1577b: kill the presence-only fallback. A null baseline cannot tell "our
+    // paste landed" from a payload that was ALREADY on the pane (a Codex `Goal blocked
+    // (/goal resume)` footer), so a presence match would false-`AlreadyLanded` → a
+    // silent bare-Enter drop. Resolve `NotLanded` so the caller does a REAL gated
+    // resend (which records a fresh baseline), never a bare Enter — deliver-safe.
+    if (baselineCount == null) return DeliveryProbeOutcome.NotLanded
     val response = try {
         client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
     } catch (cancelled: CancellationException) {
@@ -327,11 +338,9 @@ internal suspend fun probeOutboundPayloadAlreadyLanded(
         return DeliveryProbeOutcome.Unknown
     }
     if (response.isError) return DeliveryProbeOutcome.Unknown
+    // Issue #1577: a captured baseline demands the count INCREASE (our paste landed).
     val count = agentSubmitVisibleTextNeedleCount(response.output, needle)
-    // Issue #1577: a captured baseline demands the count INCREASE (our paste landed);
-    // no baseline (legacy/failed capture) falls back to the #1541 presence check.
-    val landed = if (baselineCount != null) count > baselineCount else count >= 1
-    return if (landed) DeliveryProbeOutcome.AlreadyLanded else DeliveryProbeOutcome.NotLanded
+    return if (count > baselineCount) DeliveryProbeOutcome.AlreadyLanded else DeliveryProbeOutcome.NotLanded
 }
 
 /**

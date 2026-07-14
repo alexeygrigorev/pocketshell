@@ -288,9 +288,12 @@ class OutboundDeliveryGuardTest {
         val ledger = OutboundDeliveryLedger()
         val paneId = "%0"
         val payload = "deliver this exactly once please"
-        // First attempt reached the wire ambiguously (recorded) AND landed — the
-        // pane shows the payload.
-        ledger.recordWireAttempt(paneId, payload)
+        // First attempt reached the wire ambiguously (recorded WITH its pre-send
+        // baseline 0 — the payload was NOT on the pane before the paste) AND landed:
+        // the pane now shows the payload (count 1 > baseline 0). Issue #1577b: a
+        // production wire push ALWAYS records a baseline (recordWireAttemptWithBaseline),
+        // so a genuinely-landed row is baselined — this is the production-accurate state.
+        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
         val client = captureShowing("$ $payload")
 
         val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
@@ -299,6 +302,38 @@ class OutboundDeliveryGuardTest {
             "a re-dispatched already-landed payload must resolve AlreadyLanded so the send path " +
                 "submits Enter only and never re-pastes (occurrence stays 1)",
             DeliveryProbeOutcome.AlreadyLanded,
+            outcome,
+        )
+    }
+
+    /**
+     * Issue #1577b: a NULL baseline (a legacy pre-baseline row, or a failed baseline
+     * capture) is UNTRUSTWORTHY — a presence-only check would false-`AlreadyLanded` on
+     * a permanent Codex `Goal blocked (/goal resume)` footer and submit a bare Enter,
+     * silently dropping the payload (the reopened #1577 symptom). The kill-the-presence-
+     * fallback fix resolves `NotLanded` instead, so the caller does a REAL gated resend
+     * (which records a fresh baseline), never a bare Enter.
+     *
+     * RED on base: the presence-only fallback (`count >= 1`) matched the footer ⇒
+     * AlreadyLanded. GREEN: null baseline ⇒ NotLanded (deliver-safe).
+     */
+    @Test
+    fun nullBaselineUntrustworthyFlagResolvesNotLandedNotBareEnter() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "/goal resume"
+        // A legacy row carries the durable wire-attempt flag but NO baseline (null).
+        ledger.recordWireAttempt(paneId, payload) // 2-arg ⇒ baselineCount defaults to null
+        // The pane permanently shows the payload in a status footer.
+        val client = captureShowing("gpt-5.6-sol · Goal blocked (/goal resume)")
+
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+
+        assertEquals(
+            "a null-baseline (untrustworthy) flag whose payload is already on the pane must NOT " +
+                "resolve AlreadyLanded (that submits a bare Enter and silently drops the send) — " +
+                "it must be NotLanded so the caller does a real gated resend",
+            DeliveryProbeOutcome.NotLanded,
             outcome,
         )
     }
@@ -427,7 +462,7 @@ class OutboundDeliveryGuardTest {
             "the claim alone must NOT record a wire attempt (#1577)",
             store.hasWireAttempt(paneId, payload),
         )
-        store.markWireAttempted(paneId, payload) // the actual wire push
+        store.markWireAttempted(paneId, payload, baselineCount = 0) // the actual wire push (#1577b: records a baseline)
         assertTrue(
             "the wire push must durably record the wire attempt on the row",
             store.hasWireAttempt(paneId, payload),

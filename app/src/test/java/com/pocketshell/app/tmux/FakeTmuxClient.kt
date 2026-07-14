@@ -38,7 +38,7 @@ import kotlinx.coroutines.flow.filterIsInstance
  *
  * Closed state is tracked via [closed] so tests can assert teardown.
  */
-internal class FakeTmuxClient(
+internal open class FakeTmuxClient(
     paneOutputExtraBufferCapacity: Int = 64,
 ) : TmuxClient {
 

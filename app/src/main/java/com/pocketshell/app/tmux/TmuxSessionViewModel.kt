@@ -510,6 +510,18 @@ public class TmuxSessionViewModel @Inject constructor(
         agentSubmitAckTimeoutMsOverrideForTest = timeoutMs
     }
 
+    // Issue #1577b: the pane's visible LOCAL render text the send path reads to
+    // decide whether the payload is already on screen (the #1577 baseline cost-gate)
+    // and to seed the ack gate's pre-paste needle baseline. A test override lets a
+    // unit test reproduce the production state where the app IS rendering a Codex
+    // `Goal blocked (/goal resume)` footer without wiring a full terminal producer.
+    @androidx.annotation.VisibleForTesting
+    internal val localRenderTextOverrideForTest: MutableMap<String, String> = mutableMapOf()
+
+    private fun localRenderTextForPane(paneId: String): String =
+        localRenderTextOverrideForTest[paneId]
+            ?: paneRows[paneId]?.terminalState?.visibleScreenTextSnapshot().orEmpty()
+
     /**
      * Issue #818: test override for the configured open-time default agent
      * session view. Unit tests build the view model without the
@@ -14103,26 +14115,25 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return runCatching {
             ensurePaneAcceptsInput(client, paneId)
-            val render = paneRows[paneId]?.terminalState?.visibleScreenTextSnapshot().orEmpty()
-            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, payload, render)
+            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderTextForPane(paneId))
+            // Issue #1577b: the pre-paste needle baseline the ack gate compares against
+            // (Codex's permanent `(/goal resume)` footer occupies the baseline, so the
+            // ack fires only on OUR paste adding an occurrence — never on the footer).
+            val ackBaseline = outboundDeliveryLedger.needleBaseline(paneId, payload) ?: 0
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
                 sendLiteralTextKeys(client, paneId, payload)
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
-            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent)
+            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent, ackBaseline)
             consumeSendResultLostSeamForTest()
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
             outboundDeliveryLedger.clear(paneId, payload)
-            // Issue #941 (black-screen B1): after the submit Enter a full-screen agent
-            // TUI can `clear`+redraw and emit a `%output` overpaint that leaves the
-            // active pane PARTIAL-black (a lone status/spinner line, the rest gone) with
-            // no heal, so it stayed black until a manual redraw. Schedule a guarded
-            // active-pane heal that fires only if the pane settles partial-black/blank.
-            // Issue #1353 R4: an EVENT through the shared reconcile entry ([requestReconcile]),
-            // not a private send-only poll — the send path owns no bespoke timer.
+            // Issue #941/#1353 R4: after the submit Enter a full-screen agent TUI can
+            // overpaint the active pane partial-black; a guarded heal EVENT through the
+            // shared reconcile entry re-checks and re-seeds (no bespoke send-path timer).
             requestReconcile(client, paneId, ReconcileReason.Send)
         }
     }
@@ -14192,48 +14203,32 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #869: ack-gate the submit Enter on the pasted composer text actually
-     * landing in the agent's input, instead of the pre-#869 blind fixed sleep
-     * ([com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]) that
-     * was too short under real RTT. The maintainer's on-device symptom — "most
-     * of the time when I click Send it's not really sending; I have to press
-     * Enter after" — was an Enter that raced ahead of the agent TUI finishing
-     * its paste ingestion, leaving the message sitting unsent in the input line.
+     * landing in the agent's input, instead of the pre-#869 blind fixed sleep that
+     * raced ahead of the TUI's ingestion ("I have to press Enter after"). Two parts:
+     * (1) a MINIMUM floor (the #526 setting; Codex's [CODEX_AGENT_SUBMIT_DELAY_MS]
+     * still applies) and (2) an ack poll of `capture-pane -p` for the payload,
+     * pressing Enter the instant a capture CONFIRMS the paste (RTT-adaptive for
+     * free). Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]; on a needle miss the Enter is
+     * held to `max(minFloor, AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + measuredRtt)` (a
+     * WORKING delay, never the 150ms that raced), never a hung Send.
      *
-     * The gate works in two parts:
-     *
-     * 1. **Minimum floor (the #526 setting, kept tunable).** Honour the
-     *    configured [com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]
-     *    (Codex's [CODEX_AGENT_SUBMIT_DELAY_MS] floor still applies) as the
-     *    SHORTEST time before Enter. A zero/low configured value no longer means
-     *    "race the Enter" — the ack poll below still waits for confirmation.
-     *
-     * 2. **Ack on the paste landing (the #869 correctness fix).** Poll
-     *    `capture-pane -p` for the payload to appear in the pane's visible text.
-     *    Press Enter the instant a capture confirms the paste is in. This is
-     *    RTT-adaptive for free — each capture is a round-trip, so a high-latency
-     *    host naturally waits longer for the confirming capture to return.
-     *    Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]: if the payload never shows
-     *    (an unrecognised TUI rendering, or `capture-pane` keeps failing) we
-     *    fall back to pressing Enter anyway — never a hung Send.
-     *
-     * 3. **Hardened needle-miss fallback (#869, reviewer BLOCKED follow-up).**
-     *    The fallback is the EXACT failure surface for the maintainer's report:
-     *    if the needle never matched a real agent's reflowed input box, the
-     *    pre-#869 path would press Enter after only the ~150ms floor — the very
-     *    race that left messages unsent. So when the ack is NOT observed, the
-     *    submit Enter is held to an ADEQUATE working floor instead:
-     *    `max(minFloor, AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + measuredRtt)`,
-     *    where `measuredRtt` is the longest `capture-pane` round-trip observed
-     *    during the polls (so a high-latency host waits proportionally longer).
-     *    The worst case is therefore a WORKING delay, never the 150ms that
-     *    caused the report. The best case is unchanged — an observed ack
-     *    submits the instant ingestion is seen.
+     * Issue #1577b: the ack is COUNT-BASELINE-aware. [baselineNeedleCount] is the
+     * payload needle's pre-paste occurrence count on the pane; the ack fires only
+     * when the CURRENT count INCREASES over it (our paste added an occurrence), NOT
+     * on mere presence. On a Codex pane whose status footer permanently renders the
+     * command it wants (`Goal blocked (/goal resume)`), a presence-only ack matched
+     * that footer INSTANTLY and fired Enter before Codex had read the paste — so on
+     * a busy Codex the text and the CR landed in ONE stdin read batch and Codex's
+     * paste-burst heuristic SWALLOWED the CR, leaving `/goal resume` unsubmitted.
+     * Requiring an increase guarantees a REAL gap: Enter is sent only after the
+     * typed text is confirmed ingested, so the CR lands in a separate read.
      */
     private suspend fun awaitAgentPasteIngestedBeforeSubmit(
         client: TmuxClient,
         paneId: String,
         payload: String,
         agent: AgentKind,
+        baselineNeedleCount: Int,
     ) {
         val configured = agentSubmitEnterDelayMsOverrideForTest
             ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
@@ -14271,7 +14266,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     return@withTimeoutOrNull false
                 }
                 val captureStartMs = agentSubmitNowMs()
-                val visible = agentPaneShowsPayload(client, paneId, ackNeedle)
+                val visible = agentPaneShowsPayload(client, paneId, ackNeedle, baselineNeedleCount)
                 maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
                 if (visible) {
                     // The paste is visible in the pane — the agent has ingested it.
@@ -14317,24 +14312,26 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #869: `capture-pane -p` the pane and report whether [needle] is
-     * present in its visible text. Both the visible text and the needle are
-     * whitespace-stripped (see [agentSubmitAckNeedle]) so a wrapped/reflowed
-     * input box — whose join inserts a separator at the wrap boundary — still
-     * matches. A failed/empty capture is reported as "not yet visible" so the
-     * caller keeps polling within its bounded timeout. Best-effort: never throws
-     * — a capture failure must not fail the send, only defer the Enter.
+     * Issue #869/#1577b: `capture-pane -p` the pane and report whether OUR paste has
+     * landed — i.e. the [needle]'s whitespace-stripped occurrence count now EXCEEDS
+     * [baselineNeedleCount] (its pre-paste count). Both text and needle are
+     * whitespace-stripped so a wrapped/reflowed input box still matches. A count
+     * increase (not mere presence) is required so a payload the pane ALREADY showed
+     * before the paste — a Codex `Goal blocked (/goal resume)` footer — does not
+     * false-confirm the ack. A failed/empty capture is "not yet visible" so the
+     * caller keeps polling; best-effort, never throws.
      */
     private suspend fun agentPaneShowsPayload(
         client: TmuxClient,
         paneId: String,
         needle: String,
+        baselineNeedleCount: Int,
     ): Boolean {
         val response = runCatching {
             client.capturePaneTextViaExec(paneId)
         }.getOrNull() ?: return false
         if (response.isError) return false
-        return agentSubmitVisibleTextContainsNeedle(response.output, needle)
+        return agentSubmitVisibleTextNeedleCount(response.output, needle) > baselineNeedleCount
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -15339,7 +15336,7 @@ public class TmuxSessionViewModel @Inject constructor(
         client = client,
         paneId = paneId,
         bytes = bytes,
-        localRenderText = paneRows[paneId]?.terminalState?.visibleScreenTextSnapshot().orEmpty(),
+        localRenderText = localRenderTextForPane(paneId),
         send = { c, p, b -> sendInputBytesToPane(c, p, b) },
         // Issue #1586 (H1b): AlreadyLanded -> Enter-only submit (agent-lane parity).
         submitEnter = { c, p ->

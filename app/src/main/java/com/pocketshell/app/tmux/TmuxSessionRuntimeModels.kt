@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
+import com.pocketshell.core.connection.RuntimeHealthKey
 import com.pocketshell.core.tmux.TmuxClient
 
 /**
@@ -51,6 +52,17 @@ internal fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         sessionName = sessionName,
         durableSessionKey = durableSessionKey(),
     )
+
+/**
+ * Issue #1537 (option b): the parked-runtime health identity for this target.
+ * Keyed on host + tmux session name so it aligns with the runtime cache's
+ * per-session eviction grain (`removeSession`).
+ */
+internal fun ConnectionTarget.toHealthKey(): RuntimeHealthKey =
+    RuntimeHealthKey(hostId = hostId, sessionName = sessionName)
+
+internal fun TmuxRuntimeKey.toHealthKey(): RuntimeHealthKey =
+    RuntimeHealthKey(hostId = hostId, sessionName = sessionName)
 
 internal fun targetLogFields(target: ConnectionTarget): String = buildString {
     append("hostId=")

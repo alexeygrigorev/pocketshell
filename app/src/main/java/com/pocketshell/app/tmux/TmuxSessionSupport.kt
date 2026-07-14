@@ -759,15 +759,10 @@ internal const val ISSUE_464_KILL_TAG: String = "issue464-killsession"
 
 internal val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
 
-/**
- * Issue #621 / #634 / #636 (Slice 4): how many consecutive transparent
- * stale-lease re-dials an open/switch attach may trigger before concluding the
- * host is genuinely dead and surfacing the manual Reconnect affordance. A
- * silently-dead warm lease normally heals on the FIRST fresh transport, so a
- * small cap is enough; it exists only to stop a permanently-broken host from
- * looping forever (each fresh transport also EOFing).
- */
-internal const val STALE_LEASE_AUTO_RECOVER_MAX: Int = 2
+// Issue #1537 (option b, D22 hard-cut): the bespoke `STALE_LEASE_AUTO_RECOVER_MAX`
+// two-counter budget is DELETED. Loop protection for the residual attach-EOF
+// fallback is the SINGLE #1328 auto-reconnect ladder's own budget (the
+// [AutoReconnect] re-dial cannot re-enter the fallback arm), not a parallel seam.
 
 /**
  * Issue #1185: how many times the selected session may transparently re-dial its

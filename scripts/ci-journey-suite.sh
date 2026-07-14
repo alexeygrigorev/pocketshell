@@ -142,7 +142,7 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.TmuxSessionScreenArtVerifyE2eTest"  # #1362 #1344 the ART dex-verification guard for the TmuxSessionScreen com…
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
-  "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"  # #710 the CI-AVD wedge was the unbounded VM-clear park teardown
+  "$FQCN_PREFIX.MultiSessionSwitchJourneyE2eTest"  # #710 the CI-AVD wedge was the unbounded VM-clear park teardown; #1537 also owns parkedRuntimeFastSwitchRing...NoStormStaleLease (option-b parked-corpse gate)
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"  # #758 the maintainer's priority- back→open-another-session reconne…
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.LifecycleReattachGoneSessionNoResurrectE2eTest"  # #666 #998 a session killed on the host must NOT be

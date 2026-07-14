@@ -72,6 +72,7 @@ import com.pocketshell.app.tmux.connection.NetworkChangeEffects
 import com.pocketshell.app.tmux.connection.KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
 import com.pocketshell.app.tmux.connection.KeepaliveDeathRedialAmortizer
 import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
+import com.pocketshell.app.tmux.connection.ParkedRuntimeHealthEffects
 import com.pocketshell.app.tmux.connection.isSameIdentityNetworkRestore
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreReconnectStart
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreRideThrough
@@ -95,6 +96,9 @@ import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
+import com.pocketshell.core.connection.RuntimeDeathCause
+import com.pocketshell.core.connection.RuntimeHealthKey
+import com.pocketshell.core.connection.RuntimeHealthLedger
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
@@ -1973,19 +1977,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // connect attempt so a stale cause never leaks into a later decision.
     private var lastConnectFailureCause: Throwable? = null
 
-    // Issue #621 / #634 / #636 (Slice 4): how many consecutive transparent
-    // stale-lease auto-recoveries we have already kicked off for the current
-    // connect chain. A warm SSH lease can be silently dead — its transport
-    // keeps reporting `isConnected` until sshj's 60s keepalive trips — so the
-    // first `tmux -CC` open / `list-panes` over it EOFs. Rather than stranding
-    // the user on a Disconnected band + manual Reconnect, the open/switch
-    // attach evicts the poisoned lease and re-dials a FRESH transport
-    // transparently (via [scheduleAutoReconnect]). This counter caps how many
-    // times we do that before concluding the host is genuinely dead and
-    // falling back to the manual Reconnect affordance, so a permanently-broken
-    // host cannot loop forever. Reset to 0 on a successful attach.
-    private var staleLeaseAutoRecoverAttempts: Int = 0
-
     // Issue #1185: how many times the SELECTED session has transparently
     // re-dialled after its lease acquire was woken with a coalesced-connect
     // cancel (the create-then-switch supersede). The pool slot is already
@@ -1993,7 +1984,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // first retry; the cap only stops a pathological repeat (a host that keeps
     // getting its in-flight connect cancelled) from looping forever, at which
     // point the honest terminal error + working Retry surfaces. Reset to 0 on a
-    // successful attach (alongside [staleLeaseAutoRecoverAttempts]).
+    // successful attach.
     private var coalescedCancelRedialAttempts: Int = 0
 
     // Issue #145: whether [reconnect] would result in a new connect
@@ -3023,10 +3014,9 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         trigger: TmuxConnectTrigger,
     ) {
-        // Issue #621 / #634 / #636 (Slice 4): a successful attach means the
-        // stale-lease heal worked (or was never needed), so the budget resets
-        // for the next connect chain.
-        staleLeaseAutoRecoverAttempts = 0
+        // Issue #1185: a successful attach means the coalesced-cancel re-dial
+        // worked (or was never needed), so its budget resets for the next chain.
+        // (The #1537 hard-cut deleted the sibling stale-lease counter reset.)
         coalescedCancelRedialAttempts = 0
         lifecycleReattachNetworkCoalesce =
             if (trigger == TmuxConnectTrigger.LifecycleReattach) {
@@ -5324,6 +5314,20 @@ public class TmuxSessionViewModel @Inject constructor(
         quietResetMs = { keepaliveDeathQuietResetMs },
     )
 
+    // Issue #1537 (option b): the parked-runtime health ledger + edge subscriber.
+    // A parked death edge marks the ledger Dead and calls [onParkedRuntimeDeath] to
+    // evict the corpse before switch-back (the `stale_lease_attach_eof` flap becomes
+    // a proactive calm heal); the residual silent-TCP race falls to the attach-EOF
+    // fallback (single ladder).
+    private val runtimeHealthLedger = RuntimeHealthLedger()
+
+    private val parkedRuntimeHealthEffects = ParkedRuntimeHealthEffects(
+        scope = viewModelScope,
+        ledger = runtimeHealthLedger,
+        leaseStateEvents = sshLeaseManager.stateEvents,
+        onDeath = ::onParkedRuntimeDeath,
+    )
+
     /**
      * Issue #1533: cross-episode amortization for the SAME-IDENTITY network-restore
      * redial (the "V2" busy-session flap) — the #928/#1522 debounce shape, distinct
@@ -5587,6 +5591,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=disconnected",
             )
+            parkedRuntimeHealthEffects.onEvicted(cached.key.toHealthKey()) // #1537 unbind
             // Issue #935 R1: contained — closing a stale cached runtime issues
             // `detach-client`/close IO against a dead transport.
             launchContainedTeardown {
@@ -5616,6 +5621,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=health_probe_failed",
             )
+            parkedRuntimeHealthEffects.onEvicted(cached.key.toHealthKey()) // #1537 unbind
             runCatching { cached.client.close() }
             // Issue #935 R1: contained — closing the unhealthy cached runtime +
             // disconnecting its lease is teardown IO against a dead transport.
@@ -5627,6 +5633,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             return false
         }
+        parkedRuntimeHealthEffects.onActivated(cached.key.toHealthKey()) // #1537 activated
         val startedAtMs = SystemClock.elapsedRealtime()
         val milestoneStartedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L } ?: startedAtMs
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
@@ -5797,6 +5804,12 @@ public class TmuxSessionViewModel @Inject constructor(
             remoteRows = remoteRows,
         )
         val evicted = runtimeCache.put(runtime)
+        // Issue #1537 (option b): bind the parked runtime's liveness edges.
+        parkedRuntimeHealthEffects.bindParked(
+            key = runtime.key.toHealthKey(),
+            client = runtime.client,
+            leaseKey = runtime.lease?.key ?: target.toSshLeaseTarget().leaseKey,
+        )
         leaseRef = null
         sessionRef = null
         clientRef = null
@@ -5890,6 +5903,8 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
+        // Issue #1537 (option b): cancel each evicted runtime's parked-health binding.
+        runtimes.forEach { parkedRuntimeHealthEffects.onEvicted(it.key.toHealthKey()) }
         // Issue #935 R1: contained — async eviction of deactivated cached
         // runtimes is teardown IO that may race the transport drop.
         launchContainedTeardown {
@@ -5898,6 +5913,27 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
     }
+
+    // Issue #1537 (option b): parked-runtime death effect — delegates to the
+    // extracted [handleParkedRuntimeDeath] (kept out of the god-object, #1047).
+    private fun onParkedRuntimeDeath(
+        key: RuntimeHealthKey,
+        leaseKey: SshLeaseKey?,
+        cause: RuntimeDeathCause,
+    ) = handleParkedRuntimeDeath(
+        key = key,
+        leaseKey = leaseKey,
+        cause = cause,
+        runtimeCache = runtimeCache,
+        foregroundLeaseKeys = setOfNotNull(
+            activeTarget?.toSshLeaseTarget()?.leaseKey,
+            connectingTarget?.toSshLeaseTarget()?.leaseKey,
+        ),
+        disconnectLease = { key2 ->
+            withContext(NonCancellable) { runCatching { sshLeaseManager.disconnect(key2) } }
+        },
+        launchContained = { block -> launchContainedTeardown { block() } },
+    )
 
     private suspend fun closeCachedRuntimesBounded(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
@@ -6829,6 +6865,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #440: clear any prior failure so the retry decision keys off
         // this attempt only (mirrors [runConnect]).
         lastConnectFailureCause = null
+        // Issue #1537 (option b): consult the parked-health ledger before attach.
+        parkedRuntimeHealthEffects.consumeParkedDeath(target.toHealthKey())?.let { cause ->
+            ReconnectCauseTrail.record(
+                "parked_runtime_health", "switch_consult_dead", cause.name, trigger.logValue,
+                "hostId" to target.hostId,
+            )
+        }
         try {
             val lease = acquireLeaseForTmux(
                 target = target,
@@ -6985,33 +7028,23 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            // Issue #621 / #634 / #636 (Slice 4): the fast-switch reuses the
-            // warm SSH session directly. When that session is silently dead
-            // (`session.isConnected` lies until sshj's 60s keepalive trips),
-            // the `tmux -CC` open / `list-panes` EOFs here. Rather than
-            // surfacing a Disconnected band + manual Reconnect, evict the
-            // poisoned lease and fall back to the full [runConnect] path on a
-            // FRESH transport — INLINE in this same coroutine so the heal is
-            // transparent and never re-enters a failing connect job. The
-            // budget cap keeps a genuinely-dead host from looping forever.
-            if (
-                isStaleChannelSymptom(t) &&
-                staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
-            ) {
-                staleLeaseAutoRecoverAttempts += 1
+            // Issue #1537 (option b) — the silent-TCP-death FALLBACK: the switch
+            // reused a silently-dead warm session (no parked-health edge fired in
+            // the keepalive window), so the attach EOFs here. Route it into the
+            // SINGLE #1328 ladder as a CALM hold (not the old jarring [Connecting]
+            // overlay + cleared panes, not the deleted bespoke counter). The
+            // [AutoReconnect] re-dial cannot re-enter this arm (loop protection).
+            if (isStaleChannelSymptom(t) && !trigger.isReconnectTrigger) {
                 Log.i(
                     ISSUE_145_RECONNECT_TAG,
-                    "tmux-stale-lease-auto-recover fast-switch EOF -> fresh re-dial inline; " +
-                        "attempt=$staleLeaseAutoRecoverAttempts/$STALE_LEASE_AUTO_RECOVER_MAX " +
-                        "${targetLogFields(target)}",
+                    "tmux-stale-lease-fallback fast-switch EOF -> single-ladder re-dial; " +
+                        targetLogFields(target),
                 )
                 ReconnectCauseTrail.record(
                     stage = "stale_lease_auto_recover",
                     outcome = "fast_switch_fresh_redial",
                     cause = "stale_lease_attach_eof",
                     trigger = trigger.logValue,
-                    "attempt" to staleLeaseAutoRecoverAttempts,
-                    "maxAttempts" to STALE_LEASE_AUTO_RECOVER_MAX,
                     "hostId" to target.hostId,
                     "failureClass" to t.javaClass.simpleName,
                 )
@@ -7033,18 +7066,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 connectingTarget = target
                 refreshReconnectAvailability()
-                // Escalate from the keep-frame [Switching] to the full-screen
-                // [Connecting] overlay: we are now doing a real fresh handshake.
-                submitControllerOpen(target)
+                // Calm hold: keep the [Attaching]/[Switching] band (the reveal
+                // machine holds the surface), so the silent-corpse fallback never
+                // flashes the full-screen [Connecting] overlay + cleared panes.
+                submitControllerSwitch(target)
                 setConnectionState(
-                    ConnectionState.Connecting(
+                    ConnectionState.Attaching(
                         target.host,
                         target.port,
                         target.user,
                     ),
                 )
-                _panes.value = emptyList()
-                rebuildUnifiedPanes()
                 // The poisoned pooled lease was disconnected above and the
                 // cached runtimes were dropped, so the pool is empty: an
                 // [AutoReconnect] dial (which does NOT re-run the synchronous
@@ -7302,19 +7334,22 @@ public class TmuxSessionViewModel @Inject constructor(
         // existing auto-reconnect machinery transparently instead of surfacing
         // Failed, so the heal is invisible to the user.
         //
-        // We only do this for the INITIAL user-facing open/switch (the
-        // not-yet-a-reconnect triggers). When the trigger is already a
-        // reconnect trigger, the [scheduleAutoReconnect] loop that invoked us
-        // owns the retry/exhaust decision — re-entering it here would
-        // double-drive the loop. The budget cap ([STALE_LEASE_AUTO_RECOVER_MAX])
-        // ensures a genuinely-dead host (every fresh transport also EOFs) falls
-        // back to the manual Reconnect affordance instead of looping forever.
-        if (shouldTransparentlyRecoverStaleLease(staleChannelSymptom, trigger)) {
-            staleLeaseAutoRecoverAttempts += 1
+        // Only for the INITIAL user-facing open/switch (not-yet-a-reconnect
+        // triggers); a reconnect trigger is owned by the [scheduleAutoReconnect]
+        // loop. Issue #1537 (option b, D22 hard-cut): loop protection is the
+        // SINGLE ladder's own budget, not the deleted bespoke
+        // `staleLeaseAutoRecoverAttempts` seam — the [AutoReconnect] re-dial
+        // cannot re-enter this arm, so a genuinely-dead host falls through to the
+        // honest terminal Disconnected band.
+        if (
+            staleChannelSymptom &&
+            appActive &&
+            autoReconnectDelaysMs.isNotEmpty() &&
+            !trigger.isReconnectTrigger
+        ) {
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
-                "tmux-stale-lease-auto-recover transparent re-dial after stale attach EOF; " +
-                    "attempt=$staleLeaseAutoRecoverAttempts/$STALE_LEASE_AUTO_RECOVER_MAX " +
+                "tmux-stale-lease-fallback transparent re-dial after stale attach EOF; " +
                     "trigger=${trigger.logValue} ${targetLogFields(target)}",
             )
             ReconnectCauseTrail.record(
@@ -7322,8 +7357,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 outcome = "transparent_redial",
                 cause = "stale_lease_attach_eof",
                 trigger = trigger.logValue,
-                "attempt" to staleLeaseAutoRecoverAttempts,
-                "maxAttempts" to STALE_LEASE_AUTO_RECOVER_MAX,
                 "hostId" to target.hostId,
                 "failureClass" to cause.javaClass.simpleName,
             )
@@ -7411,33 +7444,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // the user has since navigated to another session.
         driveRevealTerminalError(target, cause)
     }
-
-    /**
-     * Issue #621 / #634 / #636 (Slice 4): decide whether to transparently
-     * re-dial a fresh SSH transport after an open/switch attach EOF'd on a
-     * silently-dead warm lease, instead of surfacing a Disconnected band.
-     *
-     * Conditions:
-     *  - the failure is a stale-channel symptom (transport alive-but-dead, the
-     *    `failConnectAttempt` caller already evicted the poisoned lease);
-     *  - the app is foregrounded (a backgrounded app must not burn re-dials —
-     *    [scheduleAutoReconnect] would pause anyway, but we avoid even starting);
-     *  - auto-reconnect is enabled (the user hasn't disabled it / a test hasn't
-     *    cleared the delays);
-     *  - the trigger is an INITIAL open/switch, not already a reconnect trigger
-     *    (those are owned by the in-flight [scheduleAutoReconnect] loop);
-     *  - the per-chain budget has not been exhausted, so a genuinely-dead host
-     *    cannot loop forever.
-     */
-    private fun shouldTransparentlyRecoverStaleLease(
-        staleChannelSymptom: Boolean,
-        trigger: TmuxConnectTrigger,
-    ): Boolean =
-        staleChannelSymptom &&
-            appActive &&
-            autoReconnectDelaysMs.isNotEmpty() &&
-            !trigger.isReconnectTrigger &&
-            staleLeaseAutoRecoverAttempts < STALE_LEASE_AUTO_RECOVER_MAX
 
     /**
      * Issue #1185: decide whether to transparently re-dial the SELECTED session's

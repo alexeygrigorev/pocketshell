@@ -48,7 +48,11 @@ internal suspend fun sendRawInputBytes(
     // Issue #1460: the `-H` raw-byte injection rides the interactive send exec
     // lane, not the shared `-CC` channel, so it does not head-of-line-block
     // behind a live agent `%output` burst.
+    // Issue #1586 (H1a): surface a tmux `%error` (dead/closed pane) as a real
+    // failure instead of swallowing it, so a control-byte / terminal-response
+    // send to a dead pane fails visibly (agent-lane parity).
     client.sendKeysViaExec("send-keys -H -t $paneId $hex")
+        .throwIfTmuxError("send raw bytes to pane $paneId")
 }
 
 /**

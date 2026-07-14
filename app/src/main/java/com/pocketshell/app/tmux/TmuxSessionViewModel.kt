@@ -15329,24 +15329,26 @@ public class TmuxSessionViewModel @Inject constructor(
         return writeInputToPaneResult(client, paneId, bytes)
     }
 
+    // Issue #1586: RawBytes lane rides the agent lane's verify-before-resend ledger (H1b).
     private suspend fun writeInputToPaneResult(
         client: TmuxClient,
         paneId: String,
         bytes: ByteArray,
-    ): Result<Unit> = runCatching {
-        sendInputBytesToPane(client, paneId, bytes)
-        // Issue #1153 (class coverage — shell pane): the agent send path
-        // ([sendAgentPayloadToPaneResult]) already schedules the post-send overpaint heal, but
-        // the shell `RawBytes` route had NONE. A MULTI-LINE paste into a full-screen shell TUI
-        // (vim/htop/less/…) can trigger the same clear+redraw overpaint that leaves the pane
-        // half-black on a live transport. Schedule the same bounded, capture-diff-gated heal
-        // ONLY for a multi-line payload — a single keystroke never overpaints the whole
-        // viewport, so per-keystroke input pays nothing. Issue #1353 R4: via the shared
-        // reconcile-event entry, same as the agent send path.
-        if (BracketedPaste.containsLineBreak(bytes)) {
-            requestReconcile(client, paneId, ReconcileReason.Send)
-        }
-    }
+    ): Result<Unit> = deliverRawInputWithGuard(
+        ledger = outboundDeliveryLedger,
+        client = client,
+        paneId = paneId,
+        bytes = bytes,
+        localRenderText = paneRows[paneId]?.terminalState?.visibleScreenTextSnapshot().orEmpty(),
+        send = { c, p, b -> sendInputBytesToPane(c, p, b) },
+        // Issue #1586 (H1b): AlreadyLanded -> Enter-only submit (agent-lane parity).
+        submitEnter = { c, p ->
+            sendNamedKeyToPane(c, p, "Enter").throwIfTmuxError("submit typed shell input")
+        },
+        afterDelivered = { c, p, b ->
+            if (BracketedPaste.containsLineBreak(b)) requestReconcile(c, p, ReconcileReason.Send)
+        },
+    )
 
     internal fun sendControlInputToPane(
         paneId: String,
@@ -15611,16 +15613,17 @@ public class TmuxSessionViewModel @Inject constructor(
             sendBracketedPaste(client, paneId, bytes)
             return
         }
+        // Issue #1586 (H1a): a tmux `%error` (dead pane) must FAIL the send, not false-succeed.
         for (token in inputTokens(bytes)) {
             when (token) {
-                is TmuxInputToken.Literal -> {
+                is TmuxInputToken.Literal ->
                     if (token.text.isNotEmpty()) {
                         sendLiteralTextKeys(client, paneId, token.text)
+                            .throwIfTmuxError("type into $paneId")
                     }
-                }
-                is TmuxInputToken.NamedKey -> {
+                is TmuxInputToken.NamedKey ->
                     sendNamedKeyToPane(client, paneId, token.name)
-                }
+                        .throwIfTmuxError("send ${token.name} to $paneId")
             }
         }
     }

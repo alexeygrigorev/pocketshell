@@ -104,6 +104,94 @@ internal suspend fun verifyBeforeAgentResend(
     return outcome
 }
 
+/**
+ * Issue #1586 — RawBytes (shell/composer) lane exactly-once send. The agent-payload
+ * lane ([TmuxSessionViewModel.sendAgentPayloadToPaneResult]) got the #1577
+ * verify-before-resend ledger + tmux-error check, but the composer RawBytes lane
+ * ([TmuxSessionViewModel.writeInputToPaneResult]) had NEITHER — two HIGH holes:
+ *
+ *  - H1a false-success: [send] must surface a tmux `%error` (dead/closed pane) as a
+ *    real failure ([throwIfTmuxError] inside [send]), so a row is not marked
+ *    Delivered with nothing delivered. That check lives in the caller's byte-send
+ *    ([TmuxSessionViewModel.sendInputBytesToPane]); this wrapper just propagates it.
+ *  - H1b blind duplicate: an ambiguous failure (bytes may have landed, exec result
+ *    lost) followed by the composer auto-retry re-ran the shell command TWICE. This
+ *    routes the SAME baseline-aware [ledger] the agent lane uses (via
+ *    [verifyBeforeAgentResend] / [recordWireAttemptWithBaseline]) so a retry PROBES
+ *    for the already-landed payload instead of blind-re-sending.
+ *
+ * On `AlreadyLanded` the payload TEXT landed server-side, but the ambiguous cut may
+ * have dropped its TERMINATING submit — the #1586 H1b case is exactly "literal lands,
+ * submit-Enter throws", which leaves the shell command TYPED-BUT-NEVER-RUN (the probe
+ * needle cannot tell "typed on the prompt" from "already ran"). So — mirroring the
+ * agent lane ([TmuxSessionViewModel.sendAgentPayloadToPaneResult], which submits
+ * Enter-only on `AlreadyLanded`) — complete the delivery with an Enter-ONLY submit
+ * ([submitEnter]), NEVER re-sending the payload text (no duplicate). The submit is
+ * issued ONLY when the original send actually carried one (a trailing CR/LF the
+ * [payload] key trimmed off); a text-only / non-submit RawBytes send (partial typed
+ * input, a caret-position send) has nothing to complete, so no spurious Enter is
+ * injected. Then clear the ledger and run [afterDelivered] (the post-send reconcile
+ * heal). `Unknown` keeps the row queued WITHOUT resending (never "unknown ⇒ resend").
+ * `NotLanded` / no-prior-attempt falls through to the full send.
+ *
+ * The ledger is keyed on the raw byte payload; a fire-and-forget keystroke send with
+ * no matching durable queue row records only a volatile attempt that is cleared on
+ * success (net zero — no durable pollution), exactly like the agent lane's transient
+ * rows. The needle-count baseline (#1577) keeps short payloads safe from a
+ * false-positive `AlreadyLanded` drop.
+ */
+internal suspend fun deliverRawInputWithGuard(
+    ledger: OutboundDeliveryLedger,
+    client: TmuxClient,
+    paneId: String,
+    bytes: ByteArray,
+    localRenderText: String,
+    send: suspend (TmuxClient, String, ByteArray) -> Unit,
+    submitEnter: suspend (TmuxClient, String) -> Unit,
+    afterDelivered: suspend (TmuxClient, String, ByteArray) -> Unit,
+): Result<Unit> {
+    // Key the ledger on the payload WITHOUT its trailing submit CR/LF: the composer
+    // enqueues the durable row's `cleanText` without the CR it appends on the wire,
+    // so trimming aligns the (pane, payload) key with the durable `wireAttempted`
+    // row — the same VM-clear/back-nav durability the agent lane gets (#1541). The
+    // full [bytes] (CR included) are still what [send] pushes. Pure control/Enter
+    // input trims to empty — nothing meaningful to probe/dedupe, so it does a plain
+    // error-checked send (H1a still applies via [send]).
+    val fullText = String(bytes, Charsets.UTF_8)
+    val payload = fullText.trimEnd('\r', '\n')
+    if (payload.isEmpty()) {
+        return runCatching {
+            send(client, paneId, bytes)
+            afterDelivered(client, paneId, bytes)
+        }
+    }
+    when (verifyBeforeAgentResend(ledger, client, paneId, payload)) {
+        DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
+            // Issue #1586 (H1b): the payload TEXT landed but the ambiguous cut may have
+            // dropped its terminating submit — do NOT drop the delivery silently.
+            // Mirror the agent lane: submit Enter-ONLY (never the payload text, so no
+            // duplicate), and only when the original send actually carried a submit (a
+            // trailing CR/LF); a non-submit send has nothing to complete, so no spurious
+            // Enter is injected.
+            if (fullText.length > payload.length) {
+                submitEnter(client, paneId)
+            }
+            ledger.clear(paneId, payload)
+            afterDelivered(client, paneId, bytes)
+        }
+        DeliveryProbeOutcome.Unknown -> return Result.failure(
+            IllegalStateException("Prior shell send outcome unknown; kept queued without resend."),
+        )
+        DeliveryProbeOutcome.NotLanded, null -> Unit
+    }
+    return runCatching {
+        ledger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderText)
+        send(client, paneId, bytes)
+        ledger.clear(paneId, payload)
+        afterDelivered(client, paneId, bytes)
+    }
+}
+
 /** Bounded round-trip for a verify-before-resend `capture-pane` probe. */
 internal const val OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS: Long = 4_000L
 

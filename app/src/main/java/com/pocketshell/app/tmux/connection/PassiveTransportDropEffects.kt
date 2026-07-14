@@ -53,12 +53,20 @@ enum class PassiveDropArm {
  * selector (the #685 predicate-order trap — keep the EXACT inline precedence so behavior is
  * unchanged):
  *
- *   1. [isExplicitDetach] (ExplicitDetach reason OR `detach_or_replace` intent) -> [PassiveDropArm.Ignore]
+ *   1. [isSelfInflictedClose] (ExplicitDetach/ExplicitClose reason OR `detach_or_replace` intent) -> [PassiveDropArm.Ignore]
  *   2. NOT [isCurrentClient] (the #635 client-identity guard — a stale old-client close)   -> [PassiveDropArm.Ignore]
  *   3. [hasTarget] AND NOT [screenStartedForCleared]:
  *        - [navigatingToDifferentSession] -> [PassiveDropArm.SkipInAppNavigation]
  *        - else                           -> [PassiveDropArm.PauseUntilForeground]
  *   4. else                                                                                  -> [PassiveDropArm.SilentReattachWithinGrace]
+ *
+ * Issue #1568 (P0-5): [isSelfInflictedClose] now also covers a `TmuxDisconnectReason.ExplicitClose`
+ * — a self-inflicted `TmuxClient.close()`, NOT a passive transport loss. Before this, only
+ * `ExplicitDetach`/`detach_or_replace` were ignored, so a freshly-dialed client that our OWN
+ * code explicitly closed re-armed recovery (`SilentReattachWithinGrace`) and drove the next
+ * dial → the `explicit_close → passive_disconnect` reconnect STORM (#1562: dial→close→re-arm→
+ * dial, ~6s cadence). A self-inflicted close must NEVER re-arm; only genuine passive drops
+ * (reader EOF/exception, command timeout, server exit) do.
  *
  * Issue #895 (#766 down-payment): STATUS-AGNOSTIC. There is intentionally NO
  * `inlineConnectionStatus !is Connected -> Ignore` gate — the old status gate swallowed a
@@ -70,13 +78,13 @@ enum class PassiveDropArm {
  * real transport loss and must drive recovery.
  */
 fun selectPassiveDropArm(
-    isExplicitDetach: Boolean,
+    isSelfInflictedClose: Boolean,
     isCurrentClient: Boolean,
     hasTarget: Boolean,
     screenStartedForCleared: Boolean,
     navigatingToDifferentSession: Boolean,
 ): PassiveDropArm = when {
-    isExplicitDetach -> PassiveDropArm.Ignore
+    isSelfInflictedClose -> PassiveDropArm.Ignore
     !isCurrentClient -> PassiveDropArm.Ignore
     hasTarget && !screenStartedForCleared ->
         if (navigatingToDifferentSession) {
@@ -87,6 +95,29 @@ fun selectPassiveDropArm(
 
     else -> PassiveDropArm.SilentReattachWithinGrace
 }
+
+/**
+ * Issue #1568 (P0-2): the PURE within-grace silent-reattach RUNG selector. When a warm SSH
+ * lease is held AND the SSH transport is VOUCHED alive (the `-CC` control channel died but
+ * the transport itself is healthy — `isConnected && !isCloseInitiated`), recover the channel
+ * over the LIVE transport (rung 2, [TmuxSessionViewModel.silentlyReattachAfterPassiveDisconnect]
+ * — one channel-open + tmux attach, no TCP/KEX/auth/lease churn) FIRST, instead of the
+ * lease-EVICTING fresh dial ([TmuxSessionViewModel.silentlyReconnectTransportAfterPassiveDisconnect],
+ * whose first act is `sshLeaseManager.disconnect(leaseKey)` — it shoots the shared per-host
+ * transport that the conversation loader / upload sidecar also ride, the #1562 amplification).
+ *
+ * `preferFreshTransport` is TRUE (dial fresh first) ONLY when a warm lease is held AND the
+ * transport vouch FAILS — i.e. a genuine transport death (sshj flips `isConnected` false; the
+ * #1222 `isCloseInitiated` covers the ~2s async-close staleness window). That is exactly the
+ * old `leaseRef != null` behavior for a dead transport, so a real death still escalates to the
+ * fresh dial and is never masked. With no warm lease the warm reattach is the cheap path
+ * regardless (fresh-dial fallback runs if the warm session is itself gone — unchanged). The
+ * vouch precedents are #979 (fatal-timeout ride-through) and #1533 (restore-probe vouch).
+ */
+fun preferFreshTransportForPassiveReattach(
+    warmLeaseHeld: Boolean,
+    transportVouchedAlive: Boolean,
+): Boolean = warmLeaseHeld && !transportVouchedAlive
 
 /**
  * The connection-core passive-transport-drop authority: the SINGLE owner of the passive
@@ -101,7 +132,7 @@ fun selectPassiveDropArm(
  * the DECISION; the VM holds the state + the per-arm recovery IO.
  */
 class PassiveTransportDropEffects(
-    private val isExplicitDetach: (TmuxClient) -> Boolean,
+    private val isSelfInflictedClose: (TmuxClient) -> Boolean,
     private val isCurrentClient: (TmuxClient) -> Boolean,
     private val hasTarget: () -> Boolean,
     private val screenStartedForCleared: () -> Boolean,
@@ -114,7 +145,7 @@ class PassiveTransportDropEffects(
      */
     fun classify(client: TmuxClient): PassiveDropArm =
         selectPassiveDropArm(
-            isExplicitDetach = isExplicitDetach(client),
+            isSelfInflictedClose = isSelfInflictedClose(client),
             isCurrentClient = isCurrentClient(client),
             hasTarget = hasTarget(),
             screenStartedForCleared = screenStartedForCleared(),

@@ -84,6 +84,7 @@ import com.pocketshell.app.tmux.connection.recordNetworkLossBandSuppressed
 import com.pocketshell.app.tmux.connection.recordNetworkLossHold
 import com.pocketshell.app.tmux.connection.PassiveDropArm
 import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
+import com.pocketshell.app.tmux.connection.preferFreshTransportForPassiveReattach
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
@@ -1142,6 +1143,14 @@ public class TmuxSessionViewModel @Inject constructor(
         return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
             .getOrDefault(false)
     }
+
+    /**
+     * Issue #1568 (P0-2): vouch the SSH transport alive (connected + async-close not initiated;
+     * #1222) before the ladder evicts the warm lease. A real death fails the vouch so the ladder
+     * still escalates. Feeds [preferFreshTransportForPassiveReattach].
+     */
+    private fun transportVouchedAlive(): Boolean =
+        sessionRef?.let { it.isConnected && !it.isCloseInitiated } == true
 
     /**
      * Issue #964 test seam: pin the keepalive-alive verdict the probe defers to.
@@ -3424,9 +3433,13 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val passiveTransportDropEffects: PassiveTransportDropEffects =
         PassiveTransportDropEffects(
-            isExplicitDetach = { client ->
+            isSelfInflictedClose = { client ->
+                // Issue #1568 (P0-5): a self-inflicted close (ExplicitDetach/ExplicitClose/
+                // `detach_or_replace`) is not a passive loss and must never re-arm recovery —
+                // ignoring our own ExplicitClose breaks the #1562 dial→close→re-arm→dial storm.
                 val disconnectEvent = client.disconnectEvent.value
                 disconnectEvent?.reason == TmuxDisconnectReason.ExplicitDetach ||
+                    disconnectEvent?.reason == TmuxDisconnectReason.ExplicitClose ||
                     disconnectEvent?.intent == "detach_or_replace"
             },
             isCurrentClient = { client -> clientRef === client },
@@ -4189,16 +4202,25 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
         // over a fresh lease; a teardown-race throw must not crash the process.
         val healJob = launchContainedTeardown {
-            // Re-open a fresh `-CC` control client over a freshly-acquired lease and
-            // reseed — SILENTLY (the primitive never raises the Connecting overlay or a
-            // band; on success it sets [ConnectionStatus.Live] and reseeds every visible
-            // pane). `clientRef` may be null (the passive path unregistered it); the
-            // primitive's staleClient is nullable and used only for the close()/restore.
-            val recovered = silentlyReconnectTransportAfterPassiveDisconnect(
-                staleClient = clientRef,
-                target = target,
-                timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
-            )
+            // Issue #1568 (P0-2): channel-dead-but-transport-warm MIDDLE rung — on a vouched-alive
+            // transport recover the `-CC` channel over the LIVE transport first (no lease
+            // eviction), else fall through to the lease-evicting fresh dial (a real death fails
+            // the vouch, so it still escalates). `clientRef` may be null; the fresh dial is null-safe.
+            val staleClient = clientRef
+            val recovered =
+                (
+                    transportVouchedAlive() && staleClient != null &&
+                        silentlyReattachAfterPassiveDisconnect(
+                            staleClient = staleClient,
+                            target = target,
+                            timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                        )
+                ) ||
+                    silentlyReconnectTransportAfterPassiveDisconnect(
+                        staleClient = clientRef,
+                        target = target,
+                        timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                    )
             if (!recovered) {
                 // The within-grace silent heal could not re-open the channel in time.
                 // Fall back to the normal auto-reconnect ladder — still SILENT (no manual
@@ -8081,20 +8103,18 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
     ): Boolean {
         if (passiveDisconnectGraceMs <= 0L) return false
-        val preferFreshTransport = leaseRef != null
-        // EPIC #792 #833: count fresh-transport reconnect attempts instead of a
-        // one-shot latch. A SUSTAINED clean outage fails the first fresh-transport
-        // attempt while the link is down, but the loop must keep RE-DIALLING a fresh
-        // transport across the bounded grace window so the SAME session auto-recovers
-        // the moment the link returns — WITHOUT the switch-session dance. The old
-        // `transportReattachTried` latch tried the fresh transport exactly once, and
-        // because a failed transport reconnect nulls `sessionRef`, every later
-        // iteration could only call the warm reattach (which can no longer succeed) —
-        // so the loop spun uselessly until the 60s grace elapsed, leaving the session
-        // wedged. We bound the re-dials with the existing 60s grace `withTimeoutOrNull`
-        // plus the per-attempt timeout + 250ms retry spacing (no hot loop / battery
-        // drain), and never short-circuit a HEALTHY warm reattach (the #635/#553
-        // within-grace warm path still runs first when no fresh transport is preferred).
+        // Issue #1568 (P0-2): prefer the lease-EVICTING fresh dial ONLY when a warm lease is held
+        // AND the transport is not vouched alive; a vouched-alive `-CC` death recovers over the
+        // LIVE transport so a channel hiccup never costs the shared per-host lease.
+        val preferFreshTransport = preferFreshTransportForPassiveReattach(
+            warmLeaseHeld = leaseRef != null,
+            transportVouchedAlive = transportVouchedAlive(),
+        )
+        // EPIC #792 #833: count fresh-transport re-dials (not a one-shot latch) so a SUSTAINED
+        // clean outage keeps RE-DIALLING a fresh transport across the bounded grace window and
+        // the SAME session auto-recovers the moment the link returns — no switch dance. Bounded
+        // by the 60s grace `withTimeoutOrNull` + per-attempt timeout + 250ms retry spacing (no
+        // hot loop); never short-circuits a HEALTHY warm reattach (#635/#553).
         var transportReattachAttempts = 0
         recordSilentReattachStart(
             target = target,
@@ -8115,12 +8135,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (currentClient !== staleClient && currentClient?.disconnected?.value != true) {
                     return@withTimeoutOrNull true
                 }
-                // EPIC #792 #833: when a fresh transport is preferred, RE-DIAL it on
-                // EVERY iteration (not once) so a sustained clean outage that fails the
-                // first attempt keeps escalating into a retrying ladder — the SAME
-                // session recovers as soon as the link returns, with no switch dance.
-                // The grace `withTimeoutOrNull` + per-attempt timeout + 250ms spacing
-                // bound the re-dials.
+                // EPIC #792 #833: when a fresh transport is preferred, RE-DIAL it on EVERY
+                // iteration (not once) so a sustained clean outage keeps escalating into a
+                // retrying ladder — the SAME session recovers when the link returns, no switch
+                // dance. Bounded by the grace `withTimeoutOrNull` + per-attempt timeout + spacing.
                 if (preferFreshTransport) {
                     transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
@@ -8140,11 +8158,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 ) {
                     return@withTimeoutOrNull true
                 }
-                // No warm lease to prefer (preferFreshTransport=false): the warm
-                // reattach above is the cheap within-grace path; if it can't recover
-                // (the warm SSH session itself is gone) escalate to a fresh transport,
-                // and keep RE-DIALLING that on every later iteration for the same
-                // sustained-outage resilience as the preferred-transport branch.
+                // No fresh transport preferred: the warm reattach above is the cheap path; if it
+                // can't recover (the warm SSH session itself is gone) escalate to a fresh
+                // transport and keep re-dialling it for the same sustained-outage resilience.
                 if (!preferFreshTransport) {
                     transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
@@ -13797,6 +13813,13 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun markActiveLeaseWarmForTest() {
         val target = activeTarget ?: connectingTarget ?: return
         liveLeaseKeys.add(target.toSshLeaseTarget().leaseKey)
+    }
+
+    /** Issue #1568 test seam: set [leaseRef] warm so a proof drives the `warmLeaseHeld` rung. */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun setActiveLeaseRefWarmForTest() {
+        val target = activeTarget ?: connectingTarget ?: return
+        leaseRef = sshLeaseManager.acquire(target.toSshLeaseTarget()).getOrNull()
     }
 
     /**

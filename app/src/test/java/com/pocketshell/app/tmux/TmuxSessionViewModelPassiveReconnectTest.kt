@@ -1358,6 +1358,277 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
     }
 
 
+    // ------------------------------------------------------------------
+    // Issue #1568 — the #1562 reconnect STORM, at the app layer.
+    //  P0-2: a -CC reader read_failure must NOT evict the warm lease + dial a
+    //        fresh transport when the transport is VOUCHED ALIVE — recover the
+    //        channel over the LIVE transport instead (no self-storm).
+    //  P0-5: an ExplicitClose (self-inflicted TmuxClient.close()) must NOT re-arm
+    //        recovery — that is the dial->close->re-arm->dial loop.
+    // The class-coverage of the pure RUNG/Ignore selectors lives in the sibling
+    // connection.PassiveTransportDropEffectsTest; these are the real-path VM proofs.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun issue1568_readerFailureOverVouchedAliveTransport_recoversOverLiveTransport_noLeaseEviction() =
+        runTest(scheduler) {
+            // P0-2 red->green (recover-not-evict). A -CC reader read_failure (ReaderException)
+            // while the SSH transport is VOUCHED ALIVE (isConnected && !isCloseInitiated) must
+            // recover the channel over the LIVE transport. BASE: preferFreshTransport =
+            // leaseRef != null = true -> the grace loop dials a FRESH lease-evicting transport
+            // FIRST (connectCount 1 -> 2, warm session closed) — the seq-66866 self-storm.
+            // GREEN: the vouch flips preferFreshTransport false -> warm channel-only reattach
+            // over the SAME live session (NO fresh dial, NO lease eviction).
+            TMUX_CONNECT_ATTEMPTS.set(1)
+            val registry = ActiveTmuxClients()
+            val warmSession = FakeSshSession() // isConnected=true, isCloseInitiated=false -> vouched alive
+            val freshSession = FakeSshSession() // only reached if the buggy fresh dial runs
+            val connector = QueueLeaseConnector(warmSession, freshSession)
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+            var factoryCalls = 0
+            val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                factoryCalls += 1
+                assertEquals("work", sessionName)
+                assertSame(
+                    "the vouched-alive recovery must reuse the LIVE warm transport, not a fresh dial",
+                    warmSession,
+                    session,
+                )
+                replacementClient
+            }
+            val deadClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = deadClient,
+                session = warmSession,
+            )
+            // Hold a warm lease — the exact #1562 precondition (a warm per-host transport).
+            vm.setActiveLeaseRefWarmForTest()
+            runCurrent()
+            assertEquals("the warm lease is dialed exactly once before the drop", 1, connector.connectCount)
+
+            deadClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderException,
+                    source = "read_failure",
+                    intent = "unknown",
+                ),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "vouched-alive -CC death must recover over the LIVE transport — NO fresh lease " +
+                    "dial. connectCount==2 means the lease-evicting fresh dial ran (the #1562 storm).",
+                1,
+                connector.connectCount,
+            )
+            assertFalse(
+                "the warm lease/transport must NOT be evicted on a channel-only recovery " +
+                    "(evicting it is what severs the conversation loader / upload sidecar — #1562)",
+                warmSession.closed,
+            )
+            assertSame(replacementClient, registry.clients.value[7L]?.client)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertEquals("work", vm.activeSessionNameForTest())
+            assertTrue(
+                "the channel-only reattach over the SAME live session probes server liveness",
+                vm.lastProbeServerLivenessForTest(),
+            )
+            assertEquals("exactly one recovery client is created (the warm reattach)", 1, factoryCalls)
+        }
+
+    @Test
+    fun issue1568_readerFailureOverDeadTransport_escalatesToFreshDial_notMasked() = runTest(scheduler) {
+        // P0-2 non-masking (G2): a GENUINE transport death (sshj flips isConnected false) must
+        // still evict the lease and dial a FRESH transport — the vouch fails, so the fix never
+        // masks a real death. Identical behavior on base and fix (the guard that the vouch
+        // degrades correctly).
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val leaseSession = FakeSshSession() // the warm-lease dial (connectCount 1)
+        val freshSession = FakeSshSession() // the escalation fresh dial (connectCount 2)
+        val connector = QueueLeaseConnector(leaseSession, freshSession)
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            session = FakeSshSession(isConnectedValue = false), // DEAD transport -> vouch fails
+        )
+        vm.setActiveLeaseRefWarmForTest()
+        runCurrent()
+        assertEquals(1, connector.connectCount)
+
+        deadClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderException,
+                source = "read_failure",
+                intent = "unknown",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "a genuine transport death must escalate to a FRESH dial — the vouch must NOT mask it",
+            2,
+            connector.connectCount,
+        )
+        assertSame(replacementClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun issue1568_readerFailureWhileCloseInitiated_escalatesToFreshDial_notMasked() = runTest(scheduler) {
+        // P0-2 non-masking (G2), the #1222 async-close staleness window: isConnected still LIES
+        // true for ~2s after a close was initiated. The vouch must consult isCloseInitiated and
+        // FAIL here (a vouch that only checked isConnected would recover over the doomed session
+        // and mask the death — connectCount would stay 1). With the fix the vouch fails ->
+        // fresh dial -> connectCount 2.
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val leaseSession = FakeSshSession()
+        val freshSession = FakeSshSession()
+        val connector = QueueLeaseConnector(leaseSession, freshSession)
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+        val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            replacementClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            // isConnected LIES true, but the close is already initiated -> vouch must fail.
+            session = FakeSshSession(isConnectedValue = true, isCloseInitiatedValue = true),
+        )
+        vm.setActiveLeaseRefWarmForTest()
+        runCurrent()
+        assertEquals(1, connector.connectCount)
+
+        deadClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderException,
+                source = "read_failure",
+                intent = "unknown",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "a close-initiated (doomed) transport must escalate to a FRESH dial — the vouch must " +
+                "consult isCloseInitiated, not just isConnected (which lies true in the #1222 window)",
+            2,
+            connector.connectCount,
+        )
+        assertSame(replacementClient, registry.clients.value[7L]?.client)
+    }
+
+    @Test
+    fun issue1568_explicitCloseOnCurrentClientDoesNotRearmRecovery() = runTest(scheduler) {
+        // P0-5 red->green (no re-arm). A self-inflicted ExplicitClose on the CURRENT client must
+        // NOT re-arm recovery. BASE: ExplicitClose is not ignored -> SilentReattachWithinGrace
+        // -> a recovery client is dialed (the dial->close->re-arm->dial STORM). GREEN: it is
+        // classified Ignore -> no recovery client, no dial, and a passive_disconnect_ignored
+        // diagnostic is recorded.
+        val diagnostics = installRecordingDiagnosticSink()
+        TMUX_CONNECT_ATTEMPTS.set(1)
+        val registry = ActiveTmuxClients()
+        val warmSession = FakeSshSession()
+        val connector = QueueLeaseConnector(warmSession, FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 5_000L, silentReattachTimeoutMs = 5_000L)
+        var factoryCalls = 0
+        vm.setTmuxClientFactoryForTest { _, _, _ ->
+            factoryCalls += 1
+            FakeTmuxClient().withSinglePane("work", "%1")
+        }
+        val currentClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = currentClient,
+            session = warmSession,
+        )
+        vm.setActiveLeaseRefWarmForTest()
+        runCurrent()
+        val connectsBefore = connector.connectCount
+        try {
+            currentClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ExplicitClose,
+                    source = "local_close",
+                    intent = "explicit_close",
+                ),
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                "a self-inflicted ExplicitClose must NOT dial a recovery transport (that is the " +
+                    "#1562 dial->close->re-arm->dial storm)",
+                connectsBefore,
+                connector.connectCount,
+            )
+            assertEquals(
+                "a self-inflicted ExplicitClose must NOT create a recovery client (no re-arm)",
+                0,
+                factoryCalls,
+            )
+            assertTrue(
+                "an ExplicitClose of the current client must classify Ignore (no re-arm)",
+                diagnostics.eventsNamed("passive_disconnect_ignored").any {
+                    it.fields["disconnectReason"] == TmuxDisconnectReason.ExplicitClose.logValue
+                },
+            )
+        } finally {
+            diagnostics.close()
+        }
+    }
+
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {
@@ -1441,6 +1712,9 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
 
     private class FakeSshSession(
         private val isConnectedValue: Boolean = true,
+        // Issue #1568 (P0-2): the #1222 async-close staleness window — `isConnected` may still
+        // lie true while a close has already been initiated. The transport vouch must fail here.
+        private val isCloseInitiatedValue: Boolean = false,
     ) : SshSession {
         @Volatile
         var closed: Boolean = false
@@ -1450,6 +1724,9 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
 
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
+
+        override val isCloseInitiated: Boolean
+            get() = isCloseInitiatedValue
 
         override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean =
             transportProvenAlive && isConnected

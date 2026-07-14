@@ -44,7 +44,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.Ignore,
             selectPassiveDropArm(
-                isExplicitDetach = true,
+                isSelfInflictedClose = true,
                 isCurrentClient = true,
                 hasTarget = true,
                 screenStartedForCleared = false,
@@ -60,7 +60,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.Ignore,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = false,
                 hasTarget = true,
                 screenStartedForCleared = false,
@@ -76,7 +76,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.SkipInAppNavigation,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = true,
                 hasTarget = true,
                 screenStartedForCleared = false,
@@ -90,7 +90,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.PauseUntilForeground,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = true,
                 hasTarget = true,
                 screenStartedForCleared = false,
@@ -104,7 +104,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.SilentReattachWithinGrace,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = true,
                 hasTarget = false,
                 screenStartedForCleared = false,
@@ -120,7 +120,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.SilentReattachWithinGrace,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = true,
                 hasTarget = true,
                 screenStartedForCleared = true,
@@ -137,7 +137,7 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.Ignore,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = false,
                 hasTarget = true,
                 screenStartedForCleared = false,
@@ -154,11 +154,63 @@ class PassiveTransportDropEffectsTest {
         assertEquals(
             PassiveDropArm.SilentReattachWithinGrace,
             selectPassiveDropArm(
-                isExplicitDetach = false,
+                isSelfInflictedClose = false,
                 isCurrentClient = true,
                 hasTarget = false,
                 screenStartedForCleared = true,
                 navigatingToDifferentSession = false,
+            ),
+        )
+    }
+
+    // ---- Issue #1568 (P0-2): the within-grace silent-reattach RUNG selector -------------
+    // Class coverage (G2): warm-lease × transport-vouch combinations. `preferFreshTransport`
+    // (dial the lease-EVICTING fresh transport FIRST) must be TRUE only when a warm lease is
+    // held AND the transport vouch FAILS (a genuine transport death) — a vouched-alive channel
+    // death recovers over the LIVE transport (rung 2) so a `-CC` hiccup never costs the lease.
+
+    @Test
+    fun preferFreshTransport_warmLease_transportVouchedAlive_recoversOverLiveTransport() {
+        // THE #1568 load-bearing fixture (channel dead, transport warm): do NOT prefer the
+        // lease-evicting fresh dial — recover the channel over the live transport instead.
+        assertEquals(
+            false,
+            preferFreshTransportForPassiveReattach(
+                warmLeaseHeld = true,
+                transportVouchedAlive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun preferFreshTransport_warmLease_transportDead_escalatesToFreshDial() {
+        // Non-masking: a genuine transport death (vouch FAILS) with a warm lease still prefers
+        // the fresh dial — exactly the old `leaseRef != null` behavior for a dead transport.
+        assertEquals(
+            true,
+            preferFreshTransportForPassiveReattach(
+                warmLeaseHeld = true,
+                transportVouchedAlive = false,
+            ),
+        )
+    }
+
+    @Test
+    fun preferFreshTransport_noWarmLease_neverPrefersFreshDial() {
+        // No warm lease to prefer: the warm reattach is the cheap path (the fresh-dial fallback
+        // still runs later if the warm session is itself gone) — never prefer fresh first.
+        assertEquals(
+            false,
+            preferFreshTransportForPassiveReattach(
+                warmLeaseHeld = false,
+                transportVouchedAlive = true,
+            ),
+        )
+        assertEquals(
+            false,
+            preferFreshTransportForPassiveReattach(
+                warmLeaseHeld = false,
+                transportVouchedAlive = false,
             ),
         )
     }
@@ -168,13 +220,13 @@ class PassiveTransportDropEffectsTest {
     private val client: TmuxClient = FakeTmuxClient()
 
     private fun effects(
-        isExplicitDetach: (TmuxClient) -> Boolean = { false },
+        isSelfInflictedClose: (TmuxClient) -> Boolean = { false },
         isCurrentClient: (TmuxClient) -> Boolean = { true },
         hasTarget: () -> Boolean = { true },
         screenStartedForCleared: () -> Boolean = { false },
         navigatingToDifferentSession: () -> Boolean = { false },
     ) = PassiveTransportDropEffects(
-        isExplicitDetach = isExplicitDetach,
+        isSelfInflictedClose = isSelfInflictedClose,
         isCurrentClient = isCurrentClient,
         hasTarget = hasTarget,
         screenStartedForCleared = screenStartedForCleared,
@@ -185,7 +237,7 @@ class PassiveTransportDropEffectsTest {
     fun classify_explicitDetach_ignored() {
         assertEquals(
             PassiveDropArm.Ignore,
-            effects(isExplicitDetach = { true }).classify(client),
+            effects(isSelfInflictedClose = { true }).classify(client),
         )
     }
 

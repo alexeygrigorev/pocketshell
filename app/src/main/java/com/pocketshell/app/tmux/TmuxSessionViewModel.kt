@@ -3142,34 +3142,28 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #145: explicit reconnect entry point used by the Compose
-     * "Reconnect" affordance the screen renders when [connectionStatus]
-     * is Failed. Delegates to [connect] with the last known
-     * [activeTarget] (or [connectingTarget] if the failure happened
-     * during the initial connect race). Marked public so tests can
-     * drive the reconnect without going through the screen, and so the
-     * screen's reconnect button has a single named seam to call.
-     *
-     * Returns `false` when there is no known target to reconnect to
-     * (e.g. the ViewModel was never opened). The screen gates the
-     * Reconnect button on [canReconnect] so the user never sees a tap
-     * that silently no-ops; this return value is the secondary defence
-     * for direct programmatic callers.
+     * Issue #145: explicit reconnect seam for the "Reconnect" affordance; routes
+     * through the single [TransportEffects] owner (D22, EPIC #792 Slice C). Issue
+     * #1574: when both live targets were nulled by a terminal generic failure but a
+     * once-opened session is still showing, restore the retained [latestConnectIntent]
+     * (never nulled) as the connecting target so the body re-dials in place, not a
+     * dead-end (#1521). Confined to this explicit tap — the send-wait auto-redial
+     * loop still stops on `no live target`, so a non-retryable failure never loops.
+     * `false` only when nothing was ever opened (or the session is genuinely gone).
      */
     public fun reconnect(): Boolean {
-        if (activeTarget == null && connectingTarget == null) return false
-        // EPIC #792 Slice C: route through the single [TransportEffects] reconnect owner —
-        // the inline direct call is deleted (D22 hard-cut, single reconnect entrypoint).
+        if (activeTarget == null && connectingTarget == null) {
+            connectingTarget = latestConnectIntent?.target ?: return false
+            refreshReconnectAvailability()
+        }
         transportEffects.onManualReconnect()
         return true
     }
 
     /**
-     * EPIC #792 Slice C: the manual / send-triggered reconnect IO BODY — the body of the
-     * former inline `startReconnectForSend`, now invoked ONLY through the single
-     * [TransportEffects] owner (see [transportEffects]). Cancels any in-flight auto-ladder
-     * and re-enters `connect(Reconnect)` (the force-fresh-lease trigger). Returns the
-     * connect [Job] (or null when there is no target) so the send path can join it.
+     * EPIC #792 Slice C: the manual / send-triggered reconnect IO BODY, invoked ONLY
+     * through the single [TransportEffects] owner. Cancels any in-flight auto-ladder,
+     * re-enters `connect(Reconnect)`, returns the connect [Job] (or null, no target).
      */
     private fun startReconnectForSendBody(): Job? {
         pausedAutoReconnect = null
@@ -3226,7 +3220,9 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun refreshReconnectAvailability() {
-        _canReconnect.value = activeTarget != null || connectingTarget != null
+        // Issue #1574: a once-opened session ([latestConnectIntent]) stays reconnectable.
+        _canReconnect.value =
+            activeTarget != null || connectingTarget != null || latestConnectIntent != null
     }
 
     /**
@@ -6631,6 +6627,8 @@ public class TmuxSessionViewModel @Inject constructor(
         activeAttachMilestone = null
         activeTarget = null
         connectingTarget = null
+        // Issue #1574: genuinely gone — clear the retained intent, no resurrection (#666).
+        latestConnectIntent = null
         refreshReconnectAvailability()
         setConnectionState(
             ConnectionState.Unreachable("Session “${target.sessionName}” has ended."),
@@ -6695,6 +6693,8 @@ public class TmuxSessionViewModel @Inject constructor(
         activeAttachMilestone = null
         activeTarget = null
         connectingTarget = null
+        // Issue #1574: server gone — clear the retained intent (#998).
+        latestConnectIntent = null
         refreshReconnectAvailability()
         setConnectionState(
             ConnectionState.Unreachable(

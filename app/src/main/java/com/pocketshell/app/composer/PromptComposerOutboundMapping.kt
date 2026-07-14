@@ -40,6 +40,30 @@ internal fun computeSendKey(
 }
 
 /**
+ * Issue #1588: for each sidecar, the remote path recorded once its send-time upload
+ * COMPLETED ([LocalAttachmentSidecarRef.uploadedRemotePath]), keyed by sidecar id. A
+ * delivery retry skips re-transferring any sidecar present here (resume, not restart).
+ */
+internal fun List<LocalAttachmentSidecarRef>.recordedUploadPaths(): Map<String, String> =
+    mapNotNull { s -> s.uploadedRemotePath?.takeIf { it.isNotBlank() }?.let { s.id to it } }.toMap()
+
+/**
+ * Issue #1588: the full uploaded-ref list in sidecar order — each sidecar takes its
+ * previously-[reused] recorded path or its [fresh]ly-uploaded one — so
+ * [withUploadedSidecars] can replace every provisional row ref.
+ */
+internal fun List<LocalAttachmentSidecarRef>.mergedUploadedRefs(
+    reused: Map<String, String>,
+    fresh: Map<String, String>,
+): List<DurableAttachmentRef> = map { ref ->
+    DurableAttachmentRef(
+        remotePath = reused[ref.id] ?: fresh.getValue(ref.id),
+        displayName = ref.displayName,
+        mimeType = ref.mimeType,
+    )
+}
+
+/**
  * Issue #900: sidecar-backed sends must be able to replace provisional remote
  * upload refs after process death.
  */

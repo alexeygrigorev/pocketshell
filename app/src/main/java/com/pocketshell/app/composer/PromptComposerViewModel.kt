@@ -1667,6 +1667,17 @@ public class PromptComposerViewModel @Inject constructor(
             clearStrandedSendInFlight()
             return false
         }
+        // Issue #1588: a delivery retry used to re-transfer the FULL sidecar every
+        // time (H5, #1562 audit — the #1563 52MB-re-upload pain in the send leg). Gate
+        // the re-upload on the durable per-sidecar upload marker (recorded by
+        // [OutboundAttachmentSidecarStore.markUploaded] ONLY after a full success): a
+        // sidecar with a recorded path resumes to send; one whose upload never
+        // completed re-uploads normally (exactly-once/#1554/#1569 untouched).
+        val alreadyUploadedPaths = sidecars.recordedUploadPaths()
+        val pendingSidecars = sidecars.filter { it.id !in alreadyUploadedPaths }
+        // Whole batch already on the remote — only the DELIVERY leg failed. Skip
+        // straight to send; the row stays Queued (no markUploading transition needed).
+        if (pendingSidecars.isEmpty()) return true
         // Issue #929: `markUploading` lost the claim race (row no longer exactly
         // claimable). Non-delivering exit — clear the strand.
         val uploading = outboundQueueStore.markUploading(id, lastAttemptAtMs = clock())
@@ -1687,8 +1698,9 @@ public class PromptComposerViewModel @Inject constructor(
         // window and surfaces here as a [Result.failure] → requeueForRetry (durable,
         // retryable), so nothing wedges forever.
         watchdogs.disarmSend()
+        // Issue #1588: upload ONLY the not-yet-uploaded sidecars.
         val result = try {
-            uploader(sidecars)
+            uploader(pendingSidecars)
         } catch (cancelled: CancellationException) {
             outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
@@ -1703,19 +1715,18 @@ public class PromptComposerViewModel @Inject constructor(
             clearStrandedSendInFlight()
             return false
         }.filter { it.isNotBlank() }
-        if (uploadedPaths.size != sidecars.size) {
+        if (uploadedPaths.size != pendingSidecars.size) {
             outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
             clearStrandedSendInFlight()
             return false
         }
-        val uploadedSidecarRefs = sidecars.mapIndexed { index, ref ->
-            DurableAttachmentRef(
-                remotePath = uploadedPaths[index],
-                displayName = ref.displayName,
-                mimeType = ref.mimeType,
-            )
-        }
+        // Issue #1588: durably stamp the freshly-uploaded sidecars so a later retry
+        // SKIPS re-transferring them. Recorded only after a full success.
+        val freshPathsBySidecarId = pendingSidecars.zip(uploadedPaths)
+            .associate { (sidecar, path) -> sidecar.id to path }
+        sidecarStore.markUploaded(freshPathsBySidecarId)
+        val uploadedSidecarRefs = sidecars.mergedUploadedRefs(alreadyUploadedPaths, freshPathsBySidecarId)
         val updatedRefs = item.attachments.withUploadedSidecars(sidecars, uploadedSidecarRefs)
         val uploaded = outboundQueueStore.markAttachmentsUploaded(id, updatedRefs)
         if (uploaded?.state != OutboundState.Queued) {

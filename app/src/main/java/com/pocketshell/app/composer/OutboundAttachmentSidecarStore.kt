@@ -69,6 +69,29 @@ class OutboundAttachmentSidecarStore @Inject constructor(
         refsForBlocking(outboundItemId)
     }
 
+    /**
+     * Issue #1588: durably record that the send-time upload for the sidecars in
+     * [uploadedRemotePathById] (keyed by [LocalAttachmentSidecarRef.id]) has COMPLETED,
+     * stamping each ref with its authoritative uploaded remote path. A later delivery
+     * retry reads this back via [refsFor] and SKIPS the re-transfer (resume, not
+     * restart) — the send-leg cure for the #1563 full-re-upload-on-every-retry pain
+     * (H5, #1562 audit). Only set after a fully successful upload, so a failed/partial
+     * upload leaves the marker null and the row re-uploads normally. No-op for empty
+     * input or ids with no matching persisted ref.
+     */
+    suspend fun markUploaded(uploadedRemotePathById: Map<String, String>) = withContext(ioDispatcher) {
+        if (uploadedRemotePathById.isEmpty()) return@withContext
+        val refs = allRefsBlocking()
+        if (refs.none { uploadedRemotePathById.containsKey(it.id) }) return@withContext
+        val updated = refs.map { ref ->
+            uploadedRemotePathById[ref.id]
+                ?.takeIf { it.isNotBlank() }
+                ?.let { path -> ref.copy(uploadedRemotePath = path) }
+                ?: ref
+        }
+        persistAll(updated)
+    }
+
     suspend fun removeOutboundItem(outboundItemId: String) = withContext(ioDispatcher) {
         refsForBlocking(outboundItemId).forEach { ref -> runCatching { File(ref.localPath).delete() } }
         val remaining = allRefsBlocking().filterNot { it.outboundItemId == outboundItemId }
@@ -204,6 +227,10 @@ data class LocalAttachmentSidecarRef(
     val byteSize: Long,
     val createdAtMs: Long,
     val attachmentIndex: Int? = null,
+    // Issue #1588: the authoritative remote path recorded once the send-time upload
+    // for this sidecar COMPLETED (via [OutboundAttachmentSidecarStore.markUploaded]).
+    // `null` until then; a delivery retry with a non-null value skips the re-transfer.
+    val uploadedRemotePath: String? = null,
 )
 
 private fun encodeRefs(refs: List<LocalAttachmentSidecarRef>): String =
@@ -217,6 +244,8 @@ private fun encodeRefs(refs: List<LocalAttachmentSidecarRef>): String =
             ref.byteSize.toString(),
             ref.createdAtMs.toString(),
             ref.attachmentIndex?.toString().orEmpty(),
+            // Issue #1588: field 8 — the completed send-time upload path (or empty).
+            ref.uploadedRemotePath.orEmpty(),
         ).joinToString("\t") { field -> escapeSidecarField(field) }
     }
 
@@ -232,6 +261,9 @@ private fun decodeRefs(raw: String): List<LocalAttachmentSidecarRef> {
         val byteSize = fields.getOrNull(5)?.toLongOrNull() ?: return@mapNotNull null
         val createdAtMs = fields.getOrNull(6)?.toLongOrNull() ?: return@mapNotNull null
         val attachmentIndex = fields.getOrNull(7)?.toIntOrNull()
+        // Issue #1588: field 8 is absent on rows persisted before the marker existed —
+        // `getOrNull` → null → the row re-uploads on next send (the safe default).
+        val uploadedRemotePath = fields.getOrNull(8)?.ifBlank { null }
         if (id.isBlank() || outboundItemId.isBlank() || localPath.isBlank()) return@mapNotNull null
         LocalAttachmentSidecarRef(
             id = id,
@@ -242,6 +274,7 @@ private fun decodeRefs(raw: String): List<LocalAttachmentSidecarRef> {
             byteSize = byteSize,
             createdAtMs = createdAtMs,
             attachmentIndex = attachmentIndex,
+            uploadedRemotePath = uploadedRemotePath,
         )
     }
 }

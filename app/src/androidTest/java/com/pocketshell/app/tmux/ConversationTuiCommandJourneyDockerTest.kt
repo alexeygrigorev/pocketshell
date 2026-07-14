@@ -189,8 +189,10 @@ class ConversationTuiCommandJourneyDockerTest {
         // STEP 3 — type `/model` into the REAL composer and Send. This drives the
         // production composerSendHandler AgentConversation branch on the live
         // screen (NOT a proxy): `tmuxAgentConversationSend("/model")` =
-        // TuiCommandNoEcho → writeInputToPaneResult (no optimistic echo) → the
-        // Open-in-Terminal notice is raised.
+        // TuiCommandNoEcho → sendAgentPayloadToPaneResult (the #1577b GATED submit:
+        // floor + count-baseline ack gate + Enter; no optimistic echo) → the
+        // Open-in-Terminal notice is raised. This test is the real-path guard for
+        // the #1577b Route B routing change (Conversation slash → gated submit).
         sendFromComposer(MODEL_COMMAND)
         stamp("composer_sent text=$MODEL_COMMAND")
 

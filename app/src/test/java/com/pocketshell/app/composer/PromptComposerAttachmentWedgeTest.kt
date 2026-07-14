@@ -275,7 +275,14 @@ class PromptComposerAttachmentWedgeTest {
     }
 
     @Test
-    fun attachmentUploadTimeoutDoesNotWedgeSubsequentPlainSend() = runTest {
+    fun attachmentUploadStallFailureDoesNotWedgeSubsequentPlainSend() = runTest {
+        // Issue #1569 (U2): the absolute 90s app cap was REMOVED — a genuinely
+        // STALLED upload is now bounded by core-ssh's progress-based budget (60s
+        // no-progress) and surfaces here as a Result.failure (modelled below),
+        // NOT by an app wall-clock cap. That failure must still un-wedge the
+        // pipeline (requeueForRetry + clear the strand) so a subsequent plain send
+        // works — previously the cap was what broke the wedge. (A never-resolving
+        // fake was the old proxy; production uploads always resolve within core-ssh.)
         val queue = InMemoryOutboundQueueStore()
         val dispatcher = StandardTestDispatcher(testScheduler)
         val sidecars = newSidecarStore(ioDispatcher = dispatcher)
@@ -285,7 +292,7 @@ class PromptComposerAttachmentWedgeTest {
             outboundAttachmentSidecarStore = sidecars,
         )
         vm.setOutboundAttachmentSidecarUploader {
-            awaitCancellation()
+            Result.failure(com.pocketshell.core.ssh.SshException("Upload stalled: no progress"))
         }
         val sent = collectSendRequests(vm)
         val target = PromptComposerViewModel.SendTargetSnapshot(
@@ -293,7 +300,7 @@ class PromptComposerAttachmentWedgeTest {
             route = OutboundRoute.RawBytes,
         )
 
-        attachAndSendForWedge(vm, sent, target, "this will time out", "timeout.txt")
+        attachAndSendForWedge(vm, sent, target, "this will stall", "stall.txt")
         advanceUntilIdle()
         assertSubsequentPlainSendWorks(vm, sent, target)
     }

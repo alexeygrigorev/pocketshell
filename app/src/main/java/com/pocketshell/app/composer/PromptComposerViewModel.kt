@@ -24,7 +24,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -39,7 +38,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
@@ -321,6 +319,14 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1569 test seam: whether the attach-time staging job is still active.
+     * Used to prove that removing the absolute 90s cap (U2) leaves no orphaned
+     * "zombie" upload job after a failed/settled pick.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun isAttachmentJobActiveForTest(): Boolean = attachmentJob?.isActive == true
+
+    /**
      * Issue #900: upload hook for durable outbound attachment sidecars. The host
      * owns the live SSH/session upload primitive; the ViewModel owns when queued
      * local bytes must be uploaded before a row is claimed for delivery.
@@ -504,9 +510,16 @@ public class PromptComposerViewModel @Inject constructor(
                 )
             }
             val result: Result<List<String>> = try {
-                withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { stage() }
-            } catch (timeout: TimeoutCancellationException) {
-                Result.failure(timeout)
+                // Issue #1569 (U2): the absolute 90s whole-batch cap
+                // (ATTACHMENT_UPLOAD_TIMEOUT_MS) KILLED a progressing large upload
+                // on a healthy link (a 52MB batch needs >90s) AND — because the cap
+                // only cancelled the AWAIT, not the detached #1072 upload deferred —
+                // left a ZOMBIE that kept uploading after the cap fired. Removed:
+                // the staging is bounded by its inner budgets (the per-file SAF read
+                // timeout + core-ssh's progress-based 60s-no-progress upload bound,
+                // total unbounded while bytes move), so a progressing transfer is
+                // never killed by wall-clock alone and no zombie is orphaned.
+                stage()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (t: Throwable) {
@@ -563,14 +576,149 @@ public class PromptComposerViewModel @Inject constructor(
                         "cause" to error.javaClass.simpleName,
                         "message" to error.message,
                     )
-                    _uiState.update {
-                        it.copy(
-                            attachmentUpload = AttachmentUploadState.Idle,
-                            error = attachmentErrorMessage(error),
-                        )
+                    // Issue #1569 (U1 — P0 DATA LOSS): the picked files must NOT be
+                    // dropped when the (attach-time) upload fails. Before #1569 this
+                    // branch set Idle + an error and DISCARDED the picked URIs — no
+                    // tile, no durable bytes, no queue row, no Retry — so a mid-stream
+                    // teardown ("Stream closed") LOST the maintainer's attachment with
+                    // the false "Your draft was kept" copy (true only for draft TEXT).
+                    // Now we RETAIN the pick durably: stage the picked bytes as durable
+                    // local sidecars and add persisted tiles backed by them, so the
+                    // failed upload leaves a RETRYABLE representation — the send-time
+                    // queue leg (#1540 write-ahead, #1531 badge/Retry, #1554
+                    // exactly-once) uploads it on Send and auto-retries on reconnect.
+                    if (!retainFailedPickDurably(previews, error)) {
+                        _uiState.update {
+                            it.copy(
+                                attachmentUpload = AttachmentUploadState.Idle,
+                                error = attachmentErrorMessage(error),
+                            )
+                        }
                     }
                 },
             )
+        }
+    }
+
+    /**
+     * Issue #1569 (U1): retain a pick whose upload FAILED as a durable, retryable
+     * representation instead of losing it. Stages the picked bytes as durable local
+     * sidecars keyed to the composer draft (survives teardown / reconnect / process
+     * death), adds a tile per retained file backed by those bytes, and persists the
+     * tiles to the per-session [composerDraftStore]. A subsequent Send routes them
+     * through the durable, auto-retrying, exactly-once send-time upload leg.
+     *
+     * Returns `true` when at least one file was durably retained (the caller shows
+     * the "saved — will upload on Send" copy); `false` when nothing could be retained
+     * (no local URIs / no sidecar store), so the caller falls back to the plain
+     * error banner.
+     */
+    private suspend fun retainFailedPickDurably(
+        previews: List<AttachmentPreview>,
+        error: Throwable,
+    ): Boolean {
+        val sidecarStore = outboundAttachmentSidecarStore ?: return false
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return false
+        val uris = previews.map { it.uri }
+        if (uris.isEmpty()) return false
+        val scope = draftAttachmentSidecarScope(target)
+        // Fresh durable bytes for this draft scope: drop any stale draft sidecars
+        // first so a re-pick after a prior failure does not accumulate orphans.
+        sidecarStore.removeOutboundItem(scope)
+        val sidecars = sidecarStore.stage(
+            outboundItemId = scope,
+            uris = uris,
+            attachmentIndices = uris.indices.toList(),
+        )
+        if (sidecars.isEmpty()) return false
+        val retainedTiles = sidecars.mapIndexed { index, ref ->
+            StagedAttachment(
+                // The provisional remote path is unique + non-blank so the tile
+                // de-dupes and composes; the send-time sidecar upload REPLACES it
+                // with the authoritative uploaded path (withUploadedSidecars), so it
+                // never reaches the wire.
+                remotePath = pendingAttachmentRemotePath(scope, ref.attachmentIndex ?: index, ref.displayName),
+                displayName = ref.displayName,
+                previewUri = previews.getOrNull(ref.attachmentIndex ?: index)?.uri
+                    ?: android.net.Uri.fromFile(java.io.File(ref.localPath)),
+                mimeType = ref.mimeType ?: previews.getOrNull(ref.attachmentIndex ?: index)?.mimeType,
+            )
+        }
+        DiagnosticEvents.record(
+            "action",
+            "attachment_stage_fail_retained",
+            "retainedCount" to retainedTiles.size,
+            "cause" to error.javaClass.simpleName,
+        )
+        _uiState.update { current ->
+            val merged = (current.attachments + retainedTiles)
+                .distinctBy { it.remotePath }
+            current.copy(
+                attachments = merged,
+                attachmentUpload = AttachmentUploadState.Idle,
+                error = attachmentRetainedMessage(error),
+            )
+        }
+        // Issue #746/#1569: stamp the draft owner so a later session switch treats
+        // these retained tiles as BELONGING to this session (persist + reload on
+        // return) rather than as an unowned orphan the FIRST switch adopts into the
+        // wrong session (the #746 orphan-adopt path).
+        savedStateHandle[KEY_DRAFT_OWNER] = target
+        // Persist the retained tiles so they survive a session switch A→B→A AND a
+        // process-death recreate (the durable draft sidecar bytes above survive the
+        // process too; [rehydrateDraftAttachmentBytes] reconnects them on restore).
+        composerDraftStore.saveAttachments(target, _uiState.value.attachments.toDurableRefs())
+        return true
+    }
+
+    /**
+     * Issue #1569 (U1): after a process-death restore or a session switch back, the
+     * persisted tiles carry no live preview Uri ([ComposerDraftStore] intentionally
+     * drops it). For a retained-on-failure tile (a provisional `pending-upload-…`
+     * path) the durable BYTES still exist in the draft sidecar store, so reconnect
+     * the tile to them (`previewUri` = the local sidecar file) — otherwise the next
+     * Send would fall to the non-sidecar path and try to deliver the broken
+     * provisional path. Best-effort + async: matches the retained (pending-upload,
+     * previewUri-less) tiles to the ordered draft sidecars.
+     */
+    private fun rehydrateDraftAttachmentBytes(target: String) {
+        val sidecarStore = outboundAttachmentSidecarStore ?: return
+        if (target.isBlank()) return
+        val hasRetainedTiles = _uiState.value.attachments.any {
+            it.previewUri == null && isPendingUploadRemotePath(it.remotePath)
+        }
+        if (!hasRetainedTiles) return
+        viewModelScope.launch(outboundQueueDispatcher) {
+            val refs = sidecarStore.refsFor(draftAttachmentSidecarScope(target))
+            if (refs.isEmpty()) return@launch
+            withContext(Dispatchers.Main.immediate) {
+                if (composerTarget != target) return@withContext
+                _uiState.update { current ->
+                    val queue = ArrayDeque(refs)
+                    val rehydrated = current.attachments.map { tile ->
+                        if (tile.previewUri != null || !isPendingUploadRemotePath(tile.remotePath)) {
+                            return@map tile
+                        }
+                        val ref = queue.removeFirstOrNull() ?: return@map tile
+                        tile.copy(previewUri = android.net.Uri.fromFile(java.io.File(ref.localPath)))
+                    }
+                    if (rehydrated == current.attachments) current else current.copy(attachments = rehydrated)
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #1569 (U1): drop the durable draft-sidecar bytes for [target] once the
+     * retained tiles no longer need them (handed off to the queue on Send, or the
+     * draft was discarded). Best-effort; a leftover set is also swept by the store's
+     * periodic [OutboundAttachmentSidecarStore.reconcile].
+     */
+    internal fun clearDraftAttachmentSidecars(target: String?) {
+        val sidecarStore = outboundAttachmentSidecarStore ?: return
+        val key = target?.takeIf { it.isNotBlank() } ?: return
+        viewModelScope.launch(outboundQueueDispatcher) {
+            sidecarStore.removeOutboundItem(draftAttachmentSidecarScope(key))
         }
     }
 
@@ -1234,6 +1382,9 @@ public class PromptComposerViewModel @Inject constructor(
         composerTarget?.let {
             clearComposerDraft(it)
             composerDraftStore.clearAttachments(it)
+            // Issue #1569 (U1): discard also drops the retained-on-failure durable
+            // bytes — the user threw the prompt away, so nothing should linger.
+            clearDraftAttachmentSidecars(it)
         }
         _uiState.update { current ->
             current.copy(
@@ -1325,6 +1476,9 @@ public class PromptComposerViewModel @Inject constructor(
             savedStateHandle[KEY_DRAFT] = incoming
             savedStateHandle[KEY_DRAFT_OWNER] =
                 if (incoming.isEmpty() && incomingAttachments.isEmpty()) null else targetKey
+            // Issue #1569 (U1): a retained-on-failure tile that lost its live
+            // preview Uri across process death still has durable bytes — reconnect.
+            rehydrateDraftAttachmentBytes(targetKey)
             return
         }
         savedStateHandle[KEY_DRAFT] = incoming
@@ -1342,6 +1496,10 @@ public class PromptComposerViewModel @Inject constructor(
                 error = null,
             )
         }
+        // Issue #1569 (U1): reconnect any retained-on-failure tile to its durable
+        // draft-sidecar bytes (the persisted tile dropped its live preview Uri), so
+        // the next Send uploads the real bytes instead of the provisional path.
+        rehydrateDraftAttachmentBytes(targetKey)
     }
 
     /**
@@ -1517,10 +1675,20 @@ public class PromptComposerViewModel @Inject constructor(
                 return false
             }
         refreshOutboundQueueItemsFor(uploading.sessionKey)
+        // Issue #1569 (U2): DO NOT wrap the upload in the absolute 90s cap
+        // (ATTACHMENT_UPLOAD_TIMEOUT_MS). A 52MB batch progressing on a healthy
+        // link legitimately exceeds 90s, and the cap killed it (size-correlated
+        // failure). The upload is bounded by core-ssh's progress-based budget
+        // (60s no-progress, total unbounded while bytes move). The overall-send
+        // watchdog ([armSend]/[OVERALL_SEND_TIMEOUT_MS]) is a wall-clock backstop
+        // that would ALSO kill a progressing multi-minute upload, so disarm it for
+        // the upload leg — the delivery leg re-arms it ([claimAndEmitOutboundItem]).
+        // A genuinely stalled upload still fails within core-ssh's 60s no-progress
+        // window and surfaces here as a [Result.failure] → requeueForRetry (durable,
+        // retryable), so nothing wedges forever.
+        watchdogs.disarmSend()
         val result = try {
-            withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS) { uploader(sidecars) }
-        } catch (timeout: TimeoutCancellationException) {
-            Result.failure(timeout)
+            uploader(sidecars)
         } catch (cancelled: CancellationException) {
             outboundQueueStore.requeueForRetry(id)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
@@ -3218,10 +3386,21 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SAMPLE_INTERVAL_MS: Long = 50L
 
         /**
-         * Issue #570: attachment staging must be bounded. A hung content
-         * provider, stalled SSH upload, or dead remote must return the
-         * composer to editable Idle state instead of leaving the upload
-         * banner and disabled attachment actions stuck forever.
+         * Issue #570 / #1569 (U2): the historical whole-batch attachment upload
+         * budget.
+         *
+         * It is **no longer an absolute wall-clock cap on the upload** — the
+         * `withTimeout(ATTACHMENT_UPLOAD_TIMEOUT_MS)` wrappers around the attach
+         * and send upload legs were REMOVED because a 52MB batch progressing on a
+         * healthy link legitimately exceeds 90s, and the cap both killed the
+         * progressing transfer (size-correlated failure) and orphaned a zombie
+         * deferred that kept uploading after it fired. Uploads are now bounded by
+         * core-ssh's progress-based budget (60s no-progress, total unbounded while
+         * bytes move); a genuinely stalled upload still fails within that window.
+         *
+         * The constant survives only as the upload term in the derived overall-send
+         * watchdog budget below, so the #891 "watchdog ceiling stays above the
+         * worst-case leg sum" invariant math is unchanged.
          */
         public const val ATTACHMENT_UPLOAD_TIMEOUT_MS: Long = 90_000L
 

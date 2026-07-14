@@ -287,6 +287,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // Nullable default keeps the existing unit-test constructors working without
     // the Hilt singleton; when absent the host mirror is simply skipped.
     private val diagnosticRecorder: com.pocketshell.app.diagnostics.DiagnosticRecorder? = null,
+    // Issue #1587 (H3): injected @Singleton store, one lock (see outboundDeliveryLedgerFor).
+    private val outboundQueueStore: com.pocketshell.app.composer.OutboundQueueStore? = null,
 ) : ViewModel() {
 
     /**
@@ -14068,11 +14070,9 @@ public class TmuxSessionViewModel @Inject constructor(
         return sendAgentPayloadToPaneResult(client, paneId, payload, agent)
     }
 
-    // Issue #1526 S1 / #1541: verify-before-resend ledger. The volatile set dies
-    // on VM-clear (back-navigation), so it is backed by the durable per-row
-    // `wireAttempted` flag (see [outboundDeliveryLedgerFor]) — a rebuilt ledger
-    // verifies instead of blindly re-pasting. Null ctx (unit-test ctors) ⇒ base S1.
-    private val outboundDeliveryLedger = outboundDeliveryLedgerFor(applicationContext)
+    // Issue #1526 S1 / #1541 / #1587: verify-before-resend ledger, durable-backed by
+    // the injected @Singleton store (see [outboundDeliveryLedgerFor]). Null ⇒ base S1.
+    private val outboundDeliveryLedger = outboundDeliveryLedgerFor(outboundQueueStore)
 
     private fun consumeSendResultLostSeamForTest() {
         if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return

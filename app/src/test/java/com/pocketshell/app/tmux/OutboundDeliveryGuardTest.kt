@@ -558,6 +558,183 @@ class OutboundDeliveryGuardTest {
         )
     }
 
+    // ---------------------------------------------------------------- issue #1587 H2 (viewport-bounded probe)
+
+    /**
+     * Issue #1587 (H2) — THE reported defect. A payload that LANDED but scrolled OFF
+     * the visible viewport under a burst of agent output must still be found by the
+     * verify-before-resend probe, so an ambiguous retry submits Enter only and does
+     * NOT duplicate-paste.
+     *
+     * RED on base (visible-only `capture-pane -p`, no `-S`): the scrolled-off payload
+     * is absent from the visible capture ⇒ NotLanded ⇒ the retry re-pastes (server
+     * occurrence 2). GREEN (bounded `-S -N` scrollback capture): the payload is found
+     * in scrollback (count 1 > baseline 0) ⇒ AlreadyLanded ⇒ no duplicate.
+     */
+    @Test
+    fun landedThenScrolledOffPayloadIsFoundViaBoundedScrollbackProbeSoNoDuplicate() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "run the full integration suite now"
+        // A prior ambiguous wire attempt recorded with baseline 0 (fresh payload — it
+        // was NOT on the pane at send time; production always records a baseline).
+        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+
+        val client = FakeTmuxClient().apply {
+            // The paste LANDED, then a burst of agent output pushed it OFF the visible
+            // viewport: a visible-only capture no longer shows it...
+            defaultCaptureResponse =
+                CommandResponse(number = 0L, output = listOf("...busy agent burst...", "$ "), isError = false)
+            // ...but it is STILL within the bounded scrollback the probe now captures.
+            scrollbackCaptureResponse = CommandResponse(
+                number = 0L,
+                output = listOf("> $payload", "...busy agent burst...", "$ "),
+                isError = false,
+            )
+        }
+
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+
+        assertTrue(
+            "the verify-before-resend probe must request BOUNDED SCROLLBACK (the H2 fix)",
+            client.capturePaneTextViaExecScrollbackLines.any { it > 0 },
+        )
+        assertEquals(
+            "a landed-then-scrolled-off payload must be found via bounded scrollback (AlreadyLanded) " +
+                "so the retry submits Enter only — RED on base (visible-only probe ⇒ NotLanded ⇒ duplicate)",
+            DeliveryProbeOutcome.AlreadyLanded,
+            outcome,
+        )
+    }
+
+    /**
+     * Issue #1587 (H2) class-coverage — the payload still VISIBLE (never scrolled off)
+     * remains found: the bounded-scrollback capture is a SUPERSET of the visible
+     * viewport, so the common already-landed case is unchanged (AlreadyLanded).
+     */
+    @Test
+    fun stillVisiblePayloadIsFoundByTheScrollbackProbeUnchanged() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "deploy the staging build to the box"
+        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        val client = FakeTmuxClient().apply {
+            // The scrollback capture (what the probe now issues) includes the visible
+            // payload — it is at the bottom of the buffer, still on screen.
+            scrollbackCaptureResponse =
+                CommandResponse(number = 0L, output = listOf("$ ", "> $payload"), isError = false)
+        }
+
+        assertEquals(
+            DeliveryProbeOutcome.AlreadyLanded,
+            verifyBeforeAgentResend(ledger, client, paneId, payload),
+        )
+    }
+
+    /**
+     * Issue #1587 (H2) class-coverage — NO over-suppression. A payload GENUINELY absent
+     * from the pane (not visible AND not in the bounded scrollback) must stay NotLanded
+     * so the caller does a real gated resend — the scrollback probe must not invent a
+     * false `AlreadyLanded` and silently drop the send.
+     */
+    @Test
+    fun genuinelyAbsentPayloadStaysNotLandedNoOverSuppression() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "please run the deployment checklist"
+        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        val client = FakeTmuxClient().apply {
+            // Neither the visible viewport nor the bounded scrollback contains the payload.
+            scrollbackCaptureResponse =
+                CommandResponse(number = 0L, output = listOf("$ ", "unrelated output line"), isError = false)
+        }
+
+        assertEquals(
+            "a payload absent from the bounded scrollback must stay NotLanded (real resend), " +
+                "never a false AlreadyLanded drop",
+            DeliveryProbeOutcome.NotLanded,
+            verifyBeforeAgentResend(ledger, client, paneId, payload),
+        )
+    }
+
+    /**
+     * Issue #1587 (H2) consistency — the baseline snapshot and the resend probe scope
+     * over the SAME bounded scrollback, so a needle that PRE-EXISTS in scrollback (a
+     * prior scrolled-off occurrence) is counted in BOTH: a resend requires the count to
+     * INCREASE, so a pre-existing occurrence is not over-suppressed as `AlreadyLanded`.
+     *
+     * If the baseline scoped over the visible viewport while the probe scoped over
+     * scrollback, the pre-existing occurrence would inflate the probe count above a
+     * (visible-derived) baseline of 0 and FALSELY resolve AlreadyLanded → silent drop.
+     */
+    @Test
+    fun baselineAndProbeScopeOverSameScrollbackSoPreExistingOccurrenceIsNotOverSuppressed() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "/goal resume"
+        val client = FakeTmuxClient()
+        // The needle already exists ONCE in the bounded scrollback (a prior scrolled-off
+        // line). `localRenderText` carries the needle so the baseline is captured
+        // AUTHORITATIVELY over the SAME bounded scrollback (not fast-pathed to 0).
+        client.scrollbackCaptureResponse =
+            CommandResponse(number = 0L, output = listOf("> $payload", "...later output...", "$ "), isError = false)
+        ledger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderText = "> $payload")
+        assertEquals(
+            "the baseline is captured over the SAME bounded scrollback the probe uses (count 1)",
+            1,
+            ledger.needleBaseline(paneId, payload),
+        )
+
+        // A resend whose paste did NOT land: scrollback still shows the ONE pre-existing
+        // occurrence (count 1 == baseline 1) ⇒ NotLanded (no false AlreadyLanded).
+        assertEquals(
+            DeliveryProbeOutcome.NotLanded,
+            verifyBeforeAgentResend(ledger, client, paneId, payload),
+        )
+
+        // A resend whose paste DID land: scrollback now shows TWO (count 2 > baseline 1)
+        // ⇒ AlreadyLanded ⇒ deduped to exactly-once.
+        client.scrollbackCaptureResponse =
+            CommandResponse(number = 0L, output = listOf("> $payload", "> $payload", "$ "), isError = false)
+        assertEquals(
+            DeliveryProbeOutcome.AlreadyLanded,
+            verifyBeforeAgentResend(ledger, client, paneId, payload),
+        )
+    }
+
+    // ---------------------------------------------------------------- issue #1587 H3 (single-store)
+
+    /**
+     * Issue #1587 (H3) — structural single-store invariant. [outboundDeliveryLedgerFor]
+     * threads the EXACT injected [OutboundQueueStore][com.pocketshell.app.composer.OutboundQueueStore]
+     * (the SAME @Singleton instance the composer and the 15s orphan sweep use) as the
+     * ledger's durable backing — it does NOT `new` up a second store. Proven by identity:
+     * a wire attempt recorded through the ledger is visible via the SAME store object the
+     * sweep reads (one instance ⇒ one lock ⇒ no lost-update race that erases the flag).
+     */
+    @Test
+    fun outboundDeliveryLedgerForThreadsTheExactInjectedStoreNotASecondInstance() {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        store.enqueue("sessA", "single-store payload", paneId = "%0")
+        val ledger = outboundDeliveryLedgerFor(store)
+
+        ledger.recordWireAttempt("%0", "single-store payload")
+
+        assertTrue(
+            "the wire attempt recorded via the ledger must be visible through the SAME store " +
+                "instance the orphan sweep reads (one lock — no lost-update race)",
+            store.hasWireAttempt("%0", "single-store payload"),
+        )
+    }
+
+    /** A null store (narrow unit-test VM constructors) ⇒ base S1 in-memory-only ledger. */
+    @Test
+    fun outboundDeliveryLedgerForWithNoStoreIsInMemoryOnly() {
+        val ledger = outboundDeliveryLedgerFor(null)
+        ledger.recordWireAttempt("%0", "in-memory only payload")
+        assertTrue(ledger.hasAmbiguousAttempt("%0", "in-memory only payload"))
+    }
+
     @Test
     fun ledgerTracksRecordsClearsAndEvictsOldestBeyondCapacity() {
         val ledger = OutboundDeliveryLedger(maxEntries = 2)

@@ -304,8 +304,13 @@ internal class BurstTuiFakeTmuxClient(
         return super.sendBestEffortCommand(cmd)
     }
 
-    override suspend fun capturePaneTextViaExec(paneId: String, timeoutMs: Long?): CommandResponse {
+    override suspend fun capturePaneTextViaExec(
+        paneId: String,
+        timeoutMs: Long?,
+        scrollbackLines: Int,
+    ): CommandResponse {
         capturePaneTextViaExecCalls += paneId
+        capturePaneTextViaExecScrollbackLines += scrollbackLines
         advanceCodexReadOnCapture()
         return CommandResponse(number = 0L, output = renderLines(), isError = false)
     }

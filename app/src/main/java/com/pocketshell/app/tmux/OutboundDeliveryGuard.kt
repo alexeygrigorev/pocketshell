@@ -1,8 +1,8 @@
 package com.pocketshell.app.tmux
 
 import android.util.Log
+import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.OutboundWireAttemptDurableStore
-import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.tmux.TmuxClient
@@ -201,6 +201,24 @@ internal suspend fun deliverRawInputWithGuard(
 internal const val OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS: Long = 4_000L
 
 /**
+ * Issue #1587 (H2): how many lines of scrollback the verify-before-resend probe
+ * (and its baseline snapshot) capture — `capture-pane -p -S -N`. A visible-only
+ * capture (`-p`, no `-S`) MISSES a payload that LANDED but scrolled off the
+ * visible viewport under a burst of agent output since the send, so the probe
+ * reports `NotLanded` and the retry duplicate-pastes (the reported H2 defect).
+ *
+ * Bounded (NOT full history): matches the app's established seed-scrollback depth
+ * ([SEED_SCROLLBACK_LINES] = 200), which covers several screens of agent output
+ * since a send while staying small enough that a truly ANCIENT identical occurrence
+ * is out of window (no over-suppression) and the exec round-trip stays fast. The
+ * baseline snapshot ([captureNeedleBaseline]) and the post-send probe
+ * ([probeOutboundPayloadAlreadyLanded]) MUST scope over this SAME bound so the
+ * needle-count comparison (#1577: resend requires the count to INCREASE) is
+ * meaningful — a pre-existing occurrence is then counted in BOTH.
+ */
+internal const val OUTBOUND_PROBE_SCROLLBACK_LINES: Int = SEED_SCROLLBACK_LINES
+
+/**
  * Minimum printable needle length for a keystroke-batch probe. Below this the
  * needle is too generic for a visible-viewport presence check (a lone `y` or an
  * arrow key would false-positive on almost any pane), so the probe reports
@@ -294,17 +312,22 @@ internal class OutboundDeliveryLedger(
 
 /**
  * Issue #1541: build the production [OutboundDeliveryLedger] with its durable
- * wire-attempt backing wired to the persisted outbound queue rows. A fresh
- * [SharedPrefsOutboundQueueStore][com.pocketshell.app.composer.SharedPrefsOutboundQueueStore]
- * shares the process-cached `outbound_queue` SharedPreferences with the composer's
- * singleton, so the `wireAttempted` flag written on one instance is visible to the
- * ledger rebuilt on the next VM — surviving VM-clear / back-navigation. A null
- * [context] (narrow unit-test VM constructors) falls back to the in-memory-only
+ * wire-attempt backing wired to the persisted outbound queue rows.
+ *
+ * Issue #1587 (H3): thread the INJECTED `@Singleton` [OutboundQueueStore] (the SAME
+ * instance the composer and the poll-lane orphan sweep use) — NOT a freshly
+ * `new`-ed `SharedPrefsOutboundQueueStore`. Two instances over the one `outbound_queue`
+ * SharedPreferences blob hold SEPARATE locks, so a `markWireAttempted` (this ledger)
+ * racing a `requeueStaleInFlight` orphan sweep (the composer VM's store) is a
+ * last-writer-wins lost update — the durable `wireAttempted` flag is clobbered and a
+ * rebuilt ledger blind re-pastes after a VM-clear. ONE store ⇒ ONE lock ⇒ the two
+ * read-modify-writes serialize and the flag survives. A null [store] (narrow unit-test
+ * VM constructors that don't inject the singleton) falls back to the in-memory-only
  * ledger (base S1 behaviour).
  */
-internal fun outboundDeliveryLedgerFor(context: android.content.Context?): OutboundDeliveryLedger =
+internal fun outboundDeliveryLedgerFor(store: OutboundQueueStore?): OutboundDeliveryLedger =
     OutboundDeliveryLedger(
-        durable = context?.let { SharedPrefsOutboundQueueStore(it).asWireAttemptDurableStore() },
+        durable = store?.asWireAttemptDurableStore(),
     )
 
 /**
@@ -331,7 +354,13 @@ internal suspend fun probeOutboundPayloadAlreadyLanded(
     // resend (which records a fresh baseline), never a bare Enter — deliver-safe.
     if (baselineCount == null) return DeliveryProbeOutcome.NotLanded
     val response = try {
-        client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
+        // Issue #1587 (H2): bounded scrollback so a landed-then-scrolled-off payload
+        // is still found (else NotLanded ⇒ duplicate paste on retry).
+        client.capturePaneTextViaExec(
+            paneId,
+            timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+            scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
+        )
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
@@ -357,7 +386,14 @@ internal suspend fun captureNeedleBaseline(
 ): Int? {
     val needle = agentSubmitAckNeedle(payload) ?: return null
     val response = try {
-        client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
+        // Issue #1587 (H2): the baseline snapshot MUST scope over the SAME bounded
+        // scrollback the probe uses ([probeOutboundPayloadAlreadyLanded]) so the
+        // count comparison is meaningful (a pre-existing occurrence is in both).
+        client.capturePaneTextViaExec(
+            paneId,
+            timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+            scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
+        )
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
@@ -408,7 +444,13 @@ internal suspend fun probeNeedleAlreadyLanded(
 ): DeliveryProbeOutcome {
     if (needle == null) return DeliveryProbeOutcome.Unknown
     val response = try {
-        client.capturePaneTextViaExec(paneId, timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS)
+        // Issue #1587 (H2): bounded scrollback so a landed-then-scrolled-off keystroke
+        // batch is still found by the superseded/retry probe (no duplicate send).
+        client.capturePaneTextViaExec(
+            paneId,
+            timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+            scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
+        )
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {

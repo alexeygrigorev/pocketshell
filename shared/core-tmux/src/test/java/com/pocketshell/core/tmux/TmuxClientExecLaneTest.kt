@@ -162,6 +162,36 @@ class TmuxClientExecLaneTest {
     }
 
     @Test
+    fun `capturePaneTextViaExec includes bounded scrollback when requested`() = runBlocking {
+        // Issue #1587 (H2): the verify-before-resend probe requests bounded scrollback
+        // (`-S -N`) so a payload that LANDED but scrolled off the visible viewport is
+        // still found — otherwise the probe reports NotLanded and the retry duplicate-pastes.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = {
+                ExecResult(stdout = "scrolled\noff\nline\n", stderr = "", exitCode = 0)
+            },
+        )
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            val response = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.capturePaneTextViaExec("%3", timeoutMs = 2_500L, scrollbackLines = 200)
+            }
+
+            assertFalse(response.isError)
+            assertEquals(listOf("scrolled", "off", "line"), response.output)
+            assertEquals(
+                "tmux capture-pane -p -S -200 -t '%3'",
+                session.execCommands.single { it.contains("capture-pane") },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `captureWithCursor exec lane times out on a wedged transport within the short ceiling`() = runBlocking {
         // Issue #926/#1297: a genuinely wedged/half-open transport (the exec never
         // returns) must surface a TmuxClientException within the SHORT seed

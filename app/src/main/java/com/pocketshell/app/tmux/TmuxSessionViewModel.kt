@@ -14083,13 +14083,12 @@ public class TmuxSessionViewModel @Inject constructor(
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }
-        // Issue #1526 S1 (verify-before-resend): when a PRIOR attempt at this exact
-        // (pane, payload) ended ambiguously (timeout/drop after the paste may have
-        // run server-side — audit A1/A2), do NOT blindly re-paste. Probe the pane
-        // with the #869 ack needle first: already landed ⇒ submit-Enter ONLY (a
-        // no-op on an already-submitted empty input box); unknown ⇒ fail WITHOUT
-        // resending so the durable row stays queued for a later verified retry;
-        // not landed ⇒ fall through to the normal full send.
+        // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt at this
+        // exact (pane, payload) — timeout/drop after the paste may have run
+        // server-side (audit A1/A2) — must not blindly re-paste. Probe the pane
+        // (#869 needle, #1577 baseline-aware): already landed ⇒ submit-Enter ONLY;
+        // unknown ⇒ fail WITHOUT resending (row stays queued for a verified retry);
+        // not landed / no prior attempt ⇒ fall through to the normal full send.
         when (verifyBeforeAgentResend(outboundDeliveryLedger, client, paneId, payload)) {
             DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
                 sendNamedKeyToPane(client, paneId, "Enter")
@@ -14104,7 +14103,8 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return runCatching {
             ensurePaneAcceptsInput(client, paneId)
-            outboundDeliveryLedger.recordWireAttempt(paneId, payload)
+            val render = paneRows[paneId]?.terminalState?.visibleScreenTextSnapshot().orEmpty()
+            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, payload, render)
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
@@ -14116,17 +14116,13 @@ public class TmuxSessionViewModel @Inject constructor(
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
             outboundDeliveryLedger.clear(paneId, payload)
-            // Issue #941 (black-screen B1): the maintainer's "I sent a message and
-            // everything became black" symptom. After the submit Enter, a full-screen
-            // agent TUI repaints — it can `clear`+redraw and emit a `%output` overpaint
-            // that leaves the active pane PARTIAL-black (a single live status/spinner
-            // line, the rest of the prior viewport gone). The reattach/manual-Redraw
-            // heals already restore a partial-black pane; a SEND-triggered overpaint had
-            // NO heal, so the pane stayed black until the user manually redrew. Schedule
-            // a one-shot, guarded active-pane heal that fires ONLY if the pane settles
-            // partial-black/blank after the overpaint. Issue #1353 R4: this is now an EVENT
-            // submission through the shared reconcile entry ([requestReconcile]) rather than a
-            // private send-only poll — the send path no longer owns a bespoke timer.
+            // Issue #941 (black-screen B1): after the submit Enter a full-screen agent
+            // TUI can `clear`+redraw and emit a `%output` overpaint that leaves the
+            // active pane PARTIAL-black (a lone status/spinner line, the rest gone) with
+            // no heal, so it stayed black until a manual redraw. Schedule a guarded
+            // active-pane heal that fires only if the pane settles partial-black/blank.
+            // Issue #1353 R4: an EVENT through the shared reconcile entry ([requestReconcile]),
+            // not a private send-only poll — the send path owns no bespoke timer.
             requestReconcile(client, paneId, ReconcileReason.Send)
         }
     }

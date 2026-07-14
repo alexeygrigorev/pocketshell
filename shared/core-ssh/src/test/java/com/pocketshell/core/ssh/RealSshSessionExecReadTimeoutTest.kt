@@ -38,13 +38,20 @@ import java.util.concurrent.atomic.AtomicInteger
  * On BASE (no fix) `exec` against a wedged read NEVER returns, so the
  * `withTimeout(...)` wrapping the call below trips and the test fails (red). With
  * the boundary read-timeout bound the exec fast-fails with a clear, retryable
- * [SshExecTimeoutException] and closes the wedged session so the lease pool
- * self-heals (green).
+ * [SshExecTimeoutException] (green).
+ *
+ * Issue #1567 (D28 — root of the #1562 self-close reconnect storm): the stalled
+ * exec closes ONLY its own exec channel and leaves the shared transport ALIVE
+ * (`isConnected` stays true). The old contract — close the WHOLE session on a
+ * stall — was the in-app killer that tore the live `-CC` reader off a busy
+ * session; these tests now PIN the channel-local containment. The `disconnect()`
+ * on the fake client is the tripwire: if `exec` ever closes the session again,
+ * `isConnected` flips false and these assertions go red.
  */
 class RealSshSessionExecReadTimeoutTest {
 
     @Test
-    fun `wedged exec read fast-fails with SshExecTimeoutException instead of hanging`() {
+    fun `wedged exec read closes only its channel and keeps the shared transport alive`() {
         runBlocking {
             val command = WedgedReadCommand()
             val sessionChannel = RecordingSessionChannel(command)
@@ -76,17 +83,28 @@ class RealSshSessionExecReadTimeoutTest {
                     thrown.command.contains("cat /tmp/wedged"),
                 )
 
-                // The timeout-close `exec` fires is ASYNC (issue #1135/#1144 —
-                // `close()` launches the transport-disconnect on closeScope and
-                // returns before `client.disconnect()` flips the flag). Join it
-                // before reading `isConnected` so the assertion is deterministic
-                // rather than racing the async disconnect (same de-flake shape as
-                // the #1149 integration-suite fix). The bound CLOSED the wedged
-                // session so the lease pool self-heals: a disconnected session is
-                // discarded + re-dialed on next acquire.
+                // Issue #1567: the stall closes ONLY this exec's own channel —
+                // both the command and its session channel — via the `finally`
+                // channel-local teardown.
+                assertTrue(
+                    "the stalled exec must close its own command channel",
+                    command.closed,
+                )
+                assertTrue(
+                    "the stalled exec must close its own session channel",
+                    sessionChannel.closed,
+                )
+                // The LOAD-BEARING assertion (#1567): the shared transport MUST
+                // stay UP. `disconnect()` on the fake client is never called by a
+                // channel-local close, so `isConnected` stays true. On BASE (the
+                // old close-the-session contract) this flipped false — the exact
+                // in-app killer that tore the live -CC reader off a busy session.
+                // (awaitClosed() is a no-op here since close() was never called;
+                // calling it makes the intent explicit and de-flakes the read.)
                 session.awaitClosed()
-                assertFalse(
-                    "wedged exec timeout must close the session (lease self-heal)",
+                assertTrue(
+                    "a stalled exec must NOT close the shared transport (#1567 — leave " +
+                        "the live -CC reader + concurrent execs/uploads alive)",
                     session.isConnected,
                 )
             } finally {
@@ -197,17 +215,19 @@ class RealSshSessionExecReadTimeoutTest {
     }
 
     /**
-     * Class coverage for #1046: an exec that PROGRESSES for a while and THEN
-     * wedges (no further bytes on either stream) must still be bounded and still
-     * close the session — the no-progress budget must not be defeated by earlier
-     * progress. The budget resets while bytes flow, then bounds the final stall.
+     * Class coverage for #1046 + #1567: an exec that PROGRESSES for a while and
+     * THEN wedges (no further bytes on either stream) must still be bounded — the
+     * no-progress budget must not be defeated by earlier progress — and, per
+     * #1567, it must close ONLY its own channel while the shared transport stays
+     * ALIVE. The budget resets while bytes flow, then bounds the final stall.
      */
     @Test
-    fun `exec that progresses then wedges is still bounded and closes the session`() {
+    fun `exec that progresses then wedges is bounded but keeps the transport alive`() {
         runBlocking {
             val command = ProgressesThenWedgesCommand(chunkCount = 3, gapMillis = 100L)
+            val sessionChannel = RecordingSessionChannel(command)
             val session = RealSshSession(
-                ConnectedClient(RecordingSessionChannel(command)),
+                ConnectedClient(sessionChannel),
                 execReadTimeoutMs = 400L,
             )
 
@@ -229,17 +249,20 @@ class RealSshSessionExecReadTimeoutTest {
                     "timeout exception must carry the wedged command",
                     thrown.command.contains("progress-then-wedge"),
                 )
-                // The timeout-close `exec` fires on a wedged read is ASYNC (issue
-                // #1135/#1144 — `close()` launches its transport-disconnect on the
-                // object-owned closeScope and returns before `client.disconnect()`
-                // flips the flag). Join that teardown before reading `isConnected`
-                // so the assertion is deterministic, not a race against the async
-                // disconnect (the intermittent-CI flake this de-flake removes; same
-                // shape as the #1149 integration-suite fix). The LOAD-BEARING
-                // property is unchanged: the wedged exec MUST close the session.
+                // Issue #1567: the mid-stream wedge closes ONLY this exec's channel.
+                assertTrue(
+                    "a mid-stream wedge must close its own command channel",
+                    command.closed,
+                )
+                assertTrue(
+                    "a mid-stream wedge must close its own session channel",
+                    sessionChannel.closed,
+                )
+                // LOAD-BEARING (#1567): the shared transport MUST stay up even
+                // after real progress then a wedge. On BASE this flipped false.
                 session.awaitClosed()
-                assertFalse(
-                    "a mid-stream wedge must still close the session (lease self-heal)",
+                assertTrue(
+                    "a mid-stream wedge must NOT close the shared transport (#1567)",
                     session.isConnected,
                 )
             } finally {
@@ -373,6 +396,15 @@ class RealSshSessionExecReadTimeoutTest {
                 thrown.message.orEmpty().contains("stdout exceeded"),
             )
             assertTrue("command channel should be closed", command.closed)
+            // Issue #1567 class coverage (G2 — exec-ERROR case): an exec that
+            // errors (here, an over-cap stdout → SshException) must close only its
+            // own channel and leave the shared transport ALIVE, exactly like the
+            // exec-timeout and exec-cancel cases. A stalled/errored/cancelled exec
+            // is never grounds to tear the shared session.
+            assertTrue(
+                "an exec error must NOT close the shared transport (#1567)",
+                session.isConnected,
+            )
         } finally {
             session.close()
         }

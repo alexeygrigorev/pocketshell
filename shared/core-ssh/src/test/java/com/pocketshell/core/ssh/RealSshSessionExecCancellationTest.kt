@@ -47,6 +47,16 @@ class RealSshSessionExecCancellationTest {
 
             assertTrue("cancelling exec must close the command channel", command.closed)
             assertTrue("cancelling exec must close the SSH session channel", sessionChannel.closed)
+            // Issue #1567 class coverage (G2 — exec-CANCEL case): cancelling an
+            // exec closes ONLY its own channel and must leave the shared transport
+            // ALIVE (the `disconnect()` tripwire on the fake client never fires).
+            // A cancelled exec is never grounds to tear the shared session — same
+            // channel-local containment contract as the exec-timeout / exec-error
+            // cases.
+            assertTrue(
+                "cancelling exec must NOT close the shared transport (#1567)",
+                session.isConnected,
+            )
         } finally {
             session.close()
         }

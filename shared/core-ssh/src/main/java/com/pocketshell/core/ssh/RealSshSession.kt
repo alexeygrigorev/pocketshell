@@ -694,13 +694,15 @@ internal class RealSshSession(
             // JDK read/join.
             //
             // On a genuine no-progress stall the read is mapped to a clear,
-            // RETRYABLE [SshExecTimeoutException], and we then CLOSE the session
-            // (lease pool self-heals — a now-disconnected session is discarded +
-            // re-dialed on next acquire). This is the SAME close-on-timeout intent
-            // the three bespoke gateway wraps (`FolderListGateway.execBounded`,
-            // `TreeRemoteSource`, `AgentKindRemoteSource`) implement per-caller —
-            // pulled down to the `exec` boundary so EVERY caller inherits it (D22
-            // hard-cut).
+            // RETRYABLE [SshExecTimeoutException]. Issue #1567 (D28 — root of the
+            // #1562 self-close reconnect storm): the stall then closes ONLY this
+            // exec's own channel (the `finally` below), and leaves the shared
+            // transport — and every other channel on it (the live `-CC` reader,
+            // concurrent execs, in-flight uploads) — ALIVE. A starved exec is NOT
+            // evidence of a dead link; only a genuine TRANSPORT-level death
+            // (keepalive/liveness owns that judgment) may close the session.
+            // Callers get the retryable timeout and retry on the SAME warm
+            // transport (D22 hard-cut — no per-caller close-on-timeout shim).
             try {
                 runInterruptible(Dispatchers.IO) {
                     val output = try {
@@ -734,15 +736,27 @@ internal class RealSshSession(
             } catch (timeout: SshExecTimeoutException) {
                 EXEC_LOGGER.warning(
                     "exec read made no progress for ${execReadTimeoutMs}ms (real wall-clock); closing " +
-                        "wedged session + surfacing retryable SshExecTimeoutException. cmd=${command.takeLast(48)}",
+                        "ONLY this exec channel + surfacing retryable SshExecTimeoutException — the shared " +
+                        "transport (and the live -CC reader + concurrent execs/uploads on it) stays UP. " +
+                        "cmd=${command.takeLast(48)}",
                 )
-                // CLOSE the session to tear down the transport so the lease pool
-                // discards the corpse (the watchdog already interrupted+unparked
-                // the read; this also frees the channel deterministically).
-                // NonCancellable so a cancelled/timed-out coroutine still closes.
-                withContext(NonCancellable) {
-                    runCatching { close() }
-                }
+                // Issue #1567 (D28 — root of the #1562 self-close reconnect storm):
+                // a stalled exec must close ONLY its own channel, NEVER the shared
+                // SshSession/transport. The `finally` below tears down just THIS
+                // exec's command+session channel (channel-local containment — the
+                // same shape uploads/downloads already use on a stall). The
+                // WallClockCeiling watchdog already interrupted+unparked the wedged
+                // read, so no `close()` is needed to free the read.
+                //
+                // Closing the whole session here was the in-app killer: on a busy
+                // session the app runs constant execs (agent-log reads, detection
+                // probes, attachment cat>/wc/mv) on the ONE shared transport, so a
+                // single stalled exec `close()`d it → the tmux -CC reader's `read()`
+                // threw SSHException (client-local socket close) → passive_disconnect
+                // → reconnect. The host's sshd journal proved every drop was code 11
+                // BY_APPLICATION (PocketShell's OWN disconnect), zero server/network
+                // errors — entirely self-inflicted. Only a genuine TRANSPORT-level
+                // death (keepalive/liveness) may close the session.
                 throw timeout
             }
         } finally {
@@ -2245,8 +2259,12 @@ internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
  * `join()`) of a single [RealSshSession.exec] (#935 S4-2). A half-open / wedged
  * transport leaves the blocking JDK read parked forever; this is the boundary
  * bound that turns "the action silently never returns" into a fast, clear,
- * RETRYABLE [SshExecTimeoutException]. On expiry the session is closed so the
- * lease pool discards the corpse and re-dials on the next acquire.
+ * RETRYABLE [SshExecTimeoutException]. Issue #1567 (D28): on expiry ONLY this
+ * exec's own channel is closed — the shared transport (and the live `-CC`
+ * reader, concurrent execs, and in-flight uploads on it) stays ALIVE. A stalled
+ * exec is not evidence of a dead link; the caller retries on the same warm
+ * transport. Only a genuine transport-level death (keepalive/liveness) closes
+ * the session.
  *
  * Issue #1046: this is now a per-read NO-PROGRESS window, NOT a whole-call
  * wall-clock ceiling. The budget RESETS on every byte that arrives on either

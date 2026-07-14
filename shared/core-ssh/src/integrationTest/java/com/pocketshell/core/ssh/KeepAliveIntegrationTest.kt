@@ -1108,7 +1108,11 @@ class KeepAliveIntegrationTest {
  *    is delayed past the keepalive's local reply budget, which on base orphans the
  *    promise and desyncs the FIFO.
  */
-private class PausableTcpRelay(
+// Issue #1567: widened from `private` to `internal` so the exec-stall-containment
+// integration test (RealSshSessionExecStallContainmentIntegrationTest) can reuse
+// this proven in-JVM TCP relay to inject a REAL hard socket cut (a genuine
+// transport death) without duplicating the harness.
+internal class PausableTcpRelay(
     private val targetHost: String,
     private val targetPort: Int,
 ) : AutoCloseable {

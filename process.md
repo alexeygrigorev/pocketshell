@@ -375,6 +375,16 @@ Minimum pre-push gate:
   god-object past its baseline is itself a D28 smell — the fix is a real
   reduction (delete dead old-path code or extract to a sibling `*Effects`/
   diagnostics file), never raising the baseline.
+  **Per-PR guard-green is NOT sufficient when multiple PRs touch the SAME
+  hygiene-ratcheted file.** Two PRs can each pass `check-file-size-hygiene.sh`
+  individually off the shared base yet breach the byte baseline once *both* are
+  merged, because the guard only ever sees cumulative size on `main` (the v0.4.33
+  wave: #1545 + #1541 each passed the guard alone but their sum put
+  `TmuxSessionViewModel.kt` +28 bytes over baseline, red on `main`, requiring the
+  #1555 reduction). When merging a batch that touches the same ratcheted file,
+  re-run `check-file-size-hygiene.sh` against the actual post-merge `main` (or the
+  integration worktree rebased on the latest sibling) BEFORE the last merge — not
+  just per-PR in isolation.
 - **A render-heal / stale-render-watchdog / virtual-clock coroutine-loop change
   MUST run the FULL `:app:testDebugUnitTest` locally before push — NOT a narrow
   `--tests` class.** A watchdog/heal test that constructs and then cancels its

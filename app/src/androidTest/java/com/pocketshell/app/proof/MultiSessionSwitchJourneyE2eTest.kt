@@ -21,6 +21,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
@@ -151,11 +152,21 @@ class MultiSessionSwitchJourneyE2eTest {
 
     private val timings = mutableListOf<String>()
 
+    // Issue #1537 (option b): recording diagnostic sink for the parked-runtime
+    // fast-switch gate. Installed only by that test method (the other bodies do
+    // not read diagnostics) and always restored to Noop in [closeLaunchedActivity].
+    private var diagnostics: RecordingDiagnosticSink? = null
+
     private val pickerWaitMs: Long =
         if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L
 
     @After
     fun closeLaunchedActivity() {
+        // Issue #1537: restore the global DiagnosticEvents sink to Noop so this
+        // class's parked-runtime method never leaks a recording sink into a
+        // sibling test in the same instrumentation process.
+        runCatching { diagnostics?.close() }
+        diagnostics = null
         // Issue #788: the body cycles the rule-owned scenario to CREATED during
         // bg->fg grace tests; restore it to RESUMED before the compose rule's own
         // `after()` -> ActivityScenario.close() runs, so close() does not crash
@@ -298,6 +309,116 @@ class MultiSessionSwitchJourneyE2eTest {
                 "switches_asserted=${ring.size}",
                 "expectation=each switch shows correct (non-stale) content, no Disconnected band, " +
                     "pane re-seeded, no spurious SSH re-dial, input routed to shown session",
+            ),
+        )
+        writeTimings()
+        Unit
+    } }
+
+    /**
+     * Issue #1537 (option b) — the PARKED-RUNTIME fast-switch gate, on-device.
+     *
+     * The last unfixed connection flap is the fast-switch stale-lease redial: a
+     * session parked in the runtime cache while another is foreground had no
+     * subscriber watching its liveness, so its death surfaced only at switch-back
+     * as an attach EOF that forced a visible fresh redial
+     * (`stage=stale_lease_auto_recover cause=stale_lease_attach_eof
+     * outcome=fast_switch_fresh_redial`). Option (b) binds the parked client's
+     * liveness edges and evicts a corpse proactively, and routes the residual
+     * silent-TCP race into the single calm ladder instead of the bespoke counter.
+     *
+     * This drives the maintainer's real A->B->C->A fast-switch ring on the plain
+     * Docker `agents:2222` fixture and, from the connection-lifecycle diagnostics
+     * captured over the SAME run, asserts the two on-device properties the parked-
+     * health machinery must hold on the real path:
+     *
+     *  1. NO `stale_lease_attach_eof` / `fast_switch_fresh_redial` STORM on
+     *     switch-back — the warm parked runtime is reused, never discovered as a
+     *     stale corpse (the exact `cause_trail` signature the maintainer hit).
+     *  2. NO false `parked_runtime_death` — the subscriber must not evict a LIVE
+     *     parked runtime; a false-positive eviction would turn every switch-back
+     *     into the very redial this fix deletes. This is the on-device guard for
+     *     the parked-health subscriber over-firing (the JVM red->green lives in
+     *     `Issue1537ParkedRuntimeHealthTest` / `ParkedRuntimeDeathHandlerTest`;
+     *     agents:2222 cannot silently kill only a parked transport, so the death
+     *     reproduction is synthetic at the VM level while THIS gate proves the
+     *     machinery does not regress the real fast-switch on-device).
+     *
+     * Plus the reused per-switch [switchAndAssert] assertions: the CORRECT
+     * non-stale session is shown, the pane is re-seeded, no Disconnected band, no
+     * spurious reconnect, input routes to the shown session. Runs in per-push CI
+     * via the [MultiSessionSwitchJourneyE2eTest] whole-class entry in
+     * scripts/ci-journey-suite.sh (agents:2222, no toxiproxy, no self-skip).
+     */
+    @Test
+    fun parkedRuntimeFastSwitchRingNeverStormsStaleLeaseNorEvictsHealthyParkedRuntime() { runBlocking {
+        // Capture the connection-lifecycle diagnostics over the whole ring.
+        val recording = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        diagnostics = recording
+
+        // ---- (0) Attach to session A from the host-detail list.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady(hostRowTag)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "issue1537 initial attach to A")
+
+        expectedMarker[SESSION_A] = SESSION_A_MARKER
+        expectedMarker[SESSION_B] = SESSION_B_MARKER
+        expectedMarker[SESSION_C] = SESSION_C_MARKER
+        var previousSession = SESSION_A
+        assertInputRoutesToShownSession(SESSION_A, "issue1537 initial")
+
+        // ---- The ring A -> B -> C -> A. Each switch parks the leaving same-host
+        // runtime into the cache (the parked-health subscriber binds each); the
+        // return-to-A switch is the one most prone to the stale-lease redial.
+        val ringStart = SystemClock.elapsedRealtime()
+        listOf(SESSION_B, SESSION_C, SESSION_A).forEachIndexed { index, target ->
+            switchAndAssert(step = index + 1, fromSession = previousSession, toSession = target)
+            previousSession = target
+        }
+        recordTiming("issue1537_switch_ring_ms", SystemClock.elapsedRealtime() - ringStart)
+
+        // ---- (1) NO stale-lease attach-EOF storm on switch-back.
+        val causeTrail = recording.eventsNamed("cause_trail")
+        val staleLeaseStorm = causeTrail.filter { event ->
+            event.fields["cause"] == "stale_lease_attach_eof" ||
+                event.fields["outcome"] == "fast_switch_fresh_redial"
+        }
+        writeText("issue1537-cause-trail.txt", causeTrail.joinToString("\n").ifBlank { "(none)" })
+        recordTiming("issue1537_stale_lease_storm_events", staleLeaseStorm.size.toLong())
+        assertTrue(
+            "issue1537: a HEALTHY A->B->C->A fast-switch ring must NOT storm the stale-lease " +
+                "attach-EOF fallback on switch-back (cause=stale_lease_attach_eof / " +
+                "outcome=fast_switch_fresh_redial) — the warm parked runtime must be reused, " +
+                "not discovered as a stale corpse. Saw: $staleLeaseStorm ; full trail=$causeTrail",
+            staleLeaseStorm.isEmpty(),
+        )
+
+        // ---- (2) NO false parked_runtime_death: the subscriber must not evict a
+        // LIVE parked runtime during a healthy switch (over-eviction would force
+        // the redial this fix deletes).
+        val falseDeaths = recording.eventsNamed("parked_runtime_death")
+        recordTiming("issue1537_parked_runtime_death_events", falseDeaths.size.toLong())
+        assertTrue(
+            "issue1537: a HEALTHY fast-switch ring must NOT record a parked_runtime_death — the " +
+                "parked-health subscriber must not evict a live parked runtime. Saw: $falseDeaths",
+            falseDeaths.isEmpty(),
+        )
+
+        writeSummary(
+            lines = listOf(
+                "issue=1537 option-b parked-runtime fast-switch gate",
+                "sessions=$SESSION_A,$SESSION_B,$SESSION_C",
+                "journey=A->B->C->A (parks each leaving same-host runtime)",
+                "cause_trail_events=${causeTrail.size}",
+                "stale_lease_attach_eof_or_fast_switch_fresh_redial=${staleLeaseStorm.size}",
+                "parked_runtime_death_events=${falseDeaths.size}",
+                "expectation=no stale-lease attach-EOF storm on switch-back, no false parked_runtime_death, " +
+                    "correct non-stale session each switch, no Disconnected band, no spurious reconnect",
             ),
         )
         writeTimings()

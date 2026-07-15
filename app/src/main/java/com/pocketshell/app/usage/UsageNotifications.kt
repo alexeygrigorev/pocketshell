@@ -15,6 +15,7 @@ import com.pocketshell.app.R
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageThresholdState
+import java.time.Instant
 import java.time.ZoneId
 
 public interface UsageNotifier {
@@ -30,6 +31,7 @@ public class DefaultUsageNotifier(
     private val settingsRepository: SettingsRepository,
     private val stateStore: UsageNotificationStateStore,
     private val zoneId: () -> ZoneId = { ZoneId.systemDefault() },
+    private val now: () -> Instant = { Instant.now() },
     private val poster: (UsageNotificationEvent) -> Unit = { event ->
         UsageNotifications.show(context.applicationContext, event)
     },
@@ -59,6 +61,7 @@ public class DefaultUsageNotifier(
                             record = record,
                             state = state,
                             warnPercent = warnPercent,
+                            now = now(),
                             zoneId = zoneId(),
                             hostName = snapshot.hostName,
                             hostId = snapshot.hostId,
@@ -103,6 +106,7 @@ internal fun usageNotificationEvent(
     record: UsageProviderRecord,
     state: UsageThresholdState,
     warnPercent: Double,
+    now: Instant = Instant.now(),
     zoneId: ZoneId = ZoneId.systemDefault(),
     hostName: String? = null,
     hostId: Long? = null,
@@ -119,13 +123,17 @@ internal fun usageNotificationEvent(
         UsageThresholdState.Ok ->
             "${record.displayName} usage"
     }
-    // Issue #1441: show an ABSOLUTE reset time, not a relative "resets in Xh Ym"
-    // computed once against `now`. A notification is fire-and-forget — a value
-    // baked in at post time must stay correct as wall-clock time passes, and a
-    // relative countdown drifts wrong (reads "resets in 2h" long after the reset
-    // already happened). The absolute local time never goes stale.
-    val resetText = formatResetAbsolute(record.mostConstrainedWindow?.resetAt, zoneId)
-        ?.let { "resets $it" }
+    // Issue #1618: the maintainer needs both the at-a-glance countdown and the
+    // exact local reset time in the notification. Reuse the same two formatters
+    // as the Usage screen; [now] is captured once when the card is posted so
+    // relative and absolute text describe the same reset instant. Issue #1441's
+    // clearing path still cancels the card as soon as the quota resets.
+    val resetAt = record.mostConstrainedWindow?.resetAt
+    val resetText = resetAt?.let {
+        val relative = formatResetRelative(now, it, zoneId)
+        val absolute = formatResetAbsolute(it, zoneId)
+        "resets $relative · $absolute"
+    }
     val hostText = hostName?.trim()?.takeIf { it.isNotEmpty() }
     val stateText = when (state) {
         UsageThresholdState.Approaching -> "Approaching limit"

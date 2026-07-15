@@ -175,7 +175,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest"
   "com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest"
   "com.pocketshell.app.usage.UsageScreenE2eTest"
-  "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"
 )
 
 in_list() {

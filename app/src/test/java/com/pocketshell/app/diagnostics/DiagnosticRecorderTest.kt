@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.settings.SettingsRepository
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -223,6 +224,45 @@ class DiagnosticRecorderTest {
         val events = store.readEvents()
         assertEquals(listOf(3L, 4L, 5L), events.map { it.sequence })
         assertEquals(listOf("tap_3", "tap_4", "tap_5"), events.map { it.name })
+    }
+
+    @Test
+    fun `reconnect cause-trail exposes the reader exception message in the host connection log`() = runTest {
+        // Issue #1610: the real ~/.pocketshell/connection-log.jsonl path. The
+        // mobile -CC reader SSHException fed a `message=[redacted]` line to the
+        // host mirror, so we could not tell WHICH SSHException tore down the
+        // shared lease transport. The reconnect cause-trail must now surface the
+        // exception class + a bounded, allowlisted classification of the failure
+        // shape (Option A) end-to-end through the recorder — with ZERO chance of
+        // leaking arbitrary secret text a caller folded into the message.
+        settingsRepository.setDiagnosticsRecordingEnabled(true)
+        val recorder = DiagnosticRecorder(context, settingsRepository)
+        DiagnosticEvents.install(recorder)
+
+        ReconnectCauseTrail.record(
+            stage = "lease_transport",
+            outcome = "down",
+            cause = "reader_exception",
+            "exceptionClass" to "SSHException",
+            "transportDropSource" to "control_channel",
+            "disconnectSource" to "read_failure",
+            "message" to "SSHException: connection reset by peer (password=hunter2secret)",
+        )
+
+        val jsonl = recorder.connectionLogJsonl()
+        val line = jsonl.split("\n").first { it.isNotBlank() }
+        val metadata = JSONObject(line).getJSONObject("metadata")
+
+        // Surfaced for diagnosis (RED on base: this was "[redacted]").
+        assertEquals("SSHException", metadata.getString("exceptionClass"))
+        // The operator can see it was a connection-reset read failure — WHICH
+        // SSHException — via a fixed classification token, not raw message text.
+        assertEquals("connection_reset", metadata.getString("message"))
+        // Load-bearing safety: the embedded secret never reaches the host log.
+        assertFalse(
+            "secret leaked into the host connection log: $jsonl",
+            jsonl.contains("hunter2secret"),
+        )
     }
 
     @Test

@@ -98,12 +98,30 @@ internal object DiagnosticEventJson {
 }
 
 internal object DiagnosticRedactor {
-    fun redact(fields: Map<String, Any?>): Map<String, Any?> =
+    /**
+     * [category] is the diagnostic event's category (e.g. `connection`,
+     * `reconnect`). It is threaded through so the connection/reconnect
+     * cause-trail can SURFACE which exception the -CC reader hit — which the
+     * blanket key-based redaction would otherwise drop to `[redacted]`, making a
+     * `reader_exception` teardown undiagnosable (issue #1610). Rather than pass
+     * the raw exception `message` (whose free text could carry a secret a caller
+     * folded in), the surfaced value is a BOUNDED, ALLOWLISTED classification of
+     * the failure shape — see [classifyFailureMessage]. For every other category
+     * the `message` key stays fully redacted exactly as before.
+     */
+    fun redact(fields: Map<String, Any?>, category: String? = null): Map<String, Any?> =
         fields.mapKeys { (key, _) -> sanitizeMetadataKey(key) }
-            .mapValues { (key, value) -> redactValue(key, value) }
+            .mapValues { (key, value) -> redactValue(key, value, category) }
 
-    private fun redactValue(key: String, value: Any?): Any? {
+    private fun redactValue(key: String, value: Any?, category: String?): Any? {
         if (value == null) return null
+        // Surface WHICH exception the -CC reader hit for the connection/reconnect
+        // cause-trail so a `reader_exception` teardown is diagnosable — but as a
+        // fixed classification token, never raw message text, so no secret a
+        // caller folded into the exception message can ever leak (#1610).
+        if (isDiagnosableMessageKey(key, category)) {
+            return classifyFailureMessage(value.toString())
+        }
         if (isSensitiveKey(key) || looksSensitive(value)) return REDACTED
         if (isStableContextKey(key)) return DiagnosticPrivacy.stableFingerprint(value)
         return when (value) {
@@ -113,12 +131,65 @@ internal object DiagnosticRedactor {
             is Collection<*> -> mapOf("count" to value.size)
             is Map<*, *> -> mapOf("count" to value.size)
             is Throwable -> value.javaClass.simpleName
-            else -> value.toString()
-                .replace('\n', ' ')
-                .replace('\r', ' ')
-                .replace('\t', ' ')
-                .filterNot { it.isISOControl() }
-                .take(MAX_VALUE_CHARS)
+            else -> sanitizeFreeText(value.toString())
+        }
+    }
+
+    private fun sanitizeFreeText(text: String): String =
+        text.replace('\n', ' ')
+            .replace('\r', ' ')
+            .replace('\t', ' ')
+            .filterNot { it.isISOControl() }
+            .take(MAX_VALUE_CHARS)
+
+    /**
+     * True only for the exception-message key of a connection/reconnect
+     * cause-trail event. Deliberately narrow: it opens ONLY the message field
+     * and ONLY for the reconnect-diagnosis categories, never `command` /
+     * `prompt` / `body` / `content`, and never for other categories.
+     */
+    private fun isDiagnosableMessageKey(key: String, category: String?): Boolean {
+        val normalisedCategory = category?.lowercase() ?: return false
+        if (normalisedCategory !in DIAGNOSABLE_MESSAGE_CATEGORIES) return false
+        return key.lowercase() in DIAGNOSABLE_MESSAGE_KEYS
+    }
+
+    /**
+     * Maps a connection/reconnect failure message to a BOUNDED, ALLOWLISTED
+     * classification token (#1610). This is deliberately NOT the raw message and
+     * NOT a scrubbed variant of it: the return value is ALWAYS one of the fixed
+     * lowercase `[a-z_]+` tokens below and NEVER a substring of [text]. That
+     * gives a categorical secret-safety guarantee — an `authorization:` header, a
+     * PEM private-key body, a high-entropy token, or any other secret a caller
+     * folded into the exception message can never surface, because no part of
+     * [text] is ever emitted. What the reconnect diagnosis needs (WHICH
+     * SSHException the -CC reader hit — read-timeout vs reset vs EOF vs
+     * channel-closed) is preserved; the risky free text is dropped. An
+     * unrecognised shape collapses to [OTHER_FAILURE].
+     *
+     * This is strictly stronger than the old unconditional `[redacted]` for the
+     * `message` key: it leaks strictly less (a fixed enum, never user data) while
+     * surfacing the failure shape the maintainer needs to root-cause the mobile
+     * -CC teardown.
+     */
+    private fun classifyFailureMessage(text: String): String {
+        val lower = text.lowercase()
+        return when {
+            "broken pipe" in lower -> "broken_pipe"
+            "reset by peer" in lower || "connection reset" in lower -> "connection_reset"
+            "connection refused" in lower -> "connection_refused"
+            "timed out" in lower || "timeout" in lower -> "timeout"
+            "no route to host" in lower -> "no_route_to_host"
+            "network is unreachable" in lower || "network unreachable" in lower -> "network_unreachable"
+            "channel" in lower && ("closed" in lower || "not open" in lower || "eof" in lower) ->
+                "channel_closed"
+            "premature eof" in lower || "unexpected eof" in lower ||
+                "end of file" in lower || "eof" in lower -> "eof"
+            "socket closed" in lower || "connection closed" in lower ||
+                "closed by" in lower || "disconnect" in lower -> "connection_closed"
+            "auth" in lower && "fail" in lower -> "auth_failure"
+            "host key" in lower || "verification failed" in lower -> "host_key_mismatch"
+            else -> OTHER_FAILURE
         }
     }
 
@@ -149,6 +220,22 @@ internal object DiagnosticRedactor {
     private const val MAX_KEY_CHARS = 64
     private const val MAX_VALUE_CHARS = 160
     private const val REDACTED = "[redacted]"
+    private const val OTHER_FAILURE = "other"
+
+    /**
+     * Categories whose exception `message` is surfaced (secret-scrubbed) for
+     * reconnect diagnosis (#1610): the connection lifecycle events and the
+     * [ReconnectCauseTrail]. Everything else keeps `message` fully redacted.
+     */
+    private val DIAGNOSABLE_MESSAGE_CATEGORIES = setOf(
+        "connection",
+        ReconnectCauseTrail.CATEGORY,
+    )
+
+    private val DIAGNOSABLE_MESSAGE_KEYS = setOf(
+        "message",
+        "exceptionmessage",
+    )
 
     private val STABLE_CONTEXT_KEYS = setOf(
         "host",

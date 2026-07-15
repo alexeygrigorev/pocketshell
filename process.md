@@ -695,6 +695,35 @@ maintainer/process cleanups use the direct-to-main lane instead.
 
 Parallelism is issue-scoped, not role-skipping:
 
+### Required Codex subagent model (locked, 2026-07-15)
+
+Backlog implementers, reviewers, researchers, and on-call workers MUST run as
+Codex subagents on **`gpt-5.6-sol` with High reasoning effort**. Do not replace
+them with shell-launched Claude sessions or an unspecified/default-effort
+agent.
+
+Set the persistent local defaults in `~/.codex/config.toml`:
+
+```toml
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+```
+
+In an already-running app/CLI task, the parent thread's live model setting is
+reapplied to spawned children and can override newly edited config. Before the
+first dispatch, use the composer model selector (**Advanced → `gpt-5.6-sol` →
+High**) or CLI `/model`; otherwise restart/open a new task so config reloads.
+Verify the first child's recorded/effective model and effort before allowing it
+to edit. If it is not `gpt-5.6-sol` High, interrupt it immediately, preserve the
+worktree, correct the parent/config setting, and redispatch only after reload.
+
+- Use the built-in Codex subagent workflow for all role dispatches.
+- Keep the normal isolated-worktree and implementer → reviewer state machine;
+  model selection does not waive any process gate.
+- Project/personal custom agent TOML files may pin `model` and
+  `model_reasoning_effort`, but newly added agent/config files still require a
+  new task or restart when the active parent retains a live override.
+
 - Each active issue keeps its own implementer/reviewer loop.
 - Reviewers may run in parallel for different issues.
 - A reviewer finding for issue A goes back to an implementer assigned to issue A, even if issue B is also active.

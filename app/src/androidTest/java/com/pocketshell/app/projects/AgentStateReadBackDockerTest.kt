@@ -39,6 +39,15 @@ import java.io.FileOutputStream
  * the gateway's read-back path resolves the chip state. It covers the class:
  * idle, waiting_for_input, the stale case (activity newer than the state write →
  * Unknown, no chip), and the absent case (no option → Unknown, no chip).
+ *
+ * Issue #1570: adds the WORKING case with the timestamp format the real host
+ * hook actually writes — `datetime.now(timezone.utc).isoformat()`, an ISO-8601
+ * string, NOT the epoch int the other cases (and every prior fixture) used. A
+ * live Codex that recorded `idle` on its last turn-stop and then resumed (its
+ * `Working (…· esc to interrupt)` redraw bumps session_activity past the recorded
+ * stop) must read back as [SessionAgentState.Working], not the wrong "Idle" the
+ * maintainer saw. This is the #847-class fixture gap that let the bug ship: the
+ * connected test never exercised the ISO format.
  */
 @RunWith(AndroidJUnit4::class)
 class AgentStateReadBackDockerTest {
@@ -117,6 +126,21 @@ class AgentStateReadBackDockerTest {
             updatedAtOffsetSec = -3600,
         )
 
+        // 5) WORKING (#1570): a live Codex agent that recorded `idle` on its last
+        //    turn-stop, then resumed — the host wrote the timestamp in the REAL
+        //    ISO-8601 format the hook uses (not an epoch int), far in the PAST
+        //    relative to session activity. It MUST read back as Working, not the
+        //    wrong "Idle" (the maintainer's report). Requires @ps_agent_kind=codex
+        //    so the session is treated as a live agent.
+        val working = "issue1237-working-$suffix"
+        createAgentSessionWithIsoState(
+            sessionName = working,
+            cwd = cwd,
+            kind = "codex",
+            state = "idle",
+            updatedAtOffsetSec = -3600,
+        )
+
         // 4) ABSENT: a plain session with no @ps_agent_state option → Unknown.
         val absent = "issue1237-absent-$suffix"
         cleanupCommands += "tmux kill-session -t ${shellQuote(absent)} 2>/dev/null || true"
@@ -149,7 +173,7 @@ class AgentStateReadBackDockerTest {
         // drops a session that raw tmux confirms is live, the assertions below
         // fail loudly (a real product enumeration gap is surfaced, not masked).
         awaitSessionsEnumerable(
-            statefulSessions = listOf(idle, waiting, stale),
+            statefulSessions = listOf(idle, waiting, stale, working),
             plainSessions = listOf(absent),
         )
 
@@ -184,6 +208,19 @@ class AgentStateReadBackDockerTest {
             SessionAgentState.Unknown,
             rowFor(rows, absent).toSessionEntry().agentState,
         )
+        // #1570: the working Codex recorded `idle` with the REAL ISO-8601
+        // timestamp; the resolver must parse it, see activity is newer, and — for
+        // a live agent — surface Working, not the wrong "Idle".
+        assertEquals(
+            "hook-written idle must read back as raw idle",
+            "idle",
+            rowFor(rows, working).agentStateRaw,
+        )
+        assertEquals(
+            "#1570: a live Codex whose ISO-stamped idle is stale reads back Working, not Idle",
+            SessionAgentState.Working,
+            rowFor(rows, working).toSessionEntry().agentState,
+        )
     } }
 
     private fun rowFor(rows: List<FolderSessionRow>, name: String): FolderSessionRow =
@@ -207,6 +244,38 @@ class AgentStateReadBackDockerTest {
                     append("__ts=\$(( \$(date +%s) + ($updatedAtOffsetSec) )); ")
                     append("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_state ${shellQuote(state)}; ")
                     append("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_state_updated_at \"\$__ts\"")
+                }
+                session.exec(script)
+            }
+        }
+    }
+
+    /**
+     * Like [createSessionWithState] but records a live-agent kind
+     * (`@ps_agent_kind`) and stamps `@ps_agent_state_updated_at` in the REAL
+     * ISO-8601 format the host hook writes (`date -u ... +%Y-%m-%dT%H:%M:%S+00:00`),
+     * not an epoch int — issue #1570. Used to reproduce a working agent whose
+     * stale ISO-stamped idle must resolve to Working on the connected path.
+     */
+    private suspend fun createAgentSessionWithIsoState(
+        sessionName: String,
+        cwd: String,
+        kind: String,
+        state: String,
+        updatedAtOffsetSec: Long,
+    ) {
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        withTimeout(30_000) {
+            withSshSession { session ->
+                val script = buildString {
+                    append("tmux new-session -d -s ${shellQuote(sessionName)} -c ${shellQuote(cwd)}; ")
+                    // ISO-8601 UTC timestamp offset from now, mirroring the host
+                    // hook's datetime.now(timezone.utc).isoformat().
+                    append("__iso=\$(date -u -d @\$(( \$(date +%s) + ($updatedAtOffsetSec) )) ")
+                    append("+%Y-%m-%dT%H:%M:%S+00:00); ")
+                    append("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind ${shellQuote(kind)}; ")
+                    append("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_state ${shellQuote(state)}; ")
+                    append("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_state_updated_at \"\$__iso\"")
                 }
                 session.exec(script)
             }

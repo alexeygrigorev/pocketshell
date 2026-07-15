@@ -175,4 +175,93 @@ class SessionAgentStateTest {
             ),
         )
     }
+
+    // --- Issue #1570: agent resume → Working; ISO timestamp parse ---------
+
+    @Test
+    fun `resolver surfaces Working for a live agent whose resting state is stale`() {
+        // A live agent (Codex/Claude) recorded idle, then resumed and is emitting
+        // output (session_activity newer than the recorded stop). The stop hook
+        // never records the resume, so we infer Working from the fresh output —
+        // the "working Codex shows Idle" report (#1570).
+        assertEquals(
+            SessionAgentState.Working,
+            resolveSessionAgentState(
+                rawState = "idle",
+                stateUpdatedAtEpochSec = 1_000L,
+                sessionActivityEpochSec = 5_000L,
+                isAgentSession = true,
+            ),
+        )
+        assertEquals(
+            SessionAgentState.Working,
+            resolveSessionAgentState(
+                rawState = "waiting_for_input",
+                stateUpdatedAtEpochSec = 1_000L,
+                sessionActivityEpochSec = 5_000L,
+                isAgentSession = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `resolver keeps a live agent's fresh resting state as Idle within grace`() {
+        // An agent resting at its prompt produces no new output → not stale →
+        // stays Idle, never a wrong Working (the Codex idle-at-prompt case).
+        assertEquals(
+            SessionAgentState.Idle,
+            resolveSessionAgentState(
+                rawState = "idle",
+                stateUpdatedAtEpochSec = 1_000L,
+                sessionActivityEpochSec = 1_000L,
+                isAgentSession = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `resolver stays Unknown for a non-agent stale resting state`() {
+        // A shell is not a live agent — the #1237 "absent, not wrong" rule holds.
+        assertEquals(
+            SessionAgentState.Unknown,
+            resolveSessionAgentState(
+                rawState = "idle",
+                stateUpdatedAtEpochSec = 1_000L,
+                sessionActivityEpochSec = 5_000L,
+                isAgentSession = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `updated-at parse accepts the ISO-8601 string the host hook writes`() {
+        // The generated hook writes datetime.now(timezone.utc).isoformat().
+        // 2023-11-14T22:13:20+00:00 == epoch 1_700_000_000.
+        assertEquals(1_700_000_000L, parseAgentStateUpdatedAtEpochSec("2023-11-14T22:13:20+00:00"))
+        assertEquals(
+            1_700_000_000L,
+            parseAgentStateUpdatedAtEpochSec("2023-11-14T22:13:20.500000+00:00"),
+        )
+        assertEquals(1_700_000_000L, parseAgentStateUpdatedAtEpochSec(" 2023-11-14T22:13:20Z "))
+    }
+
+    @Test
+    fun `updated-at parse accepts an epoch int and rejects blank or garbage`() {
+        assertEquals(1_700_000_900L, parseAgentStateUpdatedAtEpochSec("1700000900"))
+        assertNull(parseAgentStateUpdatedAtEpochSec(null))
+        assertNull(parseAgentStateUpdatedAtEpochSec(""))
+        assertNull(parseAgentStateUpdatedAtEpochSec("   "))
+        assertNull(parseAgentStateUpdatedAtEpochSec("not-a-timestamp"))
+    }
+
+    @Test
+    fun `isLiveAgent is true only for Claude Codex OpenCode`() {
+        assertEquals(true, SessionAgentKind.Claude.isLiveAgent())
+        assertEquals(true, SessionAgentKind.Codex.isLiveAgent())
+        assertEquals(true, SessionAgentKind.OpenCode.isLiveAgent())
+        assertEquals(false, SessionAgentKind.Shell.isLiveAgent())
+        assertEquals(false, SessionAgentKind.Probing.isLiveAgent())
+        assertEquals(false, SessionAgentKind.Exited.isLiveAgent())
+        assertEquals(false, SessionAgentKind.Unknown.isLiveAgent())
+    }
 }

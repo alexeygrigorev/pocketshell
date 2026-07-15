@@ -24,6 +24,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -36,6 +37,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+
+// Issue #1615: default in-JVM stress-loop iteration count for the AGENT-variant
+// guard [TmuxSessionAgentSendTest.sendToAgentPaneReconnectRecoverableDrainsDeterministicallyUnderStress].
+// This guard runs in the per-push Unit gate at this floor (proven stable). The
+// PAYLOAD variant is intentionally NOT stress-guarded (deferred to #1617 — see
+// that guard's KDoc). Override with the `PS_STRESS_COUNT` env var for a heavier
+// local soak.
+private const val STRESS_ITERATIONS = 50
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -1079,6 +1088,11 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
 
     @Test
     fun sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
+        runReconnectRecoverableAgentSendScenario()
+    }
+
+    @Test
+    fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
@@ -1086,6 +1100,135 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             registry = registry,
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
+        // Issue #1110: the send-triggered reconnect REPLACES the disconnected
+        // client, and the displaced client's runtime is torn down on the off-Main
+        // teardown scope ([deferConnectionTeardownOffMain]). The default scope is a
+        // real `Dispatchers.IO` ([defaultTeardownScope]); that real worker races the
+        // virtual-clock reconnect/send the test drives with `advanceUntilIdle()`,
+        // so the load-bearing reconnect+send assertions flaked under CI contention
+        // (the `:11824` lambda-line failure). Pin the teardown to the SHARED
+        // virtual-clock scheduler (the established #1085 pattern below) so the close
+        // drains deterministically under `advanceUntilIdle()` with no real-IO race.
+        //
+        // Issue #1615 (DEMOTE decision): the deeper #1168 `agentTailScope`/
+        // `factoryScope` cross-test isolation weakness that makes THIS payload
+        // variant flake in CI (#1584/#1599) even with the seam is deferred to
+        // #1617; #1615 does NOT add a per-push stress guard for this variant (a
+        // 50× guard would AMPLIFY the residual flake). See #1617.
+        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "codex",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+
+        val send = async {
+            vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
+        }
+        advanceUntilIdle()
+        val result = send.await()
+
+        assertTrue("Codex Terminal-tab Send+Enter must reconnect before send", result.isSuccess)
+        assertEquals(1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'codex terminal send'",
+                "send-keys -t %0 Enter",
+            ),
+            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    /**
+     * Issue #1615 (test-infra determinism — AGENT variant, #1614 flake): the
+     * `sendToAgentPaneResult` reconnect-recoverable send coupled the REAL off-Main
+     * teardown dispatcher (the #1110
+     * [TmuxSessionViewModel.deferConnectionTeardownOffMain] path) into a
+     * virtual-time `runTest`. The send-triggered reconnect REPLACES the
+     * disconnected client and the displaced client's runtime tears down on the
+     * teardown scope; when that scope is a real `Dispatchers.IO` worker (the base
+     * `defaultTeardownScope`) it races the virtual clock the assertions drive with
+     * `advanceUntilIdle()`, so the load-bearing reconnect+send ordering
+     * intermittently hadn't drained when the clock advanced — a spurious `Unit
+     * tests` red on unrelated PR #1614 (this variant at :1081).
+     *
+     * The fix is a test-determinism seam ONLY (no production behaviour change):
+     * the agent scenario pins the teardown scope to the SHARED virtual-clock
+     * scheduler via
+     * `setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))`
+     * (see [runReconnectRecoverableAgentSendScenario]), so the displaced-client
+     * teardown drains deterministically under `advanceUntilIdle()`.
+     *
+     * This stress guard runs the EXACT same scenario body as the single-shot
+     * `sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable` test
+     * above (shared helper) [STRESS_ITERATIONS]× so a returning real-IO teardown
+     * race surfaces as a hard failure in the per-push Unit gate. It is proven
+     * stable at this floor (co-run + solo 50×, 0 flakes; reviewer saw the agent
+     * scenario pass at 300× under CPU saturation, and FAIL at 300× only when the
+     * seam is removed).
+     *
+     * SCOPE NOTE — the PAYLOAD variant is deliberately NOT stress-guarded here.
+     * The `sendAgentPayloadToPaneResult` variant (#1584/#1599) flakes at the same
+     * 50× floor because of the deeper #1168 `agentTailScope`/`factoryScope`
+     * cross-test isolation weakness, which is distinct from the teardown scope and
+     * NOT fixed by #1615. Adding a payload stress guard to the per-push gate would
+     * AMPLIFY that residual flake (50 chances/run), the opposite of #1615's goal,
+     * so the payload isolation fix is deferred to **#1617**. Do NOT add a payload
+     * `…DrainsDeterministicallyUnderStress` guard until #1617 lands the isolation
+     * fix.
+     */
+    @Test
+    fun sendToAgentPaneReconnectRecoverableDrainsDeterministicallyUnderStress() = runTest(scheduler) {
+        val iterations = System.getenv("PS_STRESS_COUNT")?.toIntOrNull() ?: STRESS_ITERATIONS
+        repeat(iterations) {
+            runReconnectRecoverableAgentSendScenario()
+        }
+    }
+
+    private suspend fun TestScope.runReconnectRecoverableAgentSendScenario() {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Issue #1615: pin the off-Main connection-teardown scope to the SHARED
+        // virtual-clock scheduler (a StandardTestDispatcher on `scheduler`) so the
+        // send-triggered reconnect's displaced-client teardown
+        // ([TmuxSessionViewModel.deferConnectionTeardownOffMain]) drains under
+        // `advanceUntilIdle()` instead of racing a real `Dispatchers.IO` worker
+        // (the base default is `defaultTeardownScope`, real IO). Without this the
+        // real teardown thread races the virtual-clock reconnect/send and the
+        // load-bearing assertions flaked on CI (PR #1614, this variant at :1081).
+        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -1142,75 +1285,6 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val pending = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
         assertEquals("send after return", pending.text)
         assertEquals(MessageSendState.Pending, pending.sendState)
-    }
-
-    @Test
-    fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
-        val registry = ActiveTmuxClients()
-        val connector = QueueLeaseConnector(FakeSshSession())
-        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
-        val vm = newVm(
-            registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
-        )
-        // Issue #1110: the send-triggered reconnect REPLACES the disconnected
-        // client, and the displaced client's runtime is torn down on the off-Main
-        // teardown scope ([deferConnectionTeardownOffMain]). The default scope is a
-        // real `Dispatchers.IO` ([defaultTeardownScope]); that real worker races the
-        // virtual-clock reconnect/send the test drives with `advanceUntilIdle()`,
-        // so the load-bearing reconnect+send assertions flaked under CI contention
-        // (the `:11824` lambda-line failure). Pin the teardown to the SHARED
-        // virtual-clock scheduler (the established #1085 pattern below) so the close
-        // drains deterministically under `advanceUntilIdle()` with no real-IO race.
-        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
-        vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
-        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
-            assertEquals("work", sessionName)
-            reconnectClient
-        }
-        val deadClient = FakeTmuxClient()
-        vm.replaceClientForTest(
-            hostId = 7L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = deadClient,
-        )
-        vm.applyParsedPanesForTest(
-            listOf(
-                TmuxSessionViewModel.ParsedPane(
-                    paneId = "%0",
-                    windowId = "@0",
-                    sessionId = "\$0",
-                    title = "codex",
-                    paneIndex = 0,
-                    sessionName = "work",
-                ),
-            ),
-        )
-
-        deadClient.disconnectedSignal.value = true
-        runCurrent()
-
-        val send = async {
-            vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
-        }
-        advanceUntilIdle()
-        val result = send.await()
-
-        assertTrue("Codex Terminal-tab Send+Enter must reconnect before send", result.isSuccess)
-        assertEquals(1, connector.connectCount)
-        assertSame(reconnectClient, registry.clients.value[7L]?.client)
-        assertEquals(
-            listOf(
-                "send-keys -l -t %0 -- 'codex terminal send'",
-                "send-keys -t %0 Enter",
-            ),
-            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
-        )
     }
 
     @Test

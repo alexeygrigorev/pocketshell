@@ -6,6 +6,7 @@ import com.pocketshell.core.usage.UsageWindow
 import com.pocketshell.uikit.model.PillKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -27,8 +28,8 @@ class UsageGlancePillStateTest {
     private val zone = ZoneId.of("UTC")
     private val now = Instant.parse("2026-07-04T14:10:00Z")
 
-    private fun window(percent: Double): UsageWindow =
-        UsageWindow(name = "5h", used = percent, limit = 100.0, unit = "percent", resetAt = null)
+    private fun window(percent: Double, name: String = "5h"): UsageWindow =
+        UsageWindow(name = name, used = percent, limit = 100.0, unit = "percent", resetAt = null)
 
     private fun record(
         provider: String,
@@ -89,7 +90,73 @@ class UsageGlancePillStateTest {
         )
         val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
         assertEquals(72, state.percent)
-        assertEquals("72%", state.label)
+        // #1566: attributed, not a bare "72%". The winning window here is the
+        // default "5h" from the window() helper.
+        assertEquals("Codex", state.provider)
+        assertEquals("Codex 5h 72%", state.label)
+    }
+
+    // AC4 (issue #1566): REPRODUCE-FIRST — with two providers at different
+    // percents, the pill shows the HIGHER one WITH its provider attribution, not
+    // a bare number. On the pre-#1566 code the label was "72%" (bare) with no
+    // provider field; this asserts the attribution the maintainer asked for.
+    @Test
+    fun `two providers — the higher percent is shown attributed to its provider`() {
+        val snapshots = mapOf(
+            1L to snapshot(
+                1L,
+                listOf(
+                    record("claude", 40.0, windows = listOf(window(40.0, name = "7d"))),
+                    record("codex", 72.0, windows = listOf(window(72.0, name = "7d"))),
+                ),
+            ),
+        )
+        val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
+
+        // The number is the higher (nearest-limit) provider's …
+        assertEquals(72, state.percent)
+        // … and it is ATTRIBUTED to Codex, with its window, not a bare "72%".
+        assertEquals("Codex", state.provider)
+        assertEquals("7d", state.window)
+        assertEquals("Codex 7d", state.attribution)
+        assertEquals("Codex 7d 72%", state.label)
+        assertTrue("label must name the provider", state.label.contains("Codex"))
+        assertNotEquals("label must NOT be a bare percent", "72%", state.label)
+    }
+
+    @Test
+    fun `provider display label is compact — Claude not Claude Code`() {
+        val snapshots = mapOf(1L to snapshot(1L, listOf(record("claude", 60.0))))
+        val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
+        assertEquals("Claude", state.provider)
+    }
+
+    @Test
+    fun `internal-looking window keys are dropped — provider still attributes`() {
+        // copilot's "short_term" key is not a clean compact token → window null,
+        // but the provider label still answers "which provider".
+        val snapshots = mapOf(
+            1L to snapshot(1L, listOf(record("copilot", 66.0, windows = listOf(window(66.0, name = "short_term"))))),
+        )
+        val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
+        assertEquals("Copilot", state.provider)
+        assertNull(state.window)
+        assertEquals("Copilot 66%", state.label)
+    }
+
+    @Test
+    fun `blocked provider with no windows is attributed with no window hint`() {
+        val snapshots = mapOf(
+            1L to snapshot(
+                1L,
+                listOf(record("codex", 0.0, status = UsageStatus.Blocked, windows = emptyList())),
+            ),
+        )
+        val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
+        assertEquals(100, state.percent)
+        assertEquals("Codex", state.provider)
+        assertNull(state.window)
+        assertEquals("Codex 100%", state.label)
     }
 
     @Test
@@ -147,7 +214,7 @@ class UsageGlancePillStateTest {
         val snapshots = mapOf(1L to snapshot(1L, listOf(record("claude", 60.0)), fetchedAt = now.minus(Duration.ofMinutes(2))))
         val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
         assertFalse(state.stale)
-        assertEquals("Usage 60%", state.contentDescription)
+        assertEquals("Usage Claude 5h 60%", state.contentDescription)
     }
 
     @Test
@@ -157,7 +224,7 @@ class UsageGlancePillStateTest {
         val state = usageGlancePillState(snapshots, warnPercent = 80.0, now = now, zoneId = zone)!!
         assertTrue(state.stale)
         assertEquals("13:55", state.capturedClock)
-        assertEquals("Usage 60%, cached from 13:55", state.contentDescription)
+        assertEquals("Usage Claude 5h 60%, cached from 13:55", state.contentDescription)
     }
 
     @Test

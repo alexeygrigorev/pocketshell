@@ -51,6 +51,20 @@ public data class UsageGlancePillState(
     /** Most-constraining provider percent across every cached host, rounded. */
     val percent: Int,
     /**
+     * Compact display label of the provider that OWNS this percent (e.g.
+     * "Claude", "Codex", "OpenCode"). Issue #1566: the bare "77%" was ambiguous
+     * — "77% of what?" — so the pill now names the provider the most-constraining
+     * number belongs to. See [glanceProviderLabel].
+     */
+    val provider: String,
+    /**
+     * Compact hint for WHICH window drove the percent (e.g. "5h", "7d",
+     * "weekly"), or null when the winning window has no clean short token
+     * (internal keys like "short_term" / long names are dropped — the provider
+     * label alone still answers "which provider"). See [glanceWindowHint].
+     */
+    val window: String?,
+    /**
      * Severity tint for the leading dot, derived from the winning provider's
      * threshold state so a blocked provider reads red at a glance without the
      * user opening the panel.
@@ -65,20 +79,62 @@ public data class UsageGlancePillState(
     /** Local "HH:mm" capture clock, shown only while [stale]. */
     val capturedClock: String,
 ) {
-    val label: String get() = "$percent%"
+    /**
+     * The muted attribution shown before the percent — the provider, plus the
+     * winning window when it has a clean compact token: "Codex 7d" or "Claude".
+     * Issue #1566: this is what makes the SELECTION legible so the user can tell
+     * the number is the nearest-limit provider, not a bare figure.
+     */
+    val attribution: String
+        get() = if (window != null) "$provider $window" else provider
+
+    /** Full glanceable label, provider-attributed: "Codex 7d 72%" / "Claude 60%". */
+    val label: String get() = "$attribution $percent%"
 
     /**
      * Accessibility / test-visible description. Mirrors the visual: a fresh
-     * pill is just "Usage N%"; a stale pill spells out the honest "cached from
-     * HH:mm" provenance so TalkBack users get the same signal the muted clock
-     * gives sighted users.
+     * pill is "Usage <provider> [<window>] N%"; a stale pill spells out the
+     * honest "cached from HH:mm" provenance so TalkBack users get the same
+     * signal the muted clock gives sighted users.
      */
     val contentDescription: String
         get() = if (stale) {
-            "Usage $percent%, cached from $capturedClock"
+            "Usage $label, cached from $capturedClock"
         } else {
-            "Usage $percent%"
+            "Usage $label"
         }
+}
+
+/**
+ * Compact provider label for the app-bar pill (#1566). Shorter than
+ * [com.pocketshell.core.usage.UsageProviderRecord.displayName] ("Claude Code",
+ * "GitHub Copilot") so it fits the small pill without crowding the header —
+ * "Claude" not "Claude Code". Unknown providers fall back to a title-cased
+ * token.
+ */
+internal fun glanceProviderLabel(provider: String): String = when (provider.lowercase()) {
+    "claude" -> "Claude"
+    "codex" -> "Codex"
+    "opencode", "open_code", "open-code" -> "OpenCode"
+    "copilot", "github_copilot", "github-copilot" -> "Copilot"
+    "zai", "z.ai", "z-ai" -> "Z.AI"
+    else -> provider
+        .split('-', '_', ' ')
+        .firstOrNull { it.isNotBlank() }
+        ?.replaceFirstChar { it.uppercase() }
+        ?: provider
+}
+
+/**
+ * Compact window hint for the app-bar pill (#1566). Only surfaces a CLEAN
+ * short token ("5h", "7d", "weekly") — internal-looking keys ("short_term" /
+ * "long_term") and long names are dropped (returns null) so the pill stays
+ * legible and short on the Pixel-7 app bar. The provider label alone still
+ * answers "which provider" when the window is dropped.
+ */
+internal fun glanceWindowHint(name: String?): String? {
+    val trimmed = name?.trim().orEmpty()
+    return trimmed.takeIf { it.isNotEmpty() && '_' !in it && it.length <= 6 }
 }
 
 /**
@@ -119,10 +175,22 @@ internal fun usageGlancePillState(
         .flatMap { snap -> snap.records.map { snap to it } }
         .mapNotNull { (snap, record) ->
             val state = record.thresholdState(warnPercent = warnPercent)
-            val percent = record.mostConstrainedWindow?.percent
+            val winningWindow = record.mostConstrainedWindow
+            val percent = winningWindow?.percent
                 ?: if (state == UsageThresholdState.Exceeded) 100.0 else return@mapNotNull null
-            GlanceCandidate(percent = percent, state = state, fetchedAt = snap.fetchedAt)
+            GlanceCandidate(
+                percent = percent,
+                state = state,
+                fetchedAt = snap.fetchedAt,
+                provider = glanceProviderLabel(record.provider),
+                window = glanceWindowHint(winningWindow?.name),
+            )
         }
+        // Tie-break: when two candidates share the same highest percent, the
+        // FIRST-encountered wins (maxByOrNull keeps the earliest max), which is
+        // deterministic over the snapshot/record iteration order. The percent is
+        // what matters to the user (nearest limit); the attribution just names
+        // whichever provider that peak belongs to.
         .maxByOrNull { it.percent }
         ?: return null
 
@@ -134,6 +202,8 @@ internal fun usageGlancePillState(
     val stale = Duration.between(worst.fetchedAt, now) > staleAfter
     return UsageGlancePillState(
         percent = worst.percent.roundToInt(),
+        provider = worst.provider,
+        window = worst.window,
         kind = kind,
         stale = stale,
         capturedClock = formatCapturedClock(worst.fetchedAt, zoneId),
@@ -144,6 +214,8 @@ private data class GlanceCandidate(
     val percent: Double,
     val state: UsageThresholdState,
     val fetchedAt: Instant,
+    val provider: String,
+    val window: String?,
 )
 
 /**
@@ -181,11 +253,22 @@ internal fun UsageGlancePill(
             drawCircle(color = usageGlanceKindColor(state.kind).copy(alpha = contentAlpha))
         }
         Spacer(modifier = Modifier.width(6.dp))
+        // Provider (+ window) attribution in a muted tint so the user can tell
+        // WHICH provider/window the number belongs to (#1566) …
         androidx.compose.material3.Text(
-            text = state.label,
+            text = state.attribution,
+            color = PocketShellColors.TextSecondary.copy(alpha = contentAlpha),
+            style = PocketShellType.bodyDense,
+            maxLines = 1,
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        // … and the percent itself pops in the primary text weight.
+        androidx.compose.material3.Text(
+            text = "${state.percent}%",
             color = PocketShellColors.Text.copy(alpha = contentAlpha),
             style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
         )
         if (state.stale) {
             // Honest provenance for a cached reading, consistent with the Usage

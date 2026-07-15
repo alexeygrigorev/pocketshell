@@ -147,7 +147,7 @@ internal fun UsageGlancePillRender() {
             title = "Hosts",
             subtitle = "5 hosts · 4 active",
             trailing = {
-                UsageGlancePillFacsimile(percent = "72%", dot = PillKind.Warn)
+                UsageGlancePillFacsimile(attribution = "Codex 7d", percent = "72%", dot = PillKind.Warn)
                 AppBarPillFacsimile {
                     Text(
                         "2",
@@ -163,7 +163,7 @@ internal fun UsageGlancePillRender() {
             title = "Hosts",
             subtitle = "5 hosts · 4 active",
             trailing = {
-                UsageGlancePillFacsimile(percent = "63%", dot = PillKind.Ok, staleClock = "13:40")
+                UsageGlancePillFacsimile(attribution = "Claude", percent = "63%", dot = PillKind.Ok, staleClock = "13:40")
                 AppBarGearFacsimile()
             },
         )
@@ -177,7 +177,12 @@ internal fun UsageGlancePillRender() {
  * screenshot is the acceptance.
  */
 @Composable
-private fun UsageGlancePillFacsimile(percent: String, dot: PillKind, staleClock: String? = null) {
+private fun UsageGlancePillFacsimile(
+    attribution: String,
+    percent: String,
+    dot: PillKind,
+    staleClock: String? = null,
+) {
     val alpha = if (staleClock != null) 0.6f else 1f
     val dotColor = when (dot) {
         PillKind.Ok -> PocketShellColors.Green
@@ -195,6 +200,13 @@ private fun UsageGlancePillFacsimile(percent: String, dot: PillKind, staleClock:
     ) {
         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(dotColor.copy(alpha = alpha)))
         Spacer(modifier = Modifier.width(6.dp))
+        // #1566: provider (+window) attribution muted, percent bold.
+        Text(
+            text = attribution,
+            color = PocketShellColors.TextSecondary.copy(alpha = alpha),
+            style = PocketShellType.bodyDense,
+        )
+        Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = percent,
             color = PocketShellColors.Text.copy(alpha = alpha),

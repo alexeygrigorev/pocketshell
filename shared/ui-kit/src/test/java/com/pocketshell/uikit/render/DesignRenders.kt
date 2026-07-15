@@ -584,11 +584,13 @@ class DesignRenders {
      * to the forwarding indicator + Settings gear. The real pill lives in the
      * app module ([com.pocketshell.app.usage.UsageGlancePill]); this fixture
      * mirrors it with the SAME ui-kit chrome (32dp rounded SurfaceElev surface,
-     * 1dp BorderSoft hairline, kind-tinted dot + percent) the app pill composes,
-     * so the fast JVM check shows it reads as one small app-bar affordance — NOT
-     * a heavy card — and does NOT crowd the header (the #418 declutter guard).
-     * Fresh (Warn 72%) on top, stale (Ok 63% · "cached from 13:40") below to
-     * check the honest muted treatment. The emulator screenshot is the acceptance.
+     * 1dp BorderSoft hairline, kind-tinted dot + muted provider attribution +
+     * bold percent) the app pill composes, so the fast JVM check shows it reads
+     * as one small app-bar affordance — NOT a heavy card — and does NOT crowd
+     * the header (the #418 declutter guard). Issue #1566: the percent is now
+     * ATTRIBUTED to its provider/window — "Codex 7d 72%" (Warn) on top, stale
+     * "Claude 63% · cached from 13:40" (Ok) below — so it is clear WHICH provider
+     * the number represents. The emulator screenshot is the acceptance.
      */
     /**
      * Issue #1239: the host-card one-tap "Resume last session" affordance. The

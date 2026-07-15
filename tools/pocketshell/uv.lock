@@ -3,8 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-06-18T14:08:51.166593044Z"
-exclude-newer-span = "P7D"
+exclude-newer = "2026-07-16T22:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -315,12 +314,13 @@ wheels = [
 
 [[package]]
 name = "pocketshell"
-version = "0.4.16"
+version = "0.4.37"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "google-auth" },
     { name = "pyyaml" },
+    { name = "quse" },
     { name = "tmuxctl" },
 ]
 
@@ -346,6 +346,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qrcode", extras = ["pil"], marker = "extra == 'qr'", specifier = ">=7.4" },
+    { name = "quse", specifier = "==0.0.11" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0" },
     { name = "tmuxctl", specifier = ">=0.3.3" },
 ]
@@ -482,6 +483,18 @@ wheels = [
 [package.optional-dependencies]
 pil = [
     { name = "pillow" },
+]
+
+[[package]]
+name = "quse"
+version = "0.0.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fd/5d/c659757cf4532e8f347476881caf998e4339f1e9dc7c71ee7887270f2069/quse-0.0.11.tar.gz", hash = "sha256:3728b89b5011638a48c68465870ec9be824844ce3b1e2a8f0a9a4d3dc888124b", size = 52456, upload-time = "2026-07-15T08:26:18.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/c1/53e5a3ab471833b0fec1dcaaa81affd07e2bbbefa059e793ca7b333934f2/quse-0.0.11-py3-none-any.whl", hash = "sha256:2fae4365f7c9c78c544e7afff5ce9aa2e5543892c3736402ff06bb1e3d16230a", size = 19051, upload-time = "2026-07-15T08:26:18Z" },
 ]
 
 [[package]]

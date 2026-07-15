@@ -36,6 +36,16 @@ from pocketshell.usage import (
 
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 _FIXTURE = Path(__file__).resolve().parent / "data" / "quse-0.0.9-usage.json"
+# Captured LIVE from the pinned quse 0.0.11 (`quse --json`) on 2026-07-15 —
+# the exact Codex "no 5h window" shape (#1564): Codex temporarily removed the
+# 5h window, so its `primary_window` now carries the WEEKLY (604800s) span and
+# `secondary_window` is `present: false`. quse 0.0.11 labels the primary from
+# its actual `limit_window_seconds` (→ `short_term.window == "7d"`, NOT the old
+# positional "5h") and emits the dropped window as a null placeholder
+# (`long_term: {percent_remaining: null, ...}`) instead of a phantom
+# "0% / unavailable" ghost row. Claude / Copilot / zai in the same document
+# keep their correct 5h / 7d / monthly / weekly labels (class coverage).
+_FIXTURE_0011 = Path(__file__).resolve().parent / "data" / "quse-0.0.11-usage.json"
 
 
 def _fake_completed(
@@ -62,9 +72,11 @@ def _quse_keyed_json() -> str:
 
 
 def test_pyproject_pins_quse_exactly() -> None:
-    # AC: pocketshell pins quse==0.0.9 as a hard dependency (frozen contract).
+    # AC: pocketshell pins quse==0.0.11 as a hard dependency (frozen contract).
+    # 0.0.11 (#1564) labels Codex windows from the actual `limit_window_seconds`
+    # and omits a dropped window rather than emitting a phantom "5h"/ghost row.
     text = _PYPROJECT.read_text()
-    assert '"quse==0.0.9"' in text, "pyproject must pin quse==0.0.9 in dependencies"
+    assert '"quse==0.0.11"' in text, "pyproject must pin quse==0.0.11 in dependencies"
 
 
 def test_resolve_quse_binary_uses_pinned_env_next_to_interpreter(tmp_path: Path) -> None:
@@ -187,6 +199,63 @@ def test_flatten_passes_unified_fields_through_unchanged() -> None:
         "reset_at": "2026-05-28T14:59:59Z",
         "window": "7d",
     }
+
+
+def test_flatten_codex_0011_no_5h_window_weekly_only_no_ghost() -> None:
+    """#1564: quse 0.0.11 fixes Codex's mislabeled/ghost windows at the source.
+
+    Feeds the REAL captured quse 0.0.11 Codex "no 5h window" shape through the
+    flatten and asserts the corrected wire shape the app consumes:
+
+    - `short_term` is the WEEKLY window labeled **"7d"** (from Codex's real
+      `limit_window_seconds=604800`) with its real reset — NOT the old phantom
+      "5h" window that showed weekly data under a 5h label with a 5-day reset.
+    - `long_term` is a null placeholder (`percent_remaining: null`) for the
+      window Codex DROPPED — the app parser treats a null-percent window as
+      absent, so there is NO "0% / unavailable" ghost row.
+
+    The flatten passes quse's unified fields through verbatim (D22 / #1318):
+    pocketshell does NOT relabel — the correct labels come from quse 0.0.11.
+    """
+    out = normalize_usage_stdout(_FIXTURE_0011.read_text())
+    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
+
+    codex = by_provider["codex"]
+    # The single real Codex window is the WEEKLY one, labeled "7d" — no phantom 5h.
+    assert codex["short_term"]["window"] == "7d"
+    assert codex["short_term"]["window"] != "5h"
+    assert codex["short_term"]["reset_at"] == "2026-07-21T20:37:32Z"
+    assert codex["short_term"]["percent_remaining"] == 69.0
+    # The dropped window is a null placeholder → the app parser omits it (no
+    # "0% / unavailable" ghost row). percent_remaining MUST be null here.
+    assert codex["long_term"]["percent_remaining"] is None
+    assert codex["long_term"]["window"] is None
+    assert codex["long_term"]["reset_at"] is None
+
+
+def test_flatten_codex_0011_leaves_other_providers_unchanged() -> None:
+    """#1564 class coverage: the quse Codex fix does NOT regress other cards.
+
+    Claude keeps its 5h + 7d windows, Copilot keeps its monthly window, and zai
+    keeps its 5h + weekly windows — all labeled correctly in the same quse
+    0.0.11 document. Only Codex's window shape changed.
+    """
+    out = normalize_usage_stdout(_FIXTURE_0011.read_text())
+    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
+
+    claude = by_provider["claude"]
+    assert claude["short_term"]["window"] == "5h"
+    assert claude["short_term"]["reset_at"] == "2026-07-15T11:39:59Z"
+    assert claude["long_term"]["window"] == "7d"
+    assert claude["long_term"]["reset_at"] == "2026-07-16T14:59:59Z"
+
+    copilot = by_provider["copilot"]
+    assert copilot["long_term"]["window"] == "monthly"
+    assert copilot["long_term"]["percent_remaining"] == 97.1
+
+    zai = by_provider["zai"]
+    assert zai["short_term"]["window"] == "5h"
+    assert zai["long_term"]["window"] == "weekly"
 
 
 def test_flatten_raises_on_non_json() -> None:

@@ -35,11 +35,18 @@ classifiers = [
 dependencies = [
     "click>=8.2.0",
     # Usage backend + single source of truth for the unified provider schema
-    # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse
-    # 0.0.9's provider-keyed `--json` document (per provider: status +
+    # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse's
+    # provider-keyed `--json` document (per provider: status +
     # short_term/long_term {percent_remaining, reset_at, window} + error) and
     # fails loudly on any schema drift, so the version is frozen, not a range.
-    "quse==0.0.9",
+    # 0.0.11 (#1564): quse labels each Codex window from its actual
+    # `limit_window_seconds` instead of assuming primary==5h / secondary==7d,
+    # and omits a window Codex drops (`present: false`) as a null placeholder
+    # rather than a phantom "0% / unavailable" ghost row. Codex temporarily
+    # removed the 5h window, so its `primary_window` now carries the WEEKLY
+    # (604800s) span — the old positional labels mislabeled weekly data as a
+    # "5h window" with a 5-day reset and left a "7d" ghost.
+    "quse==0.0.11",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
     # for `pocketshell push` / the `usage --capture` reset-push send. Imported
     # lazily and fail-soft — a host without it (or without a Firebase

@@ -1,5 +1,6 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -78,7 +79,9 @@ class HostTmuxSessionListParser @Inject constructor() {
             // Issue #1237: only the cross-host dashboard shape carries the
             // agent-state columns; other shapes leave them null → Unknown.
             agentStateRaw = fields.agentStateRaw?.trim()?.takeIf { it.isNotEmpty() },
-            agentStateUpdatedAt = fields.agentStateUpdatedAt?.trim()?.toLongOrNull(),
+            // Issue #1570: accept the ISO-8601 timestamp the host hook actually
+            // writes (not only an epoch int) so the staleness rule can fire.
+            agentStateUpdatedAt = parseAgentStateUpdatedAtEpochSec(fields.agentStateUpdatedAt),
         )
     }
 
@@ -124,8 +127,12 @@ class HostTmuxSessionListParser @Inject constructor() {
         ) {
             return null
         }
+        // Issue #1570: the updated-at column is an epoch int OR the ISO-8601
+        // string the host hook writes; reject the 6-field state shape only when
+        // it is neither (so a 5-field path row whose `#{session_path}` contains
+        // `::` still falls through to the path parse).
         val updatedAt = fields[5].trim()
-        if (updatedAt.isNotEmpty() && updatedAt.toLongOrNull() == null) {
+        if (updatedAt.isNotEmpty() && parseAgentStateUpdatedAtEpochSec(updatedAt) == null) {
             return null
         }
         return TmuxListSessionsFields(

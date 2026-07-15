@@ -18,13 +18,14 @@ class FolderSessionRowAgentStateResolutionTest {
         stateRaw: String?,
         stateUpdatedAt: Long?,
         activity: Long?,
+        kind: SessionAgentKind = SessionAgentKind.Claude,
     ) = FolderSessionRow(
         sessionName = "s",
         lastActivity = activity,
         attached = true,
         cwd = "/srv/a",
-        agentKind = SessionAgentKind.Claude,
-        recordedKind = SessionAgentKind.Claude,
+        agentKind = kind,
+        recordedKind = kind,
         agentStateRaw = stateRaw,
         agentStateUpdatedAt = stateUpdatedAt,
     )
@@ -43,17 +44,31 @@ class FolderSessionRowAgentStateResolutionTest {
     }
 
     @Test
-    fun restingStateGoesUnknownWhenActivityIsNewerThanTheHookWrite() {
-        // The user answered and the agent resumed work; no new hook fired, so
-        // activity is newer than the recorded idle/waiting. The chip must be
-        // absent (Unknown), never a wrong "Idle"/"Waiting".
+    fun agentRestingStateGoesWorkingWhenActivityIsNewerThanTheHookWrite() {
+        // Issue #1570: the user answered and the agent resumed work; the
+        // stop/idle hook fires only on stop, so it never records the resume,
+        // but session_activity is now newer than the recorded idle/waiting. For
+        // a LIVE agent that fresh output IS the agent working — surface Working
+        // (the "working Codex shows Idle" report), not a wrong "Idle".
         assertEquals(
-            SessionAgentState.Unknown,
+            SessionAgentState.Working,
             row("idle", stateUpdatedAt = 1_000L, activity = 5_000L).toSessionEntry().agentState,
         )
         assertEquals(
-            SessionAgentState.Unknown,
+            SessionAgentState.Working,
             row("waiting_for_input", stateUpdatedAt = 1_000L, activity = 5_000L)
+                .toSessionEntry().agentState,
+        )
+    }
+
+    @Test
+    fun nonAgentStaleRestingStateStaysUnknownNoWrongChip() {
+        // A plain shell is not a live agent: fresh activity cannot be attributed
+        // to an agent working, so a stale recorded resting state stays Unknown
+        // (no chip) — the #1237 "absent, not wrong" rule, unchanged for shells.
+        assertEquals(
+            SessionAgentState.Unknown,
+            row("idle", stateUpdatedAt = 1_000L, activity = 5_000L, kind = SessionAgentKind.Shell)
                 .toSessionEntry().agentState,
         )
     }

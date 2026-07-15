@@ -173,9 +173,14 @@ abstract class TmuxSessionViewModelTestBase {
             applicationContext?.let {
                 com.pocketshell.app.composer.SharedPrefsOutboundQueueStore(it)
             },
+        // Issue #1617: reconnect stress scenarios can inject a scenario-owned
+        // virtual scope instead of sharing this class's real-IO factoryScope.
+        // The default preserves the genuine reader-loop coverage used by the
+        // terminal-feed integration tests documented above.
+        tmuxClientFactory: TmuxClientFactory = TmuxClientFactory(factoryScope),
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
-            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            tmuxClientFactory = tmuxClientFactory,
             activeTmuxClients = registry,
             hostDao = hostDao,
             folderListGateway = folderListGateway,

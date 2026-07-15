@@ -23,6 +23,7 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -2226,8 +2227,12 @@ class SshFolderListGateway internal constructor(
             // (no chip), which is the correct "absent, not wrong" behaviour.
             val agentStateRaw =
                 if (hasIdentityColumns) parts.getOrNull(7)?.trim()?.ifBlank { null } else null
+            // Issue #1570: the host hook writes @ps_agent_state_updated_at as an
+            // ISO-8601 string (datetime.isoformat()), not an epoch int — a bare
+            // toLongOrNull() returned null, disabling the staleness rule. Parse
+            // both shapes so a working agent's stale idle is correctly demoted.
             val agentStateUpdatedAt =
-                if (hasIdentityColumns) parts.getOrNull(8)?.trim()?.toLongOrNull() else null
+                if (hasIdentityColumns) parseAgentStateUpdatedAtEpochSec(parts.getOrNull(8)) else null
             val sessionPath =
                 (if (hasIdentityColumns) {
                     parts.getOrNull(9)

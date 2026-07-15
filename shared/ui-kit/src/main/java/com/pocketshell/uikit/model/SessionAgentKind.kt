@@ -42,6 +42,27 @@ enum class SessionAgentKind {
 }
 
 /**
+ * True when this kind is a live agent engine — Claude / Codex / OpenCode.
+ *
+ * Issue #1570: used by [resolveSessionAgentState] to decide that fresh output
+ * after a recorded resting state means the agent RESUMED working (Working),
+ * versus a non-agent session where the same activity cannot be attributed to an
+ * agent (stays Unknown). [Probing]/[Exited]/[Shell]/[Unknown] are deliberately
+ * excluded so a probing/foreign session never gets a guessed Working chip.
+ */
+fun SessionAgentKind.isLiveAgent(): Boolean = when (this) {
+    SessionAgentKind.Claude,
+    SessionAgentKind.Codex,
+    SessionAgentKind.OpenCode,
+    -> true
+    SessionAgentKind.Shell,
+    SessionAgentKind.Probing,
+    SessionAgentKind.Exited,
+    SessionAgentKind.Unknown,
+    -> false
+}
+
+/**
  * The value written into / read back from the host-side `@ps_agent_kind`
  * tmux user option (epic #821). Mirrors the strings the `pocketshell agent`
  * wrapper records server-side (`record_agent_kind` in `agents.py`):

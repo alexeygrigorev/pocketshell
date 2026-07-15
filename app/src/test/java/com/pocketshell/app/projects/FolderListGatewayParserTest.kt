@@ -72,6 +72,23 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parseListSessionsRowsParsesIsoStateUpdatedAtTheHostActuallyWrites() {
+        // Issue #1570: the host stop/idle hook records @ps_agent_state_updated_at
+        // as datetime.now(timezone.utc).isoformat() — an ISO-8601 string, NOT the
+        // epoch int every prior fixture used. parseRow must convert it to epoch
+        // seconds so the staleness rule can run. 2023-11-14T22:13:20+00:00 ==
+        // 1_700_000_000.
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "codex-work::\$7::1699990000::1700010000::1::codex::::" +
+                "idle::2023-11-14T22:13:20+00:00::/srv/labs\n",
+        )
+        assertEquals(1, rows.size)
+        assertEquals("idle", rows[0].agentStateRaw)
+        assertEquals(1_700_000_000L, rows[0].agentStateUpdatedAt)
+        assertEquals("/srv/labs", rows[0].cwd)
+    }
+
+    @Test
     fun parseListSessionsRowsBlankStateOptionIsNullNotAWrongState() {
         // A never-hooked / foreign session leaves @ps_agent_state (and its
         // timestamp) empty; tmux expands them to blank columns, so the row keeps

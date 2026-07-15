@@ -168,6 +168,22 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
+    fun parseTmuxListSessionsReadsIsoStateUpdatedAtTheHostActuallyWrites() {
+        // Issue #1570: the host hook writes @ps_agent_state_updated_at as an
+        // ISO-8601 string, not an epoch int; the 6-field dashboard parse must
+        // accept it (both the shape guard and the stored value).
+        // 2023-11-14T22:13:20+00:00 == 1_700_000_000.
+        val rows = parser.parseTmuxListSessions(
+            "codex::1779520800::1779521400::1::idle::2023-11-14T22:13:20+00:00\n",
+        )
+
+        assertEquals(listOf("codex"), rows.map { it.name })
+        assertEquals("idle", rows[0].agentStateRaw)
+        assertEquals(1_700_000_000L, rows[0].agentStateUpdatedAt)
+        assertNull(rows[0].path)
+    }
+
+    @Test
     fun parseTmuxListSessionsSixFieldBlankStateIsNull() {
         // A never-hooked session leaves both state columns empty; tmux expands
         // them to blank fields, so the row parses with no recorded state.

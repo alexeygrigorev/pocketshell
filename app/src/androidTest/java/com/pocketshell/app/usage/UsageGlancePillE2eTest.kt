@@ -73,13 +73,26 @@ class UsageGlancePillE2eTest {
         }
     }
 
-    // AC1: shows the most-constraining percent from cache.
+    // AC1 + #1566: shows the most-constraining percent from cache, ATTRIBUTED to
+    // its provider (+ window) — not a bare number.
     @Test
-    fun showsMostConstrainingPercent() {
-        appBar(pill = UsageGlancePillState(percent = 72, kind = PillKind.Warn, stale = false, capturedClock = "14:05"))
+    fun showsMostConstrainingPercentAttributed() {
+        appBar(
+            pill = UsageGlancePillState(
+                percent = 72,
+                provider = "Codex",
+                window = "7d",
+                kind = PillKind.Warn,
+                stale = false,
+                capturedClock = "14:05",
+            ),
+        )
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
         compose.onNodeWithText("72%").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Usage 72%").assertIsDisplayed()
+        // The provider (+window) attribution is visibly rendered on the pill …
+        compose.onNodeWithText("Codex 7d").assertIsDisplayed()
+        // … and the accessibility label spells out the attributed usage.
+        compose.onNodeWithContentDescription("Usage Codex 7d 72%").assertIsDisplayed()
     }
 
     // AC1: hidden when there is no data.
@@ -95,7 +108,14 @@ class UsageGlancePillE2eTest {
     @Test
     fun hiddenWhenNoUsageRoute() {
         appBar(
-            pill = UsageGlancePillState(percent = 50, kind = PillKind.Ok, stale = false, capturedClock = "14:05"),
+            pill = UsageGlancePillState(
+                percent = 50,
+                provider = "Claude",
+                window = null,
+                kind = PillKind.Ok,
+                stale = false,
+                capturedClock = "14:05",
+            ),
             onOpenUsage = null,
         )
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertDoesNotExist()
@@ -106,7 +126,14 @@ class UsageGlancePillE2eTest {
     fun tapInvokesUsageRoute() {
         var tapped = false
         appBar(
-            pill = UsageGlancePillState(percent = 88, kind = PillKind.Warn, stale = false, capturedClock = "14:05"),
+            pill = UsageGlancePillState(
+                percent = 88,
+                provider = "Claude",
+                window = "5h",
+                kind = PillKind.Warn,
+                stale = false,
+                capturedClock = "14:05",
+            ),
             onOpenUsage = { tapped = true },
         )
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertHasClickAction()
@@ -119,7 +146,18 @@ class UsageGlancePillE2eTest {
     // the window root, even alongside the forwarding indicator (the #418 guard).
     @Test
     fun pillAndSettingsAreBothFullyContained() {
-        appBar(pill = UsageGlancePillState(percent = 100, kind = PillKind.Blocked, stale = true, capturedClock = "13:40"))
+        // A LONG attribution (OpenCode + window) alongside the stale clock stresses
+        // the app-bar width — the #418 declutter guard must still fully contain it.
+        appBar(
+            pill = UsageGlancePillState(
+                percent = 100,
+                provider = "OpenCode",
+                window = "5h",
+                kind = PillKind.Blocked,
+                stale = true,
+                capturedClock = "13:40",
+            ),
+        )
         compose.assertNodeFullyWithinRoot(USAGE_GLANCE_PILL_TAG)
         compose.assertNodeFullyWithinRoot(SETTINGS_BUTTON_TAG)
     }
@@ -127,11 +165,22 @@ class UsageGlancePillE2eTest {
     // AC4: stale data is visually honest ("cached from HH:mm").
     @Test
     fun staleReadingRendersHonestly() {
-        appBar(pill = UsageGlancePillState(percent = 63, kind = PillKind.Ok, stale = true, capturedClock = "13:40"))
+        appBar(
+            pill = UsageGlancePillState(
+                percent = 63,
+                provider = "Claude",
+                window = null,
+                kind = PillKind.Ok,
+                stale = true,
+                capturedClock = "13:40",
+            ),
+        )
         compose.onNodeWithTag(USAGE_GLANCE_PILL_TAG).assertIsDisplayed()
-        // The muted capture clock is rendered inline …
+        // The provider attribution is still shown …
+        compose.onNodeWithText("Claude").assertIsDisplayed()
+        // … the muted capture clock is rendered inline …
         compose.onNodeWithText("13:40").assertIsDisplayed()
         // … and the honest provenance is in the accessibility description.
-        compose.onNodeWithContentDescription("Usage 63%, cached from 13:40").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Usage Claude 63%, cached from 13:40").assertIsDisplayed()
     }
 }

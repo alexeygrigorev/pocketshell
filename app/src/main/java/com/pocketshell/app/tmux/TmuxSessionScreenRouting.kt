@@ -563,6 +563,37 @@ internal fun tmuxAgentConversationSend(
 }
 
 /**
+ * Issue #1584: dispatch a Conversation-tab composer submit through the per-agent
+ * TUI-only classification, keeping the call site in [TmuxSessionScreen] compact.
+ *
+ * Classify per-agent, not grammar-only: only a genuine alt-screen picker
+ * (`/model`, `/config`, permission pickers …) for THIS agent is TUI-only; a TEXT
+ * slash-command (`/goal`, `/goal resume`) routes as normal echoed payload.
+ *
+ * A [TuiCommandNoEcho] send goes through the gated agent submit
+ * ([sendAgentPayload]) and, on success, raises the inline "Open in Terminal"
+ * notice via [setTuiNotice]; an [Echo] send goes through the optimistic
+ * transcript path ([sendToAgent]). Returns whether the send succeeded.
+ */
+internal suspend fun tmuxAgentConversationSendResult(
+    text: String,
+    agentToken: String?,
+    sendAgentPayload: suspend (String, AgentKind) -> Boolean,
+    sendToAgent: suspend (String) -> Boolean,
+    setTuiNotice: (String) -> Unit,
+): Boolean {
+    val agentKind = tmuxComposerAgentKindFromToken(agentToken)
+    return when (tmuxAgentConversationSend(text, agentKind)) {
+        TmuxAgentConversationSend.TuiCommandNoEcho -> {
+            val ok = agentKind?.let { sendAgentPayload(text, it) } ?: false
+            if (ok) setTuiNotice(text.trim())
+            ok
+        }
+        TmuxAgentConversationSend.Echo -> sendToAgent(text)
+    }
+}
+
+/**
  * Issue #1207: resolve the load state the Conversation-tab placeholder renders
  * when it has NO backing conversation row (`rowLoadState == null`).
  *

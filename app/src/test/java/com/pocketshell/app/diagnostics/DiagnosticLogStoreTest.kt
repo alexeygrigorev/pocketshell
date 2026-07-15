@@ -71,6 +71,163 @@ class DiagnosticLogStoreTest {
     }
 
     @Test
+    fun `reconnect cause-trail classifies the reader_exception failure shape so it is diagnosable`() {
+        // Issue #1610: the mobile -CC reader SSHException tears down the shared
+        // lease transport, but the cause-trail dropped `message` to `[redacted]`
+        // so we could not tell WHICH SSHException it was. The reconnect diagnosis
+        // categories must SURFACE a bounded, allowlisted classification of the
+        // failure shape (Option A) — WHICH SSHException — with zero chance of
+        // leaking arbitrary secret text that a caller folded into the message.
+        // RED on base (blanket redaction): `message` came out `[redacted]`.
+        val reconnectFields = DiagnosticRedactor.redact(
+            mapOf(
+                "exceptionClass" to "SSHException",
+                "message" to "SSHException: connection reset by peer",
+                "transportDropSource" to "control_channel",
+                "disconnectSource" to "read_failure",
+            ),
+            category = ReconnectCauseTrail.CATEGORY,
+        )
+        assertEquals("SSHException", reconnectFields["exceptionClass"])
+        // The operator can see it was a connection-reset read failure.
+        assertEquals("connection_reset", reconnectFields["message"])
+
+        // Same surfacing for the `connection` lifecycle category (passive_disconnect):
+        // a broken-pipe read failure classifies as `broken_pipe`.
+        val connectionFields = DiagnosticRedactor.redact(
+            mapOf("message" to "Broken pipe"),
+            category = "connection",
+        )
+        assertEquals("broken_pipe", connectionFields["message"])
+
+        // Class coverage over the reader-teardown failure shapes the -CC channel hits.
+        assertEquals(
+            "eof",
+            DiagnosticRedactor.redact(
+                mapOf("message" to "SSHException: Premature EOF"),
+                category = ReconnectCauseTrail.CATEGORY,
+            )["message"],
+        )
+        assertEquals(
+            "timeout",
+            DiagnosticRedactor.redact(
+                mapOf("message" to "java.net.SocketTimeoutException: Read timed out"),
+                category = ReconnectCauseTrail.CATEGORY,
+            )["message"],
+        )
+        assertEquals(
+            "channel_closed",
+            DiagnosticRedactor.redact(
+                mapOf("message" to "TransportException: Channel closed unexpectedly"),
+                category = ReconnectCauseTrail.CATEGORY,
+            )["message"],
+        )
+        // An unrecognised shape collapses to the safe `other` token — never raw text.
+        assertEquals(
+            "other",
+            DiagnosticRedactor.redact(
+                mapOf("message" to "Some unusual internal state 0xdeadbeef"),
+                category = ReconnectCauseTrail.CATEGORY,
+            )["message"],
+        )
+    }
+
+    @Test
+    fun `surfaced reconnect message never leaks any secret shape and is always an allowlisted token`() {
+        // Issue #1610 load-bearing safety (reviewer round-1 BLOCKING finding): the
+        // round-1 marker-abutment scrubber leaked every secret shape whose token
+        // did not immediately abut one of 6 markers. Option A never emits ANY
+        // substring of the input — the surfaced value is ALWAYS one of a fixed set
+        // of lowercase `[a-z_]+` classification tokens — so NO secret shape can
+        // ever leak. Each pair is (message, the-secret-that-must-not-appear).
+        val tokenPattern = Regex("^[a-z_]+$")
+        val leakingShapes = listOf(
+            // Reviewer-named leak #1: standard HTTP header, SPACE after the colon —
+            // round-1 masked only a token ABUTTING the marker, so this leaked.
+            "authorization: aBcDeF0123456789tokenvalue" to "aBcDeF0123456789tokenvalue",
+            // Reviewer-named leak #2: PEM private-key block body (only `RSA` was
+            // masked by round-1; the base64 body surfaced verbatim).
+            "SSHException while reading -----BEGIN RSA PRIVATE KEY-----\n" +
+                "MIIEowIBAAKCAQEA7Xk2SecretKeyBodyLine1AbCdEf1234567890\n" +
+                "MIIEowIBAAKCAQEA7Xk2SecretKeyBodyLine2GhIjKl0987654321\n" +
+                "-----END RSA PRIVATE KEY-----" to "MIIEowIBAAKCAQEA7Xk2SecretKeyBodyLine1AbCdEf1234567890",
+            // OpenSSH PEM block body.
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaFNecretOpenSshBody0000\n" +
+                "-----END OPENSSH PRIVATE KEY-----" to "b3BlbnNzaFNecretOpenSshBody0000",
+            // Reviewer-named leak #3: no-marker HIGH-ENTROPY token (round-1 had no
+            // entropy detection anywhere, so it surfaced in full).
+            "connect failure near dGhpc0lzQVZlcnlIaWdoRW50cm9weVNlY3JldFRva2VuMDEyMzQ1Njc4OQ" to
+                "dGhpc0lzQVZlcnlIaWdoRW50cm9weVNlY3JldFRva2VuMDEyMzQ1Njc4OQ",
+            // Bare hex secret, no marker.
+            "state 0a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 dropped" to
+                "0a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            // Original marker shapes (these DID get masked by round-1, kept for coverage).
+            "auth failed password=hunter2secretvalue" to "hunter2secretvalue",
+            "using key sk-live-abc123def456ghi789" to "sk-live-abc123def456ghi789",
+            "token github_pat_ABCDEF1234567890abcdef" to "github_pat_ABCDEF1234567890abcdef",
+            "header bearer AAAAsecretbearervaluebbbb" to "AAAAsecretbearervaluebbbb",
+        )
+
+        for ((message, secret) in leakingShapes) {
+            val surfaced = DiagnosticRedactor.redact(
+                mapOf("message" to message),
+                category = ReconnectCauseTrail.CATEGORY,
+            )["message"] as String
+
+            assertFalse(
+                "secret leaked for message <$message>: surfaced=<$surfaced>",
+                surfaced.contains(secret),
+            )
+            // Strongest guarantee: the output can ONLY be a fixed classification
+            // token. Any raw message text (spaces, digits, uppercase, `:`/`-`) fails
+            // this — so no arbitrary substring of the input can ever surface.
+            assertTrue(
+                "surfaced value is not an allowlisted classification token: <$surfaced>",
+                tokenPattern.matches(surfaced),
+            )
+        }
+    }
+
+    @Test
+    fun `message stays fully redacted outside the reconnect diagnosis categories`() {
+        // Class coverage: the allowlist is narrow. A non-reconnect category (and
+        // the no-category default) keeps `message` fully `[redacted]` — the
+        // surfacing does NOT over-open the redactor everywhere.
+        val actionFields = DiagnosticRedactor.redact(
+            mapOf("message" to "failed with user prompt content"),
+            category = "action",
+        )
+        assertEquals("[redacted]", actionFields["message"])
+
+        val noCategory = DiagnosticRedactor.redact(
+            mapOf("message" to "failed with user prompt content"),
+        )
+        assertEquals("[redacted]", noCategory["message"])
+    }
+
+    @Test
+    fun `reconnect category does not open other sensitive keys`() {
+        // Class coverage: opening `message` for reconnect must NOT open sibling
+        // sensitive keys (password/token/command/prompt) — they stay redacted
+        // even in the reconnect category.
+        val fields = DiagnosticRedactor.redact(
+            mapOf(
+                "message" to "SSHException: timeout",
+                "password" to "hunter2secret",
+                "apiToken" to "sk-live-secret-value",
+                "command" to "cat ~/.ssh/id_rsa",
+                "prompt" to "please run the secret",
+            ),
+            category = ReconnectCauseTrail.CATEGORY,
+        )
+        assertEquals("timeout", fields["message"])
+        assertEquals("[redacted]", fields["password"])
+        assertEquals("[redacted]", fields["apiToken"])
+        assertEquals("[redacted]", fields["command"])
+        assertEquals("[redacted]", fields["prompt"])
+    }
+
+    @Test
     fun `redactor fingerprints shareable host user session and path context`() {
         val fields = DiagnosticRedactor.redact(
             mapOf(

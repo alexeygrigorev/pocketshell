@@ -200,7 +200,7 @@ class DiagnosticRecorder @Inject constructor(
             name = event,
             wallClockTime = Instant.now(clock),
             monotonicTimestampNanos = android.os.SystemClock.elapsedRealtimeNanos(),
-            metadata = DiagnosticRedactor.redact(fields),
+            metadata = DiagnosticRedactor.redact(fields, category),
         )
 
     private fun encode(pending: PendingEvent): String =

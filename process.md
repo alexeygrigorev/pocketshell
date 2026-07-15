@@ -697,10 +697,13 @@ Parallelism is issue-scoped, not role-skipping:
 
 ### Required Codex subagent model (locked, 2026-07-15)
 
-Backlog implementers, reviewers, researchers, and on-call workers MUST run as
+Backlog implementers, reviewers, researchers, and on-call workers default to
 Codex subagents on **`gpt-5.6-sol` with High reasoning effort**. Do not replace
 them with shell-launched Claude sessions or an unspecified/default-effort
-agent.
+agent. A maintainer may explicitly authorize a different reasoning effort for
+a named run when the built-in launcher cannot honor High; record that exception
+in the live handoff and still verify the child's actual model/effort before
+work.
 
 Set the persistent local defaults in `~/.codex/config.toml`:
 
@@ -729,6 +732,11 @@ worktree, correct the parent/config setting, and redispatch only after reload.
   `gpt-5.6-sol` / `high`; the launch API exposed no effort override. Interrupt
   that child before work and report the launcher limitation. Do not relabel it
   High, fall back to Medium, or replace it with a shell-launched agent.
+- **Current explicit exception (2026-07-15):** after the High override repeated,
+  the maintainer authorized Medium Codex subagents for the active backlog run.
+  This clears that run's effort blocker only; `gpt-5.6-sol`, built-in subagents,
+  isolated worktrees, implementer → reviewer separation, and all normal gates
+  remain mandatory.
 
 - Each active issue keeps its own implementer/reviewer loop.
 - Reviewers may run in parallel for different issues.

@@ -192,6 +192,19 @@ jobs:
           chmod +x scripts/lib/nightly-phase-reports.sh
           scripts/lib/nightly-phase-reports.sh --self-test
 
+      # Issue #1581: gate the Build workflow's corrupted-NDK-download retry
+      # wrapper (scripts/ci-assemble-with-ndk-retry.sh) so its clear-and-retry
+      # logic cannot silently regress. Fast, JVM-free shell test (fake build cmd,
+      # temp dirs, no Gradle/SDK/network) proving: attempt-1 corrupted-NDK
+      # failure -> CLEAR partial download -> attempt-2 success (self-healed);
+      # that the clear is load-bearing (retry alone, with the clear stubbed off,
+      # still fails); and that a non-NDK failure is NOT retried (a real
+      # regression is never masked). Cheap (< 5 s), no emulator.
+      - name: Build NDK-download retry guard (issue #1581)
+        run: |
+          chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
+          scripts/test-ci-ndk-retry.sh
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out

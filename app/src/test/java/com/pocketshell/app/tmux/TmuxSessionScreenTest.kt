@@ -1223,32 +1223,67 @@ class TmuxSessionScreenTest {
         // Criterion (a): `/model` and friends are TUI-only picker commands that
         // write NOTHING to the transcript. They must be recognised so the
         // composer suppresses the optimistic bubble and raises the notice.
-        assertTrue(tmuxComposerIsTuiSlashCommand("/model"))
-        assertTrue(tmuxComposerIsTuiSlashCommand("/config"))
-        assertTrue(tmuxComposerIsTuiSlashCommand("/login"))
+        // Issue #1584: classification is now per-agent (allowlist), so a valid
+        // AgentKind is supplied.
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/model", AgentKind.ClaudeCode),
+        )
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/config", AgentKind.ClaudeCode),
+        )
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/login", AgentKind.ClaudeCode),
+        )
         // A slash-command WITH arguments (e.g. `/model sonnet`) is still a
-        // command — the first token drives the classification.
-        assertTrue(tmuxComposerIsTuiSlashCommand("/model sonnet"))
+        // picker — the first token drives the classification.
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("/model sonnet", AgentKind.ClaudeCode),
+        )
         // Surrounding whitespace is trimmed before classifying.
-        assertTrue(tmuxComposerIsTuiSlashCommand("  /model  "))
+        assertEquals(
+            TmuxAgentConversationSend.TuiCommandNoEcho,
+            tmuxAgentConversationSend("  /model  ", AgentKind.ClaudeCode),
+        )
     }
 
     @Test
     fun tuiSlashCommandRejectsPromptsAndPaths() {
         // A normal prompt is NOT a slash-command — it must keep the optimistic
         // echo (`Echo`), never divert to the notice path.
-        assertTrue(!tmuxComposerIsTuiSlashCommand("explain this diff"))
-        assertTrue(!tmuxComposerIsTuiSlashCommand(""))
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("explain this diff", AgentKind.ClaudeCode),
+        )
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("", AgentKind.ClaudeCode),
+        )
         // A bare slash is not a command.
-        assertTrue(!tmuxComposerIsTuiSlashCommand("/"))
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("/", AgentKind.ClaudeCode),
+        )
         // A filesystem path is not a command (it has a second `/`).
-        assertTrue(!tmuxComposerIsTuiSlashCommand("/home/user/file.txt"))
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("/home/user/file.txt", AgentKind.ClaudeCode),
+        )
         // A leading-slash arithmetic/prompt is not a command (first token starts
         // with a digit, not a letter).
-        assertTrue(!tmuxComposerIsTuiSlashCommand("/2 + 2"))
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("/2 + 2", AgentKind.ClaudeCode),
+        )
         // A multi-line message is a prompt the user typed, not a command, even
         // when the first line looks command-like.
-        assertTrue(!tmuxComposerIsTuiSlashCommand("/model\nand also do this"))
+        assertEquals(
+            TmuxAgentConversationSend.Echo,
+            tmuxAgentConversationSend("/model\nand also do this", AgentKind.ClaudeCode),
+        )
     }
 
     @Test
@@ -1256,16 +1291,15 @@ class TmuxSessionScreenTest {
         // Criterion (a) — the load-bearing decision: a `/model` sent from the
         // Conversation composer takes the NO-ECHO path (deliver keystrokes to the
         // pane, raise the Open-in-Terminal notice), NOT the optimistic-bubble
-        // `sendToAgentPaneResult` echo path. On base (echo always) this would be
-        // `Echo`; the fix makes it `TuiCommandNoEcho`.
+        // `sendToAgentPaneResult` echo path.
         assertEquals(
             TmuxAgentConversationSend.TuiCommandNoEcho,
-            tmuxAgentConversationSend("/model"),
+            tmuxAgentConversationSend("/model", AgentKind.ClaudeCode),
         )
         // A normal prompt keeps the optimistic echo — unchanged behaviour.
         assertEquals(
             TmuxAgentConversationSend.Echo,
-            tmuxAgentConversationSend("summarise the failing test"),
+            tmuxAgentConversationSend("summarise the failing test", AgentKind.ClaudeCode),
         )
     }
 

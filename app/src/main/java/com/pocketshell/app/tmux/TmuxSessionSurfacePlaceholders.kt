@@ -118,8 +118,10 @@ internal fun ConversationDetectingPlaceholder(
 }
 
 /**
- * Issue #1207: inline notice shown over the Conversation surface after a TUI-only
- * slash-command ([tmuxComposerIsTuiSlashCommand]) is sent from the composer. Such
+ * Issue #1207 / #1584: inline notice shown over the Conversation surface after a
+ * genuine TUI-only slash-command (classified per-agent via [tmuxAgentConversationSend]
+ * against [com.pocketshell.app.agentcommands.AgentCommandCatalog]'s allowlist) is
+ * sent from the composer. Such
  * a command (`/model`, `/config`, a permission picker …) drives an alt-screen
  * picker in the covered Terminal pane and writes NOTHING to the transcript, so
  * the Conversation view can never show it. Rather than the old misleading

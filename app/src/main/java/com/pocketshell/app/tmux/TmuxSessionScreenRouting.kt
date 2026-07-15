@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.session.AgentConversationUiState
@@ -502,47 +503,95 @@ internal fun tmuxComposerSendRoute(
 }
 
 /**
- * Issue #1207: true when [text] is an agent TUI slash-command — an alt-screen
- * interaction (`/model`, `/config`, `/login`, `/agents`, permission pickers …)
- * that the agent handles in its terminal UI and writes NOTHING to the JSONL
- * transcript. Such input can NEVER appear on the Conversation surface by
- * construction, so it must NOT get an optimistic transcript bubble, and the user
- * must be offered the Terminal (the only surface that can drive the picker).
- *
- * The grammar is deliberately narrow so a normal prompt or a filesystem path is
- * NOT misclassified:
+ * Issue #1584: extract the leading `/word` command ROOT from [text], or `null`
+ * when [text] is not a well-formed slash-command token. The grammar is
+ * deliberately narrow so a normal prompt or a filesystem path is NOT treated as
+ * a command:
  *  - the trimmed text is a single line (a multi-line message is a prompt);
  *  - its first whitespace-delimited token is `/word[...]` where `word` starts
  *    with a letter and contains only `[A-Za-z0-9_-]` (no further `/`), so
- *    `/model`, `/model sonnet`, `/config` match but `/home/user/file`,
- *    `/`, and `/2 + 2` (a leading-slash math prompt) do not.
+ *    `/model`, `/model sonnet`, `/goal resume` yield `/model`/`/goal` but
+ *    `/home/user/file`, `/`, and `/2 + 2` (a leading-slash math prompt) do not.
+ *
+ * The returned root is lowercased and carries NO arguments, so `/goal resume`
+ * (root `/goal`) is distinguished from the `/goal` command itself only by the
+ * per-agent TUI-only allowlist, never by grammar (that is the #1584 fix).
  */
-internal fun tmuxComposerIsTuiSlashCommand(text: String): Boolean {
+internal fun tmuxComposerSlashCommandRoot(text: String): String? {
     val trimmed = text.trim()
-    if (!trimmed.startsWith("/")) return false
+    if (!trimmed.startsWith("/")) return null
     // A multi-line message is a prompt the user typed, not a slash-command.
-    if (trimmed.contains('\n') || trimmed.contains('\r')) return false
+    if (trimmed.contains('\n') || trimmed.contains('\r')) return null
     val firstToken = trimmed.substringBefore(' ').substringBefore('\t')
-    return firstToken.matches(Regex("^/[A-Za-z][A-Za-z0-9_-]*$"))
+    if (!firstToken.matches(Regex("^/[A-Za-z][A-Za-z0-9_-]*$"))) return null
+    return firstToken.lowercase()
 }
 
 /**
- * Issue #1207: which agent-conversation send path a composer submit takes.
- *  - [Echo]: a normal prompt — submit to the agent AND echo the optimistic user
- *    turn into the transcript (`sendToAgentPaneResult`), unchanged from before.
- *  - [TuiCommandNoEcho]: a TUI-only slash-command — deliver the keystrokes to
+ * Issue #1207 / #1584: which agent-conversation send path a composer submit
+ * takes.
+ *  - [Echo]: a normal prompt OR a TEXT slash-command (`/goal`, `/goal resume`,
+ *    `/compact`, `/diff` …) — submit to the agent AND echo the optimistic user
+ *    turn into the transcript (`sendToAgentPaneResult`).
+ *  - [TuiCommandNoEcho]: a genuine TUI-only alt-screen picker (`/model`,
+ *    `/config`, permission pickers …) for the agent — deliver the keystrokes to
  *    the pane WITHOUT an optimistic transcript bubble and raise the
  *    Open-in-Terminal notice, because the picker it opens shows only on the
  *    covered Terminal pane, never on the Conversation surface.
  */
 internal enum class TmuxAgentConversationSend { Echo, TuiCommandNoEcho }
 
-internal fun tmuxAgentConversationSend(text: String): TmuxAgentConversationSend =
-    if (tmuxComposerIsTuiSlashCommand(text)) {
+/**
+ * Issue #1584: classify per-agent, not grammar-only. A slash-command is TUI-only
+ * ONLY when its root is in [AgentCommandCatalog]'s per-agent TUI-only allowlist
+ * for [agent]. Every other input — a prompt, a TEXT slash-command (`/goal`,
+ * `/goal resume`), or a slash-command for an unknown/absent agent — routes as
+ * [Echo] so it reaches the agent and produces transcript output. This deletes
+ * the old grammar-only path (hard-cut, D22) that misclassified every `/word`.
+ */
+internal fun tmuxAgentConversationSend(
+    text: String,
+    agent: AgentKind?,
+): TmuxAgentConversationSend {
+    val root = tmuxComposerSlashCommandRoot(text) ?: return TmuxAgentConversationSend.Echo
+    if (agent == null) return TmuxAgentConversationSend.Echo
+    return if (AgentCommandCatalog.isTuiOnlyCommand(agent, root)) {
         TmuxAgentConversationSend.TuiCommandNoEcho
     } else {
         TmuxAgentConversationSend.Echo
     }
+}
+
+/**
+ * Issue #1584: dispatch a Conversation-tab composer submit through the per-agent
+ * TUI-only classification, keeping the call site in [TmuxSessionScreen] compact.
+ *
+ * Classify per-agent, not grammar-only: only a genuine alt-screen picker
+ * (`/model`, `/config`, permission pickers …) for THIS agent is TUI-only; a TEXT
+ * slash-command (`/goal`, `/goal resume`) routes as normal echoed payload.
+ *
+ * A [TuiCommandNoEcho] send goes through the gated agent submit
+ * ([sendAgentPayload]) and, on success, raises the inline "Open in Terminal"
+ * notice via [setTuiNotice]; an [Echo] send goes through the optimistic
+ * transcript path ([sendToAgent]). Returns whether the send succeeded.
+ */
+internal suspend fun tmuxAgentConversationSendResult(
+    text: String,
+    agentToken: String?,
+    sendAgentPayload: suspend (String, AgentKind) -> Boolean,
+    sendToAgent: suspend (String) -> Boolean,
+    setTuiNotice: (String) -> Unit,
+): Boolean {
+    val agentKind = tmuxComposerAgentKindFromToken(agentToken)
+    return when (tmuxAgentConversationSend(text, agentKind)) {
+        TmuxAgentConversationSend.TuiCommandNoEcho -> {
+            val ok = agentKind?.let { sendAgentPayload(text, it) } ?: false
+            if (ok) setTuiNotice(text.trim())
+            ok
+        }
+        TmuxAgentConversationSend.Echo -> sendToAgent(text)
+    }
+}
 
 /**
  * Issue #1207: resolve the load state the Conversation-tab placeholder renders

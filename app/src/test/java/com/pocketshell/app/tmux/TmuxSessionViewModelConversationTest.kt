@@ -86,7 +86,7 @@ class TmuxSessionViewModelConversationTest : TmuxSessionViewModelTestBase() {
         private val execGate: CompletableDeferred<Unit>? = null,
         private var wcOutput: String = "0\n",
         private var initialEventsOutput: String = "",
-        private val detectionOutput: String = "",
+        private var detectionOutput: String = "",
         private val recordedKindOutput: String = "",
         private var recordedSourceGenerationOutput: String = "",
         private var recordedSourceOutput: String = "",
@@ -100,6 +100,7 @@ class TmuxSessionViewModelConversationTest : TmuxSessionViewModelTestBase() {
         fun setWcOutput(value: String) { wcOutput = value }
         fun setInitialEventsOutput(value: String) { initialEventsOutput = value }
         fun setRecordedSourceOutput(value: String) { recordedSourceOutput = value }
+        fun setDetectionOutput(value: String) { detectionOutput = value }
 
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
@@ -927,4 +928,275 @@ class TmuxSessionViewModelConversationTest : TmuxSessionViewModelTestBase() {
             },
         )
     }
+
+    /**
+     * Issue #1603: connect + register a single pane carrying [cwd]/[paneTty]/[panePid]
+     * (the detection inputs) with [session] installed as the active sessionRef, so
+     * the REAL detection → window-read → tail load path runs against the fake host.
+     */
+    private fun TmuxSessionViewModel.connectPaneWithSessionForTest(
+        paneId: String,
+        cwd: String,
+        currentCommand: String,
+        session: FakeSshSession,
+        paneTty: String = "/dev/pts/7",
+        panePid: Long = 4242L,
+    ) {
+        // Terminal default → no #878 auto-seed placeholder at pane-add, so the
+        // Conversation tap below creates a USER-tapped (#778) row that a transient
+        // null detection KEEPS on "Loading…" (its watchdog resolving it), instead
+        // of an auto-seed row that a null drops. This models the reported reattach
+        // state: the user is on the Conversation tab while the load is in flight.
+        setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
+        replaceClientForTest(
+            hostId = 42L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId,
+                    "@0",
+                    "$0",
+                    currentCommand,
+                    paneIndex = 0,
+                    cwd = cwd,
+                    currentCommand = currentCommand,
+                    paneTty = paneTty,
+                    panePid = panePid,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        setSessionRefForTest(session)
+    }
+
+    @Test
+    fun issue1603SlowFirstLoadAfterReattachAutoRetriesToReadyInsteadOfFailedDeadEnd() =
+        runTest(scheduler) {
+            // Issue #1603 (reproduce-first). On a just-reattached busy session the
+            // first-paint conversation load races a still-settling transport and
+            // misses the 12 s window. On BASE the watchdog hard-fails the row to
+            // ConversationLoadState.Failed ("Couldn't load this conversation.") — a
+            // dead end the user could only escape by reconnecting. The fix
+            // AUTO-RETRIES the load with a backoff while the transport settles, so
+            // the row stays recoverable (never dead-ends) and loads to Ready with no
+            // manual reconnect.
+            val vm = newVm()
+            vm.setConversationLoadTimeoutForTest(1_000L)
+            val now = System.currentTimeMillis() / 1000
+            val source = "/home/u/.claude/projects/-workspace-proj/live.jsonl"
+            // First attempt: transport still settling — no recorded source / no
+            // transcript candidate resolves yet → detection returns null.
+            val session = FakeSshSession(
+                recordedKindOutput = "claude\n",
+                recordedSourceOutput = "",
+                detectionOutput = "",
+                wcOutput = "1\n",
+                initialEventsOutput =
+                    """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":"hi"}}""",
+            )
+            vm.connectPaneWithSessionForTest(
+                paneId = "%0",
+                cwd = "/workspace/proj",
+                currentCommand = "node",
+                session = session,
+            )
+            // The user is on the Conversation tab (user-tapped #778 placeholder), so a
+            // transient null keeps the row on "Loading…" + its watchdog.
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            // First (slow) load attempt resolves null WITHOUT advancing past the 1 s
+            // watchdog — runCurrent drains ready work but no virtual time.
+            vm.startAgentDetectionForPaneForTest("%0")
+            runCurrent()
+            assertEquals(
+                "precondition: the first load has not resolved — the row is still Loading",
+                ConversationLoadState.Loading,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            // The transport now settles: the recorded source + live transcript become
+            // observable to the NEXT read.
+            session.setRecordedSourceOutput("$source\n")
+            session.setDetectionOutput("claude|$now|/workspace/proj|$source")
+
+            // Cross the first 1 s watchdog window. BASE flips the row to Failed here;
+            // the fix keeps it recoverable (auto-retrying, still Loading).
+            advanceTimeBy(1_100L)
+            runCurrent()
+            assertNotEquals(
+                "#1603: the load must NOT dead-end to Failed on the first missed " +
+                    "window — it must stay recoverable and auto-retry without a " +
+                    "manual reconnect (RED on base: this is Failed)",
+                ConversationLoadState.Failed,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            // The auto-retry re-reads the now-settled transport and loads the
+            // conversation to Ready — recovered with no manual reconnect.
+            advanceUntilIdle()
+            assertEquals(
+                "#1603: the conversation recovers to Ready via auto-retry",
+                ConversationLoadState.Ready,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+            assertEquals(
+                "the recovered Claude source is bound",
+                source,
+                vm.agentConversations.value["%0"]!!.detection?.sourcePath,
+            )
+        }
+
+    @Test
+    fun issue1603GenuinelyAbsentConversationStillErrorsWithNoLiveSession() =
+        runTest(scheduler) {
+            // Issue #1603 class coverage: a genuinely-absent/unreachable conversation
+            // must STILL surface the clear Failed terminal state — the auto-retry must
+            // not mask a real missing conversation as an infinite spinner. With no live
+            // session the watchdog cannot auto-retry, so it flips to Failed at once.
+            val vm = newVm()
+            vm.setConversationLoadTimeoutForTest(1_000L)
+            vm.attachClientForTest(FakeTmuxClient())
+            vm.applyParsedPanesForTest(
+                listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "node", paneIndex = 0)),
+            )
+
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+            assertEquals(
+                ConversationLoadState.Loading,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            advanceUntilIdle()
+            assertEquals(
+                "#1603: with no live session to retry against, a never-completing " +
+                    "load still resolves to the clear Failed terminal state — never an " +
+                    "infinite spinner",
+                ConversationLoadState.Failed,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+        }
+
+    @Test
+    fun issue1603AutoRetryIsBoundedSoAPerpetuallyUnreachableLoadStillFails() =
+        runTest(scheduler) {
+            // Issue #1603 class coverage: the auto-retry is BOUNDED. Against a live
+            // session whose transport never settles (detection never resolves — the
+            // genuinely-absent / unreachable-log case), the load must NOT spin forever;
+            // after the bounded auto-retries it flips to the clear Failed terminal state.
+            val diagnostics = installRecordingDiagnosticSink()
+            val vm = newVm()
+            vm.setConversationLoadTimeoutForTest(1_000L)
+            // Detection perpetually resolves null (no source, no candidate ever).
+            val session = FakeSshSession(
+                recordedKindOutput = "claude\n",
+                recordedSourceOutput = "",
+                detectionOutput = "",
+            )
+            vm.connectPaneWithSessionForTest(
+                paneId = "%0",
+                cwd = "/workspace/proj",
+                currentCommand = "node",
+                session = session,
+            )
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+            vm.startAgentDetectionForPaneForTest("%0")
+            runCurrent()
+            assertEquals(
+                ConversationLoadState.Loading,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            // Drain every watchdog window + backoff. Bounded, so it terminates.
+            advanceUntilIdle()
+            assertEquals(
+                "#1603: a perpetually-unreachable load flips to Failed after the " +
+                    "bounded auto-retries — it does not spin forever",
+                ConversationLoadState.Failed,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+            val retries = diagnostics.eventsNamed("tmux_agent_conversation_load_auto_retry")
+            assertTrue(
+                "#1603: the load auto-retried before giving up (recoverable path was " +
+                    "attempted); events=${diagnostics.events.map { it.name }}",
+                retries.isNotEmpty(),
+            )
+            assertTrue(
+                "#1603: the auto-retry count is bounded (<= max); retries=${retries.size}",
+                retries.size in 1..3,
+            )
+        }
+
+    @Test
+    fun issue1603SlowFirstLoadAfterReattachRecoversForCodexSourceToo() =
+        runTest(scheduler) {
+            // Issue #1603 class coverage (Claude vs Codex source): the recovery is
+            // agent-kind-agnostic. Reproduce the slow-first-load-after-reattach for a
+            // CODEX-recorded pane and confirm it likewise stays recoverable (never the
+            // Failed dead-end on the first missed window) and loads via auto-retry.
+            val vm = newVm()
+            vm.setConversationLoadTimeoutForTest(1_000L)
+            val now = System.currentTimeMillis() / 1000
+            val source = "/home/u/.codex/sessions/2026/05/22/rollout-abc.jsonl"
+            // First attempt: transport still settling — no candidate resolves yet.
+            val session = FakeSshSession(
+                recordedKindOutput = "codex\n",
+                recordedSourceOutput = "",
+                detectionOutput = "",
+                wcOutput = "1\n",
+                initialEventsOutput =
+                    """{"type":"message","role":"assistant","content":[{"type":"text","text":"hi"}]}""",
+            )
+            vm.connectPaneWithSessionForTest(
+                paneId = "%0",
+                cwd = "/workspace/proj",
+                currentCommand = "codex",
+                session = session,
+            )
+            vm.selectSessionTab("%0", SessionTab.Conversation)
+            runCurrent()
+
+            vm.startAgentDetectionForPaneForTest("%0")
+            runCurrent()
+            assertEquals(
+                "precondition: the first codex load has not resolved — still Loading",
+                ConversationLoadState.Loading,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            // Transport settles: the codex rollout candidate becomes observable.
+            session.setRecordedSourceOutput("$source\n")
+            session.setDetectionOutput("codex|$now|/workspace/proj|$source")
+
+            advanceTimeBy(1_100L)
+            runCurrent()
+            assertNotEquals(
+                "#1603 (Codex): the load must NOT dead-end to Failed on the first " +
+                    "missed window — it stays recoverable and auto-retries",
+                ConversationLoadState.Failed,
+                vm.agentConversations.value["%0"]!!.loadState,
+            )
+
+            advanceUntilIdle()
+            val state = vm.agentConversations.value["%0"]!!
+            assertNotEquals(
+                "#1603 (Codex): the conversation recovers via auto-retry to a " +
+                    "non-Failed terminal state (Ready/Empty), not the dead end",
+                ConversationLoadState.Failed,
+                state.loadState,
+            )
+        }
 }

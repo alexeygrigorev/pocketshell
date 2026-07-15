@@ -822,6 +822,28 @@ internal const val CHANNEL_WEDGED_RECENT_OUTPUT_MS: Long = 3_000L
  */
 internal const val CONVERSATION_LOAD_TIMEOUT_MS: Long = 12_000L
 
+/**
+ * Issue #1603: how many times the conversation-load watchdog auto-retries a
+ * still-Loading first-paint read before it surfaces the
+ * [ConversationLoadState.Failed] dead-end. On a just-reattached busy session the
+ * first tail read races a still-settling transport and can miss the 12 s window
+ * even though it would succeed given a beat more; instead of hard-failing to
+ * "Couldn't load this conversation." (a dead end the user could only escape by
+ * reconnecting), the watchdog re-runs the load a bounded number of times with a
+ * backoff while the transport settles. Bounded so a genuinely-absent
+ * conversation (no agent / unreachable log) still reaches Failed and never
+ * spins forever.
+ */
+internal const val CONVERSATION_LOAD_MAX_AUTO_RETRIES: Int = 3
+
+/**
+ * Issue #1603: base backoff between conversation-load auto-retries. The Nth
+ * retry waits `CONVERSATION_LOAD_RETRY_BACKOFF_MS * N` (linear, attempt-scaled)
+ * so a still-settling transport is given progressively more room before the
+ * next re-read, without letting the total recovery window grow unbounded.
+ */
+internal const val CONVERSATION_LOAD_RETRY_BACKOFF_MS: Long = 1_000L
+
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),
     // Issue #1155 (Part B): a NORMAL tap of a PERSISTED session row in the folder

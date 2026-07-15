@@ -1312,9 +1312,9 @@ class PromptComposerOutboundSendQueueViewModelTest {
         // — so the wait genuinely blocks until the flush has completed.
         var requeueCount = 0
         val queue = object : InMemoryOutboundQueueStore() {
-            override fun requeueForRetry(id: String): OutboundItem? {
+            override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? {
                 requeueCount++
-                return super.requeueForRetry(id)
+                return super.requeueForRetry(id, resetAttempts)
             }
         }
         val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))

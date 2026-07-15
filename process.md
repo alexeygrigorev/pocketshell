@@ -723,6 +723,12 @@ worktree, correct the parent/config setting, and redispatch only after reload.
 - Project/personal custom agent TOML files may pin `model` and
   `model_reasoning_effort`, but newly added agent/config files still require a
   new task or restart when the active parent retains a live override.
+- Treat the child's recorded turn metadata as authoritative. On 2026-07-15 the
+  built-in collaboration launcher still forced `reasoning_effort = "medium"`
+  even when the parent and an exactly named custom agent profile both recorded
+  `gpt-5.6-sol` / `high`; the launch API exposed no effort override. Interrupt
+  that child before work and report the launcher limitation. Do not relabel it
+  High, fall back to Medium, or replace it with a shell-launched agent.
 
 - Each active issue keeps its own implementer/reviewer loop.
 - Reviewers may run in parallel for different issues.

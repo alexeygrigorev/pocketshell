@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
+import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.agents.AgentDetection
@@ -16,13 +17,16 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
+import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import java.io.File
 import java.io.InputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -38,12 +42,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-// Issue #1615: default in-JVM stress-loop iteration count for the AGENT-variant
-// guard [TmuxSessionAgentSendTest.sendToAgentPaneReconnectRecoverableDrainsDeterministicallyUnderStress].
-// This guard runs in the per-push Unit gate at this floor (proven stable). The
-// PAYLOAD variant is intentionally NOT stress-guarded (deferred to #1617 — see
-// that guard's KDoc). Override with the `PS_STRESS_COUNT` env var for a heavier
-// local soak.
+// Default in-JVM stress-loop floor for both reconnect-send variants. #1615
+// established the agent guard; #1617 isolates the shared #1168 collaborator
+// roots and adds the payload guard at the same per-push floor. Override with
+// `PS_STRESS_COUNT` for a heavier local soak.
 private const val STRESS_ITERATIONS = 50
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -1093,29 +1095,51 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
 
     @Test
     fun sendAgentPayloadToPaneResultReconnectsAndSendsWhenDisconnectedRecoverable() = runTest(scheduler) {
+        runReconnectRecoverablePayloadSendScenario()
+    }
+
+    /**
+     * Issue #1617: run the exact payload single-shot body at the acceptance
+     * floor. Every iteration owns and drains its factory/tail/teardown scope and
+     * VM roots, so this guard detects a return to class-wide real-IO coupling.
+     */
+    @Test
+    fun sendAgentPayloadReconnectRecoverableDrainsDeterministicallyUnderStress() = runTest(scheduler) {
+        val iterations = System.getenv("PS_STRESS_COUNT")?.toIntOrNull() ?: STRESS_ITERATIONS
+        repeat(iterations) {
+            runReconnectRecoverablePayloadSendScenario()
+        }
+    }
+
+    private suspend fun TestScope.runReconnectRecoverablePayloadSendScenario() {
+        val scenarioScope = newReconnectScenarioScope()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(
+                connector = connector,
+                scope = scenarioScope,
+                idleTtlMillis = 0L,
+            ),
+            agentRepository = AgentConversationRepository(tailScope = scenarioScope),
+            tmuxClientFactory = TmuxClientFactory(scenarioScope),
         )
         // Issue #1110: the send-triggered reconnect REPLACES the disconnected
         // client, and the displaced client's runtime is torn down on the off-Main
         // teardown scope ([deferConnectionTeardownOffMain]). The default scope is a
         // real `Dispatchers.IO` ([defaultTeardownScope]); that real worker races the
-        // virtual-clock reconnect/send the test drives with `advanceUntilIdle()`,
+        // virtual-clock reconnect/send the test drives, so the load-bearing
         // so the load-bearing reconnect+send assertions flaked under CI contention
         // (the `:11824` lambda-line failure). Pin the teardown to the SHARED
         // virtual-clock scheduler (the established #1085 pattern below) so the close
-        // drains deterministically under `advanceUntilIdle()` with no real-IO race.
+        // reconnect/send assertion drains deterministically with no real-IO race.
         //
-        // Issue #1615 (DEMOTE decision): the deeper #1168 `agentTailScope`/
-        // `factoryScope` cross-test isolation weakness that makes THIS payload
-        // variant flake in CI (#1584/#1599) even with the seam is deferred to
-        // #1617; #1615 does NOT add a per-push stress guard for this variant (a
-        // 50× guard would AMPLIFY the residual flake). See #1617.
-        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
+        // Issue #1617: unlike the former class-wide #1168 roots, scenarioScope
+        // is virtual, scenario-owned, and drained below before another reconnect
+        // scenario can start.
+        vm.setTeardownScopeForTest(scenarioScope)
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -1151,10 +1175,16 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val send = async {
             vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
         }
-        advanceUntilIdle()
+        awaitReconnectSendCompletion(send)
         val result = send.await()
 
-        assertTrue("Codex Terminal-tab Send+Enter must reconnect before send", result.isSuccess)
+        assertTrue(
+            "Codex Terminal-tab Send+Enter must reconnect before send: " +
+                "failure=${result.exceptionOrNull()} status=${vm.connectionStatus.value} " +
+                "connectCount=${connector.connectCount} " +
+                "registryClient=${registry.clients.value[7L]?.client}",
+            result.isSuccess,
+        )
         assertEquals(1, connector.connectCount)
         assertSame(reconnectClient, registry.clients.value[7L]?.client)
         assertEquals(
@@ -1164,6 +1194,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             ),
             reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
         )
+        drainReconnectScenario(vm, scenarioScope)
     }
 
     /**
@@ -1179,12 +1210,10 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
      * intermittently hadn't drained when the clock advanced — a spurious `Unit
      * tests` red on unrelated PR #1614 (this variant at :1081).
      *
-     * The fix is a test-determinism seam ONLY (no production behaviour change):
-     * the agent scenario pins the teardown scope to the SHARED virtual-clock
-     * scheduler via
-     * `setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))`
-     * (see [runReconnectRecoverableAgentSendScenario]), so the displaced-client
-     * teardown drains deterministically under `advanceUntilIdle()`.
+     * The fix is test determinism only (no production behaviour change): the
+     * agent scenario pins factory, agent-tail, and teardown work to one
+     * scenario-owned virtual scope, then clears the VM and drains both its own
+     * coroutine roots and that collaborator scope before returning.
      *
      * This stress guard runs the EXACT same scenario body as the single-shot
      * `sendToAgentPaneResultReconnectsAndSendsWhenDisconnectedRecoverable` test
@@ -1194,15 +1223,8 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
      * scenario pass at 300× under CPU saturation, and FAIL at 300× only when the
      * seam is removed).
      *
-     * SCOPE NOTE — the PAYLOAD variant is deliberately NOT stress-guarded here.
-     * The `sendAgentPayloadToPaneResult` variant (#1584/#1599) flakes at the same
-     * 50× floor because of the deeper #1168 `agentTailScope`/`factoryScope`
-     * cross-test isolation weakness, which is distinct from the teardown scope and
-     * NOT fixed by #1615. Adding a payload stress guard to the per-push gate would
-     * AMPLIFY that residual flake (50 chances/run), the opposite of #1615's goal,
-     * so the payload isolation fix is deferred to **#1617**. Do NOT add a payload
-     * `…DrainsDeterministicallyUnderStress` guard until #1617 lands the isolation
-     * fix.
+     * Issue #1617 applies the same isolation boundary to this sibling and the
+     * payload variant, so neither guard can leave work behind for the other.
      */
     @Test
     fun sendToAgentPaneReconnectRecoverableDrainsDeterministicallyUnderStress() = runTest(scheduler) {
@@ -1213,22 +1235,29 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     }
 
     private suspend fun TestScope.runReconnectRecoverableAgentSendScenario() {
+        val scenarioScope = newReconnectScenarioScope()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
         val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(
+                connector = connector,
+                scope = scenarioScope,
+                idleTtlMillis = 0L,
+            ),
+            agentRepository = AgentConversationRepository(tailScope = scenarioScope),
+            tmuxClientFactory = TmuxClientFactory(scenarioScope),
         )
         // Issue #1615: pin the off-Main connection-teardown scope to the SHARED
         // virtual-clock scheduler (a StandardTestDispatcher on `scheduler`) so the
         // send-triggered reconnect's displaced-client teardown
-        // ([TmuxSessionViewModel.deferConnectionTeardownOffMain]) drains under
-        // `advanceUntilIdle()` instead of racing a real `Dispatchers.IO` worker
+        // ([TmuxSessionViewModel.deferConnectionTeardownOffMain]) drains on the
+        // scenario scheduler instead of racing a real `Dispatchers.IO` worker
         // (the base default is `defaultTeardownScope`, real IO). Without this the
         // real teardown thread races the virtual-clock reconnect/send and the
         // load-bearing assertions flaked on CI (PR #1614, this variant at :1081).
-        vm.setTeardownScopeForTest(CoroutineScope(StandardTestDispatcher(scheduler)))
+        vm.setTeardownScopeForTest(scenarioScope)
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 0L, silentReattachTimeoutMs = 1L)
         vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
             assertEquals("work", sessionName)
@@ -1268,7 +1297,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         )
 
         val send = async { vm.sendToAgentPaneResult("%0", "send after return") }
-        advanceUntilIdle()
+        awaitReconnectSendCompletion(send)
         val result = send.await()
 
         assertTrue("send should reconnect and deliver instead of dead-ending", result.isSuccess)
@@ -1285,6 +1314,75 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val pending = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
         assertEquals("send after return", pending.text)
         assertEquals(MessageSendState.Pending, pending.sendState)
+        drainReconnectScenario(vm, scenarioScope)
+    }
+
+    /**
+     * Issue #1617: one collaborator scope per reconnect scenario/iteration.
+     * Both the TmuxClientFactory reader root and AgentConversationRepository
+     * tail root use the same virtual scheduler as the scenario, so no real-IO
+     * child can accumulate behind the next payload/agent reconnect assertion.
+     */
+    private fun newReconnectScenarioScope(): CoroutineScope =
+        CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler))
+
+    /**
+     * Quiesce the scenario at its boundary rather than deferring all VMs and
+     * collaborator roots to the class-level @After. This is load-bearing for
+     * the 50x guards: iteration N+1 starts with zero live work from iteration N.
+     */
+    private fun TestScope.drainReconnectScenario(
+        vm: TmuxSessionViewModel,
+        scenarioScope: CoroutineScope,
+    ) {
+        vm.clearForTest()
+        runCurrent()
+        scenarioScope.cancel()
+        val drainDeadline = System.currentTimeMillis() + 5_000L
+        while (
+            vm.activeOwnScopeChildCountForTest() > 0 &&
+            System.currentTimeMillis() < drainDeadline
+        ) {
+            // Completion handlers may enqueue one final bridgeScope child. Keep
+            // cancelling and pumping the shared scheduler until that hand-back
+            // has also quiesced (the same #1355 shape as the base @After).
+            vm.cancelOwnScopesForTest()
+            runCurrent()
+            // A VM child may be unwinding from a genuine background dispatcher;
+            // yield wall time before pumping its Main continuation again.
+            Thread.sleep(1)
+        }
+        assertEquals(
+            "reconnect scenario must not retain VM work into its sibling/next iteration",
+            0,
+            vm.activeOwnScopeChildCountForTest(),
+        )
+        assertTrue(
+            "reconnect scenario factory/tail/teardown scope must be fully cancelled",
+            scenarioScope.coroutineContext[Job]?.children?.none { it.isActive } != false,
+        )
+    }
+
+    /**
+     * Drive reconnect polling in small virtual increments per wall-clock yield.
+     * `advanceUntilIdle()` leaps directly to the send timeout before a real
+     * dispatcher gets CPU under contention; `runCurrent()` alone never advances
+     * the reconnect poll delay. This bounded pump does both without either race.
+     */
+    private fun TestScope.awaitReconnectSendCompletion(send: Job) {
+        repeat(2_000) {
+            if (send.isCompleted) return
+            runCurrent()
+            if (!send.isCompleted) {
+                advanceTimeBy(10L)
+                Thread.sleep(1)
+            }
+        }
+        assertTrue(
+            "reconnect send did not complete within 2,000 settle ticks under the " +
+                "virtual-clock/wall-clock settle pump",
+            send.isCompleted,
+        )
     }
 
     @Test

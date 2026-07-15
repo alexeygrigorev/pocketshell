@@ -69,11 +69,15 @@ class UsageNotificationsTest {
             ),
             state = UsageThresholdState.Approaching,
             warnPercent = 80.0,
+            now = Instant.parse("2026-06-08T10:00:00Z"),
             zoneId = ZoneId.of("UTC"),
         )
 
         assertEquals("Codex usage: 86% used", event.title)
-        assertEquals("Approaching limit · resets Mon Jun 8, 12:00 · Tap to open Usage.", event.text)
+        assertEquals(
+            "Approaching limit · resets in 2h · Mon Jun 8, 12:00 · Tap to open Usage.",
+            event.text,
+        )
         assertFalse(event.title.contains("blocked", ignoreCase = true))
         assertFalse(event.text.contains("blocked", ignoreCase = true))
     }
@@ -127,6 +131,7 @@ class UsageNotificationsTest {
             settingsRepository = SettingsRepository(context),
             stateStore = FakeStateStore(),
             zoneId = { ZoneId.of("UTC") },
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
             poster = { events += it },
         )
         val approaching = UsageSnapshot.Records(
@@ -201,6 +206,7 @@ class UsageNotificationsTest {
             settingsRepository = SettingsRepository(context),
             stateStore = FakeStateStore(),
             zoneId = { ZoneId.of("UTC") },
+            now = { Instant.parse("2026-06-08T10:00:00Z") },
             poster = { events += it },
         )
 
@@ -235,18 +241,15 @@ class UsageNotificationsTest {
         )
         assertEquals(
             listOf(
-                "agent-box · Approaching limit · resets Mon Jun 8, 15:00 · Tap to open Usage.",
+                "agent-box · Approaching limit · resets in 5h · Mon Jun 8, 15:00 · Tap to open Usage.",
             ),
             events.map { it.text },
         )
     }
 
     @Test
-    fun notificationUsesAbsoluteResetTimeNotDriftingRelative() {
-        // Issue #1441 (drift): the fire-and-forget notification must bake an
-        // ABSOLUTE reset time, not a "resets in Xh Ym" relative countdown that
-        // goes stale as wall-clock time passes (reads "resets in 2h" hours after
-        // the reset already happened).
+    fun notificationResetCopyIncludesRelativeCountdownAndAbsoluteTime() {
+        val now = Instant.parse("2026-07-15T18:59:00Z")
         val event = usageNotificationEvent(
             record = UsageProviderRecord(
                 provider = "codex",
@@ -258,23 +261,53 @@ class UsageNotificationsTest {
                         86.0,
                         100.0,
                         "percent",
-                        Instant.parse("2026-06-08T12:00:00Z"),
+                        Instant.parse("2026-07-16T17:59:00Z"),
                     ),
                 ),
             ),
             state = UsageThresholdState.Approaching,
             warnPercent = 80.0,
+            now = now,
             zoneId = ZoneId.of("UTC"),
         )
 
-        assertFalse(
-            "reset line must not bake a drifting relative time: ${event.text}",
-            event.text.contains("resets in"),
+        assertEquals(
+            "Approaching limit · resets in 23h · Thu Jul 16, 17:59 · Tap to open Usage.",
+            event.text,
         )
-        assertTrue(
-            "reset line must show an absolute (non-drifting) time: ${event.text}",
-            event.text.contains("resets Mon Jun 8, 12:00"),
+    }
+
+    @Test
+    fun notificationResetCountdownCoversMinuteHourDayBoundariesFromFixedNow() {
+        val now = Instant.parse("2026-07-15T12:00:00Z")
+        val cases = listOf(
+            Instant.parse("2026-07-15T12:30:00Z") to "in 30m",
+            Instant.parse("2026-07-15T17:45:00Z") to "in 5h 45m",
+            Instant.parse("2026-07-16T12:00:00Z") to "in 1 day",
+            Instant.parse("2026-07-18T12:00:00Z") to "in 3 days",
         )
+
+        cases.forEach { (resetAt, expectedRelative) ->
+            val event = notificationEventForProvider("codex", now, resetAt)
+            assertTrue(
+                "expected '$expectedRelative' in notification body '${event.text}'",
+                event.text.contains("resets $expectedRelative · "),
+            )
+        }
+    }
+
+    @Test
+    fun codexClaudeAndCopilotNotificationsUseTheSameRelativeAndAbsoluteResetCopy() {
+        val now = Instant.parse("2026-07-15T12:00:00Z")
+        val resetAt = Instant.parse("2026-07-16T12:00:00Z")
+
+        listOf("codex", "claude", "copilot").forEach { provider ->
+            val event = notificationEventForProvider(provider, now, resetAt)
+            assertTrue(
+                "$provider notification must use shared relative + absolute copy: ${event.text}",
+                event.text.contains("resets in 1 day · Thu Jul 16, 12:00"),
+            )
+        }
     }
 
     @Test
@@ -489,6 +522,7 @@ class UsageNotificationsTest {
         settingsRepository = SettingsRepository(context),
         stateStore = store,
         zoneId = { ZoneId.of("UTC") },
+        now = { Instant.parse("2026-06-08T10:00:00Z") },
         poster = poster,
         canceller = { cancelled += it },
     )
@@ -525,5 +559,22 @@ class UsageNotificationsTest {
         ),
         fetchedAt = Instant.parse("2026-06-08T10:00:00Z"),
         command = UsageRemoteSource.defaultUsageCommand,
+    )
+
+    private fun notificationEventForProvider(
+        provider: String,
+        now: Instant,
+        resetAt: Instant,
+    ): UsageNotificationEvent = usageNotificationEvent(
+        record = UsageProviderRecord(
+            provider = provider,
+            status = UsageStatus.Ok,
+            rawStatus = "ok",
+            windows = listOf(UsageWindow("7d", 86.0, 100.0, "percent", resetAt)),
+        ),
+        state = UsageThresholdState.Approaching,
+        warnPercent = 80.0,
+        now = now,
+        zoneId = ZoneId.of("UTC"),
     )
 }

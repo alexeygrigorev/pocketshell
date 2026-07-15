@@ -169,9 +169,9 @@ class UsageThresholdNotificationE2eTest {
         )
         val text = posted.notification.extras
             .getCharSequence("android.text")?.toString().orEmpty()
-        assertTrue(
-            "usage notification body should prompt the user to open Usage: '$text'",
-            text.contains("Tap to open Usage"),
+        assertEquals(
+            "agent-box · 100% used · resets in 23h · Tue Jun 9, 09:00 · Tap to open Usage.",
+            text,
         )
 
         // Exactly ONE usage-alert notification is live (de-dupe within the feed
@@ -259,6 +259,7 @@ class UsageThresholdNotificationE2eTest {
         settingsRepository = SettingsRepository(context),
         stateStore = store,
         zoneId = { ZoneId.of("UTC") },
+        now = { Instant.parse("2026-06-08T10:00:00Z") },
         // default poster -> UsageNotifications.show(context, event) -> real post
     )
 
@@ -271,7 +272,15 @@ class UsageThresholdNotificationE2eTest {
                 status = UsageStatus.Blocked,
                 rawStatus = "quota_exhausted",
                 blockReason = "codex quota exhausted (weekly window at 80%)",
-                windows = listOf(UsageWindow("7d", 100.0, 100.0, "percent", null)),
+                windows = listOf(
+                    UsageWindow(
+                        "7d",
+                        100.0,
+                        100.0,
+                        "percent",
+                        Instant.parse("2026-06-09T09:00:00Z"),
+                    ),
+                ),
             ),
         ),
         fetchedAt = Instant.parse("2026-06-08T10:00:00Z"),
@@ -332,6 +341,13 @@ class UsageThresholdNotificationE2eTest {
     private fun screenshotNotificationShade() {
         instrumentation.uiAutomation
             .executeShellCommand("cmd statusbar expand-notifications").close()
+        // The AVD preserves the shade's scroll position between expansions.
+        // Pull the list back to its top so the freshly-posted alert (rather
+        // than only the lower "Silent" section) is visible in the artifact.
+        repeat(2) {
+            instrumentation.uiAutomation
+                .executeShellCommand("input swipe 540 700 540 1800 400").close()
+        }
         Thread.sleep(1_500)
         val mediaRoot = testArtifactsRoot(context)
         val artifactsDir = File(mediaRoot, "additional_test_output/usage-notification")

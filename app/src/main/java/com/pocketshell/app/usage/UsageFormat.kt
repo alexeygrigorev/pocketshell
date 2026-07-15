@@ -236,11 +236,14 @@ internal fun formatResetRelative(now: Instant, resetAt: Instant?, zoneId: ZoneId
  * under the relative string. Null `resetAt` → null (caller omits the
  * line). Zone-aware via the injected [zoneId].
  *
- * Format examples (en-US): "Jun 4, 13:10", "May 28, 09:00".
+ * Issue #1565: a short day-of-week prefix makes the reset date readable at
+ * a glance alongside the relative "in N days" line.
+ *
+ * Format examples (en-US): "Thu Jun 4, 13:10", "Wed May 28, 09:00".
  */
 internal fun formatResetAbsolute(resetAt: Instant?, zoneId: ZoneId): String? {
     if (resetAt == null) return null
-    val formatter = DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.US).withZone(zoneId)
+    val formatter = DateTimeFormatter.ofPattern("EEE MMM d, HH:mm", Locale.US).withZone(zoneId)
     return formatter.format(resetAt)
 }
 

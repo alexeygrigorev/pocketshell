@@ -254,8 +254,17 @@ public interface OutboundQueueStore {
      * re-armed; an unknown/`Delivered` id returns `null` (a late ack cannot
      * resurrect a pruned/delivered row). Attempt counts are not bumped here; the
      * next [claimNext] / [claim] records the next attempt.
+     *
+     * Issue #1602: when [resetAttempts] is true the row's
+     * [OutboundItem.attemptCount] is CLEARED to 0, granting a FRESH bounded auto-
+     * retry budget ([OUTBOUND_MAX_AUTO_ATTEMPTS]). This is
+     * for the EXPLICIT user "resend all" action ([PromptComposerViewModel.resendAllQueued]),
+     * so a row that was auto-parked (`Failed`, budget exhausted) is genuinely re-driven
+     * by the auto-flush instead of being re-parked on the very next cycle. The
+     * auto-defer path (a mid-flight drop) leaves it false so the bound still
+     * accumulates across silent reconnect retries.
      */
-    public fun requeueForRetry(id: String): OutboundItem?
+    public fun requeueForRetry(id: String, resetAttempts: Boolean = false): OutboundItem?
 
     /**
      * Requeue stale [OutboundState.InFlight] rows for [sessionKey] so a
@@ -653,10 +662,14 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             updated
         }
 
-    override fun requeueForRetry(id: String): OutboundItem? = synchronized(lock) {
+    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered) return null
-        val updated = existing.copy(state = OutboundState.Queued, lastError = null)
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            attemptCount = if (resetAttempts) 0 else existing.attemptCount,
+        )
         items[updated.id] = updated
         updated
     }
@@ -738,7 +751,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
-    override fun requeueForRetry(id: String): OutboundItem? = null
+    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
@@ -976,12 +989,16 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             updated
         }
 
-    override fun requeueForRetry(id: String): OutboundItem? = synchronized(lock) {
+    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
         if (existing.state == OutboundState.Delivered) return null
-        val updated = existing.copy(state = OutboundState.Queued, lastError = null)
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            attemptCount = if (resetAttempts) 0 else existing.attemptCount,
+        )
         replaceAndStore(sessionKey, list, updated)
         updated
     }

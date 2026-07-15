@@ -1522,6 +1522,13 @@ public class PromptComposerViewModel @Inject constructor(
      * actual delivery and calls [markSendDelivered] / [restoreFailedSend].
      */
     public fun retryOutboundItem(id: String) {
+        // Issue #1602: an explicit Retry must re-drive THIS row. A CLOGGED pipeline
+        // (wedged in-flight send holding `sendInFlight`) makes a plain dispatch a
+        // SILENT NO-OP, so break the strand first — the watchdog recovery that DEFERS
+        // the wedged row (exactly-once via #1526/#1541). NOT the sidecar latch (#928).
+        if (_uiState.value.sendInFlight) {
+            clearStrandedSendInFlight()
+        }
         dispatchOutboundItem(id)
     }
 
@@ -1535,11 +1542,17 @@ public class PromptComposerViewModel @Inject constructor(
     public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
         if (_uiState.value.sendInFlight) return null
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
-        val next = _outboundQueueItems.value.firstComposerQueueRetryable(
-            sessionKey = target,
-            excludingIds = excludingIds,
-        ) ?: return null
-        return if (dispatchOutboundItem(next.id)) next.id else null
+        // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
+        // drain skips it and the healthy tail drains; per-row Retry re-drives it.
+        val plan = _outboundQueueItems.value.planComposerAutoFlush(target, excludingIds)
+        if (plan.parkIds.isNotEmpty()) {
+            plan.parkIds.forEach {
+                outboundQueueStore.markFailed(it, lastError = OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE)
+            }
+            refreshOutboundQueueItemsFor(target)
+        }
+        val nextId = plan.nextId ?: return null
+        return if (dispatchOutboundItem(nextId)) nextId else null
     }
 
     /**
@@ -1574,7 +1587,9 @@ public class PromptComposerViewModel @Inject constructor(
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
         val rearmedIds = outboundQueueStore.itemsFor(target)
             .composerQueueRetryableItems()
-            .mapNotNull { outboundQueueStore.requeueForRetry(it.id)?.id }
+            // Issue #1602: re-grant the bounded auto-retry budget (resetAttempts) so a
+            // parked (Failed, exhausted) row is re-driven, not re-parked next cycle.
+            .mapNotNull { outboundQueueStore.requeueForRetry(it.id, resetAttempts = true)?.id }
         if (rearmedIds.isNotEmpty()) refreshOutboundQueueItemsFor(target)
         return rearmedIds
     }

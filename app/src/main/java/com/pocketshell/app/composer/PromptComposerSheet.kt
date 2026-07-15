@@ -1215,6 +1215,58 @@ internal fun SheetContent(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
+
+            // Issue #745: connection-lost indicator. Surfaced the moment the host
+            // reports the SSH/tmux link is degraded/lost, BEFORE the user taps
+            // Send, so a send into a dead link is never a silent blind wait.
+            //
+            // Issue #1613: this indicator lives INSIDE the scrollable upper region
+            // (BELOW the draft field, which is the first child), NOT in the sticky
+            // bottom chrome. When the maintainer is composing WHILE offline — the
+            // whole point of #1613 — the keyboard is up and there is only ~175dp
+            // above it; a sticky TWO-LINE "Connection lost…" banner + the sticky
+            // control row consumed nearly all of it and CRUSHED the weighted draft
+            // region to a sub-line sliver, so the user "couldn't type anything".
+            // Moving the banner into the scroll region (where the mutually-exclusive
+            // queue banner already lives) keeps the draft field — the top priority —
+            // full-size and reachable; the informational banner scrolls with the
+            // content. The blind-wait protection is preserved: with a short draft the
+            // banner is visible right above the always-sticky Send row, and once the
+            // user taps Send the (also in-scroll) OutboundQueueBanner carries the
+            // ongoing "Will send when reconnected." status.
+            //
+            // Issue #971/#987 (Option A): once there is a queued outbound prompt
+            // waiting, the OutboundQueueBanner already carries the SINGLE coherent
+            // "Will send when reconnected." status. Showing this standalone
+            // "Connection lost — Send will retry once reconnected." banner on top of
+            // it is the exact duplicated/contradictory stack the maintainer reported
+            // on #987 — so suppress it whenever the queue banner is present. With no
+            // queued prompt the standalone indicator still warns BEFORE the first Send.
+            if (state.connectionDegraded && outboundQueueItems.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PocketShellColors.AccentSoft, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag(COMPOSER_CONNECTION_LOST_TAG),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.CloudOff,
+                        contentDescription = null,
+                        tint = PocketShellColors.Accent,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text(
+                        text = "Connection lost — Send will retry once reconnected.",
+                        color = PocketShellColors.Accent,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
         }
 
         // Issue #1272: the durable "couldn't deliver — retry" surface. A voice
@@ -1235,46 +1287,6 @@ internal fun SheetContent(
                 onDismiss = onDismissUndelivered,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
-        }
-
-        // Issue #745: connection-lost indicator. Sits OUTSIDE the scrollable
-        // upper region so it is part of the sticky bottom chrome and stays
-        // visible directly above the Send row even when the soft keyboard is
-        // up. Surfaced the moment the host reports the SSH/tmux link is
-        // degraded/lost, BEFORE the user taps Send, so a send into a dead link
-        // is never a silent blind wait.
-        //
-        // Issue #971/#987 (Option A): once there is a queued outbound prompt
-        // waiting, the OutboundQueueBanner already carries the SINGLE coherent
-        // "Will send when reconnected." status. Showing this standalone
-        // "Connection lost — Send will retry once reconnected." banner on top of
-        // it is the exact duplicated/contradictory stack the maintainer reported
-        // on #987 — so suppress it whenever the queue banner is present. With no
-        // queued prompt the standalone indicator still warns BEFORE the first Send.
-        if (state.connectionDegraded && outboundQueueItems.isEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(PocketShellColors.AccentSoft, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .testTag(COMPOSER_CONNECTION_LOST_TAG),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.CloudOff,
-                    contentDescription = null,
-                    tint = PocketShellColors.Accent,
-                    modifier = Modifier.size(16.dp),
-                )
-                Text(
-                    text = "Connection lost — Send will retry once reconnected.",
-                    color = PocketShellColors.Accent,
-                    fontSize = 12.sp,
-                )
-            }
         }
 
         // Issue #453 / #508: the single decluttered controls row at the

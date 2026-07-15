@@ -156,6 +156,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"  # #732 Finding B): the host server-PROFILE discovery journey. The p…
   "com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest"  # #898 reviewer Blocker B): the in-session + New session rich-sheet
   "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"  # #736 #567 #638 #657 follow-up to the review): the composer keyboard-up SQUISH re…
+  "com.pocketshell.app.composer.PromptComposerLongDraftCaretVisibleTest"  # #1619/#765 D33/G10: synthetic + real-IME long-draft caret containment above sticky controls
   "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"  # #801 #567 #780 #657 the keyboard-up squish on a REALISTIC TIGHT screen
   "com.pocketshell.app.composer.PromptComposerOfflineComposeUsableProofTest"  # #1613 #801 #780 #657 offline compose: the OFFLINE banner + keyboard up must NOT crush the draft — the user must be able to type + queue while disconnected
   "com.pocketshell.app.tmux.Issue887TerminalFixedUnderImeProofTest"  # #887 #457 #780 the terminal must stay FIXED when the soft keyboard

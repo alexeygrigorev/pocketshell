@@ -1020,15 +1020,7 @@ public class PromptComposerViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Issue #745: the host confirmed the send was delivered. Now — and only
-     * now — clear the draft, drop the staged attachment tiles, and leave the
-     * in-flight state. The sheet's `sendRequests` collector calls this on the
-     * SUCCESS branch right before it dismisses the composer, so the next
-     * composer open is a fresh slate. Splitting the clear out of
-     * [dispatchSendNow] is what removes the optimistic-empty flicker: the
-     * field never empties until the bytes are actually delivered.
-     */
+    /** Finalize delivery without touching post-handoff editor input (#1616). */
     public fun markSendDelivered(request: SendRequest? = null) {
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
@@ -1037,30 +1029,15 @@ public class PromptComposerViewModel @Inject constructor(
         // later watchdog/strand cannot restore a stale prompt.
         inFlightSendRequest = null
         markOutboundSendDelivered(request)
-        val deliveryTarget = request?.sendTarget?.sessionKey?.takeIf { it.isNotBlank() } ?: composerTarget
-        if (deliveryTarget != null && deliveryTarget != composerTarget) {
-            clearComposerDraft(deliveryTarget)
-            composerDraftStore.clearAttachments(deliveryTarget)
-            _uiState.update {
-                it.copy(
-                    sendInFlight = false,
-                    attachmentUpload = AttachmentUploadState.Idle,
-                )
-            }
-            return
-        }
-        _uiState.update {
-            it.copy(
-                sendInFlight = false,
-                attachments = emptyList(),
-                attachmentUpload = AttachmentUploadState.Idle,
-            )
-        }
-        // Issue #872: a delivered send must also drop the durable per-session
-        // attachment refs (the sibling of clearing the draft text below) so a
-        // later switch back does not resurrect already-sent tiles.
-        composerTarget?.let { composerDraftStore.clearAttachments(it) }
-        onDraftChange("")
+        _uiState.update { it.copy(sendInFlight = false) }
+    }
+
+    /** A delivery may auto-close only when no new composition is active. */
+    public fun isQuiescentForAutoClose(): Boolean {
+        val state = _uiState.value
+        return state.draft.isEmpty() &&
+            state.attachments.isEmpty() &&
+            state.recording == RecordingState.Idle
     }
 
     /**
@@ -1095,10 +1072,10 @@ public class PromptComposerViewModel @Inject constructor(
         // watchdog so the retryable failed state we are about to set is not
         // immediately re-stamped by a late watchdog firing.
         watchdogs.disarmSend()
+        val promptWasHandedOff = inFlightSendRequest != null
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot restore it a second time.
         inFlightSendRequest = null
-        markOutboundSendFailed(request, message)
         // Issue #872: restore the CLEAN draft (no appended "Attached files:"
         // block) so the editable text is not polluted with raw remote paths and
         // the tiles are NOT double-appended on Retry. Fall back to the composed
@@ -1108,6 +1085,22 @@ public class PromptComposerViewModel @Inject constructor(
         }
         val restoredAttachments = request.attachments
         val restoreTarget = request.sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: composerTarget
+        val competingDraft = if (restoreTarget != null && restoreTarget != composerTarget) {
+            loadComposerDraft(restoreTarget).orEmpty().isNotEmpty() ||
+                composerDraftStore.loadAttachments(restoreTarget).isNotEmpty()
+        } else {
+            val live = _uiState.value
+            val hasLiveContent = live.draft.isNotEmpty() || live.attachments.isNotEmpty()
+            val liveIsOriginalPreHandoffContent =
+                live.draft == restoredDraft && live.attachments == restoredAttachments
+            hasLiveContent && (promptWasHandedOff || !liveIsOriginalPreHandoffContent)
+        }
+        if (competingDraft) {
+            markOutboundSendFailed(request, message, keepRow = true)
+            _uiState.update { it.copy(sendInFlight = false) }
+            return
+        }
+        markOutboundSendFailed(request, message)
         if (restoreTarget != null && restoreTarget != composerTarget) {
             saveComposerDraft(restoreTarget, restoredDraft)
             composerDraftStore.saveAttachments(restoreTarget, restoredAttachments.toDurableRefs())
@@ -1810,7 +1803,7 @@ public class PromptComposerViewModel @Inject constructor(
             ?.let { refreshOutboundQueueItemsFor(it) }
     }
 
-    private fun markOutboundSendFailed(request: SendRequest, message: String) {
+    private fun markOutboundSendFailed(request: SendRequest, message: String, keepRow: Boolean = false) {
         val id = request.outboundQueueItemId ?: return
         // Issue #971/#987: this is the GENUINE-permanent-failure path
         // ([restoreFailedSend]) — the prompt is returned to the composer as the
@@ -1821,8 +1814,14 @@ public class PromptComposerViewModel @Inject constructor(
         // drop/wedge case no longer reaches here — it routes through
         // [markOutboundSendDeferred], which KEEPS the row queued for auto-retry
         // (Option A). Drop any sidecar bytes the row owned so nothing is orphaned.
-        outboundQueueStore.remove(id)
-        launchSidecarRemoval(id)
+        //
+        // If newer input exists, preserve this prompt as a retryable row (#1616).
+        if (keepRow) {
+            outboundQueueStore.markFailed(id, lastError = message)
+        } else {
+            outboundQueueStore.remove(id)
+            launchSidecarRemoval(id)
+        }
         request.sendTarget.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }

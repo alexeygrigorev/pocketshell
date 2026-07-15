@@ -1437,11 +1437,12 @@ public fun PromptComposerSendDispatcher(
                 } == true
             }.getOrDefault(false)
             if (delivered) {
-                // Issue #745: only NOW clear the draft + staged attachments.
-                // The bytes are confirmed delivered, so there is no flicker of
-                // an optimistically-emptied field.
+                // Finalize the queue row without touching post-handoff input.
                 viewModel.markSendDelivered(request)
-                currentOnDelivered()
+                // A background finalize must not dismiss active composition.
+                if (viewModel.isQuiescentForAutoClose()) {
+                    currentOnDelivered()
+                }
             } else {
                 // Issue #971/#987 (maintainer decision — Option A): a failed /
                 // timed-out send on a degraded link is a connection drop, not a

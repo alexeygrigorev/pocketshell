@@ -114,7 +114,11 @@ class PromptComposerDraftPersistenceViewModelTest {
         assertTrue(vm.uiState.value.attachments.isNotEmpty())
 
         vm.restoreFailedSend(
-            PromptComposerViewModel.SendRequest(text = "ничего не происходит", withEnter = true),
+            PromptComposerViewModel.SendRequest(
+                text = "ничего не происходит",
+                withEnter = true,
+                attachments = vm.uiState.value.attachments,
+            ),
         )
         assertTrue(vm.uiState.value.draft.isNotEmpty())
         assertNotNull(vm.uiState.value.error)
@@ -341,7 +345,7 @@ class PromptComposerDraftPersistenceViewModelTest {
     }
 
     @Test
-    fun deliveredSendClearsTheDurableSlot() = runTest {
+    fun deliveredSendDoesNotClearCurrentDurableSlot() = runTest {
         val store = InMemoryComposerDraftStore()
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -352,11 +356,11 @@ class PromptComposerDraftPersistenceViewModelTest {
         assertEquals("about to send", store.load("1/a"))
 
         vm.markSendDelivered()
-        assertNull(store.load("1/a"))
+        assertEquals("about to send", store.load("1/a"))
 
         vm.onComposerTargetChanged("1/b")
         vm.onComposerTargetChanged("1/a")
-        assertEquals("", vm.uiState.value.draft)
+        assertEquals("about to send", vm.uiState.value.draft)
     }
 
     @Test
@@ -387,7 +391,7 @@ class PromptComposerDraftPersistenceViewModelTest {
     }
 
     @Test
-    fun deliveredSendUsesRequestTargetWhenCurrentComposerMoved() = runTest {
+    fun deliveredSendDoesNotClearEitherTargetWhenCurrentComposerMoved() = runTest {
         val store = InMemoryComposerDraftStore()
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
@@ -405,11 +409,11 @@ class PromptComposerDraftPersistenceViewModelTest {
         vm.onDraftChange("draft for B")
         vm.markSendDelivered(request)
 
-        assertNull(store.load("1/a"))
+        assertEquals("about to send", store.load("1/a"))
         assertEquals("draft for B", vm.uiState.value.draft)
         assertEquals("draft for B", store.load("1/b"))
 
         vm.onComposerTargetChanged("1/a")
-        assertEquals("", vm.uiState.value.draft)
+        assertEquals("about to send", vm.uiState.value.draft)
     }
 }

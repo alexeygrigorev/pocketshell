@@ -1009,10 +1009,7 @@ public fun TmuxSessionScreen(
                     ).isSuccess
                 }
             }
-            if (sent) {
-                showMicSheet = false
-                micSheetAutoStartRecording = false
-            }
+            // #1616: the dispatcher owns quiescent-only dismissal.
             sent
         }
     }
@@ -1020,6 +1017,7 @@ public fun TmuxSessionScreen(
         viewModel = promptComposerViewModel,
         onSend = composerSendHandler,
         onDelivered = {
+            // Dispatcher guarantees the composer is quiescent (#1616).
             showMicSheet = false
             micSheetAutoStartRecording = false
         },

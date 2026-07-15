@@ -91,13 +91,13 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
         // paste (the fake records the command BEFORE throwing — it "ran").
         client.throwOnCommandPrefix = "send-keys -t %0 Enter"
         client.throwOnCommandRemaining = 1
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the staging build now", AgentKind.ClaudeCode) }
+        val first = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the staging build now", AgentKind.ClaudeCode, "s-deploy") }
         advanceUntilIdle()
         assertTrue("attempt 1 must surface the ambiguous failure", first.await().isFailure)
         assertEquals("attempt 1 pastes exactly once", 1, client.pasteCount("deploy the staging build now"))
 
         // The resend (what the reconnect auto-flush / manual retry dispatches).
-        val second = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the staging build now", AgentKind.ClaudeCode) }
+        val second = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the staging build now", AgentKind.ClaudeCode, "s-deploy") }
         advanceUntilIdle()
         assertTrue("the verified resend must succeed", second.await().isSuccess)
 
@@ -110,6 +110,50 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
             client.pasteCount("deploy the staging build now"),
         )
         assertTrue("the resend must still submit (Enter-only)", client.enterCount() >= 2)
+    }
+
+    /**
+     * Issue #1529 — the agent lane's DISTINCT-send limb (companion to the raw-lane
+     * Issue1529TokenDedupTest). Two INTENTIONAL identical agent sends — each its own
+     * per-send delivery token (the VM mints one per call when none is threaded) — must
+     * BOTH paste (server occurrence == 2). Send #1 flaps (ambiguous, its paste landed),
+     * leaving a ledger entry; send #2 is a DIFFERENT user send and must NOT be
+     * false-deduped against send #1's marker.
+     *
+     * RED on base (payload-keyed ledger): send #2's payload collides with send #1's
+     * ledger entry, the probe finds the payload already on the pane, resolves
+     * AlreadyLanded, and DROPS the intentional second send (occurrence 1).
+     * GREEN (per-send token): each send keys on its own token ⇒ occurrence 2.
+     */
+    @Test
+    fun twoDistinctIdenticalAgentSendsBothPasteOccurrenceTwo() = runTest(scheduler) {
+        val client = FakeTmuxClient()
+        client.defaultCaptureResponse = CommandResponse(
+            number = 0L,
+            output = listOf("> deploy the build"),
+            isError = false,
+        )
+        val vm = newConnectedVm(client)
+
+        // Send #1 flaps: its paste LANDS, then the submit Enter's exec result is lost.
+        client.throwOnCommandPrefix = "send-keys -t %0 Enter"
+        client.throwOnCommandRemaining = 1
+        val first = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the build", AgentKind.ClaudeCode) }
+        advanceUntilIdle()
+        assertTrue("send #1 flaps (ambiguous failure — its paste landed)", first.await().isFailure)
+        assertEquals("send #1 pastes exactly once", 1, client.pasteCount("deploy the build"))
+
+        // Send #2 — a DISTINCT intentional send (its own default per-send token). It must
+        // deliver, NOT be false-deduped against send #1's marker.
+        val second = async { vm.sendAgentPayloadToPaneResult("%0", "deploy the build", AgentKind.ClaudeCode) }
+        advanceUntilIdle()
+        assertTrue("the intentional second send must deliver", second.await().isSuccess)
+        assertEquals(
+            "two DISTINCT identical agent sends must BOTH paste (occurrence == 2) — the second " +
+                "must not be false-deduped against the first (RED on base: occurrence 1)",
+            2,
+            client.pasteCount("deploy the build"),
+        )
     }
 
     /**
@@ -131,11 +175,11 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
 
         client.throwOnCommandPrefix = "send-keys -t %0 Enter"
         client.throwOnCommandRemaining = 1
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode) }
+        val first = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode, "s-restart") }
         advanceUntilIdle()
         assertTrue(first.await().isFailure)
 
-        val second = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode) }
+        val second = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode, "s-restart") }
         advanceUntilIdle()
         assertTrue(second.await().isSuccess)
 
@@ -163,7 +207,7 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
 
         client.throwOnCommandPrefix = "send-keys -t %0 Enter"
         client.throwOnCommandRemaining = 1
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode) }
+        val first = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode, "s-ship") }
         advanceUntilIdle()
         assertTrue(first.await().isFailure)
         val sendKeysAfterFirst = client.sentCommands.count { it.startsWith("send-keys") }
@@ -171,7 +215,7 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
         // The probe's capture-pane now FAILS (flaky lane) — outcome unknown.
         client.throwOnCommandPrefix = "capture-pane"
         client.throwOnCommandRemaining = 1
-        val second = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode) }
+        val second = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode, "s-ship") }
         advanceUntilIdle()
         assertTrue("an unknown probe outcome must FAIL the dispatch (row stays queued)", second.await().isFailure)
         assertEquals(
@@ -182,7 +226,7 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
 
         // A later retry whose probe CAN decide resolves it: payload visible ⇒
         // Enter-only, still exactly one paste.
-        val third = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode) }
+        val third = async { vm.sendAgentPayloadToPaneResult("%0", "ship the release notes draft", AgentKind.ClaudeCode, "s-ship") }
         advanceUntilIdle()
         assertTrue(third.await().isSuccess)
         assertEquals(1, client.pasteCount("ship the release notes draft"))
@@ -203,11 +247,11 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
         )
         val vm = newConnectedVm(client)
 
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", "run the smoke suite again", AgentKind.ClaudeCode) }
+        val first = async { vm.sendAgentPayloadToPaneResult("%0", "run the smoke suite again", AgentKind.ClaudeCode, "s-smoke") }
         advanceUntilIdle()
         assertTrue(first.await().isSuccess)
 
-        val second = async { vm.sendAgentPayloadToPaneResult("%0", "run the smoke suite again", AgentKind.ClaudeCode) }
+        val second = async { vm.sendAgentPayloadToPaneResult("%0", "run the smoke suite again", AgentKind.ClaudeCode, "s-smoke") }
         advanceUntilIdle()
         assertTrue(second.await().isSuccess)
 

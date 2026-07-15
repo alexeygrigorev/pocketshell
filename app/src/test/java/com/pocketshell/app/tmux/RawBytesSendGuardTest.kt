@@ -178,7 +178,9 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
         client.throwOnCommandException = TmuxClientException("tmux command timed out")
         vm.attachClientForTest(client)
 
-        val first = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8))
+        // Issue #1529: the retry re-uses the SAME per-send token as attempt 1 (a queue-flush
+        // re-dispatches the same durable row id) so the guard dedups it as a retry.
+        val first = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8), "r-landed")
         advanceUntilIdle()
         assertTrue("attempt 1 must surface the ambiguous failure", first.isFailure)
         assertEquals("attempt 1 pastes the literal exactly once", 1, client.literalCount("git status"))
@@ -187,7 +189,7 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
 
         // The retry (composer auto-flush): probes ⇒ AlreadyLanded ⇒ NO second paste,
         // but DOES complete the landed-but-unsubmitted command with an Enter-only submit.
-        val second = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8))
+        val second = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8), "r-landed")
         advanceUntilIdle()
         assertTrue(
             "the AlreadyLanded retry must SUCCEED (the landed command is completed, not a " +
@@ -239,7 +241,8 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
         vm.attachClientForTest(client)
 
         // NOTE: no trailing "\r" — this is the `withEnter == false` composer send.
-        val first = vm.writeInputToPaneResult("%0", "git status".toByteArray(Charsets.UTF_8))
+        // Issue #1529: the retry re-uses the SAME per-send token as attempt 1.
+        val first = vm.writeInputToPaneResult("%0", "git status".toByteArray(Charsets.UTF_8), "r-nosub")
         advanceUntilIdle()
         assertTrue("attempt 1 (no-CR literal throws) must surface the ambiguous failure", first.isFailure)
         assertEquals("attempt 1 records the literal exactly once", 1, client.literalCount("git status"))
@@ -249,7 +252,7 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
 
         // The retry probes ⇒ AlreadyLanded. The original send carried NO submit, so the
         // guard must NOT complete it with a spurious Enter, and must NOT re-paste.
-        val second = vm.writeInputToPaneResult("%0", "git status".toByteArray(Charsets.UTF_8))
+        val second = vm.writeInputToPaneResult("%0", "git status".toByteArray(Charsets.UTF_8), "r-nosub")
         advanceUntilIdle()
         assertTrue(
             "the AlreadyLanded retry of an already-landed no-submit payload must SUCCEED " +
@@ -285,11 +288,13 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
         client.throwOnCommandRemaining = 1
         vm.attachClientForTest(client)
 
-        val first = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8))
+        // Issue #1529: the retry re-uses the SAME per-send token so the guard probes (and,
+        // seeing NotLanded, re-sends) rather than treating it as an unrelated fresh send.
+        val first = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8), "r-notland")
         advanceUntilIdle()
         assertTrue("attempt 1 (literal throws before landing) must fail", first.isFailure)
 
-        val second = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8))
+        val second = vm.writeInputToPaneResult("%0", "git status\r".toByteArray(Charsets.UTF_8), "r-notland")
         advanceUntilIdle()
         assertTrue("the genuine not-landed retry must re-send and succeed", second.isSuccess)
         assertTrue(
@@ -314,12 +319,13 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
         client.throwOnCommandRemaining = 1
         vm.attachClientForTest(client)
 
-        val first = vm.writeInputToPaneResult("%0", "deploy\r".toByteArray(Charsets.UTF_8))
+        // Issue #1529: the retry re-uses attempt 1's per-send token so it is deduped.
+        val first = vm.writeInputToPaneResult("%0", "deploy\r".toByteArray(Charsets.UTF_8), "r-short")
         advanceUntilIdle()
         assertTrue(first.isFailure)
         assertEquals(1, client.literalCount("deploy"))
 
-        val second = vm.writeInputToPaneResult("%0", "deploy\r".toByteArray(Charsets.UTF_8))
+        val second = vm.writeInputToPaneResult("%0", "deploy\r".toByteArray(Charsets.UTF_8), "r-short")
         advanceUntilIdle()
         assertEquals(
             "the short command must be deduped to exactly one paste on the ambiguous retry",
@@ -329,9 +335,11 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * The fix must NOT falsely suppress a DISTINCT command sent right after a
-     * different ambiguous one (the ledger is keyed per (pane, payload), so an
-     * unrelated command is unaffected).
+     * The fix must NOT falsely suppress a DISTINCT command sent right after a different
+     * ambiguous one. Issue #1529: the ledger is keyed per (pane, SEND TOKEN) — each send
+     * gets its own token — so an unrelated command (its own fresh token) is unaffected.
+     * (Two DISTINCT sends of the IDENTICAL payload are likewise independent — see
+     * Issue1529TokenDedupTest.)
      */
     @Test
     fun distinctCommandAfterLandedOneIsNotSuppressed() = runTest(scheduler) {

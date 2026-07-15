@@ -13950,17 +13950,23 @@ public class TmuxSessionViewModel @Inject constructor(
         return clientRef?.takeUnless { it.disconnected.value }
     }
 
-    internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> =
+    internal suspend fun sendToAgentPaneResult(
+        paneId: String,
+        text: String,
+        sendToken: String? = null,
+    ): Result<Unit> =
         sendToAgentPaneResult(
             paneId = paneId,
             text = text,
             keepFailedOptimisticOnDeliveryFailure = false,
+            sendToken = sendToken,
         )
 
     private suspend fun sendToAgentPaneResult(
         paneId: String,
         text: String,
         keepFailedOptimisticOnDeliveryFailure: Boolean,
+        sendToken: String? = null,
     ): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
@@ -13974,14 +13980,12 @@ public class TmuxSessionViewModel @Inject constructor(
             ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
         val detection = current.detection
             ?: return Result.failure(IllegalStateException("No detected agent for pane $paneId."))
-        // Issue #494: insert the optimistic pending turn FIRST — before any
-        // delivery attempt — so the Conversation tab shows the user's own
-        // message the instant they hit Send, not after the JSONL round-trip.
-        // The turn starts as [MessageSendState.Pending] ("sending…") and is
-        // reconciled away when the real transcript entry arrives via the tail.
-        // If the unified composer send fails, PromptComposerSheet keeps the
-        // draft, so we remove this temporary row to avoid showing the same text
-        // twice. Retry taps have no draft fallback and opt into leaving a
+        // Issue #494: insert the optimistic pending turn FIRST (before any delivery attempt)
+        // so the Conversation tab shows the user's own message the instant they hit Send, not
+        // after the JSONL round-trip. It starts [MessageSendState.Pending] ("sending…") and is
+        // reconciled away when the real transcript entry arrives via the tail. On a failed
+        // composer send PromptComposerSheet keeps the draft, so this temporary row is removed
+        // to avoid showing the text twice; retry taps have no draft fallback and leave a
         // failed row instead.
         val optimisticId = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}"
         val optimistic = ConversationEvent.Message(
@@ -13997,7 +14001,8 @@ public class TmuxSessionViewModel @Inject constructor(
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
         appendAgentEvents(paneId, listOf(optimistic))
-        val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent)
+        // Issue #1529: a fresh direct send keys on its optimistic turn id; a retry passes a STABLE token.
+        val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent, sendToken ?: optimisticId)
         if (result.isFailure) {
             if (keepFailedOptimisticOnDeliveryFailure) {
                 markOptimisticSendFailed(paneId, optimisticId)
@@ -14044,6 +14049,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneId = paneId,
                 text = failed.text,
                 keepFailedOptimisticOnDeliveryFailure = true,
+                // Issue #1529: a retry re-uses the failed turn's id as the token.
+                sendToken = optimisticId,
             )
             if (result.isFailure) {
                 val hasFailedRetryRow = _agentConversations.value[paneId]?.events
@@ -14064,10 +14071,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         payload: String,
         agent: AgentKind,
+        sendToken: String = newOutboundDeliveryToken(),
     ): Result<Unit> {
         val client = awaitLiveTmuxClientForSend()
             ?: return Result.failure(IllegalStateException("Session is disconnected."))
-        return sendAgentPayloadToPaneResult(client, paneId, payload, agent)
+        return sendAgentPayloadToPaneResult(client, paneId, payload, agent, sendToken)
     }
 
     // Issue #1526 S1 / #1541 / #1587: verify-before-resend ledger, durable-backed by
@@ -14090,22 +14098,21 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         payload: String,
         agent: AgentKind,
+        sendToken: String,
     ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }
-        // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt at this
-        // exact (pane, payload) — timeout/drop after the paste may have run
-        // server-side (audit A1/A2) — must not blindly re-paste. Probe the pane
-        // (#869 needle, #1577 baseline-aware): already landed ⇒ submit-Enter ONLY;
-        // unknown ⇒ fail WITHOUT resending (row stays queued for a verified retry);
-        // not landed / no prior attempt ⇒ fall through to the normal full send.
-        when (verifyBeforeAgentResend(outboundDeliveryLedger, client, paneId, payload)) {
+        // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
+        // keyed by the #1529 [sendToken], NOT the payload, so two distinct identical sends
+        // never false-dedup — the paste may have run server-side (audit A1/A2). Probe (#869
+        // needle, #1577 baseline): landed ⇒ Enter ONLY; unknown ⇒ fail; else full send.
+        when (verifyBeforeAgentResend(outboundDeliveryLedger, client, paneId, sendToken, payload)) {
             DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
                 sendNamedKeyToPane(client, paneId, "Enter")
                     .throwIfTmuxError("submit previously pasted agent input")
-                outboundDeliveryLedger.clear(paneId, payload)
+                outboundDeliveryLedger.clear(paneId, sendToken)
                 requestReconcile(client, paneId, ReconcileReason.Send)
             }
             DeliveryProbeOutcome.Unknown -> return Result.failure(
@@ -14115,11 +14122,11 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return runCatching {
             ensurePaneAcceptsInput(client, paneId)
-            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderTextForPane(paneId))
+            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, sendToken, payload, localRenderTextForPane(paneId))
             // Issue #1577b: the pre-paste needle baseline the ack gate compares against
-            // (Codex's permanent `(/goal resume)` footer occupies the baseline, so the
-            // ack fires only on OUR paste adding an occurrence — never on the footer).
-            val ackBaseline = outboundDeliveryLedger.needleBaseline(paneId, payload) ?: 0
+            // (Codex's permanent `(/goal resume)` footer occupies it, so the ack fires
+            // only on OUR paste adding an occurrence, never on the footer).
+            val ackBaseline = outboundDeliveryLedger.needleBaseline(paneId, sendToken, payload) ?: 0
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
@@ -14130,10 +14137,9 @@ public class TmuxSessionViewModel @Inject constructor(
             consumeSendResultLostSeamForTest()
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
-            outboundDeliveryLedger.clear(paneId, payload)
-            // Issue #941/#1353 R4: after the submit Enter a full-screen agent TUI can
-            // overpaint the active pane partial-black; a guarded heal EVENT through the
-            // shared reconcile entry re-checks and re-seeds (no bespoke send-path timer).
+            outboundDeliveryLedger.clear(paneId, sendToken)
+            // Issue #941/#1353 R4: after the submit Enter a full-screen agent TUI can overpaint
+            // the active pane partial-black; a guarded heal EVENT re-checks and re-seeds.
             requestReconcile(client, paneId, ReconcileReason.Send)
         }
     }
@@ -15293,52 +15299,50 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Send a single key payload to [paneId] via `send-keys`.
-     *
-     * tmux's `send-keys` understands literal strings (passed as a single
-     * argument) and a vocabulary of named keys (`Enter`, `Tab`, `Escape`,
-     * `Up`, `Down`, ...). We forward the bytes as a literal single-quoted
-     * argument with embedded quotes doubled — the simplest encoding that
-     * round-trips arbitrary printable input. Callers that need a named
-     * key (e.g. arrows) should pass it through [sendNamedKey] instead.
-     *
-     * Per-pane I/O does NOT go through the SSH shell — `tmux -CC` does
-     * not expose a per-pane writable fd on the control channel. The
-     * canonical and only supported route to "type into a pane" through
-     * the control protocol is `send-keys`, verified by
-     * `TmuxClientIntegrationTest` against the test container.
+     * Send a single key payload to [paneId] via `send-keys`. We forward the bytes as a
+     * literal single-quoted argument with embedded quotes doubled — the simplest encoding
+     * that round-trips arbitrary printable input; callers that need a named key (`Enter`,
+     * arrows, ...) should use [sendNamedKey] instead. Per-pane I/O does NOT go through the
+     * SSH shell — `tmux -CC` exposes no per-pane writable fd; `send-keys` is the canonical
+     * route (verified by `TmuxClientIntegrationTest` against the test container).
      */
     public fun writeInputToPane(paneId: String, bytes: ByteArray) {
         if (bytes.isEmpty()) return
         DiagnosticEvents.record("action", "pane_input", "pane" to paneId, "bytes" to bytes.size)
         val client = clientRef ?: return
         bridgeScope.launch {
-            writeInputToPaneResult(client, paneId, bytes)
+            writeInputToPaneResult(client, paneId, bytes, newOutboundDeliveryToken())
         }
     }
 
-    internal suspend fun writeInputToPaneResult(paneId: String, bytes: ByteArray): Result<Unit> {
+    internal suspend fun writeInputToPaneResult(
+        paneId: String,
+        bytes: ByteArray,
+        sendToken: String = newOutboundDeliveryToken(),
+    ): Result<Unit> {
         if (bytes.isEmpty()) return Result.success(Unit)
         val client = awaitLiveTmuxClientForSend()
         if (client == null) {
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
-        return writeInputToPaneResult(client, paneId, bytes)
+        return writeInputToPaneResult(client, paneId, bytes, sendToken)
     }
 
-    // Issue #1586: RawBytes lane rides the agent lane's verify-before-resend ledger (H1b).
+    // Issue #1586: RawBytes lane rides the verify-before-resend ledger (H1b); #1529: per-send token.
     private suspend fun writeInputToPaneResult(
         client: TmuxClient,
         paneId: String,
         bytes: ByteArray,
+        sendToken: String,
     ): Result<Unit> = deliverRawInputWithGuard(
         ledger = outboundDeliveryLedger,
         client = client,
         paneId = paneId,
         bytes = bytes,
         localRenderText = localRenderTextForPane(paneId),
+        sendToken = sendToken,
         send = { c, p, b -> sendInputBytesToPane(c, p, b) },
-        // Issue #1586 (H1b): AlreadyLanded -> Enter-only submit (agent-lane parity).
+        // Issue #1586 (H1b): AlreadyLanded -> Enter-only submit.
         submitEnter = { c, p ->
             sendNamedKeyToPane(c, p, "Enter").throwIfTmuxError("submit typed shell input")
         },

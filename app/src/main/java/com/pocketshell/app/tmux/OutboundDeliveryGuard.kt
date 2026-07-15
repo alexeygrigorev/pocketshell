@@ -46,6 +46,16 @@ import kotlinx.coroutines.delay
 internal enum class DeliveryProbeOutcome { AlreadyLanded, NotLanded, Unknown }
 
 /**
+ * Issue #1529: an opaque, monotonic per-send-attempt delivery token for a send that has
+ * no durable outbound-queue row id to use (a non-queue-backed send). It is unique per
+ * call, so two DISTINCT sends never share ledger identity; a send whose retry must dedup
+ * threads a STABLE id (the durable row id, or the conversation turn id) instead.
+ */
+private val deliveryTokenCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+internal fun newOutboundDeliveryToken(): String = "d${deliveryTokenCounter.incrementAndGet()}"
+
+/**
  * Issue #1526 test seams (#780 synthetic-injection model). Production never arms
  * them (both default false); each is consumed once.
  *
@@ -83,9 +93,10 @@ internal suspend fun verifyBeforeAgentResend(
     ledger: OutboundDeliveryLedger,
     client: TmuxClient,
     paneId: String,
+    sendToken: String,
     payload: String,
 ): DeliveryProbeOutcome? {
-    if (!ledger.hasAmbiguousAttempt(paneId, payload)) return null
+    if (!ledger.hasAmbiguousAttempt(paneId, sendToken, payload)) return null
     // Issue #1577: compare the CURRENT needle count against the pre-send baseline
     // captured at the first wire attempt. `AlreadyLanded` requires the count to have
     // INCREASED (our paste actually added an occurrence) — so a payload that was
@@ -97,7 +108,7 @@ internal suspend fun verifyBeforeAgentResend(
     // a bare Enter and silently drop the payload). [probeOutboundPayloadAlreadyLanded]
     // reports `NotLanded` for a null baseline instead, so the caller does a REAL gated
     // resend that records a fresh baseline (self-healing), never a bare Enter.
-    val baseline = ledger.needleBaseline(paneId, payload)
+    val baseline = ledger.needleBaseline(paneId, sendToken, payload)
     val outcome = probeOutboundPayloadAlreadyLanded(client, paneId, payload, baseline)
     DiagnosticEvents.record(
         "action",
@@ -151,15 +162,17 @@ internal suspend fun deliverRawInputWithGuard(
     paneId: String,
     bytes: ByteArray,
     localRenderText: String,
+    sendToken: String,
     send: suspend (TmuxClient, String, ByteArray) -> Unit,
     submitEnter: suspend (TmuxClient, String) -> Unit,
     afterDelivered: suspend (TmuxClient, String, ByteArray) -> Unit,
 ): Result<Unit> {
-    // Key the ledger on the payload WITHOUT its trailing submit CR/LF: the composer
-    // enqueues the durable row's `cleanText` without the CR it appends on the wire,
-    // so trimming aligns the (pane, payload) key with the durable `wireAttempted`
-    // row — the same VM-clear/back-nav durability the agent lane gets (#1541). The
-    // full [bytes] (CR included) are still what [send] pushes. Pure control/Enter
+    // Issue #1529: the ledger identity is the PER-SEND-ATTEMPT [sendToken] (the durable
+    // outbound row id, or an opaque per-send token), NOT the payload — so two DISTINCT
+    // user sends of identical bytes are never false-deduped. The trailing submit CR/LF is
+    // still trimmed off the [payload] used for the #869 probe needle / #1577 baseline (the
+    // composer enqueues the durable row's `cleanText` without the CR it appends on the
+    // wire). The full [bytes] (CR included) are still what [send] pushes. Pure control/Enter
     // input trims to empty — nothing meaningful to probe/dedupe, so it does a plain
     // error-checked send (H1a still applies via [send]).
     val fullText = String(bytes, Charsets.UTF_8)
@@ -170,7 +183,7 @@ internal suspend fun deliverRawInputWithGuard(
             afterDelivered(client, paneId, bytes)
         }
     }
-    when (verifyBeforeAgentResend(ledger, client, paneId, payload)) {
+    when (verifyBeforeAgentResend(ledger, client, paneId, sendToken, payload)) {
         DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
             // Issue #1586 (H1b): the payload TEXT landed but the ambiguous cut may have
             // dropped its terminating submit — do NOT drop the delivery silently.
@@ -181,7 +194,7 @@ internal suspend fun deliverRawInputWithGuard(
             if (fullText.length > payload.length) {
                 submitEnter(client, paneId)
             }
-            ledger.clear(paneId, payload)
+            ledger.clear(paneId, sendToken)
             afterDelivered(client, paneId, bytes)
         }
         DeliveryProbeOutcome.Unknown -> return Result.failure(
@@ -190,9 +203,9 @@ internal suspend fun deliverRawInputWithGuard(
         DeliveryProbeOutcome.NotLanded, null -> Unit
     }
     return runCatching {
-        ledger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderText)
+        ledger.recordWireAttemptWithBaseline(client, paneId, sendToken, payload, localRenderText)
         send(client, paneId, bytes)
-        ledger.clear(paneId, payload)
+        ledger.clear(paneId, sendToken)
         afterDelivered(client, paneId, bytes)
     }
 }
@@ -262,11 +275,23 @@ internal class OutboundDeliveryLedger(
     // so a VM-clear-rebuilt ledger reads it back (via [needleBaseline]).
     private val baselines = HashMap<String, Int>()
 
-    private fun key(paneId: String, payload: String): String =
-        "$paneId|${payload.length}|${payload.hashCode()}"
+    // Issue #1529: the VOLATILE identity is the per-send-attempt token (pane + token),
+    // NOT the payload. Two DISTINCT user sends of identical bytes get distinct tokens, so
+    // the guard dedups only a RETRY of the SAME attempt (same token) and never suppresses
+    // a second intentional send. The DURABLE fallback stays keyed on (pane, payload): a
+    // durable row that survives a VM-clear is re-dispatched by its retry lane, and the
+    // #961 coalesce-on-enqueue invariant means at most ONE un-delivered row exists per
+    // (pane, payload), so a payload-scoped durable lookup can never conflate two distinct
+    // durable sends (they would have coalesced into one row / one token).
+    private fun key(paneId: String, sendToken: String): String = "$paneId|$sendToken"
 
-    fun recordWireAttempt(paneId: String, payload: String, baselineCount: Int? = null): Unit = synchronized(lock) {
-        val key = key(paneId, payload)
+    fun recordWireAttempt(
+        paneId: String,
+        sendToken: String,
+        payload: String,
+        baselineCount: Int? = null,
+    ): Unit = synchronized(lock) {
+        val key = key(paneId, sendToken)
         entries.remove(key)
         entries.add(key)
         // Issue #1577: keep the FIRST captured baseline (idempotent) — a re-push after
@@ -285,28 +310,30 @@ internal class OutboundDeliveryLedger(
         durable?.recordWireAttempt(paneId, payload, System.currentTimeMillis(), baselineCount)
     }
 
-    fun clear(paneId: String, payload: String): Unit = synchronized(lock) {
+    fun clear(paneId: String, sendToken: String): Unit = synchronized(lock) {
         // Only clears the volatile set: the durable flag is tied to the row's
         // lifetime (dropped when the row is delivered-pruned / removed, PRESERVED
         // across requeue), so an as-yet-un-acked in-flight row keeps verifying.
-        val key = key(paneId, payload)
+        val key = key(paneId, sendToken)
         entries.remove(key)
         baselines.remove(key)
     }
 
-    fun hasAmbiguousAttempt(paneId: String, payload: String): Boolean = synchronized(lock) {
+    fun hasAmbiguousAttempt(paneId: String, sendToken: String, payload: String): Boolean = synchronized(lock) {
         // Issue #1541: the durable flag makes a back-nav-rebuilt ledger (empty
-        // in-memory set) still see a prior wire attempt.
-        key(paneId, payload) in entries || durable?.hasWireAttempt(paneId, payload) == true
+        // in-memory set) still see a prior wire attempt (payload-scoped — the durable
+        // row is re-dispatched under its own token, and coalescing bounds it to one row).
+        key(paneId, sendToken) in entries || durable?.hasWireAttempt(paneId, payload) == true
     }
 
     /**
-     * Issue #1577: the pre-send needle baseline for (pane, payload) — the volatile
-     * value first, else the durable one (a VM-clear-rebuilt ledger). `null` when
-     * none was captured; the caller then falls back to presence-only verification.
+     * Issue #1577: the pre-send needle baseline — the volatile value for this send's
+     * token first, else the durable one for the (pane, payload) row (a VM-clear-rebuilt
+     * ledger). `null` when none was captured; the caller then falls back to
+     * presence-only verification.
      */
-    fun needleBaseline(paneId: String, payload: String): Int? = synchronized(lock) {
-        baselines[key(paneId, payload)] ?: durable?.wireNeedleBaseline(paneId, payload)
+    fun needleBaseline(paneId: String, sendToken: String, payload: String): Int? = synchronized(lock) {
+        baselines[key(paneId, sendToken)] ?: durable?.wireNeedleBaseline(paneId, payload)
     }
 }
 
@@ -422,19 +449,20 @@ internal suspend fun captureNeedleBaseline(
 internal suspend fun OutboundDeliveryLedger.recordWireAttemptWithBaseline(
     client: TmuxClient,
     paneId: String,
+    sendToken: String,
     payload: String,
     localRenderText: String,
 ) {
-    if (needleBaseline(paneId, payload) != null) {
+    if (needleBaseline(paneId, sendToken, payload) != null) {
         // A prior push already captured the pre-send baseline; keep it (idempotent).
-        recordWireAttempt(paneId, payload, null)
+        recordWireAttempt(paneId, sendToken, payload, null)
         return
     }
     val needle = agentSubmitAckNeedle(payload)
     val alreadyVisible = needle != null &&
         agentSubmitVisibleTextNeedleCount(listOf(localRenderText), needle) > 0
     val baseline = if (alreadyVisible) captureNeedleBaseline(client, paneId, payload) else 0
-    recordWireAttempt(paneId, payload, baseline)
+    recordWireAttempt(paneId, sendToken, payload, baseline)
 }
 
 internal suspend fun probeNeedleAlreadyLanded(

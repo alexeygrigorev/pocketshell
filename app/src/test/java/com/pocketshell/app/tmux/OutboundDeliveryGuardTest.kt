@@ -293,10 +293,11 @@ class OutboundDeliveryGuardTest {
         // the pane now shows the payload (count 1 > baseline 0). Issue #1577b: a
         // production wire push ALWAYS records a baseline (recordWireAttemptWithBaseline),
         // so a genuinely-landed row is baselined — this is the production-accurate state.
-        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        ledger.recordWireAttempt(paneId, payload, payload, baselineCount = 0)
         val client = captureShowing("$ $payload")
 
-        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+        // Issue #1529: the resend re-uses the SAME send token as the recorded attempt.
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload, payload)
 
         assertEquals(
             "a re-dispatched already-landed payload must resolve AlreadyLanded so the send path " +
@@ -323,11 +324,11 @@ class OutboundDeliveryGuardTest {
         val paneId = "%0"
         val payload = "/goal resume"
         // A legacy row carries the durable wire-attempt flag but NO baseline (null).
-        ledger.recordWireAttempt(paneId, payload) // 2-arg ⇒ baselineCount defaults to null
+        ledger.recordWireAttempt(paneId, payload, payload) // 3-arg ⇒ baselineCount defaults to null
         // The pane permanently shows the payload in a status footer.
         val client = captureShowing("gpt-5.6-sol · Goal blocked (/goal resume)")
 
-        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload, payload)
 
         assertEquals(
             "a null-baseline (untrustworthy) flag whose payload is already on the pane must NOT " +
@@ -349,7 +350,7 @@ class OutboundDeliveryGuardTest {
         val ledger = OutboundDeliveryLedger()
         val client = FakeTmuxClient()
 
-        val outcome = verifyBeforeAgentResend(ledger, client, "%0", "a brand new prompt")
+        val outcome = verifyBeforeAgentResend(ledger, client, "%0", "tok-fresh", "a brand new prompt")
 
         assertNull("a fresh send with no ambiguous prior attempt must not probe (null ⇒ normal send)", outcome)
         assertTrue(
@@ -375,8 +376,8 @@ class OutboundDeliveryGuardTest {
 
         // VM #1's ledger records the wire attempt (right before the paste).
         val ledger1 = OutboundDeliveryLedger(durable = durable)
-        ledger1.recordWireAttempt("%0", "durable payload")
-        assertTrue(ledger1.hasAmbiguousAttempt("%0", "durable payload"))
+        ledger1.recordWireAttempt("%0", "durable payload", "durable payload")
+        assertTrue(ledger1.hasAmbiguousAttempt("%0", "durable payload", "durable payload"))
 
         // Back-navigation clears the VM: its volatile ledger dies. A base ledger
         // with NO durable backing has no memory of the attempt (the P9 bug).
@@ -384,7 +385,7 @@ class OutboundDeliveryGuardTest {
         assertFalse(
             "RED (base): a volatile-only rebuilt ledger loses the wire attempt, so " +
                 "the reopened session blindly re-pastes (server occurrence 2)",
-            baseRebuilt.hasAmbiguousAttempt("%0", "durable payload"),
+            baseRebuilt.hasAmbiguousAttempt("%0", "durable payload", "durable payload"),
         )
 
         // The fix: a ledger rebuilt with the SAME durable store re-reads the flag
@@ -393,7 +394,7 @@ class OutboundDeliveryGuardTest {
         assertTrue(
             "GREEN (fix): the durable `wireAttempted` flag makes the rebuilt ledger " +
                 "verify-before-resend instead of blindly re-pasting",
-            rebuilt.hasAmbiguousAttempt("%0", "durable payload"),
+            rebuilt.hasAmbiguousAttempt("%0", "durable payload", "durable payload"),
         )
     }
 
@@ -405,7 +406,7 @@ class OutboundDeliveryGuardTest {
     fun freshSendWithDurableBackingButNoPriorAttemptDoesNotVerify() {
         val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
         val ledger = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
-        assertFalse(ledger.hasAmbiguousAttempt("%0", "a brand new prompt"))
+        assertFalse(ledger.hasAmbiguousAttempt("%0", "tok-fresh", "a brand new prompt"))
     }
 
     /**
@@ -421,13 +422,13 @@ class OutboundDeliveryGuardTest {
         store.enqueue("sessA", "unacked payload", paneId = "%0")
         val durable = store.asWireAttemptDurableStore()
         val ledger = OutboundDeliveryLedger(durable = durable)
-        ledger.recordWireAttempt("%0", "unacked payload")
+        ledger.recordWireAttempt("%0", "unacked payload", "unacked payload")
         ledger.clear("%0", "unacked payload")
 
         assertTrue(
             "clear() drops only the volatile entry; the durable row flag persists so " +
                 "a rebuilt ledger still verifies",
-            ledger.hasAmbiguousAttempt("%0", "unacked payload"),
+            ledger.hasAmbiguousAttempt("%0", "unacked payload", "unacked payload"),
         )
         assertTrue(store.hasWireAttempt("%0", "unacked payload"))
     }
@@ -473,14 +474,14 @@ class OutboundDeliveryGuardTest {
         // trap) — verify-before-resend would be skipped.
         assertNull(
             "a volatile-only rebuilt ledger loses the orphaned attempt (would blind re-paste)",
-            verifyBeforeAgentResend(OutboundDeliveryLedger(), captureShowing("$ $payload"), paneId, payload),
+            verifyBeforeAgentResend(OutboundDeliveryLedger(), captureShowing("$ $payload"), paneId, payload, payload),
         )
 
         // The fix path: the ledger rebuilt from the SAME durable store re-reads the
         // claim-stamped flag → verify → the pane shows the payload → AlreadyLanded,
         // so the send path submits Enter only and never re-pastes (occurrence 1).
         val rebuilt = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
-        val outcome = verifyBeforeAgentResend(rebuilt, captureShowing("$ $payload"), paneId, payload)
+        val outcome = verifyBeforeAgentResend(rebuilt, captureShowing("$ $payload"), paneId, payload, payload)
         assertEquals(
             "an orphaned InFlight row that actually landed must verify AlreadyLanded (occurrence 1)",
             DeliveryProbeOutcome.AlreadyLanded,
@@ -499,17 +500,17 @@ class OutboundDeliveryGuardTest {
         val ledger = OutboundDeliveryLedger()
         val client = captureShowing("$ /goal resume") // the resend probe sees it landed
 
-        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", localRenderText = "$ ")
+        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", "/goal resume", localRenderText = "$ ")
 
         assertTrue(
             "no baseline capture round-trip when the payload is not already on the render",
             client.capturePaneTextViaExecCalls.isEmpty(),
         )
-        assertEquals(0, ledger.needleBaseline("%0", "/goal resume"))
+        assertEquals(0, ledger.needleBaseline("%0", "/goal resume", "/goal resume"))
         assertEquals(
             "a resend that finds the payload (count 1 > baseline 0) is AlreadyLanded",
             DeliveryProbeOutcome.AlreadyLanded,
-            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume", "/goal resume"),
         )
     }
 
@@ -532,8 +533,8 @@ class OutboundDeliveryGuardTest {
         // The payload is already visible on the local render ⇒ ONE authoritative
         // baseline capture: the status line shows the needle once ⇒ baseline 1.
         client.capturePaneResponses.addLast(CommandResponse(number = 0L, output = listOf(statusLine), isError = false))
-        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", localRenderText = statusLine)
-        assertEquals("the pre-send baseline is captured authoritatively", 1, ledger.needleBaseline("%0", "/goal resume"))
+        ledger.recordWireAttemptWithBaseline(client, "%0", "/goal resume", "/goal resume", localRenderText = statusLine)
+        assertEquals("the pre-send baseline is captured authoritatively", 1, ledger.needleBaseline("%0", "/goal resume", "/goal resume"))
         assertEquals("exactly one baseline capture round-trip", 1, client.capturePaneTextViaExecCalls.size)
 
         // A genuine resend whose paste did NOT land: the pane still shows ONLY the
@@ -543,7 +544,7 @@ class OutboundDeliveryGuardTest {
             "a payload still only on the status line (count == baseline) must NOT be " +
                 "falsely AlreadyLanded (the #1577 false-success drop)",
             DeliveryProbeOutcome.NotLanded,
-            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume", "/goal resume"),
         )
 
         // A resend whose paste DID land: the pane now shows the status line AND the
@@ -554,7 +555,7 @@ class OutboundDeliveryGuardTest {
         assertEquals(
             "a payload whose occurrence count INCREASED (our paste landed) is AlreadyLanded",
             DeliveryProbeOutcome.AlreadyLanded,
-            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume"),
+            verifyBeforeAgentResend(ledger, client, "%0", "/goal resume", "/goal resume"),
         )
     }
 
@@ -578,7 +579,7 @@ class OutboundDeliveryGuardTest {
         val payload = "run the full integration suite now"
         // A prior ambiguous wire attempt recorded with baseline 0 (fresh payload — it
         // was NOT on the pane at send time; production always records a baseline).
-        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        ledger.recordWireAttempt(paneId, payload, payload, baselineCount = 0)
 
         val client = FakeTmuxClient().apply {
             // The paste LANDED, then a burst of agent output pushed it OFF the visible
@@ -593,7 +594,7 @@ class OutboundDeliveryGuardTest {
             )
         }
 
-        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload)
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, payload, payload)
 
         assertTrue(
             "the verify-before-resend probe must request BOUNDED SCROLLBACK (the H2 fix)",
@@ -617,7 +618,7 @@ class OutboundDeliveryGuardTest {
         val ledger = OutboundDeliveryLedger()
         val paneId = "%0"
         val payload = "deploy the staging build to the box"
-        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        ledger.recordWireAttempt(paneId, payload, payload, baselineCount = 0)
         val client = FakeTmuxClient().apply {
             // The scrollback capture (what the probe now issues) includes the visible
             // payload — it is at the bottom of the buffer, still on screen.
@@ -627,7 +628,7 @@ class OutboundDeliveryGuardTest {
 
         assertEquals(
             DeliveryProbeOutcome.AlreadyLanded,
-            verifyBeforeAgentResend(ledger, client, paneId, payload),
+            verifyBeforeAgentResend(ledger, client, paneId, payload, payload),
         )
     }
 
@@ -642,7 +643,7 @@ class OutboundDeliveryGuardTest {
         val ledger = OutboundDeliveryLedger()
         val paneId = "%0"
         val payload = "please run the deployment checklist"
-        ledger.recordWireAttempt(paneId, payload, baselineCount = 0)
+        ledger.recordWireAttempt(paneId, payload, payload, baselineCount = 0)
         val client = FakeTmuxClient().apply {
             // Neither the visible viewport nor the bounded scrollback contains the payload.
             scrollbackCaptureResponse =
@@ -653,7 +654,7 @@ class OutboundDeliveryGuardTest {
             "a payload absent from the bounded scrollback must stay NotLanded (real resend), " +
                 "never a false AlreadyLanded drop",
             DeliveryProbeOutcome.NotLanded,
-            verifyBeforeAgentResend(ledger, client, paneId, payload),
+            verifyBeforeAgentResend(ledger, client, paneId, payload, payload),
         )
     }
 
@@ -678,18 +679,18 @@ class OutboundDeliveryGuardTest {
         // AUTHORITATIVELY over the SAME bounded scrollback (not fast-pathed to 0).
         client.scrollbackCaptureResponse =
             CommandResponse(number = 0L, output = listOf("> $payload", "...later output...", "$ "), isError = false)
-        ledger.recordWireAttemptWithBaseline(client, paneId, payload, localRenderText = "> $payload")
+        ledger.recordWireAttemptWithBaseline(client, paneId, payload, payload, localRenderText = "> $payload")
         assertEquals(
             "the baseline is captured over the SAME bounded scrollback the probe uses (count 1)",
             1,
-            ledger.needleBaseline(paneId, payload),
+            ledger.needleBaseline(paneId, payload, payload),
         )
 
         // A resend whose paste did NOT land: scrollback still shows the ONE pre-existing
         // occurrence (count 1 == baseline 1) ⇒ NotLanded (no false AlreadyLanded).
         assertEquals(
             DeliveryProbeOutcome.NotLanded,
-            verifyBeforeAgentResend(ledger, client, paneId, payload),
+            verifyBeforeAgentResend(ledger, client, paneId, payload, payload),
         )
 
         // A resend whose paste DID land: scrollback now shows TWO (count 2 > baseline 1)
@@ -698,7 +699,7 @@ class OutboundDeliveryGuardTest {
             CommandResponse(number = 0L, output = listOf("> $payload", "> $payload", "$ "), isError = false)
         assertEquals(
             DeliveryProbeOutcome.AlreadyLanded,
-            verifyBeforeAgentResend(ledger, client, paneId, payload),
+            verifyBeforeAgentResend(ledger, client, paneId, payload, payload),
         )
     }
 
@@ -718,7 +719,7 @@ class OutboundDeliveryGuardTest {
         store.enqueue("sessA", "single-store payload", paneId = "%0")
         val ledger = outboundDeliveryLedgerFor(store)
 
-        ledger.recordWireAttempt("%0", "single-store payload")
+        ledger.recordWireAttempt("%0", "single-store payload", "single-store payload")
 
         assertTrue(
             "the wire attempt recorded via the ledger must be visible through the SAME store " +
@@ -731,25 +732,27 @@ class OutboundDeliveryGuardTest {
     @Test
     fun outboundDeliveryLedgerForWithNoStoreIsInMemoryOnly() {
         val ledger = outboundDeliveryLedgerFor(null)
-        ledger.recordWireAttempt("%0", "in-memory only payload")
-        assertTrue(ledger.hasAmbiguousAttempt("%0", "in-memory only payload"))
+        ledger.recordWireAttempt("%0", "in-memory only payload", "in-memory only payload")
+        assertTrue(ledger.hasAmbiguousAttempt("%0", "in-memory only payload", "in-memory only payload"))
     }
 
     @Test
     fun ledgerTracksRecordsClearsAndEvictsOldestBeyondCapacity() {
+        // Issue #1529: the volatile identity is (pane, sendToken). These tests use the payload
+        // string as each attempt's token, so distinct payloads are distinct attempts.
         val ledger = OutboundDeliveryLedger(maxEntries = 2)
-        ledger.recordWireAttempt("%0", "first payload")
-        assertTrue(ledger.hasAmbiguousAttempt("%0", "first payload"))
-        assertFalse(ledger.hasAmbiguousAttempt("%1", "first payload"))
+        ledger.recordWireAttempt("%0", "first payload", "first payload")
+        assertTrue(ledger.hasAmbiguousAttempt("%0", "first payload", "first payload"))
+        assertFalse(ledger.hasAmbiguousAttempt("%1", "first payload", "first payload"))
 
         ledger.clear("%0", "first payload")
-        assertFalse(ledger.hasAmbiguousAttempt("%0", "first payload"))
+        assertFalse(ledger.hasAmbiguousAttempt("%0", "first payload", "first payload"))
 
-        ledger.recordWireAttempt("%0", "a")
-        ledger.recordWireAttempt("%0", "b")
-        ledger.recordWireAttempt("%0", "c")
-        assertFalse("oldest entry must be evicted", ledger.hasAmbiguousAttempt("%0", "a"))
-        assertTrue(ledger.hasAmbiguousAttempt("%0", "b"))
-        assertTrue(ledger.hasAmbiguousAttempt("%0", "c"))
+        ledger.recordWireAttempt("%0", "a", "a")
+        ledger.recordWireAttempt("%0", "b", "b")
+        ledger.recordWireAttempt("%0", "c", "c")
+        assertFalse("oldest entry must be evicted", ledger.hasAmbiguousAttempt("%0", "a", "a"))
+        assertTrue(ledger.hasAmbiguousAttempt("%0", "b", "b"))
+        assertTrue(ledger.hasAmbiguousAttempt("%0", "c", "c"))
     }
 }

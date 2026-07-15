@@ -986,18 +986,25 @@ public fun TmuxSessionScreen(
                     // ungated `text+"\r"` whose CR lands in Codex's same stdin read batch as
                     // the text (paste-burst swallow → `/goal resume` unsubmitted). Hard-cut
                     // (D22): one gated submit path for both tabs.
-                    when (tmuxAgentConversationSend(request.text)) {
-                        TmuxAgentConversationSend.TuiCommandNoEcho -> {
-                            val ok = tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
-                                viewModel.sendAgentPayloadToPaneResult(paneId, request.text, agentKind).isSuccess
-                            } ?: false
-                            if (ok) {
-                                tuiCommandNotice = request.text.trim()
+                    // Issue #1584: classify per-agent, not grammar-only. Only a
+                    // genuine alt-screen picker (`/model`, `/config`, permission
+                    // pickers) for THIS agent is TUI-only; a TEXT slash-command
+                    // (`/goal`, `/goal resume`) routes as normal echoed payload.
+                    run {
+                        val agentKind = tmuxComposerAgentKindFromToken(target.agentKind)
+                        when (tmuxAgentConversationSend(request.text, agentKind)) {
+                            TmuxAgentConversationSend.TuiCommandNoEcho -> {
+                                val ok = agentKind?.let {
+                                    viewModel.sendAgentPayloadToPaneResult(paneId, request.text, it).isSuccess
+                                } ?: false
+                                if (ok) {
+                                    tuiCommandNotice = request.text.trim()
+                                }
+                                ok
                             }
-                            ok
+                            TmuxAgentConversationSend.Echo ->
+                                viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
                         }
-                        TmuxAgentConversationSend.Echo ->
-                            viewModel.sendToAgentPaneResult(paneId, request.text).isSuccess
                     }
                 OutboundRoute.AgentPayload ->
                     tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->

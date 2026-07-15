@@ -261,6 +261,50 @@ public object AgentCommandCatalog {
     }
 
     /**
+     * Issue #1584: the per-agent set of TUI-only slash-command roots — the
+     * genuine alt-screen picker / interactive commands (`/model`, `/config`,
+     * permission pickers …) that the agent handles ENTIRELY in its terminal UI
+     * and that write NOTHING to the JSONL transcript. On the Conversation tab
+     * these get no optimistic echo and raise the "Open in Terminal" notice,
+     * because the picker they open shows only on the covered Terminal pane.
+     *
+     * This allowlist REPLACES the old grammar-only "every `/word` is TUI-only"
+     * heuristic (hard-cut, D22). A command NOT in this set is a TEXT command
+     * (e.g. `/goal`, `/goal resume`, `/compact`, `/review`, `/diff`) that reaches
+     * the agent and produces transcript output, so it routes as normal agent
+     * payload (echo + transcript) and NEVER raises the notice.
+     *
+     * Roots are stored lowercased and WITHOUT arguments — matched against the
+     * leading `/word` token only, so `/goal resume` (root `/goal`) is text while
+     * `/model sonnet` (root `/model`) is a picker.
+     */
+    private val claudeTuiOnly: Set<String> = setOf(
+        "/model", "/config", "/login", "/logout",
+        "/permissions", "/agents", "/mcp", "/resume", "/rewind",
+    )
+
+    private val codexTuiOnly: Set<String> = setOf(
+        "/model", "/approvals", "/mcp", "/resume",
+    )
+
+    private val openCodeTuiOnly: Set<String> = setOf(
+        "/models", "/sessions", "/themes", "/editor",
+    )
+
+    private fun tuiOnlyRoots(agent: AgentKind): Set<String> = when (agent) {
+        AgentKind.ClaudeCode -> claudeTuiOnly
+        AgentKind.Codex -> codexTuiOnly
+        AgentKind.OpenCode -> openCodeTuiOnly
+    }
+
+    /**
+     * True when [commandRoot] (a leading `/word` token, case-insensitive) is a
+     * genuine TUI-only alt-screen picker for [agent]. See [tuiOnlyRoots].
+     */
+    public fun isTuiOnlyCommand(agent: AgentKind, commandRoot: String): Boolean =
+        tuiOnlyRoots(agent).contains(commandRoot.lowercase())
+
+    /**
      * Client-side substring filter over [commandsFor], matching against the
      * command text, label, and description (case-insensitive). A blank query
      * returns the full ordered list unchanged.

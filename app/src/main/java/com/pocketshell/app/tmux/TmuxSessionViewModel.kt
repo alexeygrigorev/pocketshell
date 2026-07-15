@@ -2252,9 +2252,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // `black_frame_observed` diagnostic. Diagnostic accounting only; it never gates a
     // heal decision.
     private val paneLastSeedAtMs: MutableMap<String, Long> = ConcurrentHashMap()
-    // Issue #793: per-pane conversation-load watchdog. Flips a never-completing
-    // "Loading conversation…" state to Failed so the tab can't spin forever.
-    private val conversationLoadWatchdogJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
@@ -2376,6 +2373,21 @@ public class TmuxSessionViewModel @Inject constructor(
         viewModelScope.coroutineContext +
             SupervisorJob(viewModelScope.coroutineContext[Job]) +
             bridgeExceptionHandler,
+    )
+
+    // Issue #793/#1603: Conversation load watchdog + auto-retry, extracted (D28).
+    private val conversationLoadWatchdog = TmuxConversationLoadWatchdog(
+        scope = bridgeScope,
+        timeoutMs = { conversationLoadTimeoutMs },
+        loadStateOf = { paneId -> _agentConversations.value[paneId]?.loadState },
+        isSessionLive = { sessionRef?.isConnected == true },
+        paneFor = { paneId -> paneRows[paneId] },
+        onRetryLoad = { pane ->
+            // Manual-retry path: clear dedup, then re-run the full load.
+            paneAgentInputs.remove(pane.paneId)
+            startAgentDetectionForPane(pane)
+        },
+        onExhaustedFailed = ::flipConversationLoadToFailed,
     )
 
     // Issue #935 R1 (#928 D2): crash-containment for the bare
@@ -5869,8 +5881,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneOverflowRecoveryInFlight.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
-        conversationLoadWatchdogJobs.values.forEach { it.cancel() }
-        conversationLoadWatchdogJobs.clear()
+        conversationLoadWatchdog.cancelAll()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
@@ -6032,8 +6043,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #793: drop any pending load watchdogs from the prior runtime so
         // a restored, already-populated conversation row is not flipped to
         // Failed by a stale timer.
-        conversationLoadWatchdogJobs.values.forEach { it.cancel() }
-        conversationLoadWatchdogJobs.clear()
+        conversationLoadWatchdog.cancelAll()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentNullDetections.clear()
@@ -9792,7 +9802,7 @@ public class TmuxSessionViewModel @Inject constructor(
             panePortDetectorClients.remove(paneId)
             panePortDetectorGenerations.remove(paneId)
             paneAgentJobs.remove(paneId)?.cancel()
-            conversationLoadWatchdogJobs.remove(paneId)?.cancel()
+            conversationLoadWatchdog.cancel(paneId)
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
             paneAgentNullDetections.remove(paneId)
@@ -12291,7 +12301,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #819 (A2): arm the load watchdog so a never-arriving live
         // re-detection resolves the placeholder to a clear terminal state
         // instead of spinning forever (mirrors seedPresumedAgentPlaceholder).
-        armConversationLoadWatchdog(pane.paneId)
+        conversationLoadWatchdog.arm(pane.paneId)
     }
 
     /**
@@ -12363,7 +12373,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 .map { it.paneId }
             for (paneId in shellPaneIds) {
                 if (isAutoSeededPlaceholderUp(paneId)) {
-                    conversationLoadWatchdogJobs.remove(paneId)?.cancel()
+                    conversationLoadWatchdog.cancel(paneId)
                     paneAgentNullDetections.remove(paneId)
                     clearAgentDetectionForPane(paneId)
                 }
@@ -12535,7 +12545,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 autoSeededPlaceholder = true,
             ))
         }
-        if (seeded) armConversationLoadWatchdog(pane.paneId)
+        if (seeded) conversationLoadWatchdog.arm(pane.paneId)
     }
 
     /**
@@ -13241,7 +13251,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // watchdog. A KEPT (user-tapped #778) detection-less placeholder row
         // intentionally retains its watchdog so the "Loading conversation…"
         // state still resolves to a clear Failed terminal state.
-        if (rowDropped) cancelConversationLoadWatchdog(paneId)
+        if (rowDropped) conversationLoadWatchdog.cancel(paneId)
     }
 
     private suspend fun startAgentConversationForPane(
@@ -14382,7 +14392,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     loadState = ConversationLoadState.Loading,
                 ),
             )
-            armConversationLoadWatchdog(paneId)
+            conversationLoadWatchdog.arm(paneId)
             DiagnosticEvents.record(
                 "action",
                 "session_tab_select",
@@ -14423,10 +14433,10 @@ public class TmuxSessionViewModel @Inject constructor(
                         current.copy(loadState = ConversationLoadState.Loading)
                     }
                 }
-                armConversationLoadWatchdog(paneId)
+                conversationLoadWatchdog.arm(paneId)
             }
         } else {
-            cancelConversationLoadWatchdog(paneId)
+            conversationLoadWatchdog.cancel(paneId)
         }
         if (changed) {
             DiagnosticEvents.record(
@@ -14796,32 +14806,23 @@ public class TmuxSessionViewModel @Inject constructor(
             rowExists = true
             current.copy(loadState = ConversationLoadState.Loading)
         }
-        if (rowExists) armConversationLoadWatchdog(paneId)
+        if (rowExists) conversationLoadWatchdog.arm(paneId)
     }
 
-    private fun armConversationLoadWatchdog(paneId: String) {
-        conversationLoadWatchdogJobs.remove(paneId)?.cancel()
-        conversationLoadWatchdogJobs[paneId] = bridgeScope.launch {
-            delay(conversationLoadTimeoutMs)
-            updateAgentConversation(paneId) { current ->
-                if (current.loadState == ConversationLoadState.Loading) {
-                    DiagnosticEvents.record(
-                        "recoverable",
-                        "tmux_agent_conversation_load_timeout",
-                        "pane" to paneId,
-                        "timeoutMs" to conversationLoadTimeoutMs,
-                    )
-                    current.copy(loadState = ConversationLoadState.Failed)
-                } else {
-                    current
-                }
-            }
+    private fun flipConversationLoadToFailed(paneId: String) {
+        updateAgentConversation(paneId) { current ->
+            if (current.loadState != ConversationLoadState.Loading) return@updateAgentConversation current
+            DiagnosticEvents.record(
+                "recoverable",
+                "tmux_agent_conversation_load_timeout",
+                "pane" to paneId,
+                "timeoutMs" to conversationLoadTimeoutMs,
+                "autoRetriesSpent" to conversationLoadWatchdog.attemptsSpent(paneId),
+            )
+            current.copy(loadState = ConversationLoadState.Failed)
         }
     }
 
-    private fun cancelConversationLoadWatchdog(paneId: String) {
-        conversationLoadWatchdogJobs.remove(paneId)?.cancel()
-    }
 
     /**
      * Record the terminal outcome of the first-paint tail read for [paneId].
@@ -14837,7 +14838,7 @@ public class TmuxSessionViewModel @Inject constructor(
         hasMoreOlder: Boolean,
         failed: Boolean,
     ) {
-        cancelConversationLoadWatchdog(paneId)
+        conversationLoadWatchdog.cancel(paneId)
         updateAgentConversation(paneId) { current ->
             // Only own the load state for the row that still matches this
             // detection (a fast switch could have replaced it).

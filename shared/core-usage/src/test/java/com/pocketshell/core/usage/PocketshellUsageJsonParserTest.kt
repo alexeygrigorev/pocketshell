@@ -90,6 +90,78 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexNo5hWindow_rendersWeeklyOnly_noPhantom5h_noGhostRow() {
+        // #1564 regression: Codex temporarily removed its 5h window, so quse
+        // 0.0.11 now emits Codex's `primary_window` (the WEEKLY 604800s span)
+        // in `short_term` labeled from its real `limit_window_seconds` → "7d"
+        // (NOT the old positional "5h"), and the DROPPED window as a null
+        // placeholder (`long_term.percent_remaining == null`). The maintainer's
+        // v0.4.33 symptom was a "5h window · 53% · resets in 5 days" (weekly
+        // data under a 5h label) plus a "7d window · 0% · unavailable" GHOST.
+        //
+        // This is the app-side load-bearing assertion for the acceptance
+        // criteria: the parser must render the WEEKLY window labeled "7d" (no
+        // phantom 5h) and OMIT the null-percent dropped window (no ghost row).
+        // If the parser stopped omitting null-percent windows this test goes
+        // red (a 2nd ghost window would appear).
+        val codexNo5hNdjson =
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":69.0,"reset_at":"2026-07-21T20:37:32Z","window":"7d"},"long_term":{"percent_remaining":null,"reset_at":null,"window":null},"error":null,"details":{}}"""
+        val record = parser.parse(codexNo5hNdjson).single()
+
+        // Exactly ONE renderable window — the dropped 5h is omitted (no ghost).
+        assertEquals(1, record.windows.size)
+        val weekly = record.windows.single()
+        // The weekly window is labeled "7d", NOT the phantom "5h".
+        assertEquals("7d", weekly.name)
+        assertTrue("Codex weekly window must not be mislabeled 5h", weekly.name != "5h")
+        assertEquals(31.0, weekly.percent, 0.001) // 100 - 69
+        assertEquals(Instant.parse("2026-07-21T20:37:32Z"), weekly.resetAt)
+        // No ghost "0% / unavailable" (null-reset) row survived: the only
+        // window has a real reset time.
+        assertTrue(
+            "the dropped Codex window must not render as a ghost row",
+            record.windows.all { it.resetAt != null },
+        )
+    }
+
+    @Test
+    fun parse_quse0011FullDocument_codexFixedButOtherCardsUnchanged() {
+        // #1564 class coverage: the quse 0.0.11 Codex window fix must NOT
+        // regress the other provider cards. Feeds all four providers exactly as
+        // `pocketshell usage --json` flattens quse 0.0.11 and asserts Claude
+        // (5h + 7d), Copilot (monthly), and zai (5h + weekly) are unchanged
+        // while Codex renders weekly-only.
+        val quse0011Ndjson = listOf(
+            """{"provider":"claude","status":"ok","short_term":{"percent_remaining":82.0,"reset_at":"2026-07-15T11:39:59Z","window":"5h"},"long_term":{"percent_remaining":5.0,"reset_at":"2026-07-16T14:59:59Z","window":"7d"},"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":69.0,"reset_at":"2026-07-21T20:37:32Z","window":"7d"},"long_term":{"percent_remaining":null,"reset_at":null,"window":null},"error":null,"details":{}}""",
+            """{"provider":"copilot","status":"ok","short_term":{"percent_remaining":100.0,"reset_at":null,"window":null},"long_term":{"percent_remaining":97.1,"reset_at":"2026-08-01T00:00:00Z","window":"monthly"},"error":null,"details":{}}""",
+            """{"provider":"zai","status":"ok","short_term":{"percent_remaining":99.0,"reset_at":null,"window":"5h"},"long_term":{"percent_remaining":75.0,"reset_at":"2026-07-18T14:04:58Z","window":"weekly"},"error":null,"details":{}}""",
+        ).joinToString("\n")
+        val records = parser.parse(quse0011Ndjson)
+        val byProvider = records.associateBy { it.provider }
+
+        // Claude: 5h + 7d, both real resets — unchanged.
+        val claude = byProvider.getValue("claude")
+        assertEquals(2, claude.windows.size)
+        assertEquals("5h", claude.windows[0].name)
+        assertEquals("7d", claude.windows[1].name)
+
+        // Codex: weekly-only, labeled "7d", no ghost.
+        val codex = byProvider.getValue("codex")
+        assertEquals(1, codex.windows.size)
+        assertEquals("7d", codex.windows.single().name)
+
+        // Copilot: monthly window unchanged (short_term null window omitted-or-generic).
+        val copilot = byProvider.getValue("copilot")
+        assertEquals("monthly", copilot.windows.last().name)
+
+        // zai: 5h + weekly unchanged.
+        val zai = byProvider.getValue("zai")
+        assertEquals("5h", zai.windows[0].name)
+        assertEquals("weekly", zai.windows[1].name)
+    }
+
+    @Test
     fun parse_displayNames() {
         val records = parser.parse(fourProviderNdjson)
         assertEquals("Claude Code", records[0].displayName)

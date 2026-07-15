@@ -1,0 +1,141 @@
+{
+  "claude": {
+    "details": {
+      "limit_reached": true,
+      "subscription": null,
+      "windows": {
+        "five_hour": {
+          "reset_at": "2026-07-15T11:39:59Z",
+          "used_percent": 18.0
+        },
+        "seven_day": {
+          "reset_at": "2026-07-16T14:59:59Z",
+          "used_percent": 95.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 5.0,
+      "reset_at": "2026-07-16T14:59:59Z",
+      "window": "7d"
+    },
+    "short_term": {
+      "percent_remaining": 82.0,
+      "reset_at": "2026-07-15T11:39:59Z",
+      "window": "5h"
+    },
+    "status": "ok"
+  },
+  "codex": {
+    "details": {
+      "limit_reached": false,
+      "reset_credits": [
+        {
+          "expires_at": "2026-07-31T19:09:12Z",
+          "status": "available",
+          "title": "Full reset"
+        },
+        {
+          "expires_at": "2026-08-11T21:09:47Z",
+          "status": "available",
+          "title": "Full reset"
+        },
+        {
+          "expires_at": "2026-08-12T18:09:45Z",
+          "status": "available",
+          "title": "Full reset"
+        }
+      ],
+      "reset_credits_available": 3,
+      "reset_credits_error": null,
+      "windows": {
+        "primary_window": {
+          "limit_window_seconds": 604800,
+          "present": true,
+          "reset_at": "2026-07-21T20:37:32Z",
+          "used_percent": 31.0
+        },
+        "secondary_window": {
+          "limit_window_seconds": null,
+          "present": false,
+          "reset_at": null,
+          "used_percent": 0.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": null,
+      "reset_at": null,
+      "window": null
+    },
+    "short_term": {
+      "percent_remaining": 69.0,
+      "reset_at": "2026-07-21T20:37:32Z",
+      "window": "7d"
+    },
+    "status": "ok"
+  },
+  "copilot": {
+    "details": {
+      "limit_reached": false,
+      "premium_entitlement": 1500,
+      "premium_percent_remaining": 97.1,
+      "premium_remaining": 1457
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 97.1,
+      "reset_at": "2026-08-01T00:00:00Z",
+      "window": "monthly"
+    },
+    "short_term": {
+      "percent_remaining": 100.0,
+      "reset_at": null,
+      "window": null
+    },
+    "status": "ok"
+  },
+  "zai": {
+    "details": {
+      "limit_reached": false,
+      "max_used_percent": 25.0,
+      "windows": {
+        "five_hour": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": null,
+          "used_percent": 1.0,
+          "window_hours": 5
+        },
+        "monthly_web_search": {
+          "limit": 4000,
+          "remaining": 3962,
+          "reset_at": "2026-07-27T14:04:58Z",
+          "used_percent": 1.0,
+          "window_hours": 5
+        },
+        "weekly": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": "2026-07-18T14:04:58Z",
+          "used_percent": 25.0,
+          "window_hours": null
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 75.0,
+      "reset_at": "2026-07-18T14:04:58Z",
+      "window": "weekly"
+    },
+    "short_term": {
+      "percent_remaining": 99.0,
+      "reset_at": null,
+      "window": "5h"
+    },
+    "status": "ok"
+  }
+}

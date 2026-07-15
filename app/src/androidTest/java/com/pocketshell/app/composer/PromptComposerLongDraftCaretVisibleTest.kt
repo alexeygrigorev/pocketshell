@@ -1,22 +1,37 @@
 package com.pocketshell.app.composer
 
+import android.graphics.Bitmap
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.dp
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -24,14 +39,19 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.core.voice.WhisperClient
+import com.pocketshell.app.test.testArtifactsRoot
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Issue #765 — long-draft caret cut-off with the keyboard up.
@@ -76,6 +96,8 @@ class PromptComposerLongDraftCaretVisibleTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
+    private val observedImeBottomPx = mutableStateOf(0)
+
     private class TestMicCapture : PromptComposerViewModel.MicCapture {
         override fun start() {}
         override fun stop(): ByteArray = ByteArray(0)
@@ -105,6 +127,131 @@ class PromptComposerLongDraftCaretVisibleTest {
         apiKeyStorage = TestVault(),
         voiceSettings = TestVoiceSettings(),
     )
+
+    @Test
+    fun syntheticImeLongDraftOwnsContainedCaretViewportAboveStickyControls() {
+        compose.activityRule.scenario.onActivity { activity ->
+            WindowCompat.setDecorFitsSystemWindows(activity.window, false)
+        }
+
+        val longDraft = (1..18).joinToString("\n") {
+            "line $it of the long prompt; sentinel caret remains visible"
+        }
+        compose.setContent {
+            PocketShellTheme {
+                val density = LocalDensity.current
+                observedImeBottomPx.value = WindowInsets.ime.getBottom(density)
+                Box(
+                    modifier = Modifier
+                        .width(SYNTHETIC_HOST_WIDTH_DP.dp)
+                        .height(SYNTHETIC_HOST_HEIGHT_DP.dp)
+                        .background(PocketShellColors.Background)
+                        .testTag(SYNTHETIC_HOST_TAG),
+                ) {
+                    SheetContent(
+                        state = PromptComposerViewModel.UiState(
+                            draft = longDraft,
+                            recording = PromptComposerViewModel.RecordingState.Idle,
+                            connectionDegraded = true,
+                        ),
+                        onClose = {},
+                        onDraftChange = {},
+                        onMicTap = {},
+                        onSend = {},
+                        onAttachFiles = {},
+                    )
+                }
+            }
+        }
+        compose.waitForIdle()
+
+        applySyntheticInsets(
+            imeBottomPx = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt(),
+            navBarBottomPx = 0,
+            statusBarTopPx = (SYNTHETIC_STATUS_BAR_DP * displayDensity()).toInt(),
+        )
+        compose.waitForIdle()
+
+        assertTrue(
+            "Synthetic ime() inset must reach Compose; keyboard-down would be vacuous. " +
+                "observedImeBottomPx=${observedImeBottomPx.value}",
+            observedImeBottomPx.value > 0,
+        )
+
+        val hostBounds = compose.onNodeWithTag(SYNTHETIC_HOST_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val viewportInteraction = compose.onNodeWithTag(
+            COMPOSER_DRAFT_VIEWPORT_TAG,
+            useUnmergedTree = true,
+        )
+        val viewportBounds = viewportInteraction.getUnclippedBoundsInRoot()
+        val draftInteraction = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+        val draftNode = draftInteraction.fetchSemanticsNode()
+        val draftBounds = draftInteraction.getUnclippedBoundsInRoot()
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val attachBounds = compose.onNodeWithTag(COMPOSER_ATTACH_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val micBounds = compose.onNodeWithTag(COMPOSER_MIC_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val bannerBounds = compose.onNodeWithTag(
+            COMPOSER_CONNECTION_LOST_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+
+        val layouts = mutableListOf<TextLayoutResult>()
+        val getLayout = draftNode.config.getOrNull(SemanticsActions.GetTextLayoutResult)
+        assertTrue("Draft editor must expose its real text layout.", getLayout != null)
+        getLayout!!.action!!.invoke(layouts)
+        val layout = layouts.single()
+        val caretRect = layout.getCursorRect(longDraft.length)
+        val density = displayDensity()
+        val draftHeightPx = (draftBounds.bottom - draftBounds.top).value * density
+
+        println(
+            "ISSUE1619_SYNTHETIC host=$hostBounds viewport=$viewportBounds " +
+                "draft=$draftBounds status=$bannerBounds send=$sendBounds attach=$attachBounds " +
+                "mic=$micBounds textHeight=${layout.size.height} draftHeightPx=$draftHeightPx " +
+                "caret=$caretRect density=$density",
+        )
+
+        assertTrue(
+            "Long text must overflow the effective editor viewport so caret-follow is exercised. " +
+                "textHeight=${layout.size.height} viewportHeight=$draftHeightPx",
+            layout.size.height > draftHeightPx + 1f,
+        )
+        assertTrue(
+            "The draft field must be fully contained by its dedicated viewport; an editor " +
+                "clipped by a smaller outer scroll cannot make its caret reliably visible. " +
+                "draft=$draftBounds viewport=$viewportBounds",
+            draftBounds.top >= viewportBounds.top - 1.dp &&
+                draftBounds.bottom <= viewportBounds.bottom + 1.dp,
+        )
+        assertTrue(
+            "Status content belongs above the editor. statusBottom=${bannerBounds.bottom} " +
+                "draftTop=${draftBounds.top}",
+            bannerBounds.bottom <= draftBounds.top + 1.dp,
+        )
+        assertTrue(
+            "The draft must retain one complete editable line. caretHeight=${caretRect.height} " +
+                "draftHeight=$draftHeightPx",
+            caretRect.height <= draftHeightPx + 1f,
+        )
+        assertTrue(
+            "Draft must end above sticky controls. draftBottom=${draftBounds.bottom} " +
+                "sendTop=${sendBounds.top}",
+            draftBounds.bottom <= sendBounds.top + 1.dp,
+        )
+        compose.assertNodeFullyWithinRoot(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+        listOf(COMPOSER_DRAFT_TAG, COMPOSER_SEND_ENTER_TAG, COMPOSER_ATTACH_TAG, COMPOSER_MIC_TAG)
+            .forEach { tag ->
+                compose.assertNodeFullyAboveImeOrKeyboard(
+                    tag,
+                    keyboardTopPx = hostBounds.bottom,
+                    useUnmergedTree = true,
+                )
+            }
+    }
 
     @Test
     fun caretStaysVisibleWhenTypingLongDraftWithImeUp() {
@@ -156,6 +303,11 @@ class PromptComposerLongDraftCaretVisibleTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         android.os.SystemClock.sleep(500)
         compose.waitForIdle()
+
+        val screenshotName = InstrumentationRegistry.getArguments()
+            .getString("issue1619ScreenshotName")
+            ?: "issue-1619-green-long-draft-caret-visible-keyboard-up.png"
+        captureFullDevice(screenshotName)
 
         // Optional hold BEFORE the assertions so a host-side full-device
         // screenshot can capture the keyboard-up composer state even on a base
@@ -238,14 +390,16 @@ class PromptComposerLongDraftCaretVisibleTest {
             caretHeightPx <= viewportHeightPx + 1f,
         )
 
-        // 3) The draft field is not squished: it keeps a healthy multi-line
-        //    height (well above a single line) so several lines around the caret
-        //    are visible.
+        // 3) The real-IME field keeps at least three complete caret lines. The
+        //    #1619 layout deliberately bounds the editor to the ACTUAL remaining
+        //    room (rather than preserving the old arbitrary 80dp floor), so use
+        //    the measured line height as the device/font-scale invariant.
         val draftHeightDp = viewportHeightPx / density
         assertTrue(
-            "Draft field collapsed below a usable multi-line height (squish). " +
+            "Draft field must retain at least three complete caret lines. " +
+                "draftHeightPx=$viewportHeightPx caretHeightPx=$caretHeightPx " +
                 "draftHeightDp=$draftHeightDp",
-            draftHeightDp >= 80f,
+            viewportHeightPx >= caretHeightPx * 3f,
         )
 
         // 4) The field's visible bottom sits ABOVE the controls row, which sits
@@ -260,6 +414,114 @@ class PromptComposerLongDraftCaretVisibleTest {
             "Send controls must stay above the IME. sendBottom=${sendBounds.bottom} " +
                 "imeTop=$imeTop",
             sendBounds.bottom <= imeTop + 2f,
+        )
+    }
+
+    @Test
+    fun offlineBannerStaysAboveLongDraftWithRealImeUp() {
+        val vm = newViewModel()
+        compose.activityRule.scenario.onActivity { activity ->
+            WindowCompat.setDecorFitsSystemWindows(activity.window, false)
+        }
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    FauxTerminalBackdrop()
+                    PromptComposerSheet(
+                        onDismiss = {},
+                        onSend = { _ -> true },
+                        connectionLost = true,
+                        viewModel = vm,
+                    )
+                }
+            }
+        }
+        compose.waitForIdle()
+
+        val longDraft = (1..18).joinToString("\n") {
+            "offline line $it; the reconnect queue keeps this caret visible"
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick()
+            .performTextInput(longDraft)
+        assertTrue(
+            "Real IME is required for the offline keyboard-up proof.",
+            raiseSoftImeDeterministically(timeoutMs = 30_000L),
+        )
+        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(500)
+        compose.waitForIdle()
+
+        compose.onNodeWithText(OFFLINE_COPY, useUnmergedTree = true).assertExists()
+        captureFullDevice("issue-1619-green-offline-banner-above-long-draft-keyboard-up.png")
+
+        val statusBounds = compose.onNodeWithTag(
+            COMPOSER_STATUS_VIEWPORT_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val bannerBounds = compose.onNodeWithTag(
+            COMPOSER_CONNECTION_LOST_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val draftViewportBounds = compose.onNodeWithTag(
+            COMPOSER_DRAFT_VIEWPORT_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val draftInteraction = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        val draftNode = draftInteraction.fetchSemanticsNode()
+        val draftBounds = draftInteraction.getUnclippedBoundsInRoot()
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val layouts = mutableListOf<TextLayoutResult>()
+        val getLayout = draftNode.config.getOrNull(SemanticsActions.GetTextLayoutResult)
+        assertTrue("Offline draft must expose its real text layout.", getLayout != null)
+        getLayout!!.action!!.invoke(layouts)
+        val layout = layouts.single()
+        val caretRect = layout.getCursorRect(longDraft.length)
+        val density = displayDensity()
+        val draftHeightPx = (draftBounds.bottom - draftBounds.top).value * density
+        val imeTop = readDecorHeightPx() - readImeBottomPx()
+
+        println(
+            "ISSUE1619_REAL_OFFLINE status=$statusBounds banner=$bannerBounds " +
+                "draftViewport=$draftViewportBounds draft=$draftBounds send=$sendBounds " +
+                "textHeight=${layout.size.height} caret=$caretRect imeTop=$imeTop",
+        )
+        assertTrue(
+            "Offline banner must be fully contained in its bounded status viewport. " +
+                "banner=$bannerBounds status=$statusBounds",
+            bannerBounds.top >= statusBounds.top - 1.dp &&
+                bannerBounds.bottom <= statusBounds.bottom + 1.dp,
+        )
+        assertTrue(
+            "Offline banner/status must remain above the long draft. " +
+                "bannerBottom=${bannerBounds.bottom} draftTop=${draftViewportBounds.top}",
+            bannerBounds.bottom <= draftViewportBounds.top + 1.dp,
+        )
+        assertTrue(
+            "Real offline text must overflow the editor so caret-follow is exercised.",
+            layout.size.height > draftHeightPx + 1f,
+        )
+        assertTrue(
+            "Real offline draft must retain one complete caret line.",
+            caretRect.height <= draftHeightPx + 1f,
+        )
+        assertTrue(
+            "Offline draft must end above sticky controls.",
+            draftBounds.bottom <= sendBounds.top + 1.dp,
+        )
+        assertTrue(
+            "Offline controls must remain above the real IME.",
+            sendBounds.bottom.value * density <= imeTop + 2f,
         )
     }
 
@@ -327,5 +589,68 @@ class PromptComposerLongDraftCaretVisibleTest {
             result = activity.window.decorView.height
         }
         return result
+    }
+
+    private fun applySyntheticInsets(
+        imeBottomPx: Int,
+        navBarBottomPx: Int,
+        statusBarTopPx: Int,
+    ) {
+        compose.activityRule.scenario.onActivity { activity ->
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
+                .setInsets(
+                    WindowInsetsCompat.Type.navigationBars(),
+                    Insets.of(0, 0, 0, navBarBottomPx),
+                )
+                .setInsets(
+                    WindowInsetsCompat.Type.statusBars(),
+                    Insets.of(0, statusBarTopPx, 0, 0),
+                )
+                .setInsets(
+                    WindowInsetsCompat.Type.systemBars(),
+                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
+                )
+                .build()
+            ViewCompat.dispatchApplyWindowInsets(activity.window.decorView, insets)
+        }
+    }
+
+    private fun displayDensity(): Float =
+        InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+
+    private fun captureFullDevice(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(200)
+        val bitmap: Bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "Could not capture issue #1619 full-device screenshot"
+        }
+        val dir = File(
+            testArtifactsRoot(instrumentation.targetContext),
+            "additional_test_output/issue-1619-composer",
+        )
+        check(dir.exists() || dir.mkdirs()) { "Could not create ${dir.absolutePath}" }
+        val file = File(dir, name)
+        try {
+            FileOutputStream(file).use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    "Could not write ${file.absolutePath}"
+                }
+            }
+            println("ISSUE1619_SCREENSHOT ${file.absolutePath}")
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private companion object {
+        const val SYNTHETIC_HOST_TAG = "issue1619-long-draft-host"
+        const val SYNTHETIC_HOST_WIDTH_DP = 360f
+        const val SYNTHETIC_HOST_HEIGHT_DP = 470f
+        const val SYNTHETIC_IME_HEIGHT_DP = 295f
+        const val SYNTHETIC_STATUS_BAR_DP = 52f
+        const val OFFLINE_COPY = "Offline — prompts will be queued and sent on reconnect."
     }
 }

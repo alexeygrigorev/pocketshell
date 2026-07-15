@@ -1,5 +1,6 @@
 package com.pocketshell.app.composer
 
+import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -17,8 +18,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -37,8 +48,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #1613 — "when there's no connection I can't type anything" (reproduce-
- * first, D33 / G10).
+ * Issue #1613/#1619 — offline composing and bounded status-stack geometry.
  *
  * ## The blocker this proof pins
  *
@@ -62,13 +72,10 @@ import org.junit.runner.RunWith
  *
  * ## What this proof asserts (the reachability `performTextInput` does NOT)
  *
- * With the EMPTY draft the maintainer had (about to type), the offline banner
- * showing, and a synthetic keyboard up on the measured resized-sheet host, the
- * draft field must keep a USABLE height (not the sub-line crush) AND be fully
- * within the host AND above the keyboard — containment (#657 / F1), never a bare
- * `assertIsDisplayed()`. Both a SHELL pane (`agentKind = null`) and an AGENT pane
- * (`agentKind = ClaudeCode`) are exercised (G2 class coverage). On base the draft
- * crushes below [MIN_DRAFT_HEIGHT_DP] (RED); the #1613 fix keeps it usable (GREEN).
+ * With an overflowing long draft, the standalone offline banner, and a synthetic
+ * keyboard up on the measured resized-sheet host, the draft must retain a complete
+ * caret line while the Amber status stays fully above it. A separate multi-status
+ * case proves the status region scrolls within its 48dp cap instead of expanding.
  *
  * ## Determinism (#780 model — no real keyboard, no `assumeTrue`)
  *
@@ -88,29 +95,34 @@ class PromptComposerOfflineComposeUsableProofTest {
     private val observedStatusTopPx = mutableStateOf(0)
 
     /**
-     * The maintainer's reported state: EMPTY draft (about to type), the link down
-     * ([connectionDegraded] = true) and NO queued outbound item — the exact
-     * condition under which the standalone "Connection lost — Send will retry once
-     * reconnected." banner renders (it is suppressed once a queue banner exists).
+     * The link is down with no queued outbound item — the exact condition under
+     * which the standalone offline banner renders (it is suppressed once a queue
+     * banner exists). The long draft makes native caret-follow load-bearing.
      */
-    private fun offlineEmptyDraftState(): PromptComposerViewModel.UiState =
+    private fun offlineLongDraftState(multiStatus: Boolean): PromptComposerViewModel.UiState =
         PromptComposerViewModel.UiState(
-            draft = "",
+            draft = LONG_DRAFT,
             recording = PromptComposerViewModel.RecordingState.Idle,
             connectionDegraded = true,
+            error = if (multiStatus) "Not sent. Keep editing or discard the draft." else null,
         )
 
     @Test
     fun shellPaneComposerTypableWhileOfflineWithKeyboardUp() {
-        runOfflineComposeProof(agentKind = null)
+        runOfflineComposeProof(agentKind = null, multiStatus = false)
     }
 
     @Test
     fun agentPaneComposerTypableWhileOfflineWithKeyboardUp() {
-        runOfflineComposeProof(agentKind = AgentKind.ClaudeCode)
+        runOfflineComposeProof(agentKind = AgentKind.ClaudeCode, multiStatus = false)
     }
 
-    private fun runOfflineComposeProof(agentKind: AgentKind?) {
+    @Test
+    fun multipleStatusesScrollWithoutTakingDraftCaretLine() {
+        runOfflineComposeProof(agentKind = null, multiStatus = true)
+    }
+
+    private fun runOfflineComposeProof(agentKind: AgentKind?, multiStatus: Boolean) {
         compose.activityRule.scenario.onActivity { activity ->
             WindowCompat.setDecorFitsSystemWindows(activity.window, false)
         }
@@ -142,7 +154,7 @@ class PromptComposerOfflineComposeUsableProofTest {
                         contentAlignment = Alignment.TopCenter,
                     ) {
                         SheetContent(
-                            state = offlineEmptyDraftState(),
+                            state = offlineLongDraftState(multiStatus),
                             onClose = {},
                             onDraftChange = {},
                             onMicTap = {},
@@ -181,6 +193,26 @@ class PromptComposerOfflineComposeUsableProofTest {
         // meaningless.
         compose.onNodeWithTag(COMPOSER_CONNECTION_LOST_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
+        compose.onNodeWithText(OFFLINE_COPY, useUnmergedTree = true).assertExists()
+
+        if (multiStatus) {
+            val initialStatus = compose.onNodeWithTag(
+                COMPOSER_STATUS_VIEWPORT_TAG,
+                useUnmergedTree = true,
+            ).getUnclippedBoundsInRoot()
+            val initialBanner = compose.onNodeWithTag(
+                COMPOSER_CONNECTION_LOST_TAG,
+                useUnmergedTree = true,
+            ).getUnclippedBoundsInRoot()
+            assertTrue(
+                "Multi-status proof must begin with offline below the bounded viewport, " +
+                    "making scroll load-bearing. banner=$initialBanner status=$initialStatus",
+                initialBanner.bottom > initialStatus.bottom + 1.dp,
+            )
+            compose.onNodeWithTag(COMPOSER_CONNECTION_LOST_TAG, useUnmergedTree = true)
+                .performScrollTo()
+            compose.waitForIdle()
+        }
 
         val hostBounds = compose.onNodeWithTag(HOST_TAG, useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot
@@ -190,6 +222,27 @@ class PromptComposerOfflineComposeUsableProofTest {
             .fetchSemanticsNode().boundsInRoot
         val bannerBounds = compose.onNodeWithTag(COMPOSER_CONNECTION_LOST_TAG, useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot
+        val statusViewportBounds = compose.onNodeWithTag(
+            COMPOSER_STATUS_VIEWPORT_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val draftViewportBounds = compose.onNodeWithTag(
+            COMPOSER_DRAFT_VIEWPORT_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val bannerUnclippedBounds = compose.onNodeWithTag(
+            COMPOSER_CONNECTION_LOST_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+
+        val draftNode = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        val getLayout = draftNode.config.getOrNull(SemanticsActions.GetTextLayoutResult)
+        assertTrue("Offline draft must expose its real text layout.", getLayout != null)
+        getLayout!!.action!!.invoke(layouts)
+        val layout = layouts.single()
+        val caretRect = layout.getCursorRect(LONG_DRAFT.length)
 
         val keyboardTopPx = hostBounds.bottom
         val draftHeightDp = draftBounds.height / density
@@ -199,6 +252,7 @@ class PromptComposerOfflineComposeUsableProofTest {
                 "draftTop=${draftBounds.top} draftBottom=${draftBounds.bottom} " +
                 "bannerTop=${bannerBounds.top} " +
                 "bannerHeightDp=${bannerBounds.height / density} " +
+                "statusViewport=$statusViewportBounds draftViewport=$draftViewportBounds " +
                 "sendBottom=${sendBounds.bottom} keyboardTopPx=$keyboardTopPx " +
                 "hostHeightDp=${(hostBounds.bottom - hostBounds.top) / density} density=$density",
         )
@@ -213,12 +267,32 @@ class PromptComposerOfflineComposeUsableProofTest {
         // the scroll region below the field, so the draft keeps its 24dp editor line
         // (GREEN). This is the assertion that is RED on base / GREEN on the fix.
         assertTrue(
-            "Draft editor crushed below one text line while offline + keyboard up " +
-                "(the #1613 blocker — the field is an unusable sliver, 'I can't type " +
-                "anything'). draftHeightDp=$draftHeightDp minDp=$MIN_DRAFT_HEIGHT_DP " +
-                "(draftTop=${draftBounds.top} draftBottom=${draftBounds.bottom})",
-            draftHeightDp >= MIN_DRAFT_HEIGHT_DP,
+            "Offline long text must overflow the editor so native caret-follow is exercised. " +
+                "textHeight=${layout.size.height} draftHeight=${draftBounds.height}",
+            layout.size.height > draftBounds.height + 1f,
         )
+        assertTrue(
+            "Offline draft must retain one complete editable caret line. " +
+                "caretHeight=${caretRect.height} draftHeight=${draftBounds.height}",
+            caretRect.height <= draftBounds.height + 1f,
+        )
+        assertTrue(
+            "Offline banner must be fully contained in the bounded status viewport. " +
+                "banner=$bannerUnclippedBounds status=$statusViewportBounds",
+            bannerUnclippedBounds.top >= statusViewportBounds.top - 1.dp &&
+                bannerUnclippedBounds.bottom <= statusViewportBounds.bottom + 1.dp,
+        )
+        assertTrue(
+            "Keyboard-up status region must remain capped at 48dp. status=$statusViewportBounds",
+            statusViewportBounds.bottom - statusViewportBounds.top <= 48.dp + 1.dp,
+        )
+        assertTrue(
+            "Offline banner/status must stay above the long draft. " +
+                "bannerBottom=${bannerUnclippedBounds.bottom} draftTop=${draftViewportBounds.top}",
+            bannerUnclippedBounds.bottom <= draftViewportBounds.top + 1.dp,
+        )
+
+        assertAmberBannerPixel()
 
         // CONTAINMENT (#657 / F1): the draft the user must type into, and the Send
         // that queues it, must be fully within the host AND above the keyboard — the
@@ -269,6 +343,38 @@ class PromptComposerOfflineComposeUsableProofTest {
         InstrumentationRegistry.getInstrumentation()
             .targetContext.resources.displayMetrics.density
 
+    private fun assertAmberBannerPixel() {
+        val bitmap = compose.onNodeWithTag(
+            COMPOSER_CONNECTION_LOST_TAG,
+            useUnmergedTree = true,
+        ).captureToImage().asAndroidBitmap()
+        try {
+            val insetPx = (6f * displayDensity()).toInt().coerceAtLeast(1)
+            val actual = bitmap.getPixel(
+                (bitmap.width - insetPx).coerceAtLeast(0),
+                bitmap.height / 2,
+            )
+            val expected = PocketShellColors.Amber.copy(alpha = 0.12f)
+                .compositeOver(PocketShellColors.Surface)
+                .toArgb()
+            fun delta(channel: (Int) -> Int): Int =
+                kotlin.math.abs(channel(actual) - channel(expected))
+            val maxDelta = maxOf(
+                delta(AndroidColor::red),
+                delta(AndroidColor::green),
+                delta(AndroidColor::blue),
+            )
+            assertTrue(
+                "Offline banner background must be Amber@12% over Surface. " +
+                    "actual=${Integer.toHexString(actual)} expected=${Integer.toHexString(expected)} " +
+                    "maxChannelDelta=$maxDelta",
+                maxDelta <= 5,
+            )
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     @androidx.compose.runtime.Composable
     private fun FauxTerminalBackdrop() {
         Text(
@@ -289,14 +395,14 @@ class PromptComposerOfflineComposeUsableProofTest {
         // is true (the field uses its 24dp keyboard-up min) while the intrusion
         // subtracted from the host is small. `availableAboveKeyboard ≈ HOST - IME`,
         // which we size into the crush→usable band (see below).
-        const val HOST_HEIGHT_DP = 188f
+        const val HOST_HEIGHT_DP = 470f
 
         // A narrow content width (the sheet's inner width after its 18dp side
         // paddings + the banner's 12dp padding + the cloud icon) so the
         // "Connection lost — Send will retry once reconnected." banner wraps to the
         // TWO lines the maintainer saw on-device — the tall sticky chrome that, on
         // base, crushes the weighted draft region below one line.
-        const val HOST_WIDTH_DP = 270f
+        const val HOST_WIDTH_DP = 360f
 
         // Small IME (keyboardUp true) with NAV 0. `availableAboveKeyboard ≈ 188-48 =
         // 140dp`. On base the sticky two-line offline banner (~56dp) + control row
@@ -304,15 +410,13 @@ class PromptComposerOfflineComposeUsableProofTest {
         // a sub-line crush (editor → ~0). The #1613 fix moves the banner into the
         // scroll region, so the sticky chrome is just the control row (~74dp) and the
         // draft region is ~66dp — the one-line field is fully visible.
-        const val IME_HEIGHT_DP = 48f
+        const val IME_HEIGHT_DP = 295f
         const val NAV_BAR_DP = 0f
         const val STATUS_BAR_DP = 52f
 
-        // The empty draft editor is a single 24dp line keyboard-up. On base the
-        // sticky offline banner crushes the weighted draft region so the editor is
-        // compressed to ~0 (a sub-line sliver); the fix keeps the full 24dp line.
-        // 20dp sits below the healthy 24dp line and well above the crush, so it is
-        // decisively red-on-base / green-on-fix while tolerating sub-dp rounding.
-        const val MIN_DRAFT_HEIGHT_DP = 20f
+        const val OFFLINE_COPY = "Offline — prompts will be queued and sent on reconnect."
+        val LONG_DRAFT = (1..18).joinToString("\n") {
+            "offline line $it; sentinel caret queued safely"
+        }
     }
 }

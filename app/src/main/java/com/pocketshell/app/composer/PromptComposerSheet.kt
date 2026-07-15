@@ -891,7 +891,11 @@ internal fun SheetContent(
                 .heightIn(max = availableAboveKeyboard)
                 .background(PocketShellColors.Surface)
                 .padding(horizontal = 18.dp)
-                .padding(bottom = 26.dp),
+                // Keyboard-down keeps the visual breathing room above the nav
+                // bar. Keyboard-up the IME itself is the bottom boundary; spending
+                // another 26dp here would take a complete caret line away from the
+                // weighted draft when status content is present (#1619).
+                .padding(bottom = if (keyboardUp) 0.dp else 26.dp),
         ) {
             // Issue #767: the `/`-triggered inline command autocomplete dropdown.
             // It rides the top of this same inset-anchored column (so it is never
@@ -963,124 +967,25 @@ internal fun SheetContent(
 
             Column(
                 modifier = Modifier
-                    // Issue #682/#765: the scroll region (draft + status banners +
-                    // attachment tiles) absorbs overflow so a long draft / a stack
-                    // of tiles scrolls WITHIN the compact sheet instead of forcing
-                    // the whole content taller (which would push the sticky action
-                    // row off-screen / under the keyboard). The header is PINNED
-                    // above this region (#765) so it never scrolls away.
-                    //
-                    // Issue #801: this region is WEIGHTED in both keyboard states so
-                    // it takes exactly the space left after the pinned header, the
-                    // connection-lost row, and the sticky control row are laid out —
-                    // never a hand-tuned reserve constant (the #790 cap) that could
-                    // undercut the draft's own 96dp min and crush it (the recurring
-                    // squish). `fill = false` keeps the column wrap-content for a
-                    // short/empty draft so the whole sheet sits compactly above the
-                    // keyboard with no reserved dead band (the #790 symptom). As the
-                    // draft lengthens the region grows up to its weighted share of
-                    // the room above the keyboard, then the `verticalScroll` below
-                    // absorbs the overflow so the sticky Send / attach row never
-                    // leaves the area above the keyboard (the #682 long-draft
-                    // invariant). When the keyboard is DOWN the extra
-                    // `heightIn(max = …)` keeps the sheet compact at partial-expand
-                    // (#234); when it is UP the outer
-                    // `heightIn(max = availableAboveKeyboard)` is the only ceiling,
-                    // so the field is bounded to the genuine room above the keyboard.
-                    //
-                    // Issue #873: `fill = false` keeps the column wrap-content, but
-                    // it only ACTUALLY wraps once the draft field stops greedily
-                    // filling its weighted share. That is handled in
-                    // [ComposerDraftField]: keyboard-up the field's `heightIn(min,
-                    // max)` is on the EDITOR (so a one-line draft wraps to ~one line
-                    // and self-scrolls past `max` on a long draft) rather than a
-                    // `fillMaxHeight` box that inflated a short draft to ~155dp — the
-                    // ~1cm dead band the maintainer circled.
-                    .weight(1f, fill = false)
-                    .then(
-                        if (keyboardUp) {
-                            Modifier
+                    // Issue #1619: status content owns a SEPARATE bounded scroll
+                    // ABOVE the editor. It may scroll internally when several
+                    // banners/tiles are present, but it can no longer make the
+                    // 220dp editor a child of a smaller clipping viewport. In the
+                    // measured ~175dp keyboard-up budget, 48dp is enough for the
+                    // standalone two-line Offline banner while still reserving a
+                    // complete editable line plus the sticky controls. Keyboard-
+                    // down keeps a roomier 96dp status history.
+                    .fillMaxWidth()
+                    .heightIn(
+                        max = if (keyboardUp) {
+                            PromptComposerStatusRegionImeMaxHeight
                         } else {
-                            Modifier.heightIn(max = PromptComposerScrollRegionMaxHeight)
+                            PromptComposerStatusRegionMaxHeight
                         },
                     )
+                    .testTag(COMPOSER_STATUS_VIEWPORT_TAG)
                     .verticalScroll(rememberScrollState()),
             ) {
-            // Issue #453: the composer's primary surface is state-driven.
-            //  - Idle / Text-inserted: the editable input (`Compose prompt…`).
-            //  - Recording: an amplitude-driven waveform + mm:ss timer + Stop.
-            //  - Transcribing: a "Transcribing…" spinner row.
-            // The mockup collapses these into one panel whose height adjusts to
-            // the content, so we swap the surface in place rather than stacking
-            // extra rows.
-            when (state.recording) {
-                PromptComposerViewModel.RecordingState.Recording -> {
-                    RecordingSurface(
-                        amplitude = state.amplitude,
-                        capturing = state.hasDetectedSpeech,
-                        elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                        // Issue #870 (reopen): pass the RAW growing partial; the
-                        // dedicated two-line LiveTranscriptTwoLine area resolves
-                        // the visible tail width-aware at render time so the
-                        // newest words always stay visible.
-                        liveTranscript = state.liveTranscript,
-                    )
-                }
-
-                PromptComposerViewModel.RecordingState.Transcribing -> {
-                    TranscribingSurface()
-                }
-
-                PromptComposerViewModel.RecordingState.Idle -> {
-                    // The composer text area. Issue #196: shared with the
-                    // agent-pane composer via [ComposerDraftField] so both
-                    // surfaces have an identical surface-elev fill, accent
-                    // cursor, and muted placeholder. Issue #453: placeholder is
-                    // the mockup's "Compose prompt…". After a dictation lands
-                    // (Auto-send off) the transcript fills this same editable
-                    // field for the user to review before Send.
-                    ComposerDraftField(
-                        value = draftFieldValue,
-                        onValueChange = { newValue ->
-                            // Mirror every edit into the ViewModel so the draft
-                            // (and SavedStateHandle) stay in lockstep with the
-                            // editor, then keep our local TextFieldValue as the
-                            // selection-bearing source of truth.
-                            draftFieldValue = newValue
-                            if (newValue.text != state.draft) {
-                                onDraftChange(newValue.text)
-                            }
-                        },
-                        placeholder = COMPOSER_PLACEHOLDER,
-                        fieldTag = COMPOSER_DRAFT_TAG,
-                        // Issue #873: keyboard-UP the field WRAPS to its text content
-                        // (the `heightIn(min, max)` bound lives on the EDITOR in
-                        // [ComposerDraftField], not on a `fillMaxHeight` box), so a
-                        // SHORT draft is as compact as its content — one line of text
-                        // sits in a ~one-line-tall field, NOT centred in a tall box
-                        // with ~1cm of empty space below it (the dead band the
-                        // maintainer circled). `minHeight = 44.dp` keyboard-up is a
-                        // single comfortable line so the field never reserves a
-                        // multi-line void for a one-line draft; as the user types it
-                        // grows line-by-line up to `maxHeight = 220.dp`, then the
-                        // `BasicTextField` self-scrolls to the caret within that cap
-                        // (the #765 long-draft invariant). Keyboard-DOWN it keeps the
-                        // roomy 96dp min and fills its box (unchanged).
-                        //
-                        // `minHeight = 24.dp` keyboard-up is a single text line; with
-                        // the box's 14dp top + 14dp bottom padding the empty/one-line
-                        // field is ~one line tall — as compact as its content, with
-                        // no reserved multi-line void. The box stays a comfortable
-                        // tap target via that padding.
-                        minHeight = if (keyboardUp) 24.dp else 96.dp,
-                        maxHeight = 220.dp,
-                        focusRequester = draftFocusRequester,
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
             // Optional error / status banner above the mic row. Keeps the
             // user informed about permission / API-key / Whisper failures
             // without a Snackbar (the sheet doesn't host a scaffold).
@@ -1220,20 +1125,12 @@ internal fun SheetContent(
             // reports the SSH/tmux link is degraded/lost, BEFORE the user taps
             // Send, so a send into a dead link is never a silent blind wait.
             //
-            // Issue #1613: this indicator lives INSIDE the scrollable upper region
-            // (BELOW the draft field, which is the first child), NOT in the sticky
-            // bottom chrome. When the maintainer is composing WHILE offline — the
-            // whole point of #1613 — the keyboard is up and there is only ~175dp
-            // above it; a sticky TWO-LINE "Connection lost…" banner + the sticky
-            // control row consumed nearly all of it and CRUSHED the weighted draft
-            // region to a sub-line sliver, so the user "couldn't type anything".
-            // Moving the banner into the scroll region (where the mutually-exclusive
-            // queue banner already lives) keeps the draft field — the top priority —
-            // full-size and reachable; the informational banner scrolls with the
-            // content. The blind-wait protection is preserved: with a short draft the
-            // banner is visible right above the always-sticky Send row, and once the
-            // user taps Send the (also in-scroll) OutboundQueueBanner carries the
-            // ongoing "Will send when reconnected." status.
+            // Issue #1613/#1619: this indicator lives in the independently bounded
+            // status scroll ABOVE the draft, never in sticky bottom chrome and never
+            // below a 220dp editor inside the editor's clipping viewport. This keeps
+            // the warning visible while the weighted field owns the actual remaining
+            // room and native caret-follow. Once Send queues a prompt, the mutually-
+            // exclusive OutboundQueueBanner carries the ongoing status instead.
             //
             // Issue #971/#987 (Option A): once there is a queued outbound prompt
             // waiting, the OutboundQueueBanner already carries the SINGLE coherent
@@ -1246,10 +1143,15 @@ internal fun SheetContent(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 8.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(PocketShellColors.AccentSoft, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .background(
+                            PocketShellColors.Amber.copy(alpha = 0.12f),
+                            RoundedCornerShape(8.dp),
+                        )
+                        // Two explicit 16dp text lines plus 4dp vertical padding
+                        // keep the whole Amber banner inside the calibrated 48dp
+                        // keyboard-up status viewport.
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
                         .testTag(COMPOSER_CONNECTION_LOST_TAG),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1257,17 +1159,63 @@ internal fun SheetContent(
                     Icon(
                         imageVector = Icons.Filled.CloudOff,
                         contentDescription = null,
-                        tint = PocketShellColors.Accent,
+                        tint = PocketShellColors.Amber,
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
-                        text = "Connection lost — Send will retry once reconnected.",
-                        color = PocketShellColors.Accent,
+                        text = "Offline — prompts will be queued and sent on reconnect.",
+                        color = PocketShellColors.Amber,
                         fontSize = 12.sp,
+                        lineHeight = 16.sp,
                     )
                 }
             }
         }
+
+        // Issue #453/#1619: the primary surface is state-driven. Idle makes the
+        // real editor the DIRECT weighted child, so its effective max is the
+        // actual room left between the bounded status region and sticky controls.
+        // That restores BasicTextField's native caret-follow as the only editor
+        // scroll; no outer draft scroll competes with or clips it.
+        when (state.recording) {
+            PromptComposerViewModel.RecordingState.Recording -> {
+                RecordingSurface(
+                    amplitude = state.amplitude,
+                    capturing = state.hasDetectedSpeech,
+                    elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                    liveTranscript = state.liveTranscript,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+
+            PromptComposerViewModel.RecordingState.Transcribing -> {
+                Box(modifier = Modifier.weight(1f, fill = false)) {
+                    TranscribingSurface()
+                }
+            }
+
+            PromptComposerViewModel.RecordingState.Idle -> {
+                ComposerDraftField(
+                    value = draftFieldValue,
+                    onValueChange = { newValue ->
+                        draftFieldValue = newValue
+                        if (newValue.text != state.draft) {
+                            onDraftChange(newValue.text)
+                        }
+                    },
+                    placeholder = COMPOSER_PLACEHOLDER,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .testTag(COMPOSER_DRAFT_VIEWPORT_TAG),
+                    fieldTag = COMPOSER_DRAFT_TAG,
+                    minHeight = if (keyboardUp) 24.dp else 96.dp,
+                    maxHeight = 220.dp,
+                    focusRequester = draftFocusRequester,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(if (keyboardUp) 2.dp else 4.dp))
 
         // Issue #1272: the durable "couldn't deliver — retry" surface. A voice
         // command that was transcribed successfully but never reached a pane
@@ -2088,6 +2036,12 @@ internal const val COMPOSER_SEND_IN_FLIGHT_TAG = "prompt-composer-send-in-flight
  */
 internal const val COMPOSER_CONNECTION_LOST_TAG = "prompt-composer-connection-lost"
 
+/** Issue #1619: bounded viewport that owns the draft's keyboard-up geometry. */
+internal const val COMPOSER_DRAFT_VIEWPORT_TAG = "prompt-composer-draft-viewport"
+
+/** Issue #1619: independently scrollable status region above the draft. */
+internal const val COMPOSER_STATUS_VIEWPORT_TAG = "prompt-composer-status-viewport"
+
 /**
  * Issue #767: test tags for the `/`-autocomplete dropdown. Connected tests
  * assert the dropdown appears when the draft starts with `/`, filters as more
@@ -2138,14 +2092,13 @@ internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recor
  */
 internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
 
-// Issue #682: cap the scrollable upper region (draft + status banners) so the
-// content-height sheet never grows taller than this even with a long draft +
-// several banners. Keeps the composer compact above the keyboard; the inner
-// `verticalScroll` lets a long draft scroll within the cap instead of pushing
-// the sticky action row off-screen. Used ONLY when the keyboard is DOWN; when it
-// is UP the region is `weight(1f)`-sized to the genuine room above the keyboard
-// (no fixed cap — issue #801).
-private val PromptComposerScrollRegionMaxHeight = 360.dp
+// Issue #1619: status banners/tiles scroll independently above the weighted
+// editor. The tight keyboard-up cap was calibrated against the measured 175dp
+// budget: a 48dp two-line Offline banner remains whole while one complete editor
+// line and the sticky controls still fit. Keyboard-down can show two status rows
+// before this region scrolls, without changing the editor's 220dp cap.
+private val PromptComposerStatusRegionImeMaxHeight = 48.dp
+private val PromptComposerStatusRegionMaxHeight = 96.dp
 
 // Issue #767: cap the `/`-autocomplete dropdown so a long catalog scrolls
 // internally instead of squeezing the draft field / pushing the controls under

@@ -73,7 +73,7 @@ class UsageNotificationsTest {
         )
 
         assertEquals("Codex usage: 86% used", event.title)
-        assertEquals("Approaching limit · resets Jun 8, 12:00 · Tap to open Usage.", event.text)
+        assertEquals("Approaching limit · resets Mon Jun 8, 12:00 · Tap to open Usage.", event.text)
         assertFalse(event.title.contains("blocked", ignoreCase = true))
         assertFalse(event.text.contains("blocked", ignoreCase = true))
     }
@@ -235,7 +235,7 @@ class UsageNotificationsTest {
         )
         assertEquals(
             listOf(
-                "agent-box · Approaching limit · resets Jun 8, 15:00 · Tap to open Usage.",
+                "agent-box · Approaching limit · resets Mon Jun 8, 15:00 · Tap to open Usage.",
             ),
             events.map { it.text },
         )
@@ -273,7 +273,7 @@ class UsageNotificationsTest {
         )
         assertTrue(
             "reset line must show an absolute (non-drifting) time: ${event.text}",
-            event.text.contains("resets Jun 8, 12:00"),
+            event.text.contains("resets Mon Jun 8, 12:00"),
         )
     }
 

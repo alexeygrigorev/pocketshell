@@ -198,11 +198,26 @@ class UsageFormatTest {
     @Test
     fun formatResetAbsolute_rendersLocalDateAndTime() {
         // 13:10 UTC is 15:10 in Berlin (CEST, +02:00) — proves zone-aware.
+        // 2026-06-04 is a Thursday (issue #1565: short weekday prefix).
         assertEquals(
-            "Jun 4, 15:10",
+            "Thu Jun 4, 15:10",
             formatResetAbsolute(
                 resetAt = Instant.parse("2026-06-04T13:10:00Z"),
                 zoneId = ZoneId.of("Europe/Berlin"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetAbsolute_includesShortWeekday() {
+        // Issue #1565: reset rows show the day of week at a glance.
+        // 2026-07-15 18:00 UTC → 2026-07-16 03:00 in Tokyo (JST, +09:00),
+        // which is a Thursday. Fixed instant + fixed zone = deterministic.
+        assertEquals(
+            "Thu Jul 16, 03:00",
+            formatResetAbsolute(
+                resetAt = Instant.parse("2026-07-15T18:00:00Z"),
+                zoneId = ZoneId.of("Asia/Tokyo"),
             ),
         )
     }

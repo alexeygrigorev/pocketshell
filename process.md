@@ -365,6 +365,29 @@ Minimum pre-push gate:
   asserted synchronous post-`close()` state that the new async contract broke.
   Reviewer briefs for connection-core contract changes must call out running the
   integration suite.
+- **The gate command is `./gradlew test`, NOT `:app:testDebugUnitTest`. The CI
+  `Unit tests` job runs BOTH variants, and `:app:testReleaseUnitTest` is a
+  required check.** The v0.4.37 #1633 merge went red on `main` at
+  `:app:testReleaseUnitTest` while the orchestrator's integration gate — which
+  ran only `:app:testDebugUnitTest` — was green at 3906/0. The debug variant is
+  not a proxy for the required check. Run the task CI runs.
+- **A single green run is NOT evidence on a nondeterministic suite. For any
+  change that introduces randomness, timing, or jitter, prove determinism with
+  N>=20 consecutive runs of the affected tests and report the pass count.**
+  #1633 added +/-20% ladder jitter; its own module's two exact-delay assertions
+  were legitimately rewritten into bands, but nobody swept for the same breakage
+  OUTSIDE that module, and `TmuxSessionViewModelReconnectTest` (in `:app`) went
+  flaky-by-construction. It then passed once on the PR and has failed since —
+  `git diff` between the green PR head and the red `main` merge is EMPTY. Same
+  tree, different verdict. That green was luck, and luck is not a gate.
+  Corollary: when a change makes randomness/timing observable, the tuning knob
+  must be **injectable/seedable** so tests are deterministic while production
+  keeps real randomness — never widen the assertion into a band that no longer
+  constrains behaviour (G6).
+- **When a change breaks an assertion in its own module, sweep EVERY module for
+  the same class of breakage before review (G2).** Fixing the assertions you
+  happened to trip over, in the file you happened to be editing, is not class
+  coverage — it is the definition of the proxy fix D32 exists to end.
 - **A change to a hygiene-ratcheted file (esp. `TmuxSessionViewModel.kt`) MUST
   run the `Unit` job's file-size / VM-ratchet guards locally before push —
   `scripts/check-file-size-hygiene.sh` and `scripts/check-connection-vm-ratchet.sh`.**

@@ -4,6 +4,7 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
@@ -492,7 +493,18 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
             assertEquals("work", sessionName)
             reconnectClient
         }
-        vm.setAutoReconnectDelaysForTest(listOf(0L, 250L, 250L))
+        // Issue #1633: the controller jitters every NON-ZERO rung by ±RETRY_JITTER_FRACTION,
+        // so a 250ms rung really fires somewhere in [200, 300). Advancing a flat 250ms (as
+        // this test did before #1638 added jitter) is a literal coin flip — it fired the rung
+        // only when the roll happened to land at or below the base, which is why this test
+        // failed ~50% of runs on `main`. Advance past the rung's GUARANTEED upper bound
+        // instead. The assertions below are UNCHANGED and stay exact: each step still demands
+        // EXACTLY one new dial, because the NEXT rung's own backoff is at least
+        // rung*(1-fraction) = 200ms and at most 100ms of it can have elapsed by then, so it
+        // cannot also have fired inside this window.
+        val rungMs = 250L
+        val rungUpperBoundMs = (rungMs * (1.0 + ConnectionController.RETRY_JITTER_FRACTION)).toLong()
+        vm.setAutoReconnectDelaysForTest(listOf(0L, rungMs, rungMs))
         val oldClient = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
@@ -522,7 +534,7 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
         )
         assertEquals(1, TMUX_CONNECT_ATTEMPTS.get())
 
-        advanceTimeBy(250L)
+        advanceTimeBy(rungUpperBoundMs)
         runCurrent()
 
         assertEquals(
@@ -536,7 +548,7 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
         )
         assertEquals(2, TMUX_CONNECT_ATTEMPTS.get())
 
-        advanceTimeBy(250L)
+        advanceTimeBy(rungUpperBoundMs)
         advanceUntilIdle()
 
         assertEquals(

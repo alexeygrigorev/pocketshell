@@ -231,7 +231,16 @@ class ConnectionController(
      * A confined mutator (shares the single-dispatcher contract with [submit]).
      */
     fun setReconnectLadder(delaysMs: List<Long>) = confinement.guarded("setReconnectLadder") {
-        reconnectLadderMs = delaysMs
+        // Issue #1633 (round 2): jitter is rolled EXACTLY ONCE, here, per ladder install —
+        // NOT per [reconnectingAt] state build. `reconnectingAt` is invoked repeatedly for
+        // the SAME attempt (here on re-install, on [ConnectionEvent.Enter] re-entry, and on
+        // the Reattaching/Live re-assert), so rolling inside it re-rolled that one attempt's
+        // backoff on every rebuild: the VM mirrors `retryDelayMs` into the displayed band and
+        // then sleeps on its own read, so the two could disagree, and the reducer's output
+        // stopped being a function of its input sequence. Rolling at install keeps the
+        // reducer deterministic (same inputs + same ladder -> same states) while preserving
+        // the desynchronisation property: every ladder install is a fresh independent roll.
+        reconnectLadderMs = delaysMs.map(::jittered)
         // If a reconnect is already in flight when the ladder is (re)installed — the
         // proactive network-handoff / passive-drop paths enter [ConnectionState.Reconnecting]
         // BEFORE the VM effect installs its `autoReconnectDelaysMs` — re-stamp the current
@@ -248,8 +257,20 @@ class ConnectionController(
         get() = reconnectLadderMs.size.takeIf { it > 0 } ?: maxReconnectAttempts
 
     /**
-     * Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step, then
-     * jittered ±[RETRY_JITTER_FRACTION] (issue #1633, the gRPC model).
+     * Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step. A PURE
+     * lookup into the already-jittered [reconnectLadderMs] (issue #1633 round 2) — the roll
+     * happens once, in [setReconnectLadder], so repeated builds of the same attempt's state
+     * always report the SAME backoff.
+     */
+    private fun retryDelayForAttempt(attempt: Int): Long {
+        if (reconnectLadderMs.isEmpty()) return 0L
+        val index = (attempt - 1).coerceIn(0, reconnectLadderMs.lastIndex)
+        return reconnectLadderMs[index]
+    }
+
+    /**
+     * Apply ±[RETRY_JITTER_FRACTION] jitter to a non-zero backoff (issue #1633, the gRPC
+     * model). Called once per rung per ladder install by [setReconnectLadder].
      *
      * Mobile RAT handovers and NAT/keepalive reapers are PERIODIC, so a bare ladder can
      * resonate with that cadence (and synchronize retries across sessions into a
@@ -258,13 +279,6 @@ class ConnectionController(
      * regression — and a jittered rung never rounds down to 0, so a non-zero rung always
      * actually waits.
      */
-    private fun retryDelayForAttempt(attempt: Int): Long {
-        if (reconnectLadderMs.isEmpty()) return 0L
-        val index = (attempt - 1).coerceIn(0, reconnectLadderMs.lastIndex)
-        return jittered(reconnectLadderMs[index])
-    }
-
-    /** Apply ±[RETRY_JITTER_FRACTION] full jitter to a non-zero backoff (issue #1633). */
     private fun jittered(delayMs: Long): Long {
         if (delayMs <= 0L) return 0L
         val spread = delayMs * RETRY_JITTER_FRACTION

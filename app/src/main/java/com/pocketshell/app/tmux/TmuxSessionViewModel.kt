@@ -3455,15 +3455,10 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val passiveTransportDropEffects: PassiveTransportDropEffects =
         PassiveTransportDropEffects(
-            isSelfInflictedClose = { client ->
-                // Issue #1568 (P0-5): a self-inflicted close (ExplicitDetach/ExplicitClose/
-                // `detach_or_replace`) is not a passive loss and must never re-arm recovery —
-                // ignoring our own ExplicitClose breaks the #1562 dial→close→re-arm→dial storm.
-                val disconnectEvent = client.disconnectEvent.value
-                disconnectEvent?.reason == TmuxDisconnectReason.ExplicitDetach ||
-                    disconnectEvent?.reason == TmuxDisconnectReason.ExplicitClose ||
-                    disconnectEvent?.intent == "detach_or_replace"
-            },
+            // Issue #1632: the self-inflicted predicate is no longer inlined here. It moved
+            // to the single `SelfInflictedClose` authority that ALSO answers for the lease
+            // edge, so recovery's own teardown can never again be self-inflicted on one edge
+            // and a fresh remote failure on the other (the #1610 storm).
             isCurrentClient = { client -> clientRef === client },
             hasTarget = { (activeTarget ?: connectingTarget) != null },
             screenStartedForCleared = { screenStartedForCleared },

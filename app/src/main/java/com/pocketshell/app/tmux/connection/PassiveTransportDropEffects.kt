@@ -132,7 +132,6 @@ fun preferFreshTransportForPassiveReattach(
  * the DECISION; the VM holds the state + the per-arm recovery IO.
  */
 class PassiveTransportDropEffects(
-    private val isSelfInflictedClose: (TmuxClient) -> Boolean,
     private val isCurrentClient: (TmuxClient) -> Boolean,
     private val hasTarget: () -> Boolean,
     private val screenStartedForCleared: () -> Boolean,
@@ -145,7 +144,14 @@ class PassiveTransportDropEffects(
      */
     fun classify(client: TmuxClient): PassiveDropArm =
         selectPassiveDropArm(
-            isSelfInflictedClose = isSelfInflictedClose(client),
+            // Issue #1632: the self-inflicted answer comes from the ONE authority
+            // ([SelfInflictedClose]) that also answers for the lease edge. The
+            // injectable `isSelfInflictedClose` lambda this used to take — the narrow
+            // #1568 `-CC`-only filter, inlined in `TmuxSessionViewModel` — is DELETED
+            // (D22 hard-cut): two independently-maintained filters is precisely how the
+            // lease edge silently never got one and the #1610 storm survived #1568.
+            isSelfInflictedClose =
+                SelfInflictedClose.isSelfInflictedControlChannelClose(client.disconnectEvent.value),
             isCurrentClient = isCurrentClient(client),
             hasTarget = hasTarget(),
             screenStartedForCleared = screenStartedForCleared(),

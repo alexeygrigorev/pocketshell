@@ -63,7 +63,7 @@ class ConnectionPortAdaptersTest {
     fun `lease Closed maps to transport Down carrying the close reason`() {
         val host = hostKeyFor(leaseKey)
         assertEquals(
-            TransportUpDown.Down(host, reason = "Disconnected"),
+            TransportUpDown.Down(host, reason = "Disconnected", locallyInitiated = false),
             leaseStateToTransportEdge(
                 SshLeaseStateEvent(leaseKey, SshLeaseConnectionState.Closed, SshLeaseCloseReason.Disconnected),
             ),
@@ -85,7 +85,7 @@ class ConnectionPortAdaptersTest {
         // a keepalive-driven drop surfaced as the anonymous `Disconnected`. The
         // named token is what makes the cause visible (the #964 ambiguity).
         assertEquals(
-            TransportUpDown.Down(host, reason = "keepalive_dead"),
+            TransportUpDown.Down(host, reason = "keepalive_dead", locallyInitiated = false),
             leaseStateToTransportEdge(
                 SshLeaseStateEvent(
                     leaseKey,

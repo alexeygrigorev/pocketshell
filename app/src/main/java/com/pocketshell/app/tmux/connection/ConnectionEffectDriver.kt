@@ -415,6 +415,48 @@ class ConnectionEffectDriver(
 
                 is TransportUpDown.Down ->
                     if (edge.host == controller.state.value.hostOrNull()) {
+                        // Issue #1632: a SELF-INFLICTED lease teardown is an ECHO of an
+                        // action already in flight — recovery's own
+                        // `sshLeaseManager.disconnect()` (the first act of
+                        // `silentlyReconnectTransportAfterPassiveDisconnect`), a
+                        // force-refresh eviction, an idle reap, a lifecycle teardown. It is
+                        // NOT news of a failure, so submitting it as `TransportDropped`
+                        // re-arms the ladder against ourselves: `Reconnecting 1/4` repaints
+                        // and recovery re-triggers, whose teardown echoes again — the #1610
+                        // storm the maintainer cannot work through on mobile (215
+                        // ExplicitDisconnect/down events vs 26 real ladder rungs ever).
+                        //
+                        // The intent is READ off the edge, never inferred here: the emitter
+                        // ([leaseStateToTransportEdge]) stamped it from the reason the lease
+                        // manager named at its own close site. Checked BEFORE the
+                        // single-grace-owner gate because "we did this on purpose" is a
+                        // stronger statement than "we are backgrounded" — it holds
+                        // regardless of lifecycle.
+                        //
+                        // A GENUINE death (peer gone, keepalive-declared dead) is NOT
+                        // locally initiated and falls straight through to the normal
+                        // submit below, so real failures still drive recovery. That
+                        // negative is load-bearing: over-filtering here would stop the app
+                        // reconnecting at all, which is worse than the storm.
+                        if (edge.locallyInitiated) {
+                            ReconnectCauseTrail.record(
+                                stage = "lease_transport",
+                                outcome = "down_self_inflicted",
+                                cause = edge.reason,
+                            )
+                            onDropSuppressed(
+                                SuppressedDropDiagnostic(
+                                    cause = edge.reason,
+                                    fields = mapOf(
+                                        "transportDropReason" to edge.reason,
+                                        "transportDropSource" to "lease_transport",
+                                        "selfInflicted" to "true",
+                                    ),
+                                ),
+                            )
+                            record(Observation.DropSuppressed)
+                            return@collect
+                        }
                         // Issue #969: stamp the NAMED drop cause into the
                         // exported reconnect trail so the maintainer can see why
                         // the terminal reconnected (e.g. `keepalive_dead`)

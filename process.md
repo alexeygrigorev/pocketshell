@@ -372,16 +372,38 @@ Minimum pre-push gate:
   ran only `:app:testDebugUnitTest` — was green at 3906/0. The debug variant is
   not a proxy for the required check. Run the task CI runs.
 - **A green Gradle run that executed ZERO tests is the most dangerous artifact
-  in this repo. `--rerun-tasks` is mandatory AND you must assert the executed
-  test count > 0 from the result XML, every run.** Gradle skips a *passing* test
-  task as `UP-TO-DATE` on re-run while a *failing* one always re-executes — so a
-  naive "run it N times" loop manufactures exactly the shape "1 fail, then a
-  long green streak", which reads as a flake that healed itself. On 2026-07-16
-  this fooled an on-call ("20/20 in isolation") and the orchestrator into two
-  confidently wrong conclusions about a 50%-red test; the reviewer caught it by
-  noticing `BUILD SUCCESSFUL in 3s` with zero tests executed. A green you did not
-  count is not a green. This is the mechanical sibling of G3 (ban the
+  in this repo. `--rerun-tasks` is mandatory, you must assert the executed test
+  count > 0 from the result XML, AND you must confirm from the Gradle console
+  that the test task carries no `UP-TO-DATE` / `FROM-CACHE` / `NO-SOURCE`
+  suffix — every run.** This is the mechanical sibling of G3 (ban the
   "0 tests completed" vacuous pass) applied to the *gate itself*.
+
+  On 2026-07-16 the same lie wore **four** disguises, each producing a confident
+  green over nothing:
+
+  1. **Wrong task.** The gate ran `:app:testDebugUnitTest` (green, 3906/0); CI's
+     required job runs `test` — *both* variants — and `:app:testReleaseUnitTest`
+     was red. `main` went red.
+  2. **UP-TO-DATE skip.** Gradle skips a *passing* test task on re-run while a
+     *failing* one always re-executes, so a naive "run it N times" loop
+     manufactures exactly "1 fail, then a long green streak" — which reads as a
+     flake that healed itself. An on-call's "20/20 in isolation" was four
+     `BUILD SUCCESSFUL in 3s` runs with zero tests executed; it and the
+     orchestrator both reasoned from it and were both wrong.
+  3. **Killed process.** A `nohup`'d gate was killed by the session harness at
+     `generateDebugResources` and reported **exit 0**. Zero XML files.
+  4. **FROM-CACHE — this one defeats the XML rule itself.** With
+     `org.gradle.caching=true`, a `FROM-CACHE` test task **unpacks the previous
+     run's XML with a FRESH mtime and REAL counts**. Reproduced minimally
+     (#1646): `> Task :test FROM-CACHE`, `BUILD SUCCESSFUL in 10s`, XML mtime
+     *newer* than the run marker, `tests="3"` — **zero tests executed**, and both
+     a count check and an mtime check pass. It is reachable on CI (the cache is
+     restored via `restore-keys`; on a fresh runner `FROM-CACHE` is the only
+     caching mode). **The console scan is the only defense — the XML cannot tell
+     you it is stale.**
+
+  Exit codes, build banners, and even real-looking counts lied in all four.
+  **Trust only: the console line for the task + a count you asserted yourself.**
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
   N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its

@@ -1,5 +1,11 @@
 # Orchestrator handoff — 2026-07-16 (evening)
 
+> **SUPERSEDED by `handoff-2026-07-17.md`. THE HEADLINE BELOW IS FALSE.**
+> This document says the #1610 storm is "fixed and on `main`". It is not.
+> The wave was found incomplete twice after this was written, and its gate is
+> RED. #1653 is approved but must NOT be merged alone (it arms a strand).
+> Do not tag a release from this document. Read `handoff-2026-07-17.md`.
+
 Supersedes `handoff-2026-07-16.md`. Read `process.md` first, then
 `docs/connection-storm-2026-07-16.md` — that is the root-cause record and the
 most important document from this session.

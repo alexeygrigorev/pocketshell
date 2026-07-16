@@ -223,6 +223,16 @@ internal open class FakeTmuxClient(
      */
     var captureCommandDelayMs: Long = 0L
 
+    /**
+     * Issue #1539: per-`list-panes` round-trip delay, the ATTACH/panes-ready sibling of
+     * [captureCommandDelayMs] (which injects RESEED-stage slowness). Lets a test drive a
+     * busy host where the SSH handshake completes fast but the tmux attach's panes-ready
+     * reconcile runs slow — the stage split's whole point is that this must NOT tear down
+     * the already-handshaken transport.
+     */
+    @Volatile
+    var listPanesCommandDelayMs: Long = 0L
+
     val capturePaneTextViaExecCalls: MutableList<String> = mutableListOf()
 
     var suspendForeverOnCapturePaneTextViaExec: Boolean = false
@@ -441,6 +451,9 @@ internal open class FakeTmuxClient(
         }
         if (captureCommandDelayMs > 0L && cmd.startsWith("capture-pane")) {
             delay(captureCommandDelayMs)
+        }
+        if (listPanesCommandDelayMs > 0L && cmd.startsWith("list-panes")) {
+            delay(listPanesCommandDelayMs)
         }
         suspendForeverOnCommandPrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {

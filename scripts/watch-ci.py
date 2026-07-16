@@ -22,22 +22,39 @@ Design goals (see issue #952):
    termination. A re-run that resets jobs under the same run id is NOT mistaken
    for completion — we keep watching.
 
-3. Informative. On a real failure we capture the SIGNATURE ourselves: pull the
-   failed job's failed-step log (`gh run view --job <id> --log-failed`) and grep
-   the first meaningful error line into the `signature` field, and tag known
+3. Informative, and NEVER inventive (issue #1650). On a real failure we capture
+   the SIGNATURE ourselves from output that ACTUALLY EXECUTED, and tag known
    infra signatures with `likely_infra: true` so the on-call can classify
-   flake-vs-real from this output alone.
+   flake-vs-real from this output alone. When we cannot classify confidently we
+   say "unclassified failure" and hand over the raw evidence — a FABRICATED
+   signature is worse than no signature, because it sends the on-call to the
+   wrong issue with false confidence (G5: an infra claim needs a captured
+   signature AND a clean re-run).
+
+4. Honest about non-verdicts (issue #1650). A `cancelled` run is NOT a failure.
+   `main`'s push concurrency group cancels older in-flight runs when newer
+   merges land — routine and BY DESIGN (see process.md). A watcher that cannot
+   reach a verdict reports one of the no-verdict codes below; it never invents
+   one. This matches the workflow's own classifier, which already states a
+   cancelled attempt "is NOT ... a genuine ... regression".
 
 Exit-code contract (also the final JSON's `result`):
 
     0  green       — all REQUIRED checks concluded `success` (or appropriately
                      skipped) and the run is complete.
-    1  failed      — a required check concluded `failure`/`cancelled`/`timed_out`,
-                     or the run was cancelled.
+    1  failed      — a required check GENUINELY failed (`failure`/`timed_out`/
+                     `startup_failure`/`action_required`). A real failure
+                     outranks a later cancel: red CI is never softened.
     2  hang         — no job-state progress for --no-progress-timeout, OR the run
                      exceeded --max-wall-clock. Never wait forever.
     3  unresolved  — the run / inputs couldn't be resolved, or `gh` stayed broken
                      past the retry budget.
+    4  superseded  — the run was cancelled because a NEWER run for the same
+                     workflow+branch replaced it (the `main` concurrency group).
+                     Nothing is broken; re-watch the newest head.
+    5  no_verdict  — the run was cancelled (user/API, or we could not tell why),
+                     so it produced NO trustworthy verdict. Not a pass, not a
+                     failure — unknown. Re-run to get a verdict.
 
 This module is import-safe and dependency-injectable: tests construct a Watcher
 with a fake `gh` runner and a fake clock, so the whole state machine (including
@@ -67,8 +84,17 @@ DEFAULT_REQUIRED_CHECKS = (
 )
 
 DEFAULT_INTERVAL_S = 25.0
-DEFAULT_NO_PROGRESS_TIMEOUT_S = 20 * 60
-DEFAULT_MAX_WALL_CLOCK_S = 60 * 60
+
+# Issue #1650: the no-progress guard must out-last the LONGEST single job, since
+# a healthy job that runs for its whole duration produces NO job-state change.
+# The emulator journey shards are capped at 95 min (`timeout-minutes: 95` in
+# .github/workflows/tests.yml) and routinely run 20-40 min. The old 20-min
+# default meant EVERY `main` emulator watch reported a bogus HANG while the
+# shards were perfectly healthy. Keep this strictly above the job cap, and keep
+# the wall-clock cap above it so the no-progress guard can actually fire.
+EMULATOR_JOB_CAP_S = 95 * 60  # .github/workflows/tests.yml: timeout-minutes: 95
+DEFAULT_NO_PROGRESS_TIMEOUT_S = 100 * 60
+DEFAULT_MAX_WALL_CLOCK_S = 3 * 60 * 60
 GH_RETRY_BUDGET = 3
 GH_RETRY_BACKOFF_S = 3.0
 
@@ -77,18 +103,30 @@ RESULT_GREEN = "green"
 RESULT_FAILED = "failed"
 RESULT_HANG = "hang"
 RESULT_UNRESOLVED = "unresolved"
+RESULT_SUPERSEDED = "superseded"
+RESULT_NO_VERDICT = "no_verdict"
 
 EXIT_CODE = {
     RESULT_GREEN: 0,
     RESULT_FAILED: 1,
     RESULT_HANG: 2,
     RESULT_UNRESOLVED: 3,
+    RESULT_SUPERSEDED: 4,
+    RESULT_NO_VERDICT: 5,
 }
 
-# Terminal (completed) GitHub Actions conclusions that are NOT success.
-FAILING_CONCLUSIONS = frozenset(
-    {"failure", "cancelled", "timed_out", "startup_failure", "action_required"}
+# Terminal (completed) conclusions that mean the job GENUINELY failed.
+#
+# Issue #1650: `cancelled` is deliberately NOT here. A cancel is not a failure —
+# on `main` it is the routine, by-design outcome of the push concurrency group
+# superseding an older in-flight run. Treating it as a failure made every
+# superseded-run watch a guaranteed false FAILED, on the exact path the on-call
+# is told to watch. It is handled separately (superseded vs no_verdict) below.
+GENUINE_FAILING_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "startup_failure", "action_required"}
 )
+
+CANCELLED = "cancelled"
 
 # Ordered (pattern) signatures. The first meaningful error line we grep from a
 # failed job's log.
@@ -154,19 +192,97 @@ class GhError(RuntimeError):
 # ── Pure helpers (the testable core) ─────────────────────────────────────────
 
 
-def extract_signature(log_text: str) -> Optional[str]:
-    """Return the first meaningful error line from a failed-step log, or None.
+# GitHub's "command echo": a `run:` step's own script body is printed back with
+# this ANSI wrapper before/while it executes. Such a line is SOURCE TEXT, not
+# output — an `echo "::error ..."` inside an `if` that never fired still appears
+# here verbatim.
+#
+# Issue #1650: this is THE fabrication vector. The watcher reported
+#   signature: echo "::error title=sdkmanager still broken after repair::...(#771)"
+# for a run that was merely superseded — the loose `(Install|installing).*failed`
+# pattern coincidentally matched "freshly-installed ... still failed to run"
+# inside the ECHOED script text of a conditional that never ran. A grep cannot
+# tell "this error occurred" from "this string exists in the script"; refusing
+# to read command-echo lines is what makes the difference.
+_COMMAND_ECHO_RE = re.compile(r"\x1b\[36;1m")
 
-    Scans top-to-bottom; the first line matching any signature pattern wins.
-    A known infra/flake line (e.g. `Process crashed (signal 9)`) also counts as
-    a signature so the on-call still gets the flake hint even when the log has no
-    conventional `error:`/`FAILED` line. Strips the `gh --log` timestamp/prefix
-    columns (job\\tstep\\tISO-8601 ...) so the returned line is the bare message.
+# Defence in depth for the same vector when the ANSI command-echo marker is not
+# present (e.g. a log source that strips ANSI). A REAL annotation is emitted by
+# the runner as `##[error]...` — it is NEVER the literal text `echo "::error`.
+# So a line that contains an `echo` of an annotation is, unambiguously, a script
+# body being printed rather than an error that occurred.
+_ECHOED_ANNOTATION_RE = re.compile(r"""\becho\b\s*["']?\s*::(error|warning|notice)""")
+
+# Runner-emitted annotations. Unlike an echoed `::error`, an `##[error]` line is
+# written by the runner when something ACTUALLY failed.
+_ANNOTATION_RE = re.compile(r"^##\[error\]\s*(?P<msg>.*)$")
+
+# `##[error]` wrappers that carry no diagnostic value — they say "a step exited
+# non-zero" without saying why. Never worth reporting as THE signature.
+_GENERIC_ANNOTATION_PATTERNS = [
+    re.compile(r"^The process '.*' failed with exit code \d+\.?$"),
+    re.compile(r"^Process completed with exit code \d+\.?$"),
+    re.compile(r"^The operation was canceled\.?$", re.IGNORECASE),
+    re.compile(r"^The job running has exceeded", re.IGNORECASE),
+]
+
+
+def _is_command_echo(line: str) -> bool:
+    """Is this line GitHub echoing a `run:` step's script body (not output)?"""
+    return bool(_COMMAND_ECHO_RE.search(line) or _ECHOED_ANNOTATION_RE.search(line))
+
+
+def _is_generic_annotation(msg: str) -> bool:
+    return any(pat.match(msg) for pat in _GENERIC_ANNOTATION_PATTERNS)
+
+
+def extract_signature(log_text: str, *, annotations_only: bool = False) -> Optional[str]:
+    """Return a signature for a failure from output that ACTUALLY EXECUTED.
+
+    Returns None when nothing can be attributed confidently — the caller then
+    reports an "unclassified failure" and hands over the raw evidence. Guessing
+    is not allowed (issue #1650): a wrong-but-specific signature is worse than
+    none, because the on-call acts on it.
+
+    Order of preference:
+
+    1. A runner-emitted `##[error]` annotation with real diagnostic content.
+       This is the strongest anchor: the runner only writes it when a step
+       actually failed, so it cannot come from unexecuted script text.
+    2. The heuristic error-line patterns, but ONLY over lines that are not
+       GitHub command-echo (script body). Skipped entirely when
+       `annotations_only` is set.
+
+    `annotations_only=True` is used for the whole-run-log fallback: when we
+    could not narrow the log to the FAILED STEP, a loose pattern would happily
+    match a line from an unrelated, perfectly successful step (the real #1650
+    log had `Error: No such command 'tree'.` printed by a step whose JOB was to
+    assert that very mismatch). In that case only a real annotation counts.
+
+    Strips the `gh --log` prefix columns (job\\tstep\\tISO-8601 ...) so the
+    returned line is the bare message.
     """
+    executed: list[str] = []
     for raw in log_text.splitlines():
+        if _is_command_echo(raw):
+            continue  # script text, not output — never evidence of anything
         line = _strip_gh_log_prefix(raw).strip()
-        if not line:
-            continue
+        if line:
+            executed.append(line)
+
+    # 1. A real, runner-emitted annotation wins.
+    for line in executed:
+        m = _ANNOTATION_RE.match(line)
+        if m:
+            msg = m.group("msg").strip()
+            if msg and not _is_generic_annotation(msg):
+                return msg
+
+    if annotations_only:
+        return None
+
+    # 2. Heuristic scan over executed output only.
+    for line in executed:
         for pat in _SIGNATURE_PATTERNS:
             if pat.match(line):
                 return line
@@ -263,6 +379,12 @@ class Classification:
     required: dict[str, RequiredCheck]
     failing_jobs: list[str] = field(default_factory=list)
     reason: str = ""
+    # Issue #1650: set when the run reached NO verdict because it was cancelled.
+    # The Watcher then probes whether a newer run superseded it, and only then
+    # can distinguish RESULT_SUPERSEDED from RESULT_NO_VERDICT. classify_run
+    # stays pure (no `gh` calls), so it reports the honest default —
+    # RESULT_NO_VERDICT — and lets the caller upgrade it.
+    cancelled: bool = False
 
 
 def classify_run(
@@ -282,24 +404,32 @@ def classify_run(
     must surface that gating failure — so if ANY job in the run failed, a skipped
     required check does not let the run be called green; the failing job is
     reported and the result is RESULT_FAILED.
+
+    Cancelled handling (issue #1650): `cancelled` is NOT a failure. A GENUINE
+    failure is always checked FIRST and always wins, so a run that genuinely
+    broke and was cancelled afterwards still reports RESULT_FAILED — the fix for
+    the false-alarm bug must never launder real red CI into "superseded".
+    Absent a genuine failure, a cancelled run yields NO verdict.
     """
     required = resolve_required_checks(jobs, required_names)
 
-    # Any job (required or not) that definitively failed — used both to fail the
+    # Any job (required or not) that GENUINELY failed — used both to fail the
     # run and to explain skipped required checks (gated-behind-a-failed-job).
     failed_jobs = [
         str(j.get("name", ""))
         for j in jobs
         if str(j.get("status", "")) == "completed"
-        and (j.get("conclusion") or "") in FAILING_CONCLUSIONS
+        and (j.get("conclusion") or "") in GENUINE_FAILING_CONCLUSIONS
     ]
 
-    # A required check that itself concluded a failing conclusion is a hard fail
-    # the moment we see it — no need to wait for the whole run.
+    # A required check that itself genuinely failed is a hard fail the moment we
+    # see it — no need to wait for the whole run. Checked BEFORE any cancelled
+    # handling so real failures always take precedence (G6).
     required_failures = [
         rc.name
         for rc in required.values()
-        if rc.status == "completed" and (rc.conclusion or "") in FAILING_CONCLUSIONS
+        if rc.status == "completed"
+        and (rc.conclusion or "") in GENUINE_FAILING_CONCLUSIONS
     ]
     if required_failures:
         return Classification(
@@ -312,17 +442,40 @@ def classify_run(
     run_complete = run_status == "completed"
     if not run_complete:
         # Still running; we only declare a verdict when the run is terminal,
-        # except for the explicit required-failure shortcut above.
+        # except for the explicit required-failure shortcut above. A required
+        # check that is merely `cancelled` deliberately does NOT shortcut here:
+        # we wait for the run so we can tell superseded from user-cancelled.
         return Classification(result=None, required=required, reason="in progress")
 
     # ── Run is complete. ─────────────────────────────────────────────────────
-    if (run_conclusion or "") in FAILING_CONCLUSIONS:
-        # Whole-run conclusion is failing (e.g. cancelled). Name any failed jobs.
+    if (run_conclusion or "") in GENUINE_FAILING_CONCLUSIONS:
+        # Whole-run conclusion is a genuine failure. Name any failed jobs.
         return Classification(
             result=RESULT_FAILED,
             required=required,
             failing_jobs=failed_jobs or [run_conclusion or "run"],
             reason=f"run concluded {run_conclusion}",
+        )
+
+    # No genuine failure anywhere. Was anything cancelled? Then this run reached
+    # no trustworthy verdict — the caller decides superseded vs no_verdict.
+    cancelled_required = [
+        rc.name
+        for rc in required.values()
+        if rc.status == "completed" and (rc.conclusion or "") == CANCELLED
+    ]
+    if (run_conclusion or "") == CANCELLED or cancelled_required:
+        detail = (
+            "required check(s) cancelled: " + ", ".join(cancelled_required)
+            if cancelled_required
+            else f"run concluded {run_conclusion}"
+        )
+        return Classification(
+            result=RESULT_NO_VERDICT,
+            required=required,
+            failing_jobs=[],
+            reason=f"run was cancelled, so it produced no verdict ({detail})",
+            cancelled=True,
         )
 
     # Run reports success. Validate the required checks individually.
@@ -363,7 +516,9 @@ def _required_ok(rc: RequiredCheck, any_job_failed: bool) -> bool:
     - completed/success → ok.
     - completed/skipped → ok ONLY if nothing else in the run failed. A skipped
       check whose gating job failed is NOT ok (surface the gate failure).
-    - completed/<failing> → not ok (handled earlier, defensive here).
+    - completed/<genuinely failing> → not ok (handled earlier, defensive here).
+    - completed/cancelled → not ok, but handled earlier as a no-verdict rather
+      than a failure (issue #1650).
     - missing (no matching job) → ok ONLY if nothing else failed; a missing
       required check on an otherwise-green run usually means a renamed/optional
       job, but on a run with a failed job it likely means it was gated away.
@@ -533,17 +688,33 @@ class Watcher:
         return str(rid) if rid is not None else None
 
     def _poll_run(self, run_id: str) -> dict:
+        # headBranch/workflowName/createdAt feed the #1650 supersede probe.
         return self._gh_json(
-            ["run", "view", run_id, "--json", "status,conclusion,jobs,databaseId"]
+            [
+                "run",
+                "view",
+                run_id,
+                "--json",
+                "status,conclusion,jobs,databaseId,headBranch,workflowName,createdAt",
+            ]
         )
 
     # -- signature capture ------------------------------------------------
 
     def capture_signature(self, jobs: list[dict]) -> Optional[str]:
-        """Pull the first failed job's failed-step log and extract a signature."""
+        """Pull the first GENUINELY-failed job's failed-step log for a signature.
+
+        Only ever called for RESULT_FAILED (issue #1650): a cancelled/superseded
+        run has no failure, so producing a signature for it is pure fabrication.
+
+        Anchors to the FAILED STEP's log (`--log-failed`). If that is
+        unavailable we fall back to the whole job log but demand a real runner
+        annotation (`annotations_only`), because a loose pattern over a full log
+        will match text from unrelated, successful steps.
+        """
         for j in jobs:
             if str(j.get("status", "")) == "completed" and (
-                (j.get("conclusion") or "") in FAILING_CONCLUSIONS
+                (j.get("conclusion") or "") in GENUINE_FAILING_CONCLUSIONS
             ):
                 job_id = j.get("databaseId") or j.get("id")
                 if job_id is None:
@@ -551,14 +722,82 @@ class Watcher:
                 log_text = self._gh_text(
                     ["run", "view", "--job", str(job_id), "--log-failed"]
                 )
-                if not log_text:
-                    # Some runs don't expose --log-failed; fall back to full log.
+                if log_text:
+                    sig = extract_signature(log_text)
+                else:
+                    # Some runs don't expose --log-failed; fall back to the full
+                    # log, but only trust real annotations from it.
                     log_text = self._gh_text(
                         ["run", "view", "--job", str(job_id), "--log"]
                     )
-                sig = extract_signature(log_text)
+                    sig = extract_signature(log_text, annotations_only=True)
                 if sig:
                     return sig
+        return None
+
+    # -- superseded probe (issue #1650) -----------------------------------
+
+    def find_newer_run(self, run: dict) -> Optional[str]:
+        """Return the id of a newer run for the same workflow+branch, or None.
+
+        This is how we tell "superseded by the `main` push concurrency group"
+        (routine, by design) from "somebody cancelled it" — GitHub does not
+        expose the cancel REASON, so we ask the only question that matters: did
+        a newer run replace this one?
+
+        Returns None when we cannot tell (missing branch, `gh` down, no newer
+        run). The caller then reports `no_verdict` rather than guessing.
+        """
+        branch = str(run.get("headBranch") or "")
+        if not branch:
+            return None
+        workflow = str(run.get("workflowName") or "")
+        created_at = str(run.get("createdAt") or "")
+        try:
+            run_id = int(run.get("databaseId") or 0)
+        except (TypeError, ValueError):
+            run_id = 0
+
+        try:
+            runs = self._gh_json(
+                [
+                    "run",
+                    "list",
+                    "--branch",
+                    branch,
+                    "--limit",
+                    "20",
+                    "--json",
+                    "databaseId,workflowName,headBranch,status,createdAt",
+                ]
+            )
+        except GhError as exc:
+            self._heartbeat(f"supersede probe failed: {exc}")
+            return None
+        if not isinstance(runs, list):
+            return None
+
+        for r in runs:
+            if workflow and str(r.get("workflowName") or "") != workflow:
+                continue
+            if str(r.get("headBranch") or "") != branch:
+                continue
+            try:
+                other_id = int(r.get("databaseId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if other_id == run_id:
+                continue
+            other_created = str(r.get("createdAt") or "")
+            # Prefer createdAt (authoritative ordering); fall back to the id,
+            # which is monotonic per repo.
+            newer = (
+                other_created > created_at
+                if (other_created and created_at)
+                else other_id > run_id
+            )
+            if newer:
+                return str(other_id)
         return None
 
     # -- the loop ---------------------------------------------------------
@@ -626,7 +865,7 @@ class Watcher:
                 run_status, run_conclusion, jobs, self.required_checks
             )
             if verdict.result is not None:
-                return self._finalize(verdict, jobs, run_id, start, polls)
+                return self._finalize(verdict, jobs, run_id, start, polls, run=data)
 
             # No-progress timeout (catches queued-forever / no-runner too).
             if now - last_progress_at >= self.no_progress_timeout_s:
@@ -644,20 +883,44 @@ class Watcher:
 
     # -- outcome builders -------------------------------------------------
 
-    def _finalize(self, verdict, jobs, run_id, start, polls) -> WatchOutcome:
+    def _finalize(self, verdict, jobs, run_id, start, polls, run=None) -> WatchOutcome:
+        result = verdict.result
+        reason = verdict.reason
         signature = None
         likely_infra = False
-        if verdict.result == RESULT_FAILED:
+
+        # A signature is ONLY ever captured for a genuine failure. A cancelled /
+        # superseded run has no failure to diagnose, so any signature attached
+        # to it is a fabrication (issue #1650).
+        if result == RESULT_FAILED:
             signature = self.capture_signature(jobs)
             likely_infra = is_likely_infra(signature)
+        elif verdict.cancelled:
+            newer = self.find_newer_run(run or {})
+            if newer:
+                result = RESULT_SUPERSEDED
+                reason = (
+                    "superseded — a newer run for the same workflow+branch "
+                    f"({newer}) replaced this one, so the concurrency group "
+                    "cancelled it. This is routine and by design; nothing is "
+                    f"broken. Re-watch the newest head: --run-id {newer}"
+                )
+            else:
+                reason = (
+                    f"{reason}. No newer run found on the branch, so this was "
+                    "not superseded by the concurrency group (user/API cancel, "
+                    "or the probe could not tell). No verdict is available — "
+                    "re-run to get one. This is NOT a failure."
+                )
+
         return WatchOutcome(
-            result=verdict.result,
-            exit_code=EXIT_CODE[verdict.result],
+            result=result,
+            exit_code=EXIT_CODE[result],
             required=verdict.required,
             failing_jobs=verdict.failing_jobs,
             signature=signature,
             likely_infra=likely_infra,
-            reason=verdict.reason,
+            reason=reason,
             run_id=run_id,
             polls=polls,
             elapsed_s=self._clock() - start,
@@ -724,6 +987,14 @@ def render_human_summary(outcome: WatchOutcome) -> str:
         RESULT_FAILED: "FAILED — a required check failed",
         RESULT_HANG: "HANG — watcher stopped itself (no progress / wall-clock)",
         RESULT_UNRESOLVED: "UNRESOLVED — could not watch the run",
+        RESULT_SUPERSEDED: (
+            "SUPERSEDED — a newer run replaced this one (routine "
+            "concurrency-cancel; NOT a failure). Re-watch the newest head."
+        ),
+        RESULT_NO_VERDICT: (
+            "NO VERDICT — the run was cancelled, so it never reached a verdict "
+            "(NOT a failure, NOT a pass). Re-run to get one."
+        ),
     }[outcome.result]
     lines.append(f"watch-ci: {headline}")
     if outcome.run_id:
@@ -740,6 +1011,19 @@ def render_human_summary(outcome: WatchOutcome) -> str:
     if outcome.signature:
         tag = " [likely infra/flake — re-run]" if outcome.likely_infra else ""
         lines.append(f"  signature: {outcome.signature}{tag}")
+    elif outcome.result == RESULT_FAILED:
+        # Issue #1650: never guess. Say so and hand over the raw evidence — a
+        # fabricated signature sends the on-call to the wrong issue with false
+        # confidence, which is worse than admitting we could not classify it.
+        lines.append(
+            "  signature: none — unclassified failure (could not attribute it to "
+            "executed error output; read the log yourself, do NOT assume infra)"
+        )
+        if outcome.failing_jobs:
+            lines.append(
+                "  evidence:  gh run view --log-failed --job <id>  # "
+                f"job: {outcome.failing_jobs[0]}"
+            )
     return "\n".join(lines)
 
 
@@ -753,7 +1037,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Token-free, hang-proof GitHub Actions run watcher. Runs ONCE, blocks "
             "while the run is in flight (zero LLM tokens while waiting), then prints "
             "a compact summary + a final JSON line. Exit: 0 green / 1 real-fail / "
-            "2 hang / 3 unresolved."
+            "2 hang / 3 unresolved / 4 superseded (a newer run replaced this one — "
+            "routine on main, NOT a failure) / 5 no-verdict (cancelled, so nothing "
+            "was decided)."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

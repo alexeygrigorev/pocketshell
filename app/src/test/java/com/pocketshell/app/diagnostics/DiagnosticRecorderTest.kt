@@ -56,16 +56,24 @@ class DiagnosticRecorderTest {
     }
 
     @Test
-    fun `connectionLogJsonl renders only the reconnect-cause trail as jsonl`() = runTest {
+    fun `connectionLogJsonl renders the reconnect trail and connection lifecycle as jsonl`() = runTest {
         // Issue #972: the payload the host mirror writes to
-        // ~/.pocketshell/connection-log.jsonl. It must carry the reconnect-cause
-        // breadcrumbs (incl. the named keepalive_dead cause) and NOTHING ELSE
-        // (other diagnostics categories are filtered out), one JSON object per line.
+        // ~/.pocketshell/connection-log.jsonl — the reconnect-cause breadcrumbs
+        // (incl. the named keepalive_dead cause), one JSON object per line.
+        //
+        // Issue #1642 slice 1 / #1598 HARD-CUT the old "reconnect/cause_trail and
+        // NOTHING ELSE" contract this test used to assert: the connection
+        // lifecycle now mirrors too, because the #1610 storm's engine
+        // (connection/reconnect_fail) was recorded on-device the whole time and
+        // never reached the host. Chatter categories are still filtered out;
+        // Issue1642ConnectionMirrorTest owns the full selection contract.
         val recorder = DiagnosticRecorder(context, settingsRepository)
         // The reconnect-cause breadcrumbs route through the globally-installed
         // sink (ReconnectCauseTrail.record -> DiagnosticEvents -> this recorder).
         DiagnosticEvents.install(recorder)
-        // Unrelated diagnostics noise that must NOT leak into the connection log.
+        // Device-only chatter that must NOT leak into the connection log.
+        recorder.record("action", "tap_send", mapOf("pane" to "%1"))
+        // The connection lifecycle, mirrored since #1642 slice 1.
         recorder.record("connection", "connect_start", mapOf("host" to "dev"))
         // The reconnect-cause breadcrumbs (what ReconnectCauseTrail records).
         ReconnectCauseTrail.record(stage = "lease_transport", outcome = "down", cause = "keepalive_dead")
@@ -73,13 +81,16 @@ class DiagnosticRecorderTest {
 
         val jsonl = recorder.connectionLogJsonl()
 
-        val lines = jsonl.split("\n").filter { it.isNotBlank() }
-        assertEquals("only the two reconnect-cause events, not the connect_start", 2, lines.size)
-        lines.forEach { line ->
-            val obj = JSONObject(line)
-            assertEquals(ReconnectCauseTrail.CATEGORY, obj.getString("category"))
-            assertEquals(ReconnectCauseTrail.NAME, obj.getString("name"))
-        }
+        val lines = jsonl.split("\n").filter { it.isNotBlank() }.map(::JSONObject)
+        assertEquals(
+            "the connection lifecycle + both reconnect-cause events, not the action chatter",
+            listOf(
+                "connection" to "connect_start",
+                ReconnectCauseTrail.CATEGORY to ReconnectCauseTrail.NAME,
+                ReconnectCauseTrail.CATEGORY to ReconnectCauseTrail.NAME,
+            ),
+            lines.map { it.getString("category") to it.getString("name") },
+        )
         assertTrue(
             "the named keepalive_dead cause must be carried to the host log",
             jsonl.contains("keepalive_dead"),
@@ -87,11 +98,13 @@ class DiagnosticRecorderTest {
     }
 
     @Test
-    fun `connectionLogJsonl is blank when no reconnect cause recorded`() = runTest {
+    fun `connectionLogJsonl is blank when nothing mirrorable was recorded`() = runTest {
         // The mirror treats a blank payload as a no-op (never writes an empty host
-        // file), so a fresh session with no reconnect must produce a blank string.
+        // file), so a session with only device-only chatter produces a blank
+        // string. (Pre-#1642 this fixture recorded a connection/connect_start,
+        // which is now — correctly — mirrored.)
         val recorder = DiagnosticRecorder(context, settingsRepository)
-        recorder.record("connection", "connect_start", mapOf("host" to "dev"))
+        recorder.record("action", "tap_send", mapOf("pane" to "%1"))
 
         assertEquals("", recorder.connectionLogJsonl())
     }

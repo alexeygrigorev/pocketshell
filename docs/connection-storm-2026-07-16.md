@@ -142,3 +142,64 @@ was reading the *data* (forensics) and the *dependency bytecode* (sshj) rather
 than reasoning forward from the existing theory. When an issue in a
 repeatedly-reopened class already contains a diagnosis, re-derive it before
 implementing against it.
+
+## Landed (2026-07-16)
+
+All four slices are on `main`. The wave, in merge order:
+
+| Commit | Slice | What it fixes |
+|---|---|---|
+| `a69a9a8c` | #1633 r2 (#1645) | Jitter rolled once per install, not per rebuild — also fixed a real defect where one attempt re-rolled its own backoff **on the storm path** |
+| `c66b940e` | #1632 (#1643) | Recovery's own teardown no longer echoes back as a passive drop |
+| `ab3e0caf` | #1621 (#1644) | Composer send pipelining (unrelated to the storm) |
+| `fb5746eb` | **#1539 (#1647)** | **Per-stage budgets; the reseed leaves the readiness verdict; never kill a handshaken transport; feed the counter per failed cycle** |
+| `136fe702` | #1642 s1 (#1648) | Mirror `connection/*` to the host, so the log stops hiding what the device already knows |
+
+Plus `0c55af4b` (#1633 r1: stability window, episode semantics, reachable
+give-up, jitter).
+
+**#1610 remains OPEN — deliberately.** Every proof is JVM/virtual-clock.
+#1632's reviewer relocated the on-device symptom-gone bar to a hard condition
+on #1610, because the storm is a joint property of #1539 + #1632 + #1633 and
+no single slice can prove it. Do not close #1610 until the maintainer confirms
+on the real path (D33). This class has been closed four times on exactly that
+kind of premature confidence.
+
+## What today cost, and why
+
+The wave put `main` red once. #1633's jitter broke an exact-delay assertion in
+`:app` that nobody swept for, because the implementer only fixed the two
+assertions in the module it was editing. It then passed CI once and failed
+every run after — `git diff` between the green PR head and the red `main` merge
+is EMPTY. Same tree, different verdict.
+
+Three incidents that day were the same shape — **a confident green over zero
+tests**:
+
+1. **Wrong task.** The integration gate ran `:app:testDebugUnitTest`; CI runs
+   `test` (both variants) and `:app:testReleaseUnitTest` was red.
+2. **UP-TO-DATE skip.** "20/20 in isolation" was four `BUILD SUCCESSFUL in 3s`
+   runs with zero tests executed. Two actors reasoned from it; both were wrong.
+3. **Killed process.** A `nohup`'d gate died at `generateDebugResources` and
+   reported exit 0.
+
+Exit codes and build banners said green in all three. Only the executed test
+count exposed them. Rules recorded in `a8af5d2d` + `8dc16024`; the CI side is
+filed as #1646 (CI structurally cannot show the count on a green run).
+
+## The wider lesson
+
+**Three times in one day the written guidance was wrong, and an agent caught it
+by re-deriving from mechanism:**
+
+- **#1610's own issue body** — the -CC ride-through theory. Implementing it
+  would have taught the app to ride through genuinely dead transports.
+- **#1632's issue text** (orchestrator-authored) — asked for keepalive closes to
+  be filtered. Complying would have disabled the mobile silent-drop detector:
+  the app would never reconnect at all. The implementer refused and the reviewer
+  found for the implementer.
+- **The orchestrator's own process fix** — "prove determinism with N>=20 runs",
+  unsound because Gradle skips passing tasks. Amended within the hour.
+
+An issue body is a hypothesis, not a spec — including one the orchestrator
+wrote. Re-derive before implementing, especially in a repeatedly-reopened class.

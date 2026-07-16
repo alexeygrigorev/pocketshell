@@ -11,7 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -248,7 +248,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .assertTextContains("draft B", substring = true)
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed().assertIsNotEnabled()
+            .assertIsDisplayed().assertIsEnabled()
         compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG, useUnmergedTree = true).assertDoesNotExist()
         compose.waitUntil(5_000) {
             ViewCompat.getRootWindowInsets(compose.activity.window.decorView)

@@ -200,6 +200,15 @@ public class PromptComposerViewModel @Inject constructor(
      */
     internal var composerTarget: String? = null
 
+    internal var outboundHandoffInProgress: Boolean = false
+    internal var outboundHandoffJob: Job? = null
+    internal var outboundHandoffAttachmentJob: Job? = null
+    internal var composerInteractionEpoch: Long = 0L
+    internal val outboundAutoCloseEpochs: MutableMap<String, Long> = mutableMapOf()
+    internal var backgroundDeliveredRequest: SendRequest? = null
+    internal var legacyAutoCloseEpoch: Long? = null
+    internal val composerRevisionTracker = ComposerRevisionTracker()
+
     /**
      * Issue #688: ids of pending-transcription rows with a retry round-trip
      * currently in flight. A row's id is claimed synchronously when
@@ -265,7 +274,7 @@ public class PromptComposerViewModel @Inject constructor(
     private var pendingSendOnTranscribeSuccess: Boolean = false
     private var pendingSendWithEnter: Boolean = false
     private var pendingSendTarget: SendTargetSnapshot = SendTargetSnapshot()
-    private var attachmentJob: Job? = null
+    internal var attachmentJob: Job? = null
     internal var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
         null
     internal var outboundSidecarDispatchInFlight: Boolean = false
@@ -293,8 +302,12 @@ public class PromptComposerViewModel @Inject constructor(
     internal val watchdogs = PromptComposerWatchdogs(
         scope = viewModelScope,
         sendTimeoutMs = OVERALL_SEND_TIMEOUT_MS,
+        handoffTimeoutMs = OVERALL_SEND_TIMEOUT_MS,
         transcribeTimeoutMs = TRANSCRIBE_TIMEOUT_MS,
-        onSendExpired = ::onSendWatchdogExpired,
+        // #1621: the send/handoff expiry effects live in the sibling
+        // PromptComposerWatchdogEffects.kt (D28 / file-size ratchet).
+        onSendExpired = { onSendWatchdogExpired() },
+        onHandoffExpired = { onHandoffWatchdogExpired() },
         onTranscribeExpired = ::onTranscribeWatchdogExpired,
     )
 
@@ -306,7 +319,20 @@ public class PromptComposerViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setSendWatchdogTimeoutForTest(timeoutMs: Long?) {
         watchdogs.setSendTimeoutForTest(timeoutMs)
+        // Keep old timeout tests compatible; the jobs remain separate.
+        watchdogs.setHandoffTimeoutForTest(timeoutMs)
     }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setHandoffWatchdogTimeoutForTest(timeoutMs: Long?) {
+        watchdogs.setHandoffTimeoutForTest(timeoutMs)
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun deliveryWatchdogJobForTest(): Job? = watchdogs.sendJobForTest()
+
+    @androidx.annotation.VisibleForTesting
+    internal fun handoffWatchdogJobForTest(): Job? = watchdogs.handoffJobForTest()
 
     /**
      * Issue #939 test seam. `timeoutMs = null` disables the transcribe watchdog
@@ -448,6 +474,7 @@ public class PromptComposerViewModel @Inject constructor(
      * unaffected.
      */
     public fun onDraftChange(newText: String) {
+        if (newText != _uiState.value.draft) recordComposerMutation()
         // Issue #169 Part 2: mirror the live draft into [SavedStateHandle]
         // so it survives both configuration-change recreate and process
         // death. Configuration-change recreate would already keep the
@@ -668,6 +695,7 @@ public class PromptComposerViewModel @Inject constructor(
         // process-death recreate (the durable draft sidecar bytes above survive the
         // process too; [rehydrateDraftAttachmentBytes] reconnects them on restore).
         composerDraftStore.saveAttachments(target, _uiState.value.attachments.toDurableRefs())
+        recordComposerMutation(target)
         return true
     }
 
@@ -734,6 +762,7 @@ public class PromptComposerViewModel @Inject constructor(
         previews: List<AttachmentPreview>,
         error: String?,
     ) {
+        val before = _uiState.value.attachments
         _uiState.update { current ->
             current.copy(
                 attachments = mergeStagedAttachmentPaths(
@@ -745,6 +774,7 @@ public class PromptComposerViewModel @Inject constructor(
                 error = error,
             )
         }
+        if (_uiState.value.attachments != before) recordComposerMutation()
     }
 
     /**
@@ -779,6 +809,7 @@ public class PromptComposerViewModel @Inject constructor(
             }
         }
         if (seeded) {
+            recordComposerMutation()
             DiagnosticEvents.record(
                 "action",
                 "attachment_seeded_from_share",
@@ -844,6 +875,7 @@ public class PromptComposerViewModel @Inject constructor(
             }
         }
         if (removed) {
+            recordComposerMutation()
             DiagnosticEvents.record(
                 "action",
                 "attachment_remove",
@@ -948,14 +980,14 @@ public class PromptComposerViewModel @Inject constructor(
      * user has nothing to send, which the UI normally already gates via the
      * Send button's `enabled` predicate. Tests can still call this directly;
      * the empty guard means a hostile caller cannot fire a blank send. Also
-     * a no-op when a send is already in flight so a double-tap can't queue a
-     * second request while the first is still resolving.
+     * a no-op while the same composition is still being handed off, so a
+     * double-tap cannot enqueue it twice.
      */
     private fun dispatchSendNow(
         withEnter: Boolean,
         sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
     ) {
-        if (_uiState.value.sendInFlight) return
+        if (outboundHandoffInProgress) return
         // Issue #872 (Part B reopen): a Send while an attachment upload is STILL in
         // flight must NOT cancel-and-drop into a text-only send (the silent
         // attachment loss). WAIT for the upload, then send WITH the staged tiles —
@@ -968,58 +1000,6 @@ public class PromptComposerViewModel @Inject constructor(
         emitSendRequest(withEnter, sendTarget)
     }
 
-    /**
-     * Issue #872: the user tapped Send while an attachment upload was still in
-     * flight. Park the composer in the in-flight state immediately (so the Send
-     * button disables + shows "Sending…" and a double-tap can't queue a second
-     * send), then await the upload before dispatching. On upload success the
-     * freshly-staged tiles are included in the send; on upload failure NO send
-     * goes out — the error banner is left in place and the draft is kept so the
-     * user can re-attach and retry. This is what closes the on-device silent
-     * drop: there is no code path that emits a text-only send while an attachment
-     * was being uploaded.
-     */
-    private fun dispatchSendAfterUpload(
-        withEnter: Boolean,
-        sendTarget: SendTargetSnapshot,
-    ) {
-        DiagnosticEvents.record("action", "composer_send_wait_upload")
-        // Flip into the in-flight state up front so the UI reflects "Sending…"
-        // and the in-flight guard blocks a double-tap while we await the upload.
-        _uiState.update { it.copy(sendInFlight = true, error = null) }
-        // Issue #891: arm the overall-send watchdog from the MOMENT we go
-        // in-flight — this is the with-attachment path the maintainer hit, where
-        // a wedged upload-await could otherwise leave "Sending…" stuck forever.
-        // emitSendRequest re-arms it (idempotent) once the upload resolves.
-        watchdogs.armSend()
-        val job = attachmentJob ?: return emitSendRequest(withEnter, sendTarget)
-        viewModelScope.launch {
-            // Await the upload coroutine itself; `attachFiles` resolves the UI
-            // state (tiles staged on success, error banner on failure) before it
-            // completes, so once `join()` returns the state is settled.
-            job.join()
-            val staged = _uiState.value.attachments
-            if (staged.isEmpty()) {
-                // The upload failed (or staged nothing) — `attachFiles` has
-                // already set the error banner / reset the progress. Do NOT fire a
-                // text-only send that would silently drop the attachment the user
-                // staged. Leave the draft + error so they can re-attach and retry.
-                DiagnosticEvents.record("action", "composer_send_wait_upload_no_attachment")
-                // Issue #891: the send resolved (to "no send") — disarm the
-                // overall-send watchdog so it cannot later fire a spurious
-                // "Send failed" on an already-settled composer.
-                watchdogs.disarmSend()
-                _uiState.update { it.copy(sendInFlight = false) }
-                return@launch
-            }
-            // The upload completed and the tiles are staged — clear the in-flight
-            // flag so `emitSendRequest` can re-set it on the real dispatch (its
-            // own #745 in-flight contract), then dispatch WITH the attachment.
-            _uiState.update { it.copy(sendInFlight = false) }
-            emitSendRequest(withEnter, sendTarget)
-        }
-    }
-
     /** Finalize delivery without touching post-handoff editor input (#1616). */
     public fun markSendDelivered(request: SendRequest? = null) {
         // Issue #891: the send resolved successfully — disarm the overall-send
@@ -1027,17 +1007,42 @@ public class PromptComposerViewModel @Inject constructor(
         watchdogs.disarmSend()
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot restore a stale prompt.
+        val closeEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::get)
+        backgroundDeliveredRequest = request?.takeIf {
+            it.outboundQueueItemId != null && closeEpoch != composerInteractionEpoch
+        }
         inFlightSendRequest = null
-        markOutboundSendDelivered(request)
         _uiState.update { it.copy(sendInFlight = false) }
+        markOutboundSendDelivered(request)
+        // Issue #1621: delivery ownership is already released and the completed
+        // row has been pruned. Claim the next FIFO row immediately; relying only
+        // on an outer screen's queue observer leaves an enqueue-behind row stuck
+        // when the composer is mounted in another host/lifecycle boundary.
+        if (!outboundHandoffInProgress) retryNextOutboundItem()
     }
 
-    /** A delivery may auto-close only when no new composition is active. */
-    public fun isQuiescentForAutoClose(): Boolean {
+    /**
+     * A delivery may auto-close only when no new composition is active.
+     *
+     * CONSUMING, not a pure query (issue #1621, round-three review follow-up: the
+     * old name `isQuiescentForAutoClose` promised purity it never had). Answering
+     * CONSUMES [request]'s auto-close epoch — the one-shot token proving this
+     * delivery, and not a newer composition, owns the current interaction — so a
+     * second call for the same request answers differently by design. Call it
+     * exactly ONCE per resolved delivery, right after [markSendDelivered].
+     */
+    public fun consumeQuiescenceForAutoClose(request: SendRequest? = null): Boolean {
         val state = _uiState.value
-        return state.draft.isEmpty() &&
+        val requestEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
+            ?: legacyAutoCloseEpoch.also { legacyAutoCloseEpoch = null }
+        val ownsCurrentInteraction = request == null || requestEpoch == composerInteractionEpoch
+        return ownsCurrentInteraction && state.draft.isEmpty() &&
             state.attachments.isEmpty() &&
-            state.recording == RecordingState.Idle
+            state.recording == RecordingState.Idle &&
+            !state.outboundHandoffInProgress &&
+            composerTarget?.let { target ->
+                outboundQueueStore.itemsFor(target).none { it.state != OutboundState.Delivered }
+            } != false
     }
 
     /**
@@ -1085,15 +1090,21 @@ public class PromptComposerViewModel @Inject constructor(
         }
         val restoredAttachments = request.attachments
         val restoreTarget = request.sendTarget.sessionKey.takeIf { it.isNotBlank() } ?: composerTarget
+        val hasLaterQueuedComposition = restoreTarget != null &&
+            outboundQueueStore.itemsFor(restoreTarget).any {
+                it.id != request.outboundQueueItemId && it.state != OutboundState.Delivered
+            }
         val competingDraft = if (restoreTarget != null && restoreTarget != composerTarget) {
             loadComposerDraft(restoreTarget).orEmpty().isNotEmpty() ||
-                composerDraftStore.loadAttachments(restoreTarget).isNotEmpty()
+                composerDraftStore.loadAttachments(restoreTarget).isNotEmpty() ||
+                hasLaterQueuedComposition
         } else {
             val live = _uiState.value
             val hasLiveContent = live.draft.isNotEmpty() || live.attachments.isNotEmpty()
             val liveIsOriginalPreHandoffContent =
                 live.draft == restoredDraft && live.attachments == restoredAttachments
-            hasLiveContent && (promptWasHandedOff || !liveIsOriginalPreHandoffContent)
+            (hasLiveContent && (promptWasHandedOff || !liveIsOriginalPreHandoffContent)) ||
+                hasLaterQueuedComposition
         }
         if (competingDraft) {
             markOutboundSendFailed(request, message, keepRow = true)
@@ -1181,6 +1192,7 @@ public class PromptComposerViewModel @Inject constructor(
         // later watchdog/strand cannot act on it again.
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
+        id?.let(outboundAutoCloseEpochs::remove)
         val requeued = id?.let { outboundQueueStore.requeueForRetry(it) }
             ?: request.sendTarget.sessionKey.takeIf { it.isNotBlank() }?.let { sessionKey ->
                 outboundQueueStore.itemsFor(sessionKey).deferredRetryCandidateFor(request)
@@ -1303,48 +1315,6 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #891: the overall-send watchdog fired — the send has been in-flight
-     * past [OVERALL_SEND_TIMEOUT_MS] without resolving. This is the wedged-send
-     * escape: route to the retryable failed-send state, preserving the CURRENT
-     * draft + staged attachments so Retry re-sends without losing the message.
-     * A no-op if the composer already left the in-flight state (a benign race
-     * where the resolution callback won but the watchdog cancel had not yet
-     * been observed).
-     */
-    private fun onSendWatchdogExpired() {
-        if (!_uiState.value.sendInFlight) return
-        // Issue #971: the editable composer is cleared on handoff, so prefer the
-        // captured in-flight request to restore the EXACT prompt + tiles. Fall
-        // back to the live state only for the upload-await wedge, where the send
-        // went in-flight before the request was built and the draft is still on
-        // screen.
-        val request = inFlightSendRequest ?: run {
-            val state = _uiState.value
-            val composed = appendAttachmentPaths(state.draft, state.attachments.map { it.remotePath })
-            SendRequest(
-                text = composed,
-                withEnter = false,
-                cleanDraft = state.draft,
-                attachments = state.attachments,
-            )
-        }
-        DiagnosticEvents.record(
-            "action",
-            "composer_send_watchdog_timeout",
-            "attachmentCount" to request.attachments.size,
-        )
-        // Issue #971/#987: a wedged send is a connection problem, not a permanent
-        // rejection — defer it to the queue so it auto-retries on reconnect
-        // (Option A). When the request owns a durable queue row this keeps it
-        // queued + clears the composer; the upload-await wedge (no row) falls
-        // back to the composer-restore path inside markOutboundSendDeferred with
-        // the watchdog-specific copy so the typed prompt is not lost and the user
-        // sees that the send timed out.
-        requeueStaleOutboundInFlight(staleAfterMs = 0L)
-        markOutboundSendDeferred(request, noRowFallbackMessage = SEND_TIMEOUT_MESSAGE)
-    }
-
-    /**
      * Issue #746: explicitly throw the current draft away. Wired to the
      * Discard action the "Not sent" banner instructs the user to use — and
      * the only control that actually clears a stale unsent prompt
@@ -1373,6 +1343,7 @@ public class PromptComposerViewModel @Inject constructor(
         // otherwise the next switch back would reload what the user just
         // discarded.
         composerTarget?.let {
+            recordComposerMutation(it)
             clearComposerDraft(it)
             composerDraftStore.clearAttachments(it)
             // Issue #1569 (U1): discard also drops the retained-on-failure durable
@@ -1420,6 +1391,15 @@ public class PromptComposerViewModel @Inject constructor(
         composerTarget = targetKey
         refreshOutboundQueueItems()
         if (targetKey == null || targetKey == previousTarget) return
+        // Issue #1621 (round-three review follow-up): drop auto-close epochs whose
+        // durable row no longer exists. Entries are normally consumed by
+        // [consumeQuiescenceForAutoClose] / [markOutboundSendDeferred], but a row
+        // resolved through another path (discard, permanent-failure removal, a
+        // delivery whose host never called back) leaves its epoch behind. Sweeping
+        // on TARGET CHANGE keeps the map bounded by the live queue without ever
+        // racing a just-resolved delivery's own consume, which happens inline in the
+        // send dispatcher long before any switch.
+        outboundAutoCloseEpochs.keys.retainAll { outboundQueueStore.item(it) != null }
         val draftOwner = savedStateHandle.get<String>(KEY_DRAFT_OWNER)
         val hasDraft = _uiState.value.draft.isNotEmpty() ||
             _uiState.value.attachments.isNotEmpty()
@@ -1513,17 +1493,12 @@ public class PromptComposerViewModel @Inject constructor(
      * queue id or reading the current composer draft. The row owns the original
      * payload and tap-time route; the active send dispatcher still owns
      * actual delivery and calls [markSendDelivered] / [restoreFailedSend].
+     *
+     * The eligibility/ownership rules live in `PromptComposerRetryGate.kt`
+     * ([retryOutboundItemThroughGate]) — see [activeSendIsWedged] for why a Retry
+     * may not disturb a healthy in-flight send (issue #1621).
      */
-    public fun retryOutboundItem(id: String) {
-        // Issue #1602: an explicit Retry must re-drive THIS row. A CLOGGED pipeline
-        // (wedged in-flight send holding `sendInFlight`) makes a plain dispatch a
-        // SILENT NO-OP, so break the strand first — the watchdog recovery that DEFERS
-        // the wedged row (exactly-once via #1526/#1541). NOT the sidecar latch (#928).
-        if (_uiState.value.sendInFlight) {
-            clearStrandedSendInFlight()
-        }
-        dispatchOutboundItem(id)
-    }
+    public fun retryOutboundItem(id: String): Unit = retryOutboundItemThroughGate(id)
 
     /**
      * Issue #900: foreground/reconnect queue flush. Claim one retryable row for
@@ -1534,6 +1509,8 @@ public class PromptComposerViewModel @Inject constructor(
      */
     public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
         if (_uiState.value.sendInFlight) return null
+        // Do not race delivery/pruning past #961 coalescing.
+        if (outboundHandoffInProgress) return null
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
         // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
         // drain skips it and the healthy tail drains; per-row Retry re-drives it.
@@ -1603,7 +1580,7 @@ public class PromptComposerViewModel @Inject constructor(
         return requeued
     }
 
-    private fun dispatchOutboundItem(id: String): Boolean {
+    internal fun dispatchOutboundItem(id: String): Boolean {
         if (_uiState.value.sendInFlight) return false
         if (outboundSidecarDispatchInFlight) return false
         val sidecarStore = outboundAttachmentSidecarStore
@@ -1867,6 +1844,9 @@ public class PromptComposerViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal var sidecarRemovalForTest: (suspend (String) -> Unit)? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal var outboundHandoffCommitForTest: (suspend (OutboundItem) -> Unit)? = null
 
     /**
      * Issue #1540 (L9) synthetic process-death seam (#780 model). When non-null,
@@ -3148,6 +3128,8 @@ public class PromptComposerViewModel @Inject constructor(
          * inert tap on a degraded connection.
          */
         val sendInFlight: Boolean = false,
+        /** True only while the current composition is being durably committed. */
+        val outboundHandoffInProgress: Boolean = false,
         /**
          * Issue #745: true when the host screen has reported the live SSH/tmux
          * connection is degraded/lost. The composer surfaces a connection-lost

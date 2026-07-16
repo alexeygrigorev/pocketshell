@@ -204,6 +204,23 @@ class PromptComposerOutboundQueueClogTest {
         assertTrue("the wedged head holds the sendInFlight gate", vm.uiState.value.sendInFlight)
         val sentBefore = sent.size
 
+        // Issue #1621: MODEL THE WEDGE. "Clogged" is not "a send is in flight" — it
+        // is "a send has been in flight, un-acked, past its window". PR-4 makes
+        // `[InFlight head, Queued tail]` a NORMAL healthy state (the user typed a
+        // second prompt while the first is still delivering), so the strand-breaking
+        // recovery below is now reserved for a genuinely WEDGED head — otherwise a
+        // Retry meant for the tail would tear down a live delivery and let the tail
+        // overtake it (FIFO + the #1526 duplicate class; see
+        // PromptComposerSendPipeliningTest.bannerRetryWhileHealthyAOwnsWire...).
+        // The head's claim stamped `lastAttemptAtMs` at real now; age the VM's clock
+        // past the stale window ([OUTBOUND_IN_FLIGHT_STALE_MS], the SAME rule the
+        // #900/#1542 orphan sweep uses) so the head reads as wedged, which is what
+        // the user actually sees before they tap Retry in the #1602 scenario.
+        val wedgedAtMs = System.currentTimeMillis() +
+            PromptComposerViewModel.OUTBOUND_IN_FLIGHT_STALE_MS + 1L
+        vm.clock = { wedgedAtMs }
+        assertTrue("the head must now read as WEDGED, not merely in flight", vm.activeSendIsWedged())
+
         // User taps Retry on the tail while the queue is clogged.
         vm.retryOutboundItem(tail.id)
         settleUntil { sent.size > sentBefore && sent.any { it.outboundQueueItemId == tail.id } }
@@ -220,6 +237,117 @@ class PromptComposerOutboundQueueClogTest {
         // The claim (row transitioned to InFlight) is the authoritative "delivery
         // attempt dispatched" signal.
         assertEquals(OutboundState.InFlight, requireNotNull(queue.item(tail.id)).state)
+    }
+
+    /**
+     * Issue #1621 class coverage (G2) for the wedge discriminator's OTHER genuine
+     * clog shape: the PURE STRAND — `sendInFlight` held with NO `InFlight`/
+     * `Uploading` row behind it. This is what a #929 non-delivering exit, a
+     * process-death restore, or the #1531/#1542 stale sweep (which re-arms the row
+     * to `Queued` but does not clear the VM gate) leaves behind. Nothing will ever
+     * resolve that gate, so the auto-flush drain is dead (`retryNextOutboundItem`
+     * returns null on `sendInFlight`) and the manual Retry is the ONLY recovery —
+     * it must still break the strand, with no clock-ageing needed.
+     */
+    @Test
+    fun manualRetryReDrivesAStrandedGateWithNoActiveRow() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(outboundQueueStore = queue)
+        val sent = collectSendRequests(vm)
+        val session = "1/session-a"
+        vm.onComposerTargetChanged(session)
+
+        val head = queue.enqueue(sessionKey = session, cleanText = "HEAD wedged", createdAtMs = 1)
+        val tail = queue.enqueue(sessionKey = session, cleanText = "TAIL to retry", createdAtMs = 2)
+        vm.refreshOutboundQueueItemsFor(session)
+        assertEquals(head.id, vm.retryNextOutboundItem())
+        advanceUntilIdle()
+
+        // The orphan sweep re-arms the abandoned InFlight row back to Queued but does
+        // NOT clear the VM's delivery gate — the strand. Model it exactly.
+        assertEquals(1, vm.requeueStaleOutboundInFlight(staleAfterMs = 0L).size)
+        advanceUntilIdle()
+        assertTrue("precondition: the gate is still held", vm.uiState.value.sendInFlight)
+        assertTrue(
+            "precondition: no row is InFlight/Uploading behind the held gate",
+            queue.itemsFor(session).none {
+                it.state == OutboundState.InFlight || it.state == OutboundState.Uploading
+            },
+        )
+        assertTrue(
+            "a gate held with nothing behind it is a STRAND — nothing can ever resolve it",
+            vm.activeSendIsWedged(),
+        )
+        assertEquals(
+            "the auto-flush drain is dead while the gate is stranded — Retry is the only recovery",
+            null,
+            vm.retryNextOutboundItem(),
+        )
+        val sentBefore = sent.size
+
+        vm.retryOutboundItem(tail.id)
+        settleUntil { sent.any { it.outboundQueueItemId == tail.id } }
+
+        assertTrue(
+            "a manual Retry must break a pure strand and produce a real delivery attempt (#1602)",
+            sent.size > sentBefore,
+        )
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(tail.id)).state)
+    }
+
+    /**
+     * Issue #1621, the load-bearing NEGATIVE of [manualRetryReDrivesCloggedQueueInsteadOfSilentNoOp]
+     * (G6): the same tap, the same `[InFlight head, Queued tail]` shape, but with a
+     * HEALTHY (freshly-claimed) head must NOT strand-break. This is the pair that
+     * pins the narrowed #1602 recovery: wedged ⇒ recover, healthy ⇒ hands off.
+     */
+    @Test
+    fun manualRetryLeavesAFreshHealthyInFlightHeadAlone() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(outboundQueueStore = queue)
+        val sent = collectSendRequests(vm)
+        val session = "1/session-a"
+        vm.onComposerTargetChanged(session)
+
+        val head = queue.enqueue(sessionKey = session, cleanText = "HEAD healthy", createdAtMs = 1)
+        val tail = queue.enqueue(sessionKey = session, cleanText = "TAIL queued", createdAtMs = 2)
+        vm.refreshOutboundQueueItemsFor(session)
+        assertEquals(head.id, vm.retryNextOutboundItem())
+        advanceUntilIdle()
+        val headRequest = requireNotNull(vm.inFlightSendRequest)
+        val sentBefore = sent.size
+
+        assertTrue(
+            "a freshly-claimed head is HEALTHY, not a clog",
+            !vm.activeSendIsWedged(),
+        )
+        vm.retryOutboundItem(tail.id)
+        advanceUntilIdle()
+
+        assertEquals(
+            "the healthy head must keep delivery ownership",
+            headRequest.outboundQueueItemId,
+            vm.inFlightSendRequest?.outboundQueueItemId,
+        )
+        assertEquals(
+            "the head must stay InFlight — not deferred back to Queued by a tap on the tail",
+            OutboundState.InFlight,
+            requireNotNull(queue.item(head.id)).state,
+        )
+        assertEquals(
+            "the tail must NOT overtake the healthy head on the wire",
+            sentBefore,
+            sent.size,
+        )
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(tail.id)).state)
+
+        // Once the head resolves, the tail drains — FIFO, exactly once each.
+        vm.markSendDelivered(headRequest)
+        settleUntil { sent.any { it.outboundQueueItemId == tail.id } }
+        assertEquals(
+            listOf("HEAD healthy", "TAIL queued"),
+            sent.map { it.cleanDraft },
+        )
     }
 
     @Test
@@ -241,9 +369,14 @@ class PromptComposerOutboundQueueClogTest {
         val deliveredHealthy = mutableListOf<String>()
         repeat(80) {
             if (deliveredHealthy.size == 2) return@repeat
-            val id = vm.retryNextOutboundItem() ?: return@repeat
+            val alreadyClaimed = vm.inFlightSendRequest
+            val id = alreadyClaimed?.outboundQueueItemId ?: vm.retryNextOutboundItem()
+            if (id == null) {
+                advanceUntilIdle()
+                return@repeat
+            }
             advanceUntilIdle()
-            val req = vm.inFlightSendRequest ?: return@repeat
+            val req = vm.inFlightSendRequest ?: alreadyClaimed ?: return@repeat
             if (id == head.id) {
                 vm.markOutboundSendDeferred(req)
                 advanceUntilIdle()

@@ -338,6 +338,10 @@ public fun PromptComposerSheet(
         viewModel.onComposerTargetChanged(composerTargetKey)
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.onComposerOpened()
+    }
+
     // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
     // sheet WITH recording already started — one gesture, not "open then tap the
     // mic". [autoStartRecording] carries that intent from the launcher; a
@@ -777,21 +781,22 @@ internal fun SheetContent(
     //
     //  1. Flush the live editor text (composing region included) into the
     //     ViewModel draft so the send always carries the visible text (#491).
-    //  2. Clear focus + hide the IME SYNCHRONOUSLY, BEFORE dispatching. The
-    //     dispatch (`onSend`) runs through the ViewModel -> `sendRequests` ->
-    //     host `onDismiss`, which tears this sheet (and its dialog window) out
-    //     of composition. If we hid the keyboard in a launched coroutine
-    //     (the old #491 behaviour), that coroutine could run AFTER the sheet's
-    //     `keyboardController` had already been disposed, so `hide()` no-op'd
-    //     and the keyboard stayed/bounced up. Clearing focus first means no
-    //     focused editor remains to re-request the IME on the way out; hiding
-    //     synchronously means it actually fires while the controller is alive.
+    //  2. For an ordinary send, clear focus + hide the IME synchronously before
+    //     dispatching so teardown cannot dispose the keyboard controller first.
+    //     When enqueueing behind an active row, keep both: the sheet remains a
+    //     live composer for the next prompt (#1621).
     //  3. Dispatch the send last.
     val focusManager = LocalFocusManager.current
     val commitAndSend: () -> Unit = {
         onDraftChange(draftFieldValue.text)
-        focusManager.clearFocus(force = true)
-        keyboardController?.hide()
+        // Issue #1621: enqueue-behind is still a composing workflow. Keep the
+        // editor focused and the IME open while an older row owns delivery so
+        // the user can continue with prompt C immediately. Preserve the
+        // ordinary quiescent-send dismissal behaviour.
+        if (!state.sendInFlight) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
         onSend(true)
     }
     val isResendMode = isComposerResendMode(
@@ -1293,11 +1298,11 @@ internal fun SheetContent(
                     // attachments), not the possibly-stale ViewModel draft, and
                     // disable while a send is in flight (#745). [commitAndSend]
                     // flushes the live text before dispatching so the tap delivers.
-                    val sendEnabled =
-                        (draftFieldValue.text.isNotEmpty() ||
-                            state.attachments.isNotEmpty() ||
-                            retryableOutboundItem != null) &&
-                            !state.sendInFlight
+                    val hasComposition = draftFieldValue.text.isNotEmpty() ||
+                        state.attachments.isNotEmpty()
+                    val sendEnabled = !state.outboundHandoffInProgress &&
+                        (hasComposition ||
+                            (retryableOutboundItem != null && !state.sendInFlight))
                     SendButton(
                         onClick = commitSendOrRetryQueued,
                         enabled = sendEnabled,
@@ -1392,7 +1397,7 @@ public fun PromptComposerSendDispatcher(
                 // Finalize the queue row without touching post-handoff input.
                 viewModel.markSendDelivered(request)
                 // A background finalize must not dismiss active composition.
-                if (viewModel.isQuiescentForAutoClose()) {
+                if (viewModel.consumeQuiescenceForAutoClose(request)) {
                     currentOnDelivered()
                 }
             } else {

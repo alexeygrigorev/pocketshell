@@ -44,7 +44,7 @@ import org.robolectric.annotation.Config
  * user's NEW post-handoff typing — nothing a finalize path clears can ever be
  * the delivered prompt. The fix: a finalize is a BACKGROUND event and must be
  * INVISIBLE to the editor. The sheet may only close as a direct result of a
- * USER action ([PromptComposerViewModel.isQuiescentForAutoClose] gates the
+ * USER action ([PromptComposerViewModel.consumeQuiescenceForAutoClose] gates the
  * dispatcher).
  *
  * These are the reproduce-first (D33/G10) RED→GREEN + class-coverage (G2) tests:
@@ -164,7 +164,7 @@ class PromptComposerDraftLossOnFinalizeTest {
         assertEquals("I can still report", vm.uiState.value.draft)
         assertEquals("I can still report", savedState.get<String>(PromptComposerViewModel.KEY_DRAFT))
         assertEquals("I can still report", store.load("1/session-a"))
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
         assertFalse(vm.uiState.value.sendInFlight)
     }
 
@@ -197,7 +197,7 @@ class PromptComposerDraftLossOnFinalizeTest {
             "~/.pocketshell/attachments/host-1/new-shot.png",
             vm.uiState.value.attachments.single().remotePath,
         )
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 
     @Test
@@ -305,7 +305,7 @@ class PromptComposerDraftLossOnFinalizeTest {
 
         vm.markSendDelivered(sent.single())
 
-        assertTrue(vm.isQuiescentForAutoClose())
+        assertTrue(vm.consumeQuiescenceForAutoClose())
         assertEquals("", vm.uiState.value.draft)
     }
 
@@ -339,7 +339,7 @@ class PromptComposerDraftLossOnFinalizeTest {
         assertEquals("typing while it retries", store.load("1/session-a"))
         assertEquals(1, vm.outboundQueueItems.value.size)
         assertEquals(OutboundState.Queued, vm.outboundQueueItems.value.single().state)
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 
     @Test
@@ -367,7 +367,7 @@ class PromptComposerDraftLossOnFinalizeTest {
             vm.uiState.value.attachments.single().remotePath,
         )
         assertEquals(OutboundState.Queued, vm.outboundQueueItems.value.single().state)
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 
     @Test
@@ -488,7 +488,7 @@ class PromptComposerDraftLossOnFinalizeTest {
         assertEquals(1, vm.outboundQueueItems.value.size)
         assertEquals(OutboundState.Failed, vm.outboundQueueItems.value.single().state)
         assertEquals("retry me", vm.outboundQueueItems.value.single().cleanText)
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
         assertFalse(vm.uiState.value.sendInFlight)
     }
 
@@ -552,7 +552,7 @@ class PromptComposerDraftLossOnFinalizeTest {
         )
         assertEquals(1, vm.outboundQueueItems.value.size)
         assertEquals(OutboundState.Failed, vm.outboundQueueItems.value.single().state)
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 
     @Test
@@ -677,7 +677,7 @@ class PromptComposerDraftLossOnFinalizeTest {
     }
 
     // ----------------------------------------------------------------------
-    // isQuiescentForAutoClose — the predictability-contract truth table.
+    // consumeQuiescenceForAutoClose — the predictability-contract truth table.
     // ----------------------------------------------------------------------
 
     @Test
@@ -686,13 +686,13 @@ class PromptComposerDraftLossOnFinalizeTest {
         vm.onComposerTargetChanged("1/session-a")
 
         // Empty draft, no attachments, Idle → quiescent (safe to auto-close).
-        assertTrue(vm.isQuiescentForAutoClose())
+        assertTrue(vm.consumeQuiescenceForAutoClose())
 
         // Non-empty draft → NOT quiescent.
         vm.onDraftChange("typing")
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
         vm.onDraftChange("")
-        assertTrue(vm.isQuiescentForAutoClose())
+        assertTrue(vm.consumeQuiescenceForAutoClose())
 
         // A staged attachment → NOT quiescent.
         vm.attachFiles(count = 1) {
@@ -700,20 +700,20 @@ class PromptComposerDraftLossOnFinalizeTest {
         }
         advanceUntilIdle()
         assertTrue(vm.uiState.value.attachments.isNotEmpty())
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 
     @Test
     fun quiescentGuardIsFalseWhileRecording() = runTest {
         val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
         vm.onComposerTargetChanged("1/session-a")
-        assertTrue(vm.isQuiescentForAutoClose())
+        assertTrue(vm.consumeQuiescenceForAutoClose())
 
         // Enter the Recording state — the user is actively dictating a new
         // prompt; a background finalize must NOT close the sheet over them.
         vm.onMicTap()
         runCurrent()
         assertEquals(PromptComposerViewModel.RecordingState.Recording, vm.uiState.value.recording)
-        assertFalse(vm.isQuiescentForAutoClose())
+        assertFalse(vm.consumeQuiescenceForAutoClose())
     }
 }

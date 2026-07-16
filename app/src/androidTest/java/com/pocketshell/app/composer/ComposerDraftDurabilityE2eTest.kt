@@ -385,7 +385,7 @@ class ComposerDraftDurabilityE2eTest {
 
         // Tap Send WHILE the upload is still in flight (the maintainer's race).
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsEnabled().performClick()
-        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.sendInFlight }
+        compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.outboundHandoffInProgress }
         compose.waitForIdle()
         WalkthroughScreenshotArtifacts.capture("issue-872-01-send-while-uploading")
         // NO request has gone out yet — never a text-only send that drops the file.

@@ -8,22 +8,106 @@ import com.pocketshell.app.composer.PromptComposerViewModel.StagedAttachment
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+internal data class ComposerHandoffSnapshot(
+    val target: String,
+    val revision: Long,
+)
+
+internal class ComposerRevisionTracker {
+    private val revisions: MutableMap<String, Long> = mutableMapOf()
+
+    fun revision(target: String): Long = revisions[target] ?: 0L
+
+    fun record(target: String?) {
+        val key = target?.takeIf { it.isNotBlank() } ?: return
+        revisions[key] = revision(key) + 1L
+    }
+}
+
+internal fun PromptComposerViewModel.composerRevision(target: String): Long =
+    composerRevisionTracker.revision(target)
+
+internal fun PromptComposerViewModel.recordComposerMutation(target: String? = composerTarget) {
+    composerRevisionTracker.record(target)
+    composerInteractionEpoch++
+}
+
+internal fun PromptComposerViewModel.onComposerOpened() {
+    composerInteractionEpoch++
+}
+
+internal fun PromptComposerViewModel.finishOutboundHandoff(
+    owner: Job,
+    error: String? = null,
+): Boolean {
+    if (outboundHandoffJob !== owner) return false
+    watchdogs.disarmHandoff()
+    outboundHandoffJob = null
+    outboundHandoffAttachmentJob = null
+    outboundHandoffInProgress = false
+    _uiState.update {
+        it.copy(
+            outboundHandoffInProgress = false,
+            error = error ?: it.error,
+        )
+    }
+    return true
+}
+
+/** Wait for attachment staging without claiming the wire-delivery latch. */
+internal fun PromptComposerViewModel.dispatchSendAfterUpload(
+    withEnter: Boolean,
+    sendTarget: SendTargetSnapshot,
+) {
+    DiagnosticEvents.record("action", "composer_send_wait_upload")
+    outboundHandoffInProgress = true
+    _uiState.update { it.copy(outboundHandoffInProgress = true, error = null) }
+    val attachment = attachmentJob ?: run {
+        outboundHandoffInProgress = false
+        _uiState.update { it.copy(outboundHandoffInProgress = false) }
+        return emitSendRequest(withEnter, sendTarget)
+    }
+    outboundHandoffAttachmentJob = attachment
+    lateinit var owner: Job
+    owner = viewModelScope.launch(start = CoroutineStart.LAZY) {
+        try {
+            attachment.join()
+            if (_uiState.value.attachments.isEmpty()) {
+                // Never silently downgrade a failed attachment upload to text-only.
+                DiagnosticEvents.record("action", "composer_send_wait_upload_no_attachment")
+                finishOutboundHandoff(owner)
+                return@launch
+            }
+            if (finishOutboundHandoff(owner)) emitSendRequest(withEnter, sendTarget)
+        } catch (cancelled: CancellationException) {
+            finishOutboundHandoff(owner)
+            throw cancelled
+        }
+    }
+    outboundHandoffJob = owner
+    watchdogs.armHandoff()
+    owner.start()
+}
 
 /**
  * Issue #971 / #1540: the outbound-send dispatch surface of
  * [PromptComposerViewModel], split out of the god-object VM (D28 / file-size
  * hygiene ratchet) into cohesive same-module `internal` extensions.
  *
- * This is the write-ahead handoff path: [emitSendRequest] flips the composer
- * in-flight, and the durable outbound-queue row ([enqueueOutboundSend] /
- * [enqueueAndDispatchSidecarBackedSend]) is committed BEFORE the editable draft
- * is cleared ([clearComposerForHandoff]) — closing the #1540 (L9) silent-LOST
- * window where a process death between draft-clear and row-commit lost the
- * prompt from both stores.
+ * This is the write-ahead handoff path: [emitSendRequest] serializes a durable
+ * queue commit ([enqueueOutboundSend] / [enqueueSidecarBackedSend]) BEFORE the
+ * editable draft is cleared ([clearComposerForHandoff]). The queue drain claims
+ * wire delivery separately, allowing later prompts to enqueue while an older
+ * row is active and closing the #1540 (L9) silent-LOST window where a process
+ * death between draft-clear and row-commit lost the prompt from both stores.
  */
 /**
  * Issue #211 / #745: compose + emit the [SendRequest] from the CURRENT draft
@@ -35,12 +119,6 @@ internal fun PromptComposerViewModel.emitSendRequest(
     withEnter: Boolean,
     sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
 ) {
-    if (_uiState.value.sendInFlight) return
-    // #1531 (RC2): a Send during a sidecar retry upload used to drop SILENTLY.
-    if (outboundSidecarDispatchInFlight) {
-        _uiState.update { it.copy(error = PromptComposerViewModel.SEND_BUSY_UPLOADING_MESSAGE) }
-        return
-    }
     val draft = _uiState.value.draft
     val attachments = _uiState.value.attachments
     // Issue #544: compose the outgoing prompt = the user's clean draft
@@ -58,6 +136,122 @@ internal fun PromptComposerViewModel.emitSendRequest(
         "attachmentCount" to attachments.size,
         "withEnter" to withEnter,
     )
+    val durableTarget = sendTarget.sessionKey.takeIf { it.isNotBlank() }
+        ?.takeIf { outboundQueueStore !== DisabledOutboundQueueStore }
+    if (durableTarget != null) {
+        // Issue #961/#1621: preserve the old singleton gate's exactly-once
+        // boundary for an unchanged retry while that logical prompt owns the
+        // wire. A different composition may pipeline behind it, but re-enqueueing
+        // this one can race delivery/pruning and mint a second row.
+        val activeRequest = inFlightSendRequest
+        if (_uiState.value.sendInFlight && activeRequest != null &&
+            computeSendKey(draft, attachments, withEnter, sendTarget) ==
+            computeSendKey(
+                activeRequest.cleanDraft,
+                activeRequest.attachments,
+                activeRequest.withEnter,
+                activeRequest.sendTarget,
+            )
+        ) {
+            val acknowledged = clearComposerForHandoff(
+                ComposerHandoffSnapshot(durableTarget, composerRevision(durableTarget)),
+            )
+            if (acknowledged) {
+                activeRequest.outboundQueueItemId?.let {
+                    outboundAutoCloseEpochs[it] = composerInteractionEpoch
+                }
+            }
+            return
+        }
+        val backgroundDelivery = backgroundDeliveredRequest
+        if (backgroundDelivery != null &&
+            computeSendKey(draft, attachments, withEnter, sendTarget) ==
+            computeSendKey(
+                backgroundDelivery.cleanDraft,
+                backgroundDelivery.attachments,
+                backgroundDelivery.withEnter,
+                backgroundDelivery.sendTarget,
+            )
+        ) {
+            clearComposerForHandoff(
+                ComposerHandoffSnapshot(durableTarget, composerRevision(durableTarget)),
+            )
+            backgroundDeliveredRequest = null
+            return
+        }
+        backgroundDeliveredRequest = null
+        // Issue #1621: this latch covers only the write-ahead commit. A different
+        // composition may be handed off while an older row owns wire delivery;
+        // an unchanged double tap during this same commit remains a no-op.
+        if (outboundHandoffInProgress) return
+        outboundHandoffInProgress = true
+        outboundHandoffAttachmentJob = null
+        _uiState.update { it.copy(outboundHandoffInProgress = true, error = null) }
+        val snapshot = ComposerHandoffSnapshot(
+            target = durableTarget,
+            revision = composerRevision(durableTarget),
+        )
+        lateinit var owner: Job
+        owner = viewModelScope.launch(
+            context = outboundQueueDispatcher,
+            start = CoroutineStart.LAZY,
+        ) {
+            try {
+                val queuedItem = if (hasLocalAttachmentsForSidecars(attachments)) {
+                    enqueueSidecarBackedSend(
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        withEnter = withEnter,
+                        sendTarget = sendTarget,
+                    )
+                } else {
+                    enqueueOutboundSend(
+                        cleanDraft = draft,
+                        attachments = attachments,
+                        withEnter = withEnter,
+                        sendTarget = sendTarget,
+                    )
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    if (outboundHandoffJob !== owner) return@withContext
+                    if (clearComposerForHandoff(snapshot)) {
+                        queuedItem?.let { outboundAutoCloseEpochs[it.id] = composerInteractionEpoch }
+                    }
+                    finishOutboundHandoff(owner)
+                    refreshOutboundQueueItemsFor(durableTarget)
+                    // The queue drain, never the handoff, claims delivery. If an
+                    // older row is active this is intentionally a no-op; its
+                    // completion refresh drives the next FIFO claim.
+                    if (!_uiState.value.sendInFlight && composerTarget == durableTarget) {
+                        retryNextOutboundItem()
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    finishOutboundHandoff(owner)
+                }
+                throw cancelled
+            } catch (t: Throwable) {
+                withContext(Dispatchers.Main.immediate) {
+                    finishOutboundHandoff(
+                        owner,
+                        error = "Send failed: reconnect, then send again or discard the draft.",
+                    )
+                }
+            }
+        }
+        outboundHandoffJob = owner
+        watchdogs.armHandoff()
+        owner.start()
+        return
+    }
+    // Legacy no-store / blank-target path remains single-active because there
+    // is no durable FIFO representation to own a second prompt.
+    if (_uiState.value.sendInFlight) return
+    if (outboundSidecarDispatchInFlight) {
+        _uiState.update { it.copy(error = PromptComposerViewModel.SEND_BUSY_UPLOADING_MESSAGE) }
+        return
+    }
     // Issue #971: HAND THE PROMPT OFF to the outbound queue so the prompt is
     // represented EXACTLY ONCE (the "Sending…" queue row), never as BOTH the
     // editor text AND a duplicate "1 unsent prompt" row. This reverses the
@@ -76,7 +270,7 @@ internal fun PromptComposerViewModel.emitSendRequest(
     // the durable queue — gone with zero trace. The fix WRITE-AHEADS the
     // durable row: the clear is deferred into each durable path and runs ONLY
     // AFTER the row commit succeeds ([enqueueOutboundSend] /
-    // [enqueueAndDispatchSidecarBackedSend]), so a crash in the window always
+    // [enqueueSidecarBackedSend]), so a crash in the window always
     // leaves the prompt recoverable in EXACTLY ONE durable place — the draft
     // (before commit) or the queue row (after commit) — never lost. The
     // no-durable-store fallback has no row to write-ahead, so it clears
@@ -95,77 +289,17 @@ internal fun PromptComposerViewModel.emitSendRequest(
         sendTarget = sendTarget,
     )
     inFlightSendRequest = handoffRequest
-    if (sendTarget.sessionKey.isNotBlank() && hasLocalAttachmentsForSidecars(attachments)) {
-        viewModelScope.launch(outboundQueueDispatcher) {
-            try {
-                enqueueAndDispatchSidecarBackedSend(
-                    cleanDraft = draft,
-                    attachments = attachments,
-                    withEnter = withEnter,
-                    sendTarget = sendTarget,
-                )
-            } catch (cancelled: CancellationException) {
-                // Issue #929: a real cancellation (e.g. VM cleared) — clear
-                // the in-flight gates so a recreated composer is not wedged,
-                // then rethrow to honour structured concurrency.
-                clearStrandedSendInFlight()
-                throw cancelled
-            } catch (t: Throwable) {
-                // Issue #929: any unexpected failure in the sidecar dispatch
-                // is still a non-delivering exit — clear the strand so the
-                // pipeline self-heals instead of waiting on the watchdog.
-                clearStrandedSendInFlight(
-                    error = "Send failed: reconnect, then send again or discard the draft.",
-                )
-            }
-        }
-        return
-    }
-    if (outboundQueueStore !== DisabledOutboundQueueStore &&
-        sendTarget.sessionKey.isNotBlank()
-    ) {
-        viewModelScope.launch(outboundQueueDispatcher) {
-            try {
-                val outboundItem = enqueueOutboundSend(
-                    cleanDraft = draft,
-                    attachments = attachments,
-                    withEnter = withEnter,
-                    sendTarget = sendTarget,
-                )
-                withContext(Dispatchers.Main.immediate) {
-                    // Issue #1540 (L9): the durable row is committed — NOW it
-                    // is safe to clear the editable draft + durable draft. A
-                    // crash before this point leaves the prompt in the durable
-                    // draft (nothing was cleared yet); a crash after it leaves
-                    // the prompt in the just-committed queue row. Never both
-                    // gone at once — the LOST window is closed.
-                    clearComposerForHandoff()
-                    emitPreparedSendRequest(
-                        text = text,
-                        withEnter = withEnter,
-                        cleanDraft = draft,
-                        attachments = attachments,
-                        sendTarget = sendTarget,
-                        outboundQueueItemId = outboundItem?.id,
-                    )
-                }
-            } catch (cancelled: CancellationException) {
-                clearStrandedSendInFlight()
-                throw cancelled
-            } catch (t: Throwable) {
-                clearStrandedSendInFlight(
-                    error = "Send failed: reconnect, then send again or discard the draft.",
-                )
-            }
-        }
-        return
-    }
     // Issue #1540 (L9): the no-durable-store fallback (DisabledOutboundQueueStore
     // or a blank sessionKey) has no queue row to write-ahead, so there is no
     // durable-loss window — the prompt only ever travels in the in-memory
     // [SendRequest]. Clear synchronously here, just before emitting, exactly
     // as the pre-#1540 code did.
-    clearComposerForHandoff()
+    clearComposerForHandoff(
+        ComposerHandoffSnapshot(
+            target = composerTarget.orEmpty(),
+            revision = composerTarget?.let(::composerRevision) ?: 0L,
+        ),
+    )
     emitPreparedSendRequest(
         text = text,
         withEnter = withEnter,
@@ -184,6 +318,7 @@ internal fun PromptComposerViewModel.emitPreparedSendRequest(
     sendTarget: SendTargetSnapshot,
     outboundQueueItemId: String?,
 ) {
+    if (outboundQueueItemId == null) legacyAutoCloseEpoch = composerInteractionEpoch
     // Issue #254: a `Channel.trySend` buffers the item until a collector
     // consumes it, so a send dispatched while the sheet's collector is
     // mid-recreate (dismiss → re-open) is delivered to the next collector.
@@ -222,10 +357,17 @@ internal fun PromptComposerViewModel.emitPreparedSendRequest(
  * send ([restoreFailedSend]) restores the exact draft + tiles back into the
  * (now-single) composer, and a delivered send leaves the composer empty.
  */
-internal fun PromptComposerViewModel.clearComposerForHandoff() {
-    savedStateHandle[PromptComposerViewModel.KEY_DRAFT] = ""
-    savedStateHandle[PromptComposerViewModel.KEY_DRAFT_OWNER] = null
-    composerTarget?.let { target ->
+internal fun PromptComposerViewModel.clearComposerForHandoff(snapshot: ComposerHandoffSnapshot): Boolean {
+    // Issue #1621: the IO commit may complete after the user has typed or
+    // switched targets. Only the exact captured target revision is now owned by
+    // the queue row; later input must never be cleared by this callback.
+    if (composerRevision(snapshot.target) != snapshot.revision) return false
+    val clearsLiveComposer = snapshot.target.isBlank() || composerTarget == snapshot.target
+    if (clearsLiveComposer) {
+        savedStateHandle[PromptComposerViewModel.KEY_DRAFT] = ""
+        savedStateHandle[PromptComposerViewModel.KEY_DRAFT_OWNER] = null
+    }
+    snapshot.target.takeIf { it.isNotBlank() }?.let { target ->
         clearComposerDraft(target)
         composerDraftStore.clearAttachments(target)
         // Issue #1569 (U1): the retained-on-failure bytes have been handed off to
@@ -233,13 +375,16 @@ internal fun PromptComposerViewModel.clearComposerForHandoff() {
         // durable bytes so they don't linger.
         clearDraftAttachmentSidecars(target)
     }
-    _uiState.update { current ->
-        current.copy(
-            draft = "",
-            attachments = emptyList(),
-            attachmentUpload = AttachmentUploadState.Idle,
-        )
+    if (clearsLiveComposer) {
+        _uiState.update { current ->
+            current.copy(
+                draft = "",
+                attachments = emptyList(),
+                attachmentUpload = AttachmentUploadState.Idle,
+            )
+        }
     }
+    recordComposerMutation(snapshot.target)
     // Issue #1540 (L9): synthetic process-death seam (#780 model). Fires the
     // INSTANT the durable draft has been cleared. A crash right here is the
     // exact LOST window: the durable draft is gone, and — with the WRITE-AHEAD
@@ -249,6 +394,7 @@ internal fun PromptComposerViewModel.clearComposerForHandoff() {
     // this ran BEFORE the commit, so the snapshot showed the prompt gone from
     // both stores (LOST). Production never sets this (null → no-op).
     onDurableDraftClearedForHandoffTest?.invoke()
+    return true
 }
 
 internal fun PromptComposerViewModel.hasLocalAttachmentsForSidecars(attachments: List<StagedAttachment>): Boolean =
@@ -257,24 +403,19 @@ internal fun PromptComposerViewModel.hasLocalAttachmentsForSidecars(attachments:
         outboundAttachmentUploader != null &&
         attachments.any { it.previewUri != null }
 
-internal suspend fun PromptComposerViewModel.enqueueAndDispatchSidecarBackedSend(
+internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
     cleanDraft: String,
     attachments: List<StagedAttachment>,
     withEnter: Boolean,
     sendTarget: SendTargetSnapshot,
-) {
-    // Issue #929: this whole dispatch runs while `sendInFlight = true` (set by
-    // [emitSendRequest] before launching us). EVERY exit that does not deliver
-    // must clear the in-flight gates, or the pipeline wedges for the watchdog
-    // window. The early config-missing returns below are non-delivering exits.
+): OutboundItem? {
+    // Issue #929/#1621: stage and durably enqueue the sidecars before delivery
+    // owns `sendInFlight`. Every exit here must either commit one queue row or
+    // leave the editable draft untouched for retry.
     val sessionKey = sendTarget.sessionKey.takeIf { it.isNotBlank() }
-    val sidecarStore = outboundAttachmentSidecarStore ?: run {
-        clearStrandedSendInFlight()
-        return
-    }
+    val sidecarStore = outboundAttachmentSidecarStore ?: return null
     if (sessionKey == null) {
-        clearStrandedSendInFlight()
-        return
+        return null
     }
     val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
         attachment.previewUri?.let { index to it }
@@ -286,10 +427,7 @@ internal suspend fun PromptComposerViewModel.enqueueAndDispatchSidecarBackedSend
         attachmentIndices = localAttachments.map { it.first },
     )
     if (sidecars.size != localAttachments.size) {
-        clearStrandedSendInFlight(
-            error = "Attachment upload failed: could not preserve selected file bytes. Your draft was kept.",
-        )
-        return
+        error("Attachment upload failed: could not preserve selected file bytes")
     }
     val item = OutboundItem(
         id = itemId,
@@ -314,28 +452,13 @@ internal suspend fun PromptComposerViewModel.enqueueAndDispatchSidecarBackedSend
     if (queuedItem.id != itemId) {
         outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
     }
-    // Issue #1540 (L9): the durable row is committed (with its attachment
-    // refs AND the staged sidecar bytes above) — NOW it is safe to clear the
-    // editable draft + durable draft. This is the widest LOST window: the
-    // attachment path stages bytes BEFORE the row commit, so clearing the
-    // draft up front (the old order) meant a death between stage and commit
-    // lost the prompt AND orphaned the sidecar bytes with no owning row. The
-    // clear runs on Main ([clearComposerForHandoff] writes the SavedStateHandle
-    // draft slots, which require the Main thread).
-    withContext(Dispatchers.Main.immediate) { clearComposerForHandoff() }
-    inFlightSendRequest = SendRequest(
-        text = appendAttachmentPaths(cleanDraft, attachments.map { it.remotePath }),
-        withEnter = withEnter,
-        cleanDraft = cleanDraft,
-        attachments = attachments,
-        sendTarget = sendTarget,
-        outboundQueueItemId = queuedItem.id,
-    )
-    refreshOutboundQueueItemsFor(sessionKey)
-    dispatchPreparedOutboundItem(queuedItem.id)
+    outboundHandoffCommitForTest?.invoke(queuedItem)
+    // Enqueue only. The normal FIFO drain owns upload, claim, watchdog,
+    // singleton request state, and wire emission.
+    return queuedItem
 }
 
-internal fun PromptComposerViewModel.enqueueOutboundSend(
+internal suspend fun PromptComposerViewModel.enqueueOutboundSend(
     cleanDraft: String,
     attachments: List<StagedAttachment>,
     withEnter: Boolean,
@@ -355,7 +478,6 @@ internal fun PromptComposerViewModel.enqueueOutboundSend(
         // existing un-delivered row instead of minting a duplicate.
         sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
     )
-    val activeItem = outboundQueueStore.markInFlight(item.id) ?: item
-    refreshOutboundQueueItemsFor(sessionKey)
-    return activeItem
+    outboundHandoffCommitForTest?.invoke(item)
+    return item
 }

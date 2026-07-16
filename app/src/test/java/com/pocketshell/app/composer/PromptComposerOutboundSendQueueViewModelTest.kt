@@ -506,7 +506,8 @@ class PromptComposerOutboundSendQueueViewModelTest {
 
         // Off the caller thread: the enqueue is still deferred to the queue
         // dispatcher (nothing sent, no row yet before advancing).
-        assertTrue(vm.uiState.value.sendInFlight)
+        assertTrue(vm.uiState.value.outboundHandoffInProgress)
+        assertFalse(vm.uiState.value.sendInFlight)
         assertTrue(sent.isEmpty())
         assertTrue(queue.itemsFor("1/session-a").isEmpty())
         // Issue #1540 (L9 — write-ahead): the editable draft is NO LONGER cleared
@@ -1566,7 +1567,6 @@ class PromptComposerOutboundSendQueueViewModelTest {
         vm.markSendDelivered(sent.single())
         advanceUntilIdle()
         waitForSidecarsCleared(sidecars, first.id)
-        assertEquals(second.id, vm.retryNextOutboundItem())
         waitForSendCount(sent, 2)
 
         assertEquals(listOf(first.id, second.id), uploadIds)
@@ -1938,7 +1938,6 @@ class PromptComposerOutboundSendQueueViewModelTest {
         assertEquals(listOf(second.id), vm.outboundQueueItems.value.map { it.id })
 
         // Drain #2 delivers the last row — the unsent count reaches zero.
-        assertEquals(second.id, vm.retryNextOutboundItem())
         runCurrent()
         assertEquals(second.id, sent.last().outboundQueueItemId)
         vm.markSendDelivered(sent.last())
@@ -2451,7 +2450,8 @@ class PromptComposerOutboundSendQueueViewModelTest {
 
         // In-flight immediately, typed draft retained, but NO request emitted yet
         // (we are waiting for the upload — never a text-only send).
-        assertTrue(vm.uiState.value.sendInFlight)
+        assertTrue(vm.uiState.value.outboundHandoffInProgress)
+        assertFalse(vm.uiState.value.sendInFlight)
         assertEquals("send this now", vm.uiState.value.draft)
         assertTrue(sent.isEmpty())
 
@@ -2582,7 +2582,8 @@ class PromptComposerOutboundSendQueueViewModelTest {
         vm.requestSend(withEnter = true)
         runCurrent()
         // In-flight ("Sending…") while awaiting the (wedged) upload.
-        assertTrue(vm.uiState.value.sendInFlight)
+        assertTrue(vm.uiState.value.outboundHandoffInProgress)
+        assertFalse(vm.uiState.value.sendInFlight)
 
         // The watchdog ceiling elapses with no resolution — it is the escape.
         advanceTimeBy(watchdogMs + 1_000L)
@@ -2590,7 +2591,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
 
         assertFalse(
             "watchdog must clear the stuck upload-await in-flight state",
-            vm.uiState.value.sendInFlight,
+            vm.uiState.value.outboundHandoffInProgress,
         )
         assertEquals(
             PromptComposerViewModel.SEND_TIMEOUT_MESSAGE,

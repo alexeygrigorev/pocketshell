@@ -15,6 +15,39 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emptyFlow
 
 /**
+ * Issue #1328/#1539: who reported a reconnect rung failure to the controller.
+ *
+ * The controller's single churn-surviving attempt counter takes exactly ONE reporter per real
+ * rung failure — two reporters would advance it twice and exhaust the ladder at half its
+ * intended patience. These are the only two reporters.
+ *
+ * ## Why the passive-grace loop's feed is NOT guarded on an active ladder (#1539 round 2)
+ *
+ * The two reporters are already mutually exclusive BY CONSTRUCTION, so no guard is needed:
+ * `scheduleAutoReconnectBody` CANCELS `passiveDisconnectGraceJob` as its FIRST act, before it
+ * ever assigns `autoReconnectJob` — a ladder in flight therefore means the grace loop is
+ * already dead and cannot reach its feed. (The loop's own `inlineConnectionStatus is Connected`
+ * exit enforces the same thing independently.)
+ *
+ * An `autoReconnectJob?.isActive != true` guard on that feed was carried in round 1, reasoned
+ * a-priori from the #1328 contract. It was then MEASURED: the loop reported identical counts
+ * with and without it (1 across 3-4 dials on the storm shape, 3 across 5 on the dial-abandon
+ * shape) — it suppressed exactly ZERO feeds, in every scenario. It was a redundant second
+ * expression of an invariant the job lifecycle already owns, i.e. the patches-on-patches shim
+ * D28 exists to prevent, and it was deleted (D22 hard-cut) rather than left as a policy branch
+ * that documents a hand-off which never happens.
+ *
+ * Do not re-add it without first measuring that it changes a count.
+ */
+internal enum class ReconnectRungFailureSource {
+    /** The auto-reconnect ladder's own rung dial failed retryably (#1328). */
+    Ladder,
+
+    /** A passive-disconnect grace cycle failed to heal (#1610 Q3, #1539). */
+    PassiveGraceLoop,
+}
+
+/**
  * EPIC #792 Slice E — the connection FACADE (the capstone of the migration).
  *
  * `ConnectionManager` is the single object the [com.pocketshell.app.tmux.TmuxSessionViewModel]
@@ -202,9 +235,35 @@ class ConnectionManager(
      * budget, decides exhaustion itself → [ConnectionState.Unreachable]. The VM never
      * counts a parallel ladder.
      */
-    fun reconnectRungFailed() {
+    internal fun reconnectRungFailed(source: ReconnectRungFailureSource) {
+        reconnectRungFailedCounts[source] = (reconnectRungFailedCounts[source] ?: 0) + 1
         controller.submit(ConnectionEvent.ReconnectFailed)
     }
+
+    /**
+     * Issue #1539/#1610 (Q3) test seam: how many rung failures each reporter has submitted to
+     * the controller. Additive and production-neutral (a counter only).
+     *
+     * Counted PER SOURCE because the #1328 one-reporter contract is a relationship between the
+     * two reporters, not a property of either alone. A bare total cannot tell the intended
+     * "the loop fell silent because the ladder took over reporting" from the failure mode
+     * "the loop was silently muzzled and nobody reports" — both look like a number that stops
+     * climbing. Per source, the hand-off is directly observable: the loop stops AND the ladder
+     * starts.
+     *
+     * What this counts is the SUBMISSION, which is the reporters' contract. The controller-side
+     * question — whether the resulting attempt then SURVIVES to escalate/terminate — is #1633's
+     * (a `TransportLive` on a cycle whose dial succeeded currently wipes the walk), so a test
+     * that asserted the observable `Reconnecting.attempt` here would be asserting #1633's
+     * behaviour through this slice, and would fail for reasons this slice does not own.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal val reconnectRungFailedCounts: MutableMap<ReconnectRungFailureSource, Int> =
+        mutableMapOf()
+
+    @androidx.annotation.VisibleForTesting
+    internal fun reconnectRungFailedCount(source: ReconnectRungFailureSource): Int =
+        reconnectRungFailedCounts[source] ?: 0
 
     /** INTENT: the honest give-up. The reconnect effect hit a non-retryable failure (or an
      *  explicit abort) — submit [ConnectionEvent.ReconnectGaveUp] so the reducer surfaces

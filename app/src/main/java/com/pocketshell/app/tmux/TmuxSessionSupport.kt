@@ -1,10 +1,14 @@
 package com.pocketshell.app.tmux
 
 import android.os.Build
+import android.util.Log
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.reconcileAgentEvents
+import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.terminal.input.BracketedPaste
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Job
@@ -466,8 +470,252 @@ internal const val RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS: Long = 6_000L
  * shorter VM clock.
  */
 internal val PASSIVE_DISCONNECT_GRACE_MS: Long = SshLeaseManager.DEFAULT_IDLE_TTL_MILLIS
-internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS: Long = 5_000L
+
+/**
+ * Issue #1539: the DIAL + HANDSHAKE budget for one fresh-transport rung of the passive-grace
+ * reattach — and ONLY that stage.
+ *
+ * This constant used to be `PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS`, an ALL-INCLUSIVE
+ * 5s bound that wrapped dial + handshake + attach + panes-ready + reseed in ONE
+ * `withTimeoutOrNull`. That single budget was the #1610 dogfood blocker (log-proven on the
+ * maintainer's device 2026-07-13, seq 64988-65101): on mobile RTT the handshake FITS 5s
+ * (~1.5-3s) but the later stages do NOT, so the rung timed out DETERMINISTICALLY every cycle
+ * and the `!ready` branch closed a transport whose handshake had already completed — proof
+ * the link was up. The loop then re-dialed on the next 250ms tick, producing the measured
+ * 5.65s-median churn (a brand-new clientHash every cycle; 138/138 distinct) that NEVER
+ * self-heals, because a constant budget against a constant >5s latency fails identically
+ * forever.
+ *
+ * The value stays 5s: fast-fail on a genuinely unreachable host is preserved EXACTLY — a
+ * transport that never completes its handshake within this budget is still abandoned, and its
+ * retry stays amortized by [PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS] spacing. What
+ * changed is that this budget no longer gets to kill the LATER stages' transport.
+ */
+internal const val PASSIVE_REATTACH_DIAL_HANDSHAKE_TIMEOUT_MS: Long = 15_000L
+
+/**
+ * Issue #1539/#1331: the ATTACH + PANES-READY budget for one rung, applied to an ALREADY-
+ * HANDSHAKEN transport. A completed SSH handshake is proof the link is up, so a slow attach is
+ * a reason to RETRY THE ATTACH over the same transport — never to close it and redial.
+ */
+internal const val PASSIVE_REATTACH_ATTACH_TIMEOUT_MS: Long = 10_000L
+
+/**
+ * Issue #1539/#1353: the RESEED budget — and, critically, reseed is NOT part of the readiness
+ * verdict. A transport is READY once it is attached; the reseed is pane-content recovery that
+ * runs after, and its timeout must NEVER close a proven-live transport.
+ *
+ * The reseed used to run INSIDE the single 5s all-inclusive `withTimeoutOrNull` alongside dial
+ * + handshake + attach. The render-heal audit (#1353) measured the full pane reseed at up to
+ * **~10.4s per pane** worst case — so on mobile RTT the handshake fits in 1.5-3s and then a
+ * reseed that alone can take 10.4s runs under the same 5s clock. The rung therefore blew its
+ * budget DETERMINISTICALLY every cycle and killed a healthy transport: not merely slow, but
+ * structurally in the wrong place. Bounding it here only keeps the rung from parking; a reseed
+ * that overruns is handled by [TmuxSessionViewModel.armConnectedBlankWatchdog], which re-seeds
+ * under a calm overlay on the live connection — the existing, correct net for this.
+ */
+internal const val PASSIVE_REATTACH_RESEED_TIMEOUT_MS: Long = 5_000L
+
 internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
+
+/**
+ * Issue #1539: the per-stage budgets for one passive-grace reattach rung. Replaces the single
+ * all-inclusive 5s budget that shared one clock across dial, handshake, attach, panes-ready and
+ * reseed.
+ *
+ * There is deliberately NO per-rung attach-retry count here. The attach retry over a kept
+ * transport is owned by the OUTER grace loop, not by an inner loop: a post-handshake stage
+ * failure on a still-vouched-alive transport republishes `leaseRef`/`sessionRef`
+ * ([shouldEvictTransportAfterStageFailure]), so the loop's next iteration re-vouches and routes
+ * to the channel-only warm rung over that SAME transport. That gives the retry its liveness
+ * gating (re-vouched every tick) and its bound (the grace `withTimeoutOrNull` +
+ * [PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS] spacing) from the one mechanism that already
+ * exists. A second, inner bounded-retry loop stacked on top would be exactly the
+ * patches-on-patches shape D28 exists to prevent.
+ */
+internal data class PassiveReattachStageBudgets(
+    val dialHandshakeMs: Long,
+    val attachMs: Long,
+    /** Bounds the post-readiness reseed only; overrunning it never fails the rung (#1353). */
+    val reseedMs: Long,
+)
+
+/**
+ * Issue #1539: build the per-stage budgets for a rung whose dial/handshake bound is
+ * [dialHandshakeMs] (the caller's rung timeout — production
+ * [PASSIVE_REATTACH_DIAL_HANDSHAKE_TIMEOUT_MS], or a test-pinned value).
+ *
+ * The post-handshake stages do NOT derive from [dialHandshakeMs]: they run on a link that is
+ * already PROVEN up, so they get their own fixed budgets. A test that pins a tiny dial budget
+ * (a fast-fail reproduction) therefore cannot accidentally starve the attach stage it is not
+ * testing.
+ */
+internal fun passiveReattachStageBudgets(
+    dialHandshakeMs: Long,
+    attachMs: Long = PASSIVE_REATTACH_ATTACH_TIMEOUT_MS,
+    reseedMs: Long = PASSIVE_REATTACH_RESEED_TIMEOUT_MS,
+): PassiveReattachStageBudgets = PassiveReattachStageBudgets(
+    dialHandshakeMs = dialHandshakeMs.coerceAtLeast(1L),
+    attachMs = attachMs.coerceAtLeast(1L),
+    reseedMs = reseedMs.coerceAtLeast(1L),
+)
+
+/**
+ * Issue #1539: the rung's teardown verdict for a post-handshake stage failure.
+ *
+ * The old `!ready` branch could not tell "the dial timed out" from "the attach ran slow on a
+ * proven-up link", so it closed + lease-evicted BOTH. This is the missing distinction, and it
+ * is deliberately the ONLY thing that authorises killing a transport the rung itself dialed:
+ *
+ *  - [transportVouchedAlive] false -> the transport is genuinely dead (sshj flipped
+ *    `isConnected`, or the #1222 async-close staleness window opened). Evict it; a
+ *    ride-through here would strand the user on a dead socket. A real death is NEVER masked.
+ *  - [transportVouchedAlive] true -> the handshake completed AND the link is still up. The
+ *    slow stage is the host being busy, not the link being gone. KEEP the transport; the
+ *    caller retries the attach over it (or lets the outer grace loop's warm rung recover it).
+ *
+ * Investigation B (#1610) is the reason this reads the vouch at FALLTHROUGH time rather than
+ * trusting the stage verdict: a 5s stage timeout on a transport that is still vouched alive
+ * must not evict the shared per-host lease.
+ */
+internal fun shouldEvictTransportAfterStageFailure(transportVouchedAlive: Boolean): Boolean =
+    !transportVouchedAlive
+
+/**
+ * Issue #1539: vouch THIS session's transport alive — connected AND with no close initiated
+ * (the #1222 async-close staleness window, where `isConnected` may still lie true). Mirrors
+ * `TmuxSessionViewModel.transportVouchedAlive` but vouches an EXPLICIT session rather than
+ * whatever `sessionRef` currently points at, so a rung can re-vouch the exact transport it
+ * dialed even when a stage timed out before the refs were published.
+ */
+internal fun SshSession.vouchedAlive(): Boolean = isConnected && !isCloseInitiated
+
+/**
+ * Issue #1539 (VM-shrink extraction): the [ISSUE_145_RECONNECT_TAG] device-trail label for a
+ * passive-grace rung, derived from its diagnostic [source] so the logcat breadcrumb and the
+ * `DiagnosticEvents` field can never drift apart:
+ * `silent_reattach` -> `tmux-passive-disconnect-silent-reattach`, and
+ * `silent_transport_reattach` -> `tmux-passive-disconnect-silent-transport-reattach` — the two
+ * labels the former inline `Log` calls emitted verbatim.
+ */
+private fun passiveReattachLogLabel(source: String): String =
+    "tmux-passive-disconnect-" + source.replace('_', '-')
+
+/**
+ * Issue #1539 (VM-shrink extraction, the #928 pattern): the `reconnect_success` diagnostic
+ * shared by BOTH passive-grace reattach rungs. [source] names the rung — `silent_reattach`
+ * (channel-only over the live transport) or `silent_transport_reattach` (fresh transport).
+ * Field set unchanged from the two former inline records it replaces.
+ */
+internal fun recordPassiveReattachSuccess(
+    target: ConnectionTarget,
+    source: String,
+    clientHash: Int,
+    elapsedMs: Long,
+    shortAppSwitchFields: Array<out Pair<String, Any?>>,
+) {
+    Log.i(
+        ISSUE_145_RECONNECT_TAG,
+        "${passiveReattachLogLabel(source)} ${targetLogFields(target)} elapsedMs=$elapsedMs",
+    )
+    DiagnosticEvents.record(
+        "connection",
+        "reconnect_success",
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+        "source" to source,
+        "clientHash" to clientHash,
+        "elapsedMs" to elapsedMs,
+        *shortAppSwitchFields,
+    )
+}
+
+/**
+ * Issue #1539 (VM-shrink extraction, the #928 pattern): the `reconnect_fail` diagnostic for a
+ * passive-grace rung that THREW (as opposed to timing out — see
+ * [recordTransportReattachStageFail]). [evictedLease] is omitted entirely when null so the
+ * emitted field set stays byte-identical to the two former inline records: the channel-only
+ * rung never evicts a lease and so never carried the field, while the fresh-transport rung
+ * always did.
+ */
+internal fun recordPassiveReattachThrewFail(
+    target: ConnectionTarget,
+    source: String,
+    throwable: Throwable,
+    evictedLease: Boolean?,
+    clientHash: Int?,
+    elapsedMs: Long,
+    shortAppSwitchFields: Array<out Pair<String, Any?>>,
+) {
+    Log.w(
+        ISSUE_145_RECONNECT_TAG,
+        "${passiveReattachLogLabel(source)}-failed " +
+            "cause=${throwable.javaClass.simpleName}: ${throwable.message} " +
+            targetLogFields(target),
+        throwable,
+    )
+    DiagnosticEvents.record(
+        "connection",
+        "reconnect_fail",
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+        "source" to source,
+        "cause" to throwable.javaClass.simpleName,
+        "message" to throwable.message,
+        *(evictedLease?.let { arrayOf("evictedLease" to (it as Any?)) } ?: emptyArray()),
+        "clientHash" to clientHash,
+        "elapsedMs" to elapsedMs,
+        *shortAppSwitchFields,
+    )
+}
+
+/**
+ * Issue #1539 (VM-shrink extraction, the #928 pattern): the `reconnect_fail` diagnostic for a
+ * failed fresh-transport passive-grace rung. [cause] names the STAGE that failed and
+ * [evictedLease] records the teardown verdict, so the device trail distinguishes the three
+ * outcomes the old single all-inclusive budget conflated:
+ *
+ *  - `dial_handshake_timeout` / `evictedLease=true` — never handshook; correctly abandoned.
+ *  - `attach_not_ready` / `evictedLease=true` — post-handshake stage failed AND the transport
+ *    failed its liveness re-vouch; a real death, correctly evicted.
+ *  - `attach_slow_transport_kept` / `evictedLease=false` — post-handshake stage was slow but
+ *    the transport is still vouched alive; the transport is KEPT and the attach retries over
+ *    it. On the maintainer's 2026-07-13 log every cycle was the middle case MISCLASSIFIED;
+ *    seeing `attach_slow_transport_kept` in the trail is the fix working.
+ */
+internal fun recordTransportReattachStageFail(
+    target: ConnectionTarget,
+    cause: String,
+    evictedLease: Boolean,
+    clientHash: Int?,
+    elapsedMs: Long,
+    shortAppSwitchFields: Array<out Pair<String, Any?>>,
+) {
+    DiagnosticEvents.record(
+        "connection",
+        "reconnect_fail",
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+        "source" to "silent_transport_reattach",
+        "cause" to cause,
+        "evictedLease" to evictedLease,
+        "clientHash" to clientHash,
+        "elapsedMs" to elapsedMs,
+        *shortAppSwitchFields,
+    )
+}
 
 /**
  * Issue #451: how long [TmuxSessionViewModel.stagePromptAttachments] waits
@@ -757,7 +1005,32 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
  */
 internal const val ISSUE_464_KILL_TAG: String = "issue464-killsession"
 
-internal val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
+/**
+ * Issue #1331/#1633: the auto-reconnect ladder — one delay per rung, so the list's LENGTH is
+ * the give-up budget.
+ *
+ * This was `[0, 1, 2, 5]s` (4 rungs). That was inert while the attempt counter never advanced
+ * (the loop dialled `sshLeaseManager.acquire` directly and never reported
+ * `ConnectionEvent.ReconnectFailed`, so the ladder was bypassed and unbounded — #1610 Q3, now
+ * fed from [TmuxSessionViewModel.silentlyReconnectTransportAfterPassiveDisconnect]). Once
+ * #1633's counter genuinely escalates and TERMINATES, a 4-rung ladder means a flapping mobile
+ * link exhausts every rung in ~8s and surrenders to `Unreachable` — trading the infinite
+ * strobe for an app that gives up almost immediately, which is a different bad UX rather than
+ * a fix.
+ *
+ * Eight rungs `[0,1,2,5,10,20,30,30]s` sum to ~98s before surrender: patient enough to ride
+ * out a tunnel/lift/RAT-handover on mobile, bounded enough that a genuinely dead host still
+ * reaches an honest `Unreachable` in under two minutes.
+ *
+ * NO jitter here: #1633 applies it inside `ConnectionController.retryDelayForAttempt`, and the
+ * VM waits on the controller's `recon.retryDelayMs` — adding it here would double-apply it.
+ *
+ * PROPOSED, NOT LOCKED (#1539): how patient the app should be before it stops trying is the
+ * maintainer's tuning call. #1633 made the controller behave correctly with either ladder
+ * length, so retuning is a one-line change here.
+ */
+internal val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> =
+    listOf(0L, 1_000L, 2_000L, 5_000L, 10_000L, 20_000L, 30_000L, 30_000L)
 
 // Issue #1537 (option b, D22 hard-cut): the bespoke `STALE_LEASE_AUTO_RECOVER_MAX`
 // two-counter budget is DELETED. Loop protection for the residual attach-EOF

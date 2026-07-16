@@ -85,6 +85,7 @@ import com.pocketshell.app.tmux.connection.recordNetworkLossHold
 import com.pocketshell.app.tmux.connection.PassiveDropArm
 import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.preferFreshTransportForPassiveReattach
+import com.pocketshell.app.tmux.connection.ReconnectRungFailureSource
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
@@ -1839,7 +1840,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private val renderHealCoordinator = RenderHealCoordinator()
     private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
     private var passiveDisconnectGraceMs: Long = PASSIVE_DISCONNECT_GRACE_MS
-    private var silentReattachTimeoutMs: Long = PASSIVE_DISCONNECT_SILENT_REATTACH_TIMEOUT_MS
+    private var silentReattachTimeoutMs: Long = PASSIVE_REATTACH_DIAL_HANDSHAKE_TIMEOUT_MS
     private var keepaliveDeathQuietResetMs: Long = KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
 
     /**
@@ -4230,7 +4231,9 @@ public class TmuxSessionViewModel @Inject constructor(
                         silentlyReattachAfterPassiveDisconnect(
                             staleClient = staleClient,
                             target = target,
-                            timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                            budgets = passiveReattachStageBudgets(
+                                dialHandshakeMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                            ),
                         )
                 ) ||
                     silentlyReconnectTransportAfterPassiveDisconnect(
@@ -8125,10 +8128,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #1568 (P0-2): prefer the lease-EVICTING fresh dial ONLY when a warm lease is held
         // AND the transport is not vouched alive; a vouched-alive `-CC` death recovers over the
         // LIVE transport so a channel hiccup never costs the shared per-host lease.
-        val preferFreshTransport = preferFreshTransportForPassiveReattach(
+        // Issue #1539: re-read PER ITERATION (#685 read-current-state); a snapshot stays true
+        // forever and re-dials (the 2026-07-13 churn ladder).
+        fun preferFreshTransportNow(): Boolean = preferFreshTransportForPassiveReattach(
             warmLeaseHeld = leaseRef != null,
             transportVouchedAlive = transportVouchedAlive(),
         )
+        val preferFreshTransport = preferFreshTransportNow()
         // EPIC #792 #833: count fresh-transport re-dials (not a one-shot latch) so a SUSTAINED
         // clean outage keeps RE-DIALLING a fresh transport across the bounded grace window and
         // the SAME session auto-recovers the moment the link returns — no switch dance. Bounded
@@ -8158,7 +8164,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 // iteration (not once) so a sustained clean outage keeps escalating into a
                 // retrying ladder — the SAME session recovers when the link returns, no switch
                 // dance. Bounded by the grace `withTimeoutOrNull` + per-attempt timeout + spacing.
-                if (preferFreshTransport) {
+                // Issue #1539: re-vouch EVERY tick — a kept, live transport routes to the
+                // channel-only warm rung instead of another evict-and-redial.
+                val freshTransportPreferred = preferFreshTransportNow()
+                if (freshTransportPreferred) {
                     transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
                             staleClient = staleClient,
@@ -8169,10 +8178,14 @@ public class TmuxSessionViewModel @Inject constructor(
                         return@withTimeoutOrNull true
                     }
                 }
+                // Issue #1539: channel-only over an ALREADY-LIVE transport -> post-handshake
+                // stages only, so it never sees the dial bound.
                 if (silentlyReattachAfterPassiveDisconnect(
                         staleClient = staleClient,
                         target = target,
-                        timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                        budgets = passiveReattachStageBudgets(
+                            dialHandshakeMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                        ),
                     )
                 ) {
                     return@withTimeoutOrNull true
@@ -8180,7 +8193,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // No fresh transport preferred: the warm reattach above is the cheap path; if it
                 // can't recover (the warm SSH session itself is gone) escalate to a fresh
                 // transport and keep re-dialling it for the same sustained-outage resilience.
-                if (!preferFreshTransport) {
+                if (!freshTransportPreferred) {
                     transportReattachAttempts += 1
                     if (silentlyReconnectTransportAfterPassiveDisconnect(
                             staleClient = staleClient,
@@ -8191,6 +8204,14 @@ public class TmuxSessionViewModel @Inject constructor(
                         return@withTimeoutOrNull true
                     }
                 }
+                // Issue #1610 (Q3): this cycle failed — feed the SINGLE attempt counter so #1633's
+                // ladder can escalate/terminate the flap. Once per CYCLE, never per rung: the storm
+                // is `dial SUCCEEDS -> tail times out`, so a feed wired to a failed DIAL alone would
+                // never fire on-device, and a pure-silent-heal cycle (warm rung, no dial) must arm
+                // it identically. A cycle that RECOVERS returns above.
+                // UNGUARDED on purpose — see [ReconnectRungFailureSource] for why an
+                // `autoReconnectJob?.isActive` guard here would be a measured no-op.
+                connectionManager.reconnectRungFailed(ReconnectRungFailureSource.PassiveGraceLoop)
                 val retryDelayMs = PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS
                 delay(retryDelayMs)
             }
@@ -8201,20 +8222,57 @@ public class TmuxSessionViewModel @Inject constructor(
                     target = target,
                     staleClientHash = System.identityHashCode(staleClient),
                     transportReattachAttempts = transportReattachAttempts,
-                    shortAppSwitchFields = shortAppSwitchReconnectFields(
-                        trigger = TmuxConnectTrigger.AutoReconnect,
-                        target = target,
-                        sourceCandidate = "passive_disconnect",
-                    ),
+                    shortAppSwitchFields = passiveReattachLogFields(target),
                 )
             }
         } == true
     }
 
+    /**
+     * Issue #693/#662 (#1539 VM-shrink extraction): re-seed every visible pane for a passive-grace
+     * reattach onto [client] — the sequence BOTH rungs ran verbatim. A reattach is a fresh attach
+     * for REUSED panes, so the old seed flags no longer apply: clear them, re-capture every pane,
+     * then run the blank-net backstop for any whose capture came back empty.
+     *
+     * Issue #1353/#1539: runs AFTER the readiness verdict, bounded by
+     * [PassiveReattachStageBudgets.reseedMs] but able to overrun WITHOUT failing the rung. At
+     * ~10.4s/pane worst case, inside the readiness clock it deterministically blew the rung's
+     * budget and killed proven-live transports. Overruns heal via [armConnectedBlankWatchdog].
+     */
+    private suspend fun reseedVisiblePanesForPassiveReattach(
+        target: ConnectionTarget,
+        client: TmuxClient,
+        budgets: PassiveReattachStageBudgets,
+    ) = withTimeoutOrNull(budgets.reseedMs) {
+        panesSeededThisAttach.clear()
+        panesSeedInFlightThisAttach.clear()
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = target,
+            client = client,
+        )
+        reseedAllVisiblePanes(guard)
+        reseedBlankVisiblePanes(guard)
+        maybeRefreshControlClientSize()
+    }
+
+    /**
+     * Issue #1539 (VM-shrink extraction): the AutoReconnect/`passive_disconnect` short-app-switch
+     * field set every passive-grace rung stamps on its diagnostics. One call site instead of the
+     * seven verbatim copies this replaces; field set unchanged.
+     */
+    private fun passiveReattachLogFields(target: ConnectionTarget): Array<out Pair<String, Any?>> =
+        shortAppSwitchReconnectFields(
+            trigger = TmuxConnectTrigger.AutoReconnect,
+            target = target,
+            sourceCandidate = "passive_disconnect",
+        )
+
     private suspend fun silentlyReattachAfterPassiveDisconnect(
         staleClient: TmuxClient,
         target: ConnectionTarget,
-        timeoutMs: Long,
+        // Issue #1539: per-STAGE budgets; post-handshake stages only (never the dial bound).
+        budgets: PassiveReattachStageBudgets,
     ): Boolean {
         // EPIC #792 #833 test seam: while a synthetic clean outage is armed, every
         // reattach fails as if the link were down — so the grace loop must keep
@@ -8231,7 +8289,7 @@ public class TmuxSessionViewModel @Inject constructor(
             probeServerLiveness = true,
         )
         return try {
-            val ready = withTimeoutOrNull(timeoutMs) {
+            val ready = withTimeoutOrNull(budgets.attachMs) {
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
                 outputOverflowJob?.cancelAndJoin()
@@ -8265,29 +8323,6 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
                 rebindVisiblePaneProducersToClient(replacement)
-                // Issue #693/#662: this is a fresh attach for the reused panes —
-                // their old per-attach seed flags no longer apply, so clear them
-                // and let [reseedAllVisiblePanes] re-capture every visible pane
-                // with the new control client. [healActivePaneIfStaleRender] now keeps
-                // the last rendered frame on an empty capture (never repaints
-                // black) and retries, so a degraded reconnect can't strand a
-                // black pane.
-                panesSeededThisAttach.clear()
-                panesSeedInFlightThisAttach.clear()
-                val reattachGuard = RuntimeRefreshGuard(
-                    generation = connectGeneration,
-                    target = target,
-                    client = replacement,
-                )
-                reseedAllVisiblePanes(reattachGuard)
-                // Issue #693/#662: wire the blank-net into the reconnect path
-                // (it was only on the connect-reveal + resize paths before). Any
-                // pane still blank after the reseed (its reconnect capture was
-                // empty) is retried here, and a still-black active pane keeps the
-                // calm loading overlay via the watchdog rather than painting
-                // black on a live (green) reattached connection.
-                reseedBlankVisiblePanes(reattachGuard)
-                maybeRefreshControlClientSize()
                 true
             } == true
             if (!ready) {
@@ -8297,6 +8332,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 runCatching { replacement.close() }
                 return false
             }
+            reseedVisiblePanesForPassiveReattach(target, replacement, budgets)
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -8334,29 +8370,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     client = replacement,
                 ),
             )
-            Log.i(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-passive-disconnect-silent-reattach " +
-                    targetLogFields(target) +
-                    " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
-            )
-            DiagnosticEvents.record(
-                "connection",
-                "reconnect_success",
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                "source" to "silent_reattach",
-                "clientHash" to System.identityHashCode(replacement),
-                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
-                *shortAppSwitchReconnectFields(
-                    trigger = TmuxConnectTrigger.AutoReconnect,
-                    target = target,
-                    sourceCandidate = "passive_disconnect",
-                ),
+            recordPassiveReattachSuccess(
+                target = target,
+                source = "silent_reattach",
+                clientHash = System.identityHashCode(replacement),
+                elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                shortAppSwitchFields = passiveReattachLogFields(target),
             )
             true
         } catch (t: Throwable) {
@@ -8367,36 +8386,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 runCatching { replacement.close() }
                 throw t
             }
-            Log.w(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-passive-disconnect-silent-reattach-failed " +
-                    "cause=${t.javaClass.simpleName}: ${t.message} " +
-                    targetLogFields(target),
-                t,
-            )
             runCatching { replacement.close() }
             if (clientRef === replacement) {
                 clientRef = staleClient
             }
-            DiagnosticEvents.record(
-                "connection",
-                "reconnect_fail",
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                "source" to "silent_reattach",
-                "cause" to t.javaClass.simpleName,
-                "message" to t.message,
-                "clientHash" to System.identityHashCode(replacement),
-                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
-                *shortAppSwitchReconnectFields(
-                    trigger = TmuxConnectTrigger.AutoReconnect,
-                    target = target,
-                    sourceCandidate = "passive_disconnect",
-                ),
+            recordPassiveReattachThrewFail(
+                target = target,
+                source = "silent_reattach",
+                throwable = t,
+                evictedLease = null,
+                clientHash = System.identityHashCode(replacement),
+                elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                shortAppSwitchFields = passiveReattachLogFields(target),
             )
             false
         }
@@ -8430,28 +8431,45 @@ public class TmuxSessionViewModel @Inject constructor(
         val startedAtMs = SystemClock.elapsedRealtime()
         var acquiredLease: SshLease? = null
         var replacement: TmuxClient? = null
+        // Issue #1539: per-STAGE budgets — `timeoutMs` now bounds ONLY the dial.
+        val budgets = passiveReattachStageBudgets(dialHandshakeMs = timeoutMs)
+        val leaseTarget = target.toSshLeaseTarget()
         return try {
-            val ready = withTimeoutOrNull(timeoutMs) {
-                val leaseTarget = target.toSshLeaseTarget()
-                // Issue #866: DETACH the current-client port from the stale client
-                // BEFORE we tear its transport down. `disconnect(leaseKey)` kills the
-                // stale `-CC` channel's underlying SSH session, so its reader EOFs and
-                // `disconnected` flips true. [CurrentClientTmuxPort.disconnectedClients]
-                // flatMapLatest-follows the current client, so unless we re-point it
-                // first that EOF re-enters the driver's control-channel-drop path
-                // (classified as a current-client drop because `clientRef` is still the
-                // stale client), which cancels THIS in-flight grace loop and relaunches
-                // it — the cancel storm that wedged the silent reattach ("tries a fresh
-                // transport once then spins"). Detaching to null makes the port emit
-                // nothing for the stale teardown; the success path re-points it at the
-                // replacement below.
+            // ---- Stage 1: DIAL + HANDSHAKE (fast-fail, amortized — unchanged bound) ----
+            val lease = withTimeoutOrNull(budgets.dialHandshakeMs) {
+                // Issue #866: DETACH the current-client port BEFORE tearing the stale transport
+                // down. `disconnect(leaseKey)` EOFs the stale `-CC` reader, and
+                // [CurrentClientTmuxPort.disconnectedClients] flatMapLatest-follows the current
+                // client — so unless we re-point first, that EOF re-enters the driver's
+                // control-channel-drop path (still the current client) and CANCELS this very
+                // grace loop: the cancel storm that wedged the silent reattach. Detaching to null
+                // makes the stale teardown emit nothing; the success path re-points below.
                 connectionTmuxPort.setClient(null)
                 withContext(NonCancellable) {
                     runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
                 }
-                val lease = sshLeaseManager.acquire(leaseTarget).getOrThrow()
-                acquiredLease = lease
-                val session = lease.session
+                sshLeaseManager.acquire(leaseTarget).getOrThrow()
+            }
+            if (lease == null) {
+                // #1539: never handshook -> not a live link -> abandoned (the preserved
+                // fast-fail). The loop feeds the counter per failed cycle (#1610 Q3).
+                recordTransportReattachStageFail(
+                    target = target,
+                    cause = "dial_handshake_timeout",
+                    evictedLease = true,
+                    clientHash = null,
+                    elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                    shortAppSwitchFields = passiveReattachLogFields(target),
+                )
+                withContext(NonCancellable) {
+                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                }
+                return false
+            }
+            acquiredLease = lease
+            // ---- Stages 2-3: ATTACH + PANES-READY + RESEED over the HANDSHAKEN transport ----
+            val session = lease.session
+            val ready = withTimeoutOrNull(budgets.attachMs) {
                 val newClient = createTmuxClient(
                     session,
                     target.sessionName,
@@ -8465,11 +8483,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
                 disconnectedJob = null
-                // Issue #866: re-point the current-client port (and clientRef) at the
-                // replacement BEFORE closing the stale client (see the warm-reattach
-                // sibling above). Closing it while it is still the current client
-                // re-enters the driver's control-channel-drop path and cancels this
-                // in-flight grace loop (the cancel storm). Swap first, then close.
+                // Issue #866: re-point the port (and clientRef) at the replacement BEFORE
+                // closing the stale client — see the warm-reattach sibling above for why
+                // (the cancel storm). Swap first, then close.
                 leaseRef = lease
                 sessionRef = session
                 clientRef = newClient
@@ -8490,58 +8506,44 @@ public class TmuxSessionViewModel @Inject constructor(
                     trigger = TmuxConnectTrigger.AutoReconnect,
                 )
                 rebindVisiblePaneProducersToClient(newClient)
-                // Issue #693/#662: fresh transport reattach — re-seed every
-                // visible pane on the new client (clear the prior per-attach
-                // flags first), then run the blank-net backstop so a degraded
-                // fresh-transport reconnect never strands a black pane on a
-                // live (green) connection.
-                panesSeededThisAttach.clear()
-                panesSeedInFlightThisAttach.clear()
-                val transportReattachGuard = RuntimeRefreshGuard(
-                    generation = connectGeneration,
-                    target = target,
-                    client = newClient,
-                )
-                reseedAllVisiblePanes(transportReattachGuard)
-                reseedBlankVisiblePanes(transportReattachGuard)
-                maybeRefreshControlClientSize()
                 true
             } == true
             if (!ready) {
-                val leaseTarget = target.toSshLeaseTarget()
+                // Issue #1539 — THE kill site: used to close + lease-evict unconditionally, unable
+                // to tell a timed-out DIAL from a slow ATTACH on a proven-up link.
+                // See [shouldEvictTransportAfterStageFailure].
+                val evict = shouldEvictTransportAfterStageFailure(session.vouchedAlive())
                 if (clientRef === replacement) {
                     clientRef = staleClient
-                    sessionRef = null
-                    leaseRef = null
                 }
+                // The `-CC` CHANNEL never came up so it always drops; the TRANSPORT under it is
+                // the vouch's call.
                 runCatching { replacement?.close() }
-                withContext(NonCancellable) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                if (evict) {
+                    if (sessionRef === session) sessionRef = null
+                    if (leaseRef === lease) leaseRef = null
+                    withContext(NonCancellable) {
+                        runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                    }
+                } else {
+                    // KEEP the handshaken transport, PUBLISHED as live, so the next tick's
+                    // re-vouch retries the attach over it via the channel-only warm rung. Nulling
+                    // these refs is what used to disable that rung and force the redial.
+                    leaseRef = lease
+                    sessionRef = session
                 }
-                DiagnosticEvents.record(
-                    "connection",
-                    "reconnect_fail",
-                    "hostId" to target.hostId,
-                    "host" to target.host,
-                    "port" to target.port,
-                    "user" to target.user,
-                    "session" to target.sessionName,
-                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                    "source" to "silent_transport_reattach",
-                    "cause" to "attach_not_ready",
-                    "evictedLease" to true,
-                    "clientHash" to replacement?.let { System.identityHashCode(it) },
-                    "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
-                    *shortAppSwitchReconnectFields(
-                        trigger = TmuxConnectTrigger.AutoReconnect,
-                        target = target,
-                        sourceCandidate = "passive_disconnect",
-                    ),
+                recordTransportReattachStageFail(
+                    target = target,
+                    cause = if (evict) "attach_not_ready" else "attach_slow_transport_kept",
+                    evictedLease = evict,
+                    clientHash = replacement?.let { System.identityHashCode(it) },
+                    elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                    shortAppSwitchFields = passiveReattachLogFields(target),
                 )
                 return false
             }
-            val lease = acquiredLease ?: return false
             val newClient = replacement ?: return false
+            reseedVisiblePanesForPassiveReattach(target, newClient, budgets)
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -8577,29 +8579,12 @@ public class TmuxSessionViewModel @Inject constructor(
                     client = newClient,
                 ),
             )
-            Log.i(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-passive-disconnect-silent-transport-reattach " +
-                    targetLogFields(target) +
-                    " elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}",
-            )
-            DiagnosticEvents.record(
-                "connection",
-                "reconnect_success",
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                "source" to "silent_transport_reattach",
-                "clientHash" to System.identityHashCode(newClient),
-                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
-                *shortAppSwitchReconnectFields(
-                    trigger = TmuxConnectTrigger.AutoReconnect,
-                    target = target,
-                    sourceCandidate = "passive_disconnect",
-                ),
+            recordPassiveReattachSuccess(
+                target = target,
+                source = "silent_transport_reattach",
+                clientHash = System.identityHashCode(newClient),
+                elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                shortAppSwitchFields = passiveReattachLogFields(target),
             )
             true
         } catch (t: Throwable) {
@@ -8611,21 +8596,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 runCatching { replacement?.close() }
                 withContext(NonCancellable) {
-                    val leaseTarget = target.toSshLeaseTarget()
                     runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
                 }
                 throw t
             }
-            Log.w(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-passive-disconnect-silent-transport-reattach-failed " +
-                    "cause=${t.javaClass.simpleName}: ${t.message} " +
-                    targetLogFields(target),
-                t,
-            )
             runCatching { replacement?.close() }
             withContext(NonCancellable) {
-                val leaseTarget = target.toSshLeaseTarget()
                 runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
             }
             if (clientRef === replacement) {
@@ -8633,26 +8609,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 sessionRef = null
                 leaseRef = null
             }
-            DiagnosticEvents.record(
-                "connection",
-                "reconnect_fail",
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "user" to target.user,
-                "session" to target.sessionName,
-                "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                "source" to "silent_transport_reattach",
-                "cause" to t.javaClass.simpleName,
-                "message" to t.message,
-                "evictedLease" to true,
-                "clientHash" to replacement?.let { System.identityHashCode(it) },
-                "elapsedMs" to (SystemClock.elapsedRealtime() - startedAtMs),
-                *shortAppSwitchReconnectFields(
-                    trigger = TmuxConnectTrigger.AutoReconnect,
-                    target = target,
-                    sourceCandidate = "passive_disconnect",
-                ),
+            recordPassiveReattachThrewFail(
+                target = target,
+                source = "silent_transport_reattach",
+                throwable = t,
+                evictedLease = true,
+                clientHash = replacement?.let { System.identityHashCode(it) },
+                elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
+                shortAppSwitchFields = passiveReattachLogFields(target),
             )
             false
         }
@@ -8960,7 +8924,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // / server restarted) is not a ladder rung — keep it.
                 if (connectionManager.state is CoreConnectionState.Unreachable) break
                 // A retryable rung failed — the reducer advances (or exhausts) the ladder.
-                connectionManager.reconnectRungFailed()
+                connectionManager.reconnectRungFailed(ReconnectRungFailureSource.Ladder)
             }
             // Issue #1328 (S5): on genuine exhaustion (Unreachable, no specific terminal
             // message set) surface the unified "Disconnected from …" band (#1098).
@@ -9057,6 +9021,10 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /** S6 (#1329): the AUTHORITATIVE controller state — a test asserts it DECIDED the transition. */
     internal fun connectionControllerStateForTest(): CoreConnectionState = connectionManager.state
+
+    /** Issue #1610 (Q3) seam: rung failures [source] reported; see [ConnectionManager]. */
+    internal fun reconnectRungFailedCountForTest(source: ReconnectRungFailureSource): Int =
+        connectionManager.reconnectRungFailedCount(source)
 
     internal fun attachSessionForAgentRetryForTest(session: SshSession) {
         sessionRef = session

@@ -402,8 +402,19 @@ Minimum pre-push gate:
      caching mode). **The console scan is the only defense — the XML cannot tell
      you it is stale.**
 
-  Exit codes, build banners, and even real-looking counts lied in all four.
-  **Trust only: the console line for the task + a count you asserted yourself.**
+  5. **Stale XML from a daemon killed mid-run.** A sibling agent running
+     `gradlew --stop` silently kills another run's daemon. The build dies, the
+     PREVIOUS run's XML stays on disk, and a count check reads last time's
+     numbers (#1649 nearly shipped a green off a **26-minute-old** file).
+     Note how 4 and 5 defeat opposite checks: **FROM-CACHE XML has a FRESH
+     mtime with real counts; stale-after-kill XML has an OLD mtime.** No single
+     check catches both. Use `--no-daemon` on a contended box, assert XML
+     freshness against the run's start, AND scan the console.
+
+  Exit codes, build banners, real-looking counts, and even fresh timestamps
+  lied across these five. **Trust only: the console line for the task + a count
+  you asserted yourself + proof the XML is from THIS run.** If you cannot
+  establish all three, you do not have a result — say so rather than report one.
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
   N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its

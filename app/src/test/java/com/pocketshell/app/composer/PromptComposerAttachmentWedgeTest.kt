@@ -216,14 +216,19 @@ class PromptComposerAttachmentWedgeTest {
         val before = sent.size
         vm.onDraftChange("plain follow-up after attachment")
         vm.requestSend(withEnter = true, sendTarget = target)
-        settleUntil { sent.size > before }
+        settleUntil { !vm.uiState.value.outboundHandoffInProgress }
         assertEquals(
-            "the subsequent plain send did not reach the session",
-            before + 1,
+            "a healthy tail must not overtake the retryable attachment head",
+            before,
             sent.size,
         )
-        assertEquals("plain follow-up after attachment", sent.last().text)
-        assertTrue(vm.uiState.value.sendInFlight)
+        assertTrue(
+            "the subsequent plain send must be durably queued behind the attachment head",
+            vm.outboundQueueItems.value.any {
+                it.cleanText == "plain follow-up after attachment" && it.state == OutboundState.Queued
+            },
+        )
+        assertFalse(vm.uiState.value.sendInFlight)
     }
 
     @Test

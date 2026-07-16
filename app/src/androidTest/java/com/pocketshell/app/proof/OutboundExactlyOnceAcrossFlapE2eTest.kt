@@ -42,6 +42,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
+import org.junit.rules.TestName
 import org.junit.runner.RunWith
 
 /**
@@ -106,6 +107,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     // the SAME foreground MainActivity the TerminalView interop child is placed
     // into.
     val compose = createAndroidComposeRule<MainActivity>()
+
+    @get:Rule
+    val testName: TestName = TestName()
 
     @get:Rule
     val ruleChain: RuleChain = RuleChain
@@ -748,8 +752,16 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return File(dir, name)
     }
 
+    /**
+     * Issue #1621 (round-three review follow-up): suffix the timings artifact with
+     * the TEST METHOD name. Both methods in this class used to write the one shared
+     * `timings.txt`, so in a normal full-class run the keystroke lane overwrote the
+     * composer lane's `user_retype_resend_used` / `submitted_after_send_tap_ms` —
+     * the branch-taken evidence was only recoverable by running a method in
+     * isolation. Per-method files make it readable from any run.
+     */
     private fun writeTimings(): File {
-        val file = artifactFile("timings.txt")
+        val file = artifactFile("timings-${testName.methodName}.txt")
         file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
         println("ISSUE1526_TIMINGS ${file.absolutePath}")
         return file

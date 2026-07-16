@@ -43,31 +43,42 @@ class ConnectionControllerReconnectLadderTest {
         submit(ConnectionEvent.TransportDropped("d")) // Reattaching -> Reconnecting(1)
     }
 
+    /**
+     * Issue #1633 note: the per-attempt delay is now jittered ±20% (the gRPC model), so
+     * this asserts the rung's backoff lands in its ladder step's band rather than on the
+     * exact step. The jitter distribution itself is pinned by `ConnectionControllerJitterTest`.
+     */
+    private fun assertRung(attempt: Int, maxAttempts: Int, baseDelayMs: Long, state: ConnectionState) {
+        val recon = state as ConnectionState.Reconnecting
+        assertEquals(host, recon.host)
+        assertEquals(a, recon.targetId)
+        assertEquals(attempt, recon.attempt)
+        assertEquals(maxAttempts, recon.maxAttempts)
+        if (baseDelayMs == 0L) {
+            assertEquals("the instant first rung is never jittered", 0L, recon.retryDelayMs)
+        } else {
+            val band = (baseDelayMs * 0.8).toLong()..(baseDelayMs * 1.2).toLong()
+            assertTrue(
+                "attempt $attempt: ${recon.retryDelayMs}ms outside the +/-20% jitter band " +
+                    "$band of ${baseDelayMs}ms",
+                recon.retryDelayMs in band,
+            )
+        }
+    }
+
     @Test
     fun `injected ladder drives maxAttempts and per-attempt retry delay`() {
         val (c, transport) = controller(ladder = listOf(0L, 1_000L, 2_000L, 5_000L))
         c.bringToReconnecting(transport)
 
-        assertEquals(
-            ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 4, retryDelayMs = 0L),
-            c.state.value,
-        )
+        assertRung(attempt = 1, maxAttempts = 4, baseDelayMs = 0L, state = c.state.value)
         // Advancement is EXCLUSIVELY ReconnectFailed (one per real rung failure).
         c.submit(ConnectionEvent.ReconnectFailed)
-        assertEquals(
-            ConnectionState.Reconnecting(host, a, attempt = 2, maxAttempts = 4, retryDelayMs = 1_000L),
-            c.state.value,
-        )
+        assertRung(attempt = 2, maxAttempts = 4, baseDelayMs = 1_000L, state = c.state.value)
         c.submit(ConnectionEvent.ReconnectFailed)
-        assertEquals(
-            ConnectionState.Reconnecting(host, a, attempt = 3, maxAttempts = 4, retryDelayMs = 2_000L),
-            c.state.value,
-        )
+        assertRung(attempt = 3, maxAttempts = 4, baseDelayMs = 2_000L, state = c.state.value)
         c.submit(ConnectionEvent.ReconnectFailed)
-        assertEquals(
-            ConnectionState.Reconnecting(host, a, attempt = 4, maxAttempts = 4, retryDelayMs = 5_000L),
-            c.state.value,
-        )
+        assertRung(attempt = 4, maxAttempts = 4, baseDelayMs = 5_000L, state = c.state.value)
     }
 
     @Test
@@ -103,10 +114,7 @@ class ConnectionControllerReconnectLadderTest {
         // A 1-step ladder: every attempt reuses the single step's delay.
         val (c, transport) = controller(ladder = listOf(750L))
         c.bringToReconnecting(transport)
-        assertEquals(
-            ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 1, retryDelayMs = 750L),
-            c.state.value,
-        )
+        assertRung(attempt = 1, maxAttempts = 1, baseDelayMs = 750L, state = c.state.value)
         // attempt 2 > budget 1 -> exhausted (no over-run of the ladder).
         c.submit(ConnectionEvent.ReconnectFailed)
         assertEquals(ConnectionState.Unreachable(host, a), c.state.value)

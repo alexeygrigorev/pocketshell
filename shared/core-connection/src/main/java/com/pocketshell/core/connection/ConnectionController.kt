@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
 
 /**
  * The pure-JVM connection lifecycle state machine (EPIC #687 Phase-2, slice 1).
@@ -61,6 +62,21 @@ class ConnectionController(
     // developer debug builds, and a no-op in release. Injectable so a test can
     // pin it on/off deterministically regardless of the build variant.
     confinementAssertionsEnabled: Boolean = BuildConfig.DEBUG,
+    /**
+     * Issue #1633: how long the connection must stay continuously [ConnectionState.Live]
+     * before the current recovery EPISODE commits and the attempt counter resets.
+     */
+    private val stabilityWindowMs: Long = DEFAULT_STABILITY_WINDOW_MS,
+    /**
+     * Issue #1633: the wall-clock ceiling on one recovery episode. A flap slow enough to
+     * never exhaust the rung budget still terminates here instead of grinding forever.
+     */
+    private val episodeBudgetMs: Long = DEFAULT_EPISODE_BUDGET_MS,
+    /**
+     * Issue #1633: the jitter source for [retryDelayForAttempt] (±[RETRY_JITTER_FRACTION]).
+     * Injectable so tests pin the distribution deterministically instead of skipping it.
+     */
+    private val random: Random = Random.Default,
 ) {
     /**
      * Enforces the single-confining-dispatcher contract in DEBUG builds by
@@ -118,13 +134,50 @@ class ConnectionController(
      * controller, decoupled from the transient [ConnectionState] — because the VM's
      * re-dial IO walks the state through Connecting/Attaching/Live on every rung
      * (even one that then fails an attach), which would otherwise reset an in-state
-     * counter. 0 means "no ladder in flight"; a ladder arms it to 1
-     * ([ConnectionEvent.ReconnectLadderEntered] / a heal-failed drop) and each failed
-     * rung ([ConnectionEvent.ReconnectFailed]) advances it until the budget exhausts.
+     * counter. 0 means "no EPISODE in flight"; a ladder arms it to 1
+     * ([ConnectionEvent.ReconnectLadderEntered] / a heal-failed drop) and each rung that
+     * concludes WITHOUT a stability commit advances it until the budget exhausts.
      * A plain `var` mutated only from the confining dispatcher (same contract as
      * [graceDeadlineMs]).
+     *
+     * Issue #1633 widened its lifetime from "one dial" to "one EPISODE" — see
+     * [liveSinceMs].
      */
     private var reconnectAttempt: Int = 0
+
+    /**
+     * Issue #1633: when the CURRENT [ConnectionState.Live] began, or null when not Live.
+     *
+     * This is the whole fix. Before #1633 the attempt counter's reset condition was
+     * effectively **"a dial succeeded"** ([onReconnectLadderEntered] hard-armed at 1 on
+     * every ladder entry), not **"a connection proved stable"**. On the maintainer's mobile
+     * link — which dies ~5s after each successful dial (#1610) — every cycle therefore
+     * looked like a brand-new FIRST attempt: backoff never engaged (`retryDelayMs=0` on
+     * every one of 15,456 logged burst lines), the budget was never reached, and
+     * [ConnectionState.Unreachable] was dead code. The burst only ever ended when the
+     * maintainer backgrounded the app.
+     *
+     * The remedy is the Kubernetes CrashLoopBackOff / gRPC verified-acceptance model: the
+     * episode commits only once the link has been continuously Live for
+     * [stabilityWindowMs]. A drop before then RESUMES the episode at attempt+1.
+     *
+     * It is evaluated LAZILY, at the next drop ([onLiveDropped]) — never by a timer. The
+     * commit has no observable effect until a drop asks "was that Live stable?", so a
+     * stored stamp compared on demand is exactly equivalent to a scheduled wakeup, while
+     * keeping the reducer pure, timer-free (D21) and free of any coroutine loop.
+     */
+    private var liveSinceMs: Long? = null
+
+    /**
+     * Issue #1633: when the current recovery EPISODE began (the first drop out of a
+     * committed/fresh [ConnectionState.Live]), or null when no episode is in flight.
+     *
+     * An episode spans the WHOLE flap sequence, not one dial: exiting to Live does not end
+     * it — only the [stabilityWindowMs] commit (or explicit user intent) does. It bounds
+     * the episode by wall clock ([episodeBudgetMs]) as well as by rung count, so a flap too
+     * slow to exhaust the rungs still terminates.
+     */
+    private var episodeStartMs: Long? = null
 
     /** Current target id — the drop-by-id reference for events and seeds. */
     private val currentTargetId: SessionId?
@@ -194,17 +247,38 @@ class ConnectionController(
     private val effectiveMaxAttempts: Int
         get() = reconnectLadderMs.size.takeIf { it > 0 } ?: maxReconnectAttempts
 
-    /** Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step. */
+    /**
+     * Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step, then
+     * jittered ±[RETRY_JITTER_FRACTION] (issue #1633, the gRPC model).
+     *
+     * Mobile RAT handovers and NAT/keepalive reapers are PERIODIC, so a bare ladder can
+     * resonate with that cadence (and synchronize retries across sessions into a
+     * thundering herd). Jitter breaks both. Rung 1's `0ms` is left EXACTLY zero — that
+     * rung is the instant silent heal (#680/#621) and delaying it would be a visible
+     * regression — and a jittered rung never rounds down to 0, so a non-zero rung always
+     * actually waits.
+     */
     private fun retryDelayForAttempt(attempt: Int): Long {
         if (reconnectLadderMs.isEmpty()) return 0L
         val index = (attempt - 1).coerceIn(0, reconnectLadderMs.lastIndex)
-        return reconnectLadderMs[index]
+        return jittered(reconnectLadderMs[index])
+    }
+
+    /** Apply ±[RETRY_JITTER_FRACTION] full jitter to a non-zero backoff (issue #1633). */
+    private fun jittered(delayMs: Long): Long {
+        if (delayMs <= 0L) return 0L
+        val spread = delayMs * RETRY_JITTER_FRACTION
+        val offset = random.nextDouble(-spread, spread)
+        return (delayMs + offset).toLong().coerceAtLeast(1L)
     }
 
     /** Build a [ConnectionState.Reconnecting] for [attempt] from the single ladder,
-     *  syncing the churn-surviving [reconnectAttempt] counter to it. */
+     *  syncing the churn-surviving [reconnectAttempt] counter to it and stamping the
+     *  episode start if this is the episode's first rung (issue #1633). */
     private fun reconnectingAt(host: HostKey, target: SessionId, attempt: Int): ConnectionState.Reconnecting {
         reconnectAttempt = attempt
+        if (episodeStartMs == null) episodeStartMs = clock.nowMs()
+        liveSinceMs = null
         return ConnectionState.Reconnecting(
             host = host,
             targetId = target,
@@ -212,6 +286,81 @@ class ConnectionController(
             maxAttempts = effectiveMaxAttempts,
             retryDelayMs = retryDelayForAttempt(attempt),
         )
+    }
+
+    /**
+     * Issue #1633: END the current episode — the counter, the episode clock and the
+     * stability stamp all reset, so the NEXT drop starts a fresh episode at attempt 1 with
+     * the full budget and the instant first rung.
+     *
+     * Called on the stability commit ([onLiveDropped]), on explicit user intent
+     * ([onEnter]/[onSwitch]), and when a terminal state is reached.
+     */
+    private fun endEpisode() {
+        reconnectAttempt = 0
+        episodeStartMs = null
+        liveSinceMs = null
+    }
+
+    /** Enter [ConnectionState.Live], stamping the stability window's start (issue #1633). */
+    private fun liveAt(host: HostKey, target: SessionId): ConnectionState.Live {
+        liveSinceMs = clock.nowMs()
+        return ConnectionState.Live(host, target)
+    }
+
+    /** True once the current episode has burned its rung budget or its wall clock. */
+    private fun episodeExhausted(nextAttempt: Int): Boolean {
+        if (nextAttempt > effectiveMaxAttempts) return true
+        val started = episodeStartMs ?: return false
+        return clock.nowMs() - started >= episodeBudgetMs
+    }
+
+    /**
+     * Issue #1633: the [ConnectionState.Live] that is ending faces the stability question —
+     * commit the episode if it held for [stabilityWindowMs], otherwise leave the episode in
+     * flight so the caller resumes it. The ONE place the window is evaluated; every path
+     * that ends a Live must go through it, or that path becomes a counter-laundering hole.
+     */
+    private fun endLiveAndCommitIfStable() {
+        val since = liveSinceMs
+        liveSinceMs = null
+        if (since != null && clock.nowMs() - since >= stabilityWindowMs) endEpisode()
+    }
+
+    /** The rung an ending Live should resume the episode at: 1 when none is in flight. */
+    private fun resumeAttempt(): Int = if (reconnectAttempt == 0) 1 else reconnectAttempt + 1
+
+    /**
+     * Issue #1633: the transport dropped out of [ConnectionState.Live] — the ONE place the
+     * "did this connection prove stable?" question is asked, and the loop-killer.
+     *
+     * - The prior Live lasted ≥ [stabilityWindowMs] ⇒ the episode COMMITS. The counter
+     *   resets, and this drop opens a fresh episode: silent heal first, attempt 1, instant
+     *   rung. This is the load-bearing NEGATIVE case — without it every ordinary reconnect
+     *   would escalate spuriously.
+     * - An episode was already in flight and the Live did NOT prove stable ⇒ that rung
+     *   concluded WITHOUT a commit ("the dial succeeded but the link died again"), so the
+     *   episode RESUMES at attempt+1 — or gives up honestly at the budget.
+     *
+     * A drop still routes through [ConnectionState.Reattaching] either way, so the silent
+     * heal (#680/#621) and the calm band are byte-for-byte unchanged; only the counter
+     * behind them now remembers.
+     */
+    private fun onLiveDropped(host: HostKey, target: SessionId): ConnectionState {
+        endLiveAndCommitIfStable()
+
+        if (reconnectAttempt == 0) {
+            // A fresh episode: heal silently first; the counter arms only if that fails.
+            episodeStartMs = clock.nowMs()
+            return ConnectionState.Reattaching(host, target)
+        }
+        val next = reconnectAttempt + 1
+        if (episodeExhausted(next)) {
+            endEpisode()
+            return ConnectionState.Unreachable(host, target)
+        }
+        reconnectAttempt = next
+        return ConnectionState.Reattaching(host, target)
     }
 
     private fun reduce(current: ConnectionState, event: ConnectionEvent): ConnectionState =
@@ -239,9 +388,11 @@ class ConnectionController(
      */
     private fun onEnter(current: ConnectionState, event: ConnectionEvent.Enter): ConnectionState {
         // A genuine open clears any prior grace window — we are foregrounded and
-        // re-targeting. It also disarms any stale reconnect counter (#1328).
+        // re-targeting. It also disarms any stale reconnect counter (#1328) / recovery
+        // episode (#1633): an Enter is explicit user intent, and the manual Reconnect
+        // affordance out of a terminal Unreachable routes through here.
         graceDeadlineMs = null
-        reconnectAttempt = 0
+        endEpisode()
         return if (transport.isWarm(event.host)) {
             ConnectionState.Attaching(event.host, event.targetId)
         } else {
@@ -254,11 +405,20 @@ class ConnectionController(
      * state, go to [Attaching] on the new id WITHOUT a re-handshake. The VM will
      * `selectWindow` + seed the active pane. A switch from Idle is a no-op (there
      * is no host to switch on).
+     *
+     * Issue #1633 — the episode reset here is DELIBERATE and unchanged. A [ConnectionEvent.Switch]
+     * is EXPLICIT USER INTENT: the #1331 design lists Enter/Switch/manual-Reconnect as the
+     * intent-reset set, the user is watching and has asked for this target right now, and the
+     * honest response to "take me to B" is a fresh, full-budget attempt rather than one
+     * inherited from A's flap history. It cannot launder the counter back to 1 during the
+     * #1610 storm either: `Switch` is only ever submitted from a user tap (via
+     * `ConnectionManager.switchTo`/`ensureTargeting`), never by the automatic reconnect
+     * cycle, so the storm's own event sequence never reaches this arm.
      */
     private fun onSwitch(current: ConnectionState, event: ConnectionEvent.Switch): ConnectionState {
         val host = current.hostOrNull() ?: return current
         graceDeadlineMs = null
-        reconnectAttempt = 0
+        endEpisode()
         return ConnectionState.Attaching(host, event.targetId)
     }
 
@@ -300,6 +460,16 @@ class ConnectionController(
         return if (withinGrace) {
             ConnectionState.Reattaching(current.host, current.targetId)
         } else {
+            // Issue #1633: a beyond-grace return starts a FRESH episode (the #1331 design's
+            // "Foreground beyond grace -> Recovering, attempt 1"). Ending the episode first
+            // is what makes that coherent: without it the counter would say "attempt 1"
+            // while the stale episode CLOCK said "exhausted", so the first rung failure
+            // would fire an instant, wrong Unreachable at the user. Nothing dialled while
+            // backgrounded (D21), so no episode was meaningfully in flight; the user has
+            // also been away far longer than the stability window. This deliberately keeps
+            // backgrounding — today the maintainer's ONLY escape from the #1610 storm —
+            // working as a clean restart rather than a trip straight to a dead end.
+            endEpisode()
             reconnectingAt(current.host, current.targetId, attempt = 1)
         }
     }
@@ -317,7 +487,9 @@ class ConnectionController(
         val host = current.hostOrNull() ?: return current
         val target = current.targetIdOrNull() ?: return current
         return when (current) {
-            is ConnectionState.Live,
+            // Issue #1633: the ONE place the stability window is evaluated.
+            is ConnectionState.Live -> onLiveDropped(host, target)
+
             is ConnectionState.Attaching,
             is ConnectionState.Connecting,
             -> ConnectionState.Reattaching(host, target)
@@ -352,8 +524,10 @@ class ConnectionController(
      */
     private fun onTransportLive(current: ConnectionState): ConnectionState =
         when (current) {
-            is ConnectionState.Reattaching -> ConnectionState.Live(current.host, current.targetId)
-            is ConnectionState.Reconnecting -> ConnectionState.Live(current.host, current.targetId)
+            // Issue #1633: entering Live starts the stability window — it does NOT commit
+            // the episode. "The dial succeeded" is not "the connection recovered".
+            is ConnectionState.Reattaching -> liveAt(current.host, current.targetId)
+            is ConnectionState.Reconnecting -> liveAt(current.host, current.targetId)
             is ConnectionState.Connecting -> ConnectionState.Attaching(current.host, current.targetId)
             else -> current
         }
@@ -374,8 +548,23 @@ class ConnectionController(
     ): ConnectionState {
         if (!event.validatedHandoff) return current
         return when (current) {
-            is ConnectionState.Live ->
-                reconnectingAt(current.host, current.targetId, attempt = 1)
+            is ConnectionState.Live -> {
+                // Issue #1633: a validated handoff ENDS this Live, so it must face the same
+                // stability question as a drop. It used to hard-arm at attempt 1, which on
+                // the maintainer's own environment (#1610 — a flapping MOBILE link, where
+                // periodic RAT handovers are exactly what fires this event) would launder an
+                // uncommitted episode's counter back to 1 during one of the storm's brief
+                // Live moments, and the ladder could never climb. A handoff on a link that
+                // has PROVEN stable still starts fresh at attempt 1 via the commit.
+                endLiveAndCommitIfStable()
+                val next = resumeAttempt()
+                if (reconnectAttempt > 0 && episodeExhausted(next)) {
+                    endEpisode()
+                    ConnectionState.Unreachable(current.host, current.targetId)
+                } else {
+                    reconnectingAt(current.host, current.targetId, attempt = next)
+                }
+            }
             // Connecting/Attaching/Reattaching/Reconnecting already have a
             // dial/heal in flight; Backgrounded/Idle/Gone/Unreachable have no live
             // channel to proactively replace. Suppress in all of them.
@@ -401,7 +590,7 @@ class ConnectionController(
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
             -> {
-                reconnectAttempt = 0
+                endEpisode()
                 ConnectionState.Unreachable(host, target)
             }
             // Idle/Backgrounded/NetworkLossSuspended/Gone/Unreachable: nothing to fail.
@@ -410,10 +599,17 @@ class ConnectionController(
     }
 
     /**
-     * Issue #1328 (S5): the VM effect entered its numbered reconnect ladder. Arm the
-     * SINGLE counter at attempt 1 and move any live-ish / recovering state to
-     * [ConnectionState.Reconnecting] attempt 1. A no-op from Idle/Gone/Unreachable
-     * (there is no channel to reconnect).
+     * Issue #1328 (S5): the VM effect entered its numbered reconnect ladder. Move any
+     * live-ish / recovering state to [ConnectionState.Reconnecting]. A no-op from
+     * Idle/Gone/Unreachable (there is no channel to reconnect — and, per #1633, a
+     * terminal give-up must NOT be re-armed out of by the VM's own ladder body, or the
+     * storm would simply resume).
+     *
+     * Issue #1633: this RESUMES the current episode instead of hard-arming at attempt 1.
+     * The old unconditional `attempt = 1` was the bad reset itself: the VM's ladder body
+     * exits the moment a dial reports Connected and re-enters here on the next drop, so on
+     * a connect-then-die link EVERY cycle re-armed at attempt 1 / `retryDelayMs=0` and the
+     * ladder could never climb. It arms at 1 only when no episode is in flight.
      */
     private fun onReconnectLadderEntered(current: ConnectionState): ConnectionState {
         val host = current.hostOrNull() ?: return current
@@ -423,7 +619,7 @@ class ConnectionController(
             is ConnectionState.Gone,
             is ConnectionState.Unreachable,
             -> current
-            else -> reconnectingAt(host, target, attempt = 1)
+            else -> reconnectingAt(host, target, attempt = reconnectAttempt.coerceAtLeast(1))
         }
     }
 
@@ -446,9 +642,11 @@ class ConnectionController(
             is ConnectionState.NetworkLossSuspended,
             -> current
             else -> {
-                val nextAttempt = (if (reconnectAttempt > 0) reconnectAttempt else 1) + 1
-                if (nextAttempt > effectiveMaxAttempts) {
-                    reconnectAttempt = 0
+                val nextAttempt = reconnectAttempt.coerceAtLeast(1) + 1
+                // Issue #1633: the episode is bounded by its wall clock as well as by the
+                // rung budget, so a flap too slow to burn the rungs still gives up.
+                if (episodeExhausted(nextAttempt)) {
+                    endEpisode()
                     ConnectionState.Unreachable(host, target)
                 } else {
                     reconnectingAt(host, target, attempt = nextAttempt)
@@ -482,10 +680,12 @@ class ConnectionController(
         }
         val host = current.hostOrNull() ?: return current
         return when (current) {
+            // Issue #1633: as with TransportLive, the seed landing opens the stability
+            // window; the episode commits only once that window closes.
             is ConnectionState.Attaching,
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
-            -> ConnectionState.Live(host, event.targetId)
+            -> liveAt(host, event.targetId)
             // Already Live (a background-pane reveal seed) or any other state:
             // the landing doesn't change the lifecycle state.
             else -> current
@@ -516,6 +716,39 @@ class ConnectionController(
 
         /** Silent reconnect attempts before the only honest error ([Unreachable]). */
         const val DEFAULT_MAX_RECONNECT_ATTEMPTS: Int = 4
+
+        /**
+         * Issue #1633: how long the connection must stay continuously
+         * [ConnectionState.Live] before the recovery episode COMMITS and the attempt
+         * counter resets. A drop before the window closes resumes at attempt+1.
+         *
+         * **PROPOSED, not locked** — the value comes from the #1331 target-state-machine
+         * design (which took it from Kubernetes CrashLoopBackOff's stability window). It is
+         * the loop-killer's single tuning knob: too LOW and a flapping link's brief Lives
+         * look "stable" and the storm returns; too HIGH and a genuinely healthy connection
+         * that drops within the window inherits a stale attempt. 30s comfortably exceeds
+         * the maintainer's observed ~5s connect-then-die cadence (#1610) while staying well
+         * under a normal session's uptime. Retune with evidence.
+         */
+        const val DEFAULT_STABILITY_WINDOW_MS: Long = 30_000L
+
+        /**
+         * Issue #1633: the wall-clock ceiling on ONE recovery episode. Past it the machine
+         * gives up honestly ([ConnectionState.Unreachable]) even if rungs remain, so a flap
+         * too slow to exhaust the rung budget cannot grind forever.
+         *
+         * **PROPOSED, not locked** — from the #1331 design. 120s roughly matches the
+         * 8-rung `[0,1,2,5,10,20,30,30]s` ladder's own span, so whichever bound trips first
+         * lands in the same neighbourhood.
+         */
+        const val DEFAULT_EPISODE_BUDGET_MS: Long = 120_000L
+
+        /**
+         * Issue #1633: full jitter applied to every non-zero ladder rung (the gRPC backoff
+         * model), so retries neither resonate with a periodic mobile RAT/NAT cycle nor
+         * synchronize across sessions. **PROPOSED, not locked** — ±20% is the gRPC default.
+         */
+        const val RETRY_JITTER_FRACTION: Double = 0.2
     }
 }
 

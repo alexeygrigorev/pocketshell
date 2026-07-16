@@ -142,10 +142,10 @@ class ConnectionLogHostMirrorReconnectDockerTest {
         //    mirror writes), incl. the named keepalive_dead cause + a unique
         //    marker field so the read-back unambiguously matches THIS run.
         val recorder = seedRecorderWithTrail(marker)
-        val expectedJsonl = recorder.connectionLogJsonl()
+        val seededJsonl = recorder.connectionLogJsonl()
         assertTrue(
             "precondition: the seeded trail must be non-blank (the mirror no-ops on blank)",
-            expectedJsonl.isNotBlank() && "keepalive_dead" in expectedJsonl,
+            seededJsonl.isNotBlank() && "keepalive_dead" in seededJsonl,
         )
 
         // 2. The production VM, with a handshake-counting lease manager + the real
@@ -170,6 +170,15 @@ class ConnectionLogHostMirrorReconnectDockerTest {
         try {
             // 4. Fire the EXACT production mirror glue (activeTarget ->
             //    toLeaseSessionTarget -> warm-lease write) and await it.
+            //
+            // The expected payload is rendered HERE, immediately before the mirror
+            // fires, not back at seed time. Since #1642 slice 1 the payload carries
+            // the whole `connection` lifecycle as well as the reconnect trail, so
+            // any connection event the real VM records while being built (between
+            // seeding and mirroring) legitimately belongs in the payload. Rendering
+            // at seed time would make the byte-identity assertion below a race
+            // against the VM's own diagnostics rather than a check of the mirror.
+            val expectedJsonl = recorder.connectionLogJsonl()
             val result = withTimeout(MIRROR_TIMEOUT_MS) {
                 vm.mirrorConnectionLogToHostForTest()
             }

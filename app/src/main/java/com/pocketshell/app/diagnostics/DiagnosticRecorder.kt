@@ -141,26 +141,28 @@ class DiagnosticRecorder @Inject constructor(
     }
 
     /**
-     * The reconnect-cause breadcrumbs ([ReconnectCauseTrail]) rendered as JSONL —
-     * one JSON object per line, the same on-disk encoding the rolling diagnostics
-     * file uses. This is the payload
-     * [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] mirrors to the host
-     * so the maintainer can attribute a real-world drop in the in-app file viewer
-     * (#969/#972).
+     * The host-mirrored connection log rendered as JSONL — one JSON object per
+     * line, the same on-disk encoding the rolling diagnostics file uses. This is
+     * the payload [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] writes
+     * to the host so the maintainer can attribute a real-world drop in the in-app
+     * file viewer (#969/#972).
      *
-     * Blank when nothing has been recorded yet (recording off, or no reconnect):
-     * the mirror treats a blank payload as a no-op so it never writes an empty host
-     * file.
+     * [MirroredDiagnostics] owns BOTH halves of the policy — which events belong
+     * on the host, and the byte budget for one upload. Issue #1642 slice 1 (with
+     * #1598) widened the selection from `reconnect/cause_trail`-ONLY to the whole
+     * curated connection lifecycle: the #1610 storm's engine
+     * (`connection/reconnect_fail cause=attach_not_ready`) was recorded on-device
+     * throughout and never reached the host, so six investigations re-derived what
+     * the phone already knew.
+     *
+     * Blank when nothing mirrorable has been recorded yet (recording off, or no
+     * connection activity): the mirror treats a blank payload as a no-op so it
+     * never writes an empty host file.
      */
-    suspend fun connectionLogJsonl(): String {
-        val events = readEvents(
-            DiagnosticEventFilter(
-                category = ReconnectCauseTrail.CATEGORY,
-                name = ReconnectCauseTrail.NAME,
-            ),
+    suspend fun connectionLogJsonl(): String =
+        MirroredDiagnostics.render(
+            readEvents(DiagnosticEventFilter.All).filter(MirroredDiagnostics::isMirrored),
         )
-        return events.joinToString(separator = "\n") { DiagnosticEventJson.encode(it) }
-    }
 
     /**
      * Test-only (#1124): block until the off-main store build + `lastSequence()`

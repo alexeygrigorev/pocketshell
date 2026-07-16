@@ -123,7 +123,13 @@ internal object DiagnosticRedactor {
             return classifyFailureMessage(value.toString())
         }
         if (isSensitiveKey(key) || looksSensitive(value)) return REDACTED
-        if (isStableContextKey(key)) return DiagnosticPrivacy.stableFingerprint(value)
+        // Only an identity STRING is fingerprinted. A boolean/number under an
+        // identity-shaped key (`hasSession`, …) is not an identity: digesting it
+        // would destroy the signal AND present a yes/no as an opaque identity —
+        // two possible digests, trivially reversible, and a lie to the reader.
+        if (isStableContextKey(key) && value !is Boolean && value !is Number) {
+            return DiagnosticPrivacy.stableFingerprint(value)
+        }
         return when (value) {
             is Boolean, is Byte, is Short, is Int, is Long, is Float, is Double -> value
             is CharArray -> mapOf("chars" to value.size)
@@ -252,11 +258,30 @@ internal object DiagnosticRedactor {
         "filename",
     )
 
+    /**
+     * Matched against the key with non-alphanumerics stripped, so `pausedSession`
+     * / `currentSession` / `intentSession` / `originSession` / `activeSession` all
+     * fingerprint via the `session` suffix.
+     *
+     * The `session` suffix is the #1639 M1 fix. The rule used to match the EXACT
+     * key `session` only, so the qualified variants fell through to
+     * [sanitizeFreeText] and emitted **raw tmux session names — which are
+     * directory paths by construction** ([com.pocketshell.app.tmux.SessionNameDerivation])
+     * — into the `reconnect/cause_trail`, i.e. into a log that is mirrored to the
+     * host AND routinely quoted into PUBLIC GitHub issues by agents. It is a
+     * suffix rule rather than five literals so a NEW `*Session` field added
+     * tomorrow cannot silently opt out of redaction, which is the failure mode
+     * #1639 called out (the default-allow redactor). #1642's registry-based
+     * default-deny (slice 7) supersedes this heuristic; until then this is the
+     * line, and `Issue1642ConnectionMirrorTest` asserts it as a property over the
+     * whole mirrored document rather than per key.
+     */
     private val STABLE_CONTEXT_KEY_SUFFIXES = setOf(
         "path",
         "directory",
         "folder",
         "filename",
+        "session",
     )
 
     private val SENSITIVE_KEY_MARKERS = listOf(

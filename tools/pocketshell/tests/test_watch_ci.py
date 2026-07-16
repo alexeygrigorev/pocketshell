@@ -9,9 +9,11 @@ without a real `gh` binary, network, or wall-clock wait.
 Exit-code contract under test:
 
     0  green       — all required checks passed
-    1  failed      — a required check failed / cancelled
+    1  failed      — a required check GENUINELY failed
     2  hang         — no progress past --no-progress-timeout OR wall-clock cap
     3  unresolved  — run / inputs couldn't be resolved (or gh stayed broken)
+    4  superseded  — a newer run replaced this one (routine concurrency-cancel)
+    5  no_verdict  — cancelled, so no verdict was reached (issue #1650)
 
 The load-bearing case is the HANG one: a run whose jobs NEVER change state must
 exit 2, not loop forever. The test drives a virtual clock so a stalled run is
@@ -198,15 +200,26 @@ def test_required_failure_exits_1_and_names_job():
     assert outcome.likely_infra is False
 
 
-def test_cancelled_run_exits_1():
+def test_cancelled_run_is_not_a_failure():
+    """Issue #1650: `cancelled` is NOT a failure — it is a NON-verdict.
+
+    This test previously asserted exit 1 and so ENCODED the bug: `main`'s push
+    concurrency group cancels superseded runs by design, which made every
+    superseded-run watch a guaranteed false FAILED. Hard-cut per D22 — the old
+    expectation is deleted, not kept alongside. Full class coverage (superseded
+    vs user-cancelled vs genuine-failure-then-cancelled) lives in
+    test_watch_ci_cancelled.py.
+    """
     gh = FakeGh()
     jobs = _all_required_jobs()
     jobs[1] = _job("Python utility tests (pocketshell)", "completed", "cancelled", db_id=7)
     gh.queue_run_state(status="completed", conclusion="cancelled", jobs=jobs)
+    gh.run_list_json = []  # no newer run → not superseded, just no verdict
     watcher, _ = _make_watcher(gh)
     outcome = watcher.watch(run_id="123")
-    assert outcome.result == wci.RESULT_FAILED
-    assert outcome.exit_code == 1
+    assert outcome.result == wci.RESULT_NO_VERDICT
+    assert outcome.exit_code == 5
+    assert outcome.signature is None
 
 
 # ── 2 hang: no-progress (the load-bearing case) ──────────────────────────────

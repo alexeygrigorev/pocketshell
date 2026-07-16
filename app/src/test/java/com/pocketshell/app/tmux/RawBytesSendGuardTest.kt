@@ -104,14 +104,15 @@ class RawBytesSendGuardTest : TmuxSessionViewModelTestBase() {
 
     /**
      * Class coverage — multi-line paste: a multi-line RawBytes payload rides the
-     * bracketed-paste `send-keys -H` route; a `%error` there must also fail (this
-     * lane already threw, this proves the CLASS is covered end to end).
+     * bracketed-paste route (issue #1636: a `set-buffer` fill + one `paste-buffer`
+     * commit); a `%error` on the fill must also fail (this lane already threw, this
+     * proves the CLASS is covered end to end).
      */
     @Test
     fun deadPaneMultiLinePasteSurfacesFailure() = runTest(scheduler) {
         val vm = newVm(applicationContext = context)
         val client = FakeTmuxClient().apply {
-            errorOnCommandPrefix = "send-keys -H -t %0"
+            errorOnCommandPrefix = "set-buffer"
             errorOnCommandRemaining = 1
         }
         vm.attachClientForTest(client)

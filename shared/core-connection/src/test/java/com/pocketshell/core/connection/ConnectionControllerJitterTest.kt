@@ -125,6 +125,72 @@ class ConnectionControllerJitterTest {
     }
 
     /**
+     * Issue #1633 (round 2) — jitter is rolled ONCE PER LADDER INSTALL, so a given attempt's
+     * backoff is STABLE however many times its state is rebuilt.
+     *
+     * RED on the round-1 reducer (jitter rolled inside `reconnectingAt`): `reconnectingAt` is
+     * re-invoked for the SAME attempt on every idempotent ladder re-entry, so each rebuild
+     * re-rolled that attempt's backoff. That is not academic — the VM's ladder body mirrors
+     * `retryDelayMs` into the displayed Reconnecting band and then sleeps on its own earlier
+     * read, so the band could advertise one backoff while the dial waited a different one,
+     * and the reducer's output stopped being a function of its input sequence. On a
+     * connect-then-die link (this issue's environment) that re-entry happens on EVERY cycle.
+     */
+    @Test
+    fun `a given attempt's jittered backoff is stable across repeated state rebuilds`() {
+        val transport = FakeTransportPort()
+        val c = ConnectionController(FakeClock(), transport, random = Random(7))
+        c.setReconnectLadder(ladder)
+        c.bringLive(transport)
+        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped("d")) // -> Reconnecting(1)
+        c.submit(ConnectionEvent.ReconnectFailed) // -> Reconnecting(2), a jittered rung
+
+        val attempt = (c.state.value as ConnectionState.Reconnecting).attempt
+        val first = (c.state.value as ConnectionState.Reconnecting).retryDelayMs
+        assertTrue("precondition: rung $attempt must actually be jittered (non-zero)", first > 0L)
+
+        // The VM's ladder body re-enters idempotently on every connect-then-die cycle.
+        repeat(25) {
+            c.submit(ConnectionEvent.ReconnectLadderEntered)
+            val now = c.state.value as ConnectionState.Reconnecting
+            assertEquals("the re-entry must not advance the attempt", attempt, now.attempt)
+            assertEquals(
+                "attempt $attempt re-rolled its backoff on rebuild (${now.retryDelayMs}ms vs " +
+                    "${first}ms) — the displayed band and the actual dial wait can disagree",
+                first,
+                now.retryDelayMs,
+            )
+        }
+    }
+
+    /**
+     * The stability above must NOT come from jitter having silently died: a fresh ladder
+     * install is still an independent roll, which is what actually desynchronises retries.
+     * (G6: pins the load-bearing property, not just the convenient one.)
+     */
+    @Test
+    fun `each ladder install is an independent jitter roll`() {
+        val transport = FakeTransportPort()
+        val c = ConnectionController(FakeClock(), transport, random = Random(11))
+        val rungPerInstall = (0 until 30).map {
+            c.setReconnectLadder(ladder)
+            c.bringLive(transport)
+            c.submit(ConnectionEvent.TransportDropped("d"))
+            c.submit(ConnectionEvent.TransportDropped("d"))
+            c.submit(ConnectionEvent.ReconnectFailed)
+            val d = (c.state.value as ConnectionState.Reconnecting).retryDelayMs
+            assertWithinJitterBand(1_000L, d, "per-install rung 2")
+            d
+        }
+        assertTrue(
+            "every ladder install produced the SAME backoff — jitter is not re-rolling, so " +
+                "retries would still synchronize (${rungPerInstall.distinct().size} distinct of 30)",
+            rungPerInstall.distinct().size > 1,
+        )
+    }
+
+    /**
      * Anti-drift guard: `ConnectionControllerEpisodeStabilityTest` mirrors these constants
      * locally so it can compile against the unfixed reducer for the red run. Pin the mirrors
      * to the real values here.

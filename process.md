@@ -371,9 +371,27 @@ Minimum pre-push gate:
   `:app:testReleaseUnitTest` while the orchestrator's integration gate — which
   ran only `:app:testDebugUnitTest` — was green at 3906/0. The debug variant is
   not a proxy for the required check. Run the task CI runs.
+- **A green Gradle run that executed ZERO tests is the most dangerous artifact
+  in this repo. `--rerun-tasks` is mandatory AND you must assert the executed
+  test count > 0 from the result XML, every run.** Gradle skips a *passing* test
+  task as `UP-TO-DATE` on re-run while a *failing* one always re-executes — so a
+  naive "run it N times" loop manufactures exactly the shape "1 fail, then a
+  long green streak", which reads as a flake that healed itself. On 2026-07-16
+  this fooled an on-call ("20/20 in isolation") and the orchestrator into two
+  confidently wrong conclusions about a 50%-red test; the reviewer caught it by
+  noticing `BUILD SUCCESSFUL in 3s` with zero tests executed. A green you did not
+  count is not a green. This is the mechanical sibling of G3 (ban the
+  "0 tests completed" vacuous pass) applied to the *gate itself*.
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
-  N>=20 consecutive runs of the affected tests and report the pass count.**
+  N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its
+  executed count verified, and report the pass count.** Better than sampling
+  when available: if the assertion's outcome is **monotonic** in the varied
+  quantity, pin the variable to **both extremes** and run — that covers the whole
+  distribution and is strictly stronger than N random samples (the #1633 round-two
+  method). Reproduce under the SAME condition CI uses: the #1633 flake was
+  invisible on `:app:testDebugUnitTest` and on isolated `--tests` runs, and only
+  appeared on a FULL `:app:testReleaseUnitTest` module run.
   #1633 added +/-20% ladder jitter; its own module's two exact-delay assertions
   were legitimately rewritten into bands, but nobody swept for the same breakage
   OUTSIDE that module, and `TmuxSessionViewModelReconnectTest` (in `:app`) went

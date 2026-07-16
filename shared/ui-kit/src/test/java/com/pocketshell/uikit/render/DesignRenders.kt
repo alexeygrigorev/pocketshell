@@ -903,6 +903,15 @@ class DesignRenders {
     @Test
     fun composerControlsRow() = render("composer-controls-row") { ComposerControlsRowRender() }
 
+    @Test
+    fun composerQueueSending() = render("composer-queue-sending") { ComposerQueueStateRender() }
+
+    @Test
+    fun composerQueueFailed() = render("composer-queue-failed") { ComposerQueueStateRender(failed = true) }
+
+    @Test
+    fun composerOffline() = render("composer-offline") { ComposerQueueStateRender(offline = true) }
+
     /**
      * Issue #1245: static mirror of the VOICE-RECORDING composer bottom area after
      * the hands-free Lock was removed ENTIRELY (the pill, the inline toggle, the

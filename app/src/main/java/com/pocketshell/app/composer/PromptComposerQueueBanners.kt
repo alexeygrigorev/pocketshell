@@ -41,6 +41,7 @@ internal fun PromptComposerQueueBanners(
     onDiscardPending: (String) -> Unit,
     onSavePendingAsAudio: (String) -> Unit,
     outboundQueueItems: List<OutboundItem>,
+    connectionDegraded: Boolean,
     outboundQueueExpanded: Boolean,
     onToggleOutboundQueue: () -> Unit,
     onDeleteOutboundItem: (String) -> Unit,
@@ -63,6 +64,7 @@ internal fun PromptComposerQueueBanners(
     if (outboundQueueItems.isNotEmpty()) {
         OutboundQueueBanner(
             items = outboundQueueItems,
+            connectionDegraded = connectionDegraded,
             expanded = outboundQueueExpanded,
             onToggle = onToggleOutboundQueue,
             onDelete = onDeleteOutboundItem,
@@ -81,6 +83,7 @@ internal fun PromptComposerQueueBanners(
 @Composable
 private fun OutboundQueueBanner(
     items: List<OutboundItem>,
+    connectionDegraded: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit,
     onDelete: (String) -> Unit,
@@ -88,6 +91,7 @@ private fun OutboundQueueBanner(
     onResendAll: () -> Unit,
 ) {
     val collapsedRetryItem = if (expanded) null else retryableOutboundQueueItem(items)
+    val summary = outboundQueueSummary(items, connectionDegraded)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -105,25 +109,56 @@ private fun OutboundQueueBanner(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(role = Role.Button, onClick = onToggle)
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = if (expanded) "Hide queued prompts" else "Show queued prompts",
+                    onClick = onToggle,
+                )
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .testTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = outboundQueueHeadline(items),
-                    color = PocketShellColors.Text,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = outboundQueueSubline(items),
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = summary.primary,
+                        color = if (summary.attention) PocketShellColors.Amber else PocketShellColors.Text,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag(COMPOSER_OUTBOUND_QUEUE_STATUS_TAG),
+                    )
+                    if (summary.attentionSuffix != null) {
+                        Text(
+                            text = " · ${summary.attentionSuffix}",
+                            color = PocketShellColors.Amber,
+                            style = PocketShellType.bodyDense,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            modifier = Modifier.testTag(COMPOSER_OUTBOUND_QUEUE_FAILURE_SEGMENT_TAG),
+                        )
+                    }
+                    if (items.size == 1 && summary.preview != null) {
+                        Text(
+                            text = " · ${summary.preview}",
+                            color = PocketShellColors.TextSecondary,
+                            style = PocketShellType.bodyDense,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                if (items.size > 1 && summary.preview != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = summary.preview,
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.bodyDense,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             if (collapsedRetryItem != null) {
                 Spacer(modifier = Modifier.width(8.dp))
@@ -216,8 +251,12 @@ private fun OutboundQueueRow(
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = outboundQueueStateLabel(item),
-            color = PocketShellColors.TextSecondary,
-            fontSize = 11.sp,
+            color = if (item.state == OutboundState.Failed) {
+                PocketShellColors.Amber
+            } else {
+                PocketShellColors.TextSecondary
+            },
+            style = PocketShellType.bodyDense,
         )
         if (item.cleanText.isNotBlank()) {
             Spacer(modifier = Modifier.height(4.dp))
@@ -234,7 +273,7 @@ private fun OutboundQueueRow(
             Text(
                 text = outboundAttachmentCountLabel(item.attachments.size),
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
+                style = PocketShellType.bodyDense,
             )
         }
         if (item.state == OutboundState.Queued || item.state == OutboundState.Failed) {
@@ -309,7 +348,7 @@ private fun PendingTranscriptionsBanner(
                     Text(
                         text = subline,
                         color = PocketShellColors.Accent.copy(alpha = 0.85f),
-                        fontSize = 11.sp,
+                        style = PocketShellType.bodyDense,
                     )
                 }
             }
@@ -370,7 +409,7 @@ private fun PendingTranscriptionRow(
         Text(
             text = statusText,
             color = PocketShellColors.Accent.copy(alpha = 0.85f),
-            fontSize = 11.sp,
+            style = PocketShellType.bodyDense,
         )
         if (item.retryCount > 0 && !item.atRetryCap) {
             Spacer(modifier = Modifier.height(2.dp))
@@ -378,7 +417,7 @@ private fun PendingTranscriptionRow(
                 text = "Attempt ${item.retryCount + 1} of " +
                     "${PendingTranscriptionEntity.MAX_RETRY_ATTEMPTS}",
                 color = PocketShellColors.Accent.copy(alpha = 0.7f),
-                fontSize = 11.sp,
+                style = PocketShellType.bodyDense,
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -473,20 +512,50 @@ internal fun pendingSummarySubline(items: List<PendingTranscriptionItem>): Strin
     }
 }
 
-internal fun outboundQueueHeadline(items: List<OutboundItem>): String = when (items.size) {
-    0 -> ""
-    1 -> "1 unsent prompt"
-    else -> "${items.size} unsent prompts"
-}
+internal data class OutboundQueueSummary(
+    val primary: String,
+    val preview: String? = null,
+    val attention: Boolean = false,
+    val attentionSuffix: String? = null,
+)
 
-internal fun outboundQueueSubline(items: List<OutboundItem>): String {
-    val first = items.firstOrNull() ?: return ""
-    val preview = first.cleanText.trim().lineSequence().firstOrNull().orEmpty()
-    val status = outboundQueueStateLabel(first)
-    return when {
-        preview.isBlank() -> status
-        else -> "$status — $preview"
+internal fun outboundQueueSummary(
+    items: List<OutboundItem>,
+    connectionDegraded: Boolean,
+): OutboundQueueSummary {
+    val oldest = items.minByOrNull { it.createdAtMs } ?: return OutboundQueueSummary("")
+    val previewText = oldest.cleanText.lineSequence()
+        .map(String::trim)
+        .firstOrNull(String::isNotBlank)
+        ?: outboundAttachmentCountLabel(oldest.attachments.size).takeIf { oldest.attachments.isNotEmpty() }
+    val preview = previewText?.let { "“$it”" }
+    if (items.size == 1) {
+        val primary = when (oldest.state) {
+            OutboundState.Queued -> if (connectionDegraded) {
+                "Queued — will send on reconnect"
+            } else {
+                "Queued — sending next"
+            }
+            OutboundState.Uploading -> "Uploading attachments"
+            OutboundState.InFlight -> "Sending"
+            OutboundState.Delivered -> "Delivered"
+            OutboundState.Failed -> "Failed — tap Retry"
+        }
+        return OutboundQueueSummary(primary, preview, oldest.state == OutboundState.Failed)
     }
+
+    val failedCount = items.count { it.state == OutboundState.Failed }
+    val primary = when {
+        failedCount > 0 -> "${items.size} queued"
+        connectionDegraded -> "${items.size} queued · will send on reconnect"
+        oldest.state == OutboundState.Uploading -> "${items.size} queued · uploading oldest first"
+        else -> "${items.size} queued · sending oldest first"
+    }
+    return OutboundQueueSummary(
+        primary = primary,
+        preview = preview,
+        attentionSuffix = "$failedCount failed".takeIf { failedCount > 0 },
+    )
 }
 
 internal fun outboundQueueStateLabel(item: OutboundItem): String = when (item.state) {
@@ -504,6 +573,20 @@ internal fun retryableOutboundQueueItem(items: List<OutboundItem>): OutboundItem
     items
         .filter { it.state == OutboundState.Queued || it.state == OutboundState.Failed }
         .minByOrNull { it.createdAtMs }
+
+internal fun isComposerResendMode(
+    draft: String,
+    hasAttachments: Boolean,
+    retryableItem: OutboundItem?,
+    sendInFlight: Boolean,
+): Boolean = draft.isEmpty() && !hasAttachments && retryableItem != null && !sendInFlight
+
+internal fun showComposerSendProgress(
+    sendInFlight: Boolean,
+    items: List<OutboundItem>,
+): Boolean = sendInFlight && items.none {
+    it.state == OutboundState.Uploading || it.state == OutboundState.InFlight
+}
 
 internal fun formatRelativeTimestamp(timestampMs: Long, nowMs: Long): String {
     val delta = (nowMs - timestampMs).coerceAtLeast(0L)
@@ -534,6 +617,9 @@ internal const val COMPOSER_PENDING_BANNER_TAG = "prompt-composer-pending-banner
 internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle"
 internal const val COMPOSER_OUTBOUND_QUEUE_BANNER_TAG = "prompt-composer-outbound-queue"
 internal const val COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG = "prompt-composer-outbound-queue-toggle"
+internal const val COMPOSER_OUTBOUND_QUEUE_STATUS_TAG = "prompt-composer-outbound-queue-status"
+internal const val COMPOSER_OUTBOUND_QUEUE_FAILURE_SEGMENT_TAG =
+    "prompt-composer-outbound-queue-failure-segment"
 internal const val COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG = "prompt-composer-outbound-queue-resend-all"
 internal const val PENDING_RETRYING_MESSAGE = "Retrying…"
 

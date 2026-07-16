@@ -794,12 +794,14 @@ internal fun SheetContent(
         keyboardController?.hide()
         onSend(true)
     }
+    val isResendMode = isComposerResendMode(
+        draft = draftFieldValue.text,
+        hasAttachments = state.attachments.isNotEmpty(),
+        retryableItem = retryableOutboundItem,
+        sendInFlight = state.sendInFlight,
+    )
     val commitSendOrRetryQueued: () -> Unit = {
-        if (draftFieldValue.text.isEmpty() &&
-            state.attachments.isEmpty() &&
-            retryableOutboundItem != null &&
-            !state.sendInFlight
-        ) {
+        if (isResendMode && retryableOutboundItem != null) {
             focusManager.clearFocus(force = true)
             keyboardController?.hide()
             onRetryOutboundItem(retryableOutboundItem.id)
@@ -1102,6 +1104,7 @@ internal fun SheetContent(
                 onDiscardPending = onDiscardPending,
                 onSavePendingAsAudio = onSavePendingAsAudio,
                 outboundQueueItems = outboundQueueItems,
+                connectionDegraded = state.connectionDegraded,
                 outboundQueueExpanded = outboundQueueExpanded,
                 onToggleOutboundQueue = onToggleOutboundQueue,
                 onDeleteOutboundItem = onDeleteOutboundItem,
@@ -1298,7 +1301,8 @@ internal fun SheetContent(
                     SendButton(
                         onClick = commitSendOrRetryQueued,
                         enabled = sendEnabled,
-                        sending = state.sendInFlight,
+                        sending = showComposerSendProgress(state.sendInFlight, outboundQueueItems),
+                        label = if (isResendMode) "Resend" else "Send",
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -1637,6 +1641,7 @@ private fun SendButton(
     // spinner instead of the send arrow, and is non-interactive. This is the
     // immediate in-flight feedback the moment the user taps Send.
     sending: Boolean = false,
+    label: String = "Send",
 ) {
     // While sending the pill keeps the accent fill (it is an active commit in
     // progress, not a disabled empty-draft state) but is non-interactive.
@@ -1661,7 +1666,7 @@ private fun SendButton(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Text(
-            text = if (sending) "Sending…" else "Send",
+            text = if (sending) "Sending…" else label,
             color = contentColor,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,

@@ -78,7 +78,7 @@ class ConnectionEffectDriverConnectionLogMirrorTest {
         assertEquals("a foreign-host Up must not mirror", 0, mirrorFires)
 
         // A Down for the current host must NOT fire the mirror (only Up does).
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
         assertEquals("a Down edge must not mirror", 0, mirrorFires)
 
         // The current-host Up (reconnect completed) fires the mirror exactly once.
@@ -86,7 +86,7 @@ class ConnectionEffectDriverConnectionLogMirrorTest {
         assertEquals("the current-host reconnect Up must mirror once", 1, mirrorFires)
 
         // A second reconnect cycle fires it again (it is the per-reconnect trigger).
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
         transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
         assertEquals("each reconnect Up re-mirrors", 2, mirrorFires)
 

@@ -24,7 +24,30 @@ interface Clock {
  *  portfwd-reconnect subscription consumes this; the type shape is preserved). */
 sealed interface TransportUpDown {
     data class Up(val host: HostKey) : TransportUpDown
-    data class Down(val host: HostKey, val reason: String) : TransportUpDown
+
+    /**
+     * A transport `Closed` edge.
+     *
+     * @param reason the canonical lower-snake cause token for the reconnect trail (#969).
+     * @param locallyInitiated Issue #1632 — the LOCAL-INTENT token, stamped by the EMITTER
+     *   (`leaseStateToTransportEdge`, from the close reason the lease manager named at its
+     *   own emit site). True when WE tore the transport down (recovery's own
+     *   `sshLeaseManager.disconnect()`, a force-refresh eviction, idle reaping, lifecycle
+     *   teardown) — i.e. this `Down` is an ECHO of an action already in flight, not news of
+     *   a failure. False for a genuine death (peer gone, keepalive-declared dead), which
+     *   must still drive recovery.
+     *
+     *   The token rides on the edge deliberately: the consumer must NEVER infer "was that
+     *   us?" by pattern-matching the reason string. That inference is exactly what rotted
+     *   into #1632 — the `-CC` edge grew a self-inflicted filter (#1568) and the lease edge
+     *   silently did not, so recovery's own teardown re-armed the ladder forever (the #1610
+     *   storm). Intent is knowledge only the emitter has; it is carried, not guessed.
+     */
+    data class Down(
+        val host: HostKey,
+        val reason: String,
+        val locallyInitiated: Boolean,
+    ) : TransportUpDown
 }
 
 /**

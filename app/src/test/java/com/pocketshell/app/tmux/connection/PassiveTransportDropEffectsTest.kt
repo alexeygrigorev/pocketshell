@@ -2,6 +2,8 @@ package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -220,13 +222,15 @@ class PassiveTransportDropEffectsTest {
     private val client: TmuxClient = FakeTmuxClient()
 
     private fun effects(
-        isSelfInflictedClose: (TmuxClient) -> Boolean = { false },
         isCurrentClient: (TmuxClient) -> Boolean = { true },
         hasTarget: () -> Boolean = { true },
         screenStartedForCleared: () -> Boolean = { false },
         navigatingToDifferentSession: () -> Boolean = { false },
     ) = PassiveTransportDropEffects(
-        isSelfInflictedClose = isSelfInflictedClose,
+        // Issue #1632: the `isSelfInflictedClose` injection seam is GONE — the classifier
+        // now reads the single [SelfInflictedClose] authority off the client's real
+        // `disconnectEvent`. So these tests stage a REAL disconnect event instead of
+        // stubbing the boolean, which is what makes them actually cover the predicate.
         isCurrentClient = isCurrentClient,
         hasTarget = hasTarget,
         screenStartedForCleared = screenStartedForCleared,
@@ -235,9 +239,55 @@ class PassiveTransportDropEffectsTest {
 
     @Test
     fun classify_explicitDetach_ignored() {
+        val detached = FakeTmuxClient().apply {
+            markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ExplicitDetach,
+                    source = "test",
+                    intent = "detach",
+                ),
+            )
+        }
+        assertEquals(PassiveDropArm.Ignore, effects().classify(detached))
+    }
+
+    /**
+     * Issue #1632 (adjacency, #1568 P0-5): our own `TmuxClient.close()` must still be
+     * Ignored now that the predicate lives in the shared authority rather than the
+     * deleted inline `TmuxSessionViewModel` lambda.
+     */
+    @Test
+    fun classify_explicitClose_ignored() {
+        val closed = FakeTmuxClient().apply {
+            markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ExplicitClose,
+                    source = "test",
+                    intent = "close",
+                ),
+            )
+        }
+        assertEquals(PassiveDropArm.Ignore, effects().classify(closed))
+    }
+
+    /**
+     * Issue #1632 (G6 negative): a genuine passive `-CC` loss must still be actionable
+     * through the shared authority — the filter must not swallow real failures.
+     */
+    @Test
+    fun classify_readerEof_isNotSelfInflicted_andStillRecovers() {
+        val eofed = FakeTmuxClient().apply {
+            markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "test",
+                    intent = "reader",
+                ),
+            )
+        }
         assertEquals(
-            PassiveDropArm.Ignore,
-            effects(isSelfInflictedClose = { true }).classify(client),
+            PassiveDropArm.SilentReattachWithinGrace,
+            effects(hasTarget = { false }).classify(eofed),
         )
     }
 

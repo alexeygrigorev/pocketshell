@@ -125,13 +125,26 @@ class SshLeaseTransportPort(
  * out) rather than being mis-reported as a spurious up or down — the controller
  * must never see a fake edge. Exposed as a top-level pure function so it is
  * unit-testable without a real lease manager.
+ *
+ * Issue #1632: this is the EMITTER of the lease `Down` edge, so it is where the
+ * local-intent token is stamped. [SshLeaseManager] already names WHY it closed at
+ * each of its own `emitStateLocked` call sites; [SelfInflictedClose] turns that
+ * named reason into [TransportUpDown.Down.locallyInitiated] once, here, so no
+ * downstream consumer ever has to infer "was that teardown us?" from a reason
+ * string. That inference gap is the #1632 defect: recovery's own
+ * `sshLeaseManager.disconnect()` looked, downstream, exactly like a remote drop.
  */
 internal fun leaseStateToTransportEdge(event: SshLeaseStateEvent): TransportUpDown? {
     val host = hostKeyFor(event.key)
     return when (event.state) {
         SshLeaseConnectionState.Connected -> TransportUpDown.Up(host)
         SshLeaseConnectionState.Closed ->
-            TransportUpDown.Down(host, reason = transportDropReason(event.closeReason))
+            TransportUpDown.Down(
+                host = host,
+                reason = transportDropReason(event.closeReason),
+                locallyInitiated = SelfInflictedClose.isSelfInflictedLeaseClose(event.closeReason),
+            )
+
         SshLeaseConnectionState.Connecting,
         SshLeaseConnectionState.Idle,
         -> null

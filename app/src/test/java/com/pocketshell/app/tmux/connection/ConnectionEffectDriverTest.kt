@@ -812,7 +812,7 @@ class ConnectionEffectDriverTest {
         // A real lease `Down` for the CURRENT host is now submitted as TransportDropped:
         // the controller heals Live -> Reattaching (the first ladder rung). Slice 3
         // makes the controller authoritative for that ladder STATE.
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
         assertEquals(
             "a foreground lease Down walks the controller Live -> Reattaching",
             listOf("Idle", "Attaching", "Live", "Reattaching"),
@@ -824,7 +824,7 @@ class ConnectionEffectDriverTest {
         )
 
         // A second lease Down escalates the ladder: Reattaching -> Reconnecting(1).
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
         assertTrue(
             "a second lease Down escalates the ladder to Reconnecting",
             controller.state.value is ConnectionState.Reconnecting,
@@ -852,7 +852,7 @@ class ConnectionEffectDriverTest {
         controller.submit(ConnectionEvent.Enter(host, sessionA))
         assertEquals(listOf("Idle", "Attaching"), stateNamesOf(driver))
 
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
 
         assertEquals(
             "lease Down from Attaching must submit one silent drop into Reattaching",
@@ -905,7 +905,7 @@ class ConnectionEffectDriverTest {
         // A lease Down while backgrounded must be recorded as DropSuppressed and NOT
         // submitted — submitting it would collapse the controller toward Unreachable
         // while backgrounded (the #635 band on the next within-grace foreground).
-        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "keepalive_dead"))
+        transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "keepalive_dead", locallyInitiated = false))
         assertTrue(
             "a suppressed lease Down must be recorded as DropSuppressed",
             driver.observations.value.any {
@@ -950,7 +950,7 @@ class ConnectionEffectDriverTest {
         // filter — exactly as the lease Up edge already gates — so it never disturbs
         // the current target's live channel.
         transportPort.transportEventsFlow.emit(
-            TransportUpDown.Down(HostKey("bob@elsewhere.example:22/9"), reason = "closed"),
+            TransportUpDown.Down(HostKey("bob@elsewhere.example:22/9"), reason = "closed", locallyInitiated = false),
         )
         assertEquals(
             "a lease Down for an unrelated host must not move the controller",
@@ -1014,7 +1014,7 @@ class ConnectionEffectDriverTest {
 
         // The driver must SEE both port flows, independent of controller state.
         h.tmuxPort.disconnectedFlow.emit(true)
-        h.transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed"))
+        h.transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, reason = "closed", locallyInitiated = false))
         h.transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
 
         val obs = h.driver.observations.value
@@ -1055,7 +1055,7 @@ class ConnectionEffectDriverTest {
         h.controller.submit(ConnectionEvent.Foreground)
         h.controller.submit(ConnectionEvent.TransportDropped("drop"))
         h.tmuxPort.disconnectedFlow.emit(true)
-        h.transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, "closed"))
+        h.transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, "closed", locallyInitiated = false))
 
         // Reaching here without an AssertionError from a fake port IS the proof:
         // the driver collected/logged every signal and called zero port IO.

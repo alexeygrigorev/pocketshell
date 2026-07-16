@@ -11,12 +11,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
@@ -195,5 +201,81 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
             .assertIsDisplayed()
             .assertTextContains("I can still report", substring = true)
         WalkthroughScreenshotArtifacts.capture("issue-1616-02-finalize-keeps-new-draft-open")
+    }
+
+    @Test
+    fun queuedSendingStateShowsPromptAOnceWhileDraftBAndRealImeRemainUsable() {
+        val drafts = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newViewModel(drafts, queue)
+        val sendEntered = CompletableDeferred<Unit>()
+        val releaseDelivery = CompletableDeferred<Unit>()
+        val targetKey = "1/session-a"
+
+        compose.activityRule.scenario.onActivity { activity ->
+            WindowCompat.setDecorFitsSystemWindows(activity.window, false)
+        }
+        compose.setContent {
+            PocketShellTheme {
+                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSheet(
+                        onDismiss = {},
+                        onSend = {
+                            sendEntered.complete(Unit)
+                            releaseDelivery.await()
+                            true
+                        },
+                        composerTargetKey = targetKey,
+                        sendTargetSnapshotProvider = {
+                            PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
+                        },
+                        viewModel = vm,
+                    )
+                }
+            }
+        }
+        compose.waitUntil(5_000) { vm.composerTarget == targetKey }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick().performTextInput("prompt A")
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(5_000) { sendEntered.isCompleted && vm.uiState.value.sendInFlight }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick().performTextInput("draft B")
+        compose.waitUntil(5_000) { vm.uiState.value.draft == "draft B" }
+
+        compose.onNodeWithText("Sending", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText(" · “prompt A”", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .assertTextContains("draft B", substring = true)
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .assertIsDisplayed().assertIsNotEnabled()
+        compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG, useUnmergedTree = true).assertDoesNotExist()
+        compose.waitUntil(5_000) {
+            ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
+                ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        }
+        val statusBounds = compose.onNodeWithTag(COMPOSER_STATUS_VIEWPORT_TAG, true)
+            .getUnclippedBoundsInRoot()
+        val bannerBounds = compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG, true)
+            .getUnclippedBoundsInRoot()
+        val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true)
+            .getUnclippedBoundsInRoot()
+        val insets = checkNotNull(ViewCompat.getRootWindowInsets(compose.activity.window.decorView))
+        val density = compose.activity.resources.displayMetrics.density
+        val keyboardTopDp =
+            (compose.activity.window.decorView.height - insets.getInsets(WindowInsetsCompat.Type.ime()).bottom) / density
+        assertTrue(
+            "queue banner must be contained by the #1619 status viewport: banner=$bannerBounds status=$statusBounds",
+            bannerBounds.top >= statusBounds.top - 1.dp && bannerBounds.bottom <= statusBounds.bottom + 1.dp,
+        )
+        assertTrue("Send must remain above the real IME: send=$sendBounds imeTop=$keyboardTopDp", sendBounds.bottom.value <= keyboardTopDp + 1f)
+        assertEquals(1, queue.itemsFor(targetKey).size)
+        assertEquals("prompt A", queue.itemsFor(targetKey).single().cleanText)
+        WalkthroughScreenshotArtifacts.capture(
+            "issue-1620-green-queued-sending-draft-keyboard-up",
+        )
+
+        releaseDelivery.complete(Unit)
+        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
     }
 }

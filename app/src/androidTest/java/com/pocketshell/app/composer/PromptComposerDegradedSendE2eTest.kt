@@ -19,6 +19,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -242,6 +243,7 @@ class PromptComposerDegradedSendE2eTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Sending…").assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsNotEnabled()
         // Issue #971: the prompt is HANDED OFF mid-flight — the editor is cleared
         // (single representation), so the same prompt is never shown twice.
@@ -494,15 +496,16 @@ class PromptComposerDegradedSendE2eTest {
         compose.waitUntil(timeoutMillis = 5_000) { firstSendEntered.isCompleted }
         compose.waitUntil(timeoutMillis = 5_000) { vm.uiState.value.sendInFlight }
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithTag(COMPOSER_SEND_IN_FLIGHT_TAG)
-                .fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Sending").fetchSemanticsNodes().isNotEmpty()
         }
 
         // (a) SINGLE REPRESENTATION in flight: editor EMPTY, ONE queue banner,
         // Send disabled.
         assertEquals("", vm.uiState.value.draft)
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
-        compose.onNodeWithText("1 unsent prompt", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Sending").assertIsDisplayed()
+        compose.onNodeWithText(" · “/clear”").assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertDoesNotExist()
         assertEquals(listOf("/clear"), vm.outboundQueueItems.value.map { it.cleanText })
         assertEquals(1, vm.outboundQueueItems.value.size)
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsNotEnabled()
@@ -530,10 +533,7 @@ class PromptComposerDegradedSendE2eTest {
             vm.uiState.value.error,
         )
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
-        compose.onNodeWithText(
-            PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE,
-            substring = true,
-        ).assertIsDisplayed()
+        compose.onNodeWithText("Queued — will send on reconnect").assertIsDisplayed()
         compose.onNodeWithText("send again or discard").assertDoesNotExist()
         compose.onNodeWithTag(COMPOSER_CONNECTION_LOST_TAG).assertDoesNotExist()
         WalkthroughScreenshotArtifacts.capture("issue-971-02-drop-single-status-stays-queued")

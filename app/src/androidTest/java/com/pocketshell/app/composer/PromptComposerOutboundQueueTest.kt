@@ -1,5 +1,6 @@
 package com.pocketshell.app.composer
 
+import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -10,10 +11,16 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellColors
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,6 +33,100 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerOutboundQueueTest {
+
+    @Test
+    fun statusLedSingleRowsOwnCopyProgressAndResendPresentation() {
+        val inFlight = OutboundItem(
+            id = "active-a",
+            sessionKey = "1/a",
+            cleanText = "prompt A",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+        )
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(sendInFlight = true, draft = "draft B"),
+                    onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
+                    outboundQueueItems = listOf(inFlight),
+                )
+            }
+        }
+        compose.onNodeWithText("Sending").assertIsDisplayed()
+        compose.onNodeWithText(" · “prompt A”").assertIsDisplayed()
+        compose.onNodeWithText("Send").assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_IN_FLIGHT_TAG).assertDoesNotExist()
+        compose.assertNodeFullyWithinRoot(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG)
+    }
+
+    @Test
+    fun failedAUsesAmberWordsAndRetriesExistingIdWhileDraftBStaysSend() {
+        val failed = failedItem("failed-a", "prompt A", 1L)
+        val retried = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(),
+                    onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
+                    outboundQueueItems = listOf(failed),
+                    onRetryOutboundItem = { retried += it },
+                )
+            }
+        }
+        compose.onNodeWithText("Failed — tap Retry").assertIsDisplayed()
+        compose.onNodeWithText(" · “prompt A”").assertIsDisplayed()
+        assertNodeContainsAmberInk(COMPOSER_OUTBOUND_QUEUE_STATUS_TAG)
+        compose.onNodeWithText("Resend").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("failed-a"), retried)
+
+    }
+
+    @Test
+    fun failedAPreviewRemainsWhileDraftBPrimaryActionIsSend() {
+        val failed = failedItem("failed-a", "prompt A", 1L)
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(draft = "draft B"),
+                    onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
+                    outboundQueueItems = listOf(failed),
+                )
+            }
+        }
+        compose.onNodeWithText(" · “prompt A”").assertIsDisplayed()
+        compose.onNodeWithText("Send").assertIsDisplayed()
+        compose.onNodeWithText("Resend").assertDoesNotExist()
+    }
+
+    @Test
+    fun multiFailureColorsOnlyFailureSegmentAmber() {
+        val failed = failedItem("failed-a", "prompt A", 1L)
+        val queued = OutboundItem(
+            id = "queued-b",
+            sessionKey = "1/a",
+            cleanText = "prompt B",
+            state = OutboundState.Queued,
+            createdAtMs = 2L,
+        )
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                    outboundQueueItems = listOf(failed, queued),
+                )
+            }
+        }
+
+        compose.onNodeWithText("2 queued").assertIsDisplayed()
+        compose.onNodeWithText(" · 1 failed").assertIsDisplayed()
+        assertNodeDoesNotContainAmberInk(COMPOSER_OUTBOUND_QUEUE_STATUS_TAG)
+        assertNodeContainsAmberInk(COMPOSER_OUTBOUND_QUEUE_FAILURE_SEGMENT_TAG)
+    }
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
@@ -62,11 +163,11 @@ class PromptComposerOutboundQueueTest {
         }
 
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG).assertIsDisplayed()
-        compose.onNodeWithText("1 unsent prompt").assertIsDisplayed()
+        compose.onNodeWithText("Queued — sending next").assertIsDisplayed()
         compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).assertDoesNotExist()
 
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG).performClick()
-        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("summarize the failing test output").assertIsDisplayed()
         compose.onNodeWithText("1 attachment").assertIsDisplayed()
 
@@ -106,7 +207,7 @@ class PromptComposerOutboundQueueTest {
             }
         }
 
-        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(item.id)).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Failed — connection lost").assertIsDisplayed()
 
         compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(item.id)).performClick()
@@ -191,12 +292,12 @@ class PromptComposerOutboundQueueTest {
             }
         }
 
-        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(inFlight.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(inFlight.id)).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Sending").assertIsDisplayed()
         compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(inFlight.id)).assertDoesNotExist()
         compose.onNodeWithTag(composerOutboundQueueRetryTestTag(inFlight.id)).assertDoesNotExist()
 
-        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(uploading.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(uploading.id)).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Uploading attachments").assertIsDisplayed()
         compose.onNodeWithTag(composerOutboundQueueDeleteTestTag(uploading.id)).assertDoesNotExist()
         compose.onNodeWithTag(composerOutboundQueueRetryTestTag(uploading.id)).assertDoesNotExist()
@@ -214,6 +315,48 @@ class PromptComposerOutboundQueueTest {
         lastError = "connection lost",
         createdAtMs = createdAtMs,
     )
+
+    private fun assertNodeContainsAmberInk(tag: String) {
+        val bitmap = compose.onNodeWithTag(tag, useUnmergedTree = true)
+            .captureToImage().asAndroidBitmap()
+        val expected = PocketShellColors.Amber.toArgb()
+        try {
+            val containsAmber = (0 until bitmap.height).any { y ->
+                (0 until bitmap.width).any { x ->
+                    val actual = bitmap.getPixel(x, y)
+                    maxOf(
+                        kotlin.math.abs(AndroidColor.red(actual) - AndroidColor.red(expected)),
+                        kotlin.math.abs(AndroidColor.green(actual) - AndroidColor.green(expected)),
+                        kotlin.math.abs(AndroidColor.blue(actual) - AndroidColor.blue(expected)),
+                    ) <= 12
+                }
+            }
+            assertTrue("Node tagged $tag must contain Amber ink", containsAmber)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun assertNodeDoesNotContainAmberInk(tag: String) {
+        val bitmap = compose.onNodeWithTag(tag, useUnmergedTree = true)
+            .captureToImage().asAndroidBitmap()
+        val expected = PocketShellColors.Amber.toArgb()
+        try {
+            val containsAmber = (0 until bitmap.height).any { y ->
+                (0 until bitmap.width).any { x ->
+                    val actual = bitmap.getPixel(x, y)
+                    maxOf(
+                        kotlin.math.abs(AndroidColor.red(actual) - AndroidColor.red(expected)),
+                        kotlin.math.abs(AndroidColor.green(actual) - AndroidColor.green(expected)),
+                        kotlin.math.abs(AndroidColor.blue(actual) - AndroidColor.blue(expected)),
+                    ) <= 12
+                }
+            }
+            assertTrue("Node tagged $tag must not contain Amber ink", !containsAmber)
+        } finally {
+            bitmap.recycle()
+        }
+    }
 
     @Test
     fun resendAllButtonIsAbsentForASingleResendableRow() {
@@ -233,7 +376,7 @@ class PromptComposerOutboundQueueTest {
             }
         }
 
-        compose.onNodeWithTag(composerOutboundQueueRetryTestTag("only-1")).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag("only-1")).performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).assertDoesNotExist()
     }
 
@@ -291,13 +434,13 @@ class PromptComposerOutboundQueueTest {
             }
         }
 
-        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Resend all (2)").assertIsDisplayed()
         compose.assertNodeFullyWithinRoot(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG)
         // Per-row retry stays intact alongside the batch action.
-        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(first.id)).assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(first.id)).performScrollTo().assertIsDisplayed()
 
-        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).performClick()
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(1, resendAllCount)
     }

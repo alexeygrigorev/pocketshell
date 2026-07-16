@@ -876,3 +876,41 @@ internal fun SlashCommandMirrorDropdown(rows: List<Triple<String, String, Boolea
         }
     }
 }
+
+@Composable
+internal fun ComposerQueueStateRender(failed: Boolean = false, offline: Boolean = false) {
+    Column(
+        Modifier.fillMaxSize().background(PocketShellColors.Surface).padding(18.dp),
+        verticalArrangement = Arrangement.Bottom,
+    ) {
+        val status = when {
+            offline -> "Offline — prompts will be queued and sent on reconnect."
+            failed -> "Failed — tap Retry"
+            else -> "Sending"
+        }
+        Column(
+            Modifier.fillMaxWidth().background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+                .padding(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(status, color = if (failed || offline) PocketShellColors.Amber else PocketShellColors.Text,
+                    fontSize = if (offline) 12.sp else 13.sp, fontWeight = FontWeight.SemiBold)
+                if (!offline) Text(" · “I can still report the deployment result”", color = PocketShellColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (failed) {
+                Spacer(Modifier.height(8.dp))
+                Text("Retry", color = PocketShellColors.OnAccent, modifier = Modifier.align(Alignment.End).background(PocketShellColors.Accent, RoundedCornerShape(6.dp)).padding(8.dp))
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(96.dp).background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp)).padding(14.dp)) {
+            Text(if (failed) "" else "draft B stays editable", color = PocketShellColors.Text, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Text(if (failed) "Resend" else "Send", color = PocketShellColors.TextMuted,
+                modifier = Modifier.background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp)).padding(horizontal = 18.dp, vertical = 12.dp))
+        }
+    }
+}

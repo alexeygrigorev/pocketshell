@@ -411,10 +411,31 @@ Minimum pre-push gate:
      check catches both. Use `--no-daemon` on a contended box, assert XML
      freshness against the run's start, AND scan the console.
 
-  Exit codes, build banners, real-looking counts, and even fresh timestamps
-  lied across these five. **Trust only: the console line for the task + a count
-  you asserted yourself + proof the XML is from THIS run.** If you cannot
-  establish all three, you do not have a result — say so rather than report one.
+  6. **A killed run's HONEST partial counts.** #1635 round two hit a gate
+     reporting `exit code 0` with `TOTAL EXECUTED=264 FAILED=0` — fresh XML, real
+     counts, no cache markers, **all three checks above satisfied** — while
+     `GATE_EXIT=143` and **the load-bearing storm test never ran**. Its words:
+     *"the count was real; the run was not."* A run killed partway still writes
+     truthful XML for the tests it reached before dying.
+
+  Exit codes, build banners, real-looking counts, and even fresh timestamps lied
+  across these six. **Trust only: the console line for the task + a count you
+  asserted yourself + proof the XML is from THIS run + proof the SPECIFIC
+  load-bearing test appears in the results.** A count > 0 is not enough — the one
+  test you care about must be named in the XML. If you cannot establish all four,
+  you do not have a result: say so rather than report one.
+
+  **Corollary — a killed mutation loop is worse than a killed gate.** #1635's
+  mutation loop was killed mid-run and **left the mutation in the tree**; the next
+  "green" would have run against mutated production code. Restore from a `cp`
+  backup and **verify the restore** (diffstat or md5) before believing any
+  subsequent result.
+
+  **Cross-agent damage is real on a contended box.** Two separate incidents this
+  session: a sibling's `gradlew --stop` silently killed another agent's daemon
+  (disguise 5), and a `pkill -f "GradleWrapperMain.*test"` matched a *sibling
+  worktree's* run (it survived by luck). Scope process-killing to your own
+  worktree, or don't do it.
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
   N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its

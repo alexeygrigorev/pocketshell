@@ -81,6 +81,25 @@ APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSendWhileRecordingTest#sendWhileTranscribingFiresOnlyAfterWhisperSuccess"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
+  # Issue #1652 (#1610 #1539 #1632 #1633): the reconnect-storm LIVELOCK proof. The
+  # connection manager is the #1 dogfood blocker (D28) and this class has been
+  # closed-then-reopened four times (#1562 -> #1567 -> #1568 -> #1610), every time
+  # on a single-cycle / JVM proxy. This drives N>=5 consecutive passive-grace
+  # cycles on the production path against a stalled tail with a healthy dial (the
+  # maintainer's actual mechanism) and asserts no handshaken transport is killed,
+  # the attempt counter walks, and the machine terminates. It is wired HERE — not
+  # only into the main-push journey lane — because the #1640 audit found that lane
+  # has produced zero clean verdicts for days (INFRA -> neutral green), i.e. red
+  # there stops nothing. Red here fails the gate, so no release summary is
+  # produced and `push-release-tag.sh` cannot tag. That is the point.
+  #
+  # BOTH methods are listed explicitly: `assert_app_walkthrough_selectors_exist`
+  # requires `class#method` form, and a bare class name aborts the gate before it
+  # compiles anything. Round one registered the bare class, which would have failed
+  # EVERY release on a malformed selector while never running the journey at all —
+  # an always-red gate is the #1640 waiver generator this test exists to end.
+  "com.pocketshell.app.proof.ReconnectStormLivelockE2eTest#slowTailOnAProvenLinkNeitherKillsHandshakenTransportsNorSpinsForever"
+  "com.pocketshell.app.proof.ReconnectStormLivelockE2eTest#slowTailThatClearsHealsTheSameSessionWithoutKillingTheHandshakenTransport"
 )
 
 usage() {

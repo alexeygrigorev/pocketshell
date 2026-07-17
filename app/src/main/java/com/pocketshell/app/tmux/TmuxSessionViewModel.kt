@@ -3230,9 +3230,18 @@ public class TmuxSessionViewModel @Inject constructor(
         return connectJob
     }
 
+    /**
+     * Issue #1654: the ONE place the VM's ladder is written == the ONE place the controller's
+     * ladder is re-installed (bound to the WRITE, never to a recovery path). Empty means
+     * "auto-reconnect disabled" for the VM's own guards and is NOT pushed down — the
+     * controller's ladder must never be empty. See [DEFAULT_AUTO_RECONNECT_DELAYS_MS].
+     */
     @androidx.annotation.VisibleForTesting
     internal fun setAutoReconnectDelaysForTest(delaysMs: List<Long>) {
         autoReconnectDelaysMs = delaysMs
+        if (delaysMs.isNotEmpty()) {
+            connectionManager.setReconnectLadder(delaysMs)
+        }
     }
 
     @androidx.annotation.VisibleForTesting
@@ -5779,41 +5788,6 @@ public class TmuxSessionViewModel @Inject constructor(
         return probeRuntimeControlChannel(runtime.client, runtime.session) == RuntimeHealthVerdict.HEALTHY
     }
 
-    /**
-     * Probe the live tmux control channel and classify the result.
-     *
-     * Issue #635 / #636 (Slice 1): the within-grace foreground resume must
-     * NOT treat a probe *timeout* as proof of death. `SshSession.isConnected`
-     * only reflects whether the socket object is open — for a silently
-     * dropped TCP path it stays `true` until sshj's keepalive miss-counter
-     * trips (15s × 4 = 60s, deliberately matched to the 60s background
-     * grace). A `display-message` round-trip that takes longer than the
-     * 750ms probe budget on a still-`isConnected` transport means the link
-     * is slow/recovering, not dead. Returning a distinct
-     * [RuntimeHealthVerdict.TIMEOUT] lets the foreground probe ride that
-     * through and defer the death verdict to sshj's keepalive oracle, while
-     * the switch-path activation still falls back on any non-healthy result.
-     */
-    private suspend fun probeRuntimeControlChannel(
-        client: TmuxClient,
-        session: SshSession?,
-    ): RuntimeHealthVerdict {
-        if (client.disconnected.value) return RuntimeHealthVerdict.DISCONNECTED
-        if (session?.isConnected != true) return RuntimeHealthVerdict.NOT_CONNECTED
-        val outcome = runCatching {
-            withTimeoutOrNull(RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
-                client.sendBestEffortCommand("display-message -p '#{session_name}'")
-            }
-        }
-        val response = outcome.getOrElse {
-            // A thrown write/read failure (e.g. a TCP reset the SSH library
-            // surfaced as an exception) is a genuine transport error, not a
-            // ride-through-able slowness.
-            return RuntimeHealthVerdict.ERROR
-        } ?: return RuntimeHealthVerdict.TIMEOUT
-        return if (response.isError) RuntimeHealthVerdict.ERROR else RuntimeHealthVerdict.HEALTHY
-    }
-
     private fun deactivateCurrentRuntimeToCache(): List<CachedTmuxRuntime> {
         val target = activeTarget ?: return emptyList()
         val client = clientRef ?: return emptyList()
@@ -8212,7 +8186,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 // UNGUARDED on purpose — see [ReconnectRungFailureSource] for why an
                 // `autoReconnectJob?.isActive` guard here would be a measured no-op.
                 connectionManager.reconnectRungFailed(ReconnectRungFailureSource.PassiveGraceLoop)
-                val retryDelayMs = PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS
+                // Issue #1654 (THE ABSORBER): the feed advanced the counter — SHOW it, or
+                // it never reaches the user. See "PassiveGraceBandReprojection" in Support.
+                projectStatusFromController()
+                // Issue #1654: space the next cycle by the SINGLE ladder's backoff for the
+                // attempt the feed advanced to — not a flat 250ms. See
+                // [passiveGraceCycleRetryDelayMs].
+                val retryDelayMs = passiveGraceCycleRetryDelayMs(connectionManager.state)
                 delay(retryDelayMs)
             }
             false
@@ -8403,6 +8383,44 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #1653: the ONE teardown authority for a POST-dial rung failure — both exits of
+     * [silentlyReconnectTransportAfterPassiveDisconnect] (`!ready` and thrown) route here. Why a
+     * second parallel guard is forbidden, and the [lease]-null / [forceEvict] cases:
+     * [shouldEvictTransportAfterStageFailure]. Returns whether the lease was evicted.
+     */
+    private suspend fun resolveRungStageFailure(
+        lease: SshLease?,
+        leaseKey: SshLeaseKey,
+        replacement: TmuxClient?,
+        staleClient: TmuxClient?,
+        forceEvict: Boolean = false,
+    ): Boolean {
+        val session = lease?.session
+        val evict = forceEvict ||
+            session == null ||
+            shouldEvictTransportAfterStageFailure(session.vouchedAlive())
+        // Re-point clientRef off the replacement BEFORE closing it (#866 cancel storm — see the
+        // warm rung's swap-then-close for the full why). The `-CC` CHANNEL always drops; only the
+        // TRANSPORT under it is the vouch's call.
+        if (clientRef === replacement) {
+            clientRef = staleClient
+        }
+        runCatching { replacement?.close() }
+        if (evict) {
+            if (session == null || sessionRef === session) sessionRef = null
+            if (lease == null || leaseRef === lease) leaseRef = null
+            // The lease is the SHARED per-host transport: only a genuine death reaches this.
+            withContext(NonCancellable) {
+                runCatching { sshLeaseManager.disconnect(leaseKey) }
+            }
+        } else {
+            leaseRef = lease
+            sessionRef = session
+        }
+        return evict
+    }
+
     private suspend fun silentlyReconnectTransportAfterPassiveDisconnect(
         // Nullable (EPIC #687 P2): the within-grace foreground heal may have no stale
         // client handle to close (the passive path already unregistered it). The
@@ -8453,6 +8471,7 @@ public class TmuxSessionViewModel @Inject constructor(
             if (lease == null) {
                 // #1539: never handshook -> not a live link -> abandoned (the preserved
                 // fast-fail). The loop feeds the counter per failed cycle (#1610 Q3).
+                // #1653: not the post-dial authority's business — nothing handshook to weigh.
                 recordTransportReattachStageFail(
                     target = target,
                     cause = "dial_handshake_timeout",
@@ -8509,29 +8528,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 true
             } == true
             if (!ready) {
-                // Issue #1539 — THE kill site: used to close + lease-evict unconditionally, unable
-                // to tell a timed-out DIAL from a slow ATTACH on a proven-up link.
-                // See [shouldEvictTransportAfterStageFailure].
-                val evict = shouldEvictTransportAfterStageFailure(session.vouchedAlive())
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                }
-                // The `-CC` CHANNEL never came up so it always drops; the TRANSPORT under it is
-                // the vouch's call.
-                runCatching { replacement?.close() }
-                if (evict) {
-                    if (sessionRef === session) sessionRef = null
-                    if (leaseRef === lease) leaseRef = null
-                    withContext(NonCancellable) {
-                        runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                    }
-                } else {
-                    // KEEP the handshaken transport, PUBLISHED as live, so the next tick's
-                    // re-vouch retries the attach over it via the channel-only warm rung. Nulling
-                    // these refs is what used to disable that rung and force the redial.
-                    leaseRef = lease
-                    sessionRef = session
-                }
+                // #1539's kill site; #1653 routed it through the authority the throw exit shares.
+                val evict = resolveRungStageFailure(
+                    lease = lease,
+                    leaseKey = leaseTarget.leaseKey,
+                    replacement = replacement,
+                    staleClient = staleClient,
+                )
                 recordTransportReattachStageFail(
                     target = target,
                     cause = if (evict) "attach_not_ready" else "attach_slow_transport_kept",
@@ -8588,32 +8591,25 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
-            if (t is CancellationException) {
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                    sessionRef = null
-                    leaseRef = null
-                }
-                runCatching { replacement?.close() }
-                withContext(NonCancellable) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                }
-                throw t
-            }
-            runCatching { replacement?.close() }
-            withContext(NonCancellable) {
-                runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-            }
-            if (clientRef === replacement) {
-                clientRef = staleClient
-                sessionRef = null
-                leaseRef = null
-            }
+            // Issue #1653 — THE OTHER kill site, the one #1539 missed: a stalled tail's INNER
+            // sshj timeout beats the OUTER stage budget, so the same "slow tail on a proven-up
+            // link" arrives here THROWN instead of as `!ready`. This evicted unconditionally, so
+            // the vouch never ran and a live SHARED transport still died. Same authority now.
+            val evict = resolveRungStageFailure(
+                lease = acquiredLease,
+                leaseKey = leaseTarget.leaseKey,
+                replacement = replacement,
+                staleClient = staleClient,
+                // Cancellation = deliberate abandonment (grace expiry / switch / a superseding
+                // connect), not a stage verdict — the rung is going away. Unchanged from base.
+                forceEvict = t is CancellationException,
+            )
+            if (t is CancellationException) throw t
             recordPassiveReattachThrewFail(
                 target = target,
                 source = "silent_transport_reattach",
                 throwable = t,
-                evictedLease = true,
+                evictedLease = evict,
                 clientHash = replacement?.let { System.identityHashCode(it) },
                 elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
                 shortAppSwitchFields = passiveReattachLogFields(target),
@@ -8785,9 +8781,8 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         connectingTarget = null
         refreshReconnectAvailability()
-        val delays = autoReconnectDelaysMs.ifEmpty { listOf(0L) }
-        // Issue #1328 (S5): the controller owns the SINGLE ladder; this body only dials.
-        connectionManager.setReconnectLadder(delays)
+        // Issue #1654: this body no longer INSTALLS the ladder — see [DEFAULT_AUTO_RECONNECT_DELAYS_MS].
+        val delays = autoReconnectDelaysMs
         recordAutoReconnectDecision(
             decision = "scheduled",
             target = target,

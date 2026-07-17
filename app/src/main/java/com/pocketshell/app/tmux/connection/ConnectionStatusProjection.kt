@@ -188,8 +188,11 @@ internal object ConnectionStatusProjection {
             port = hpu.port,
             user = hpu.user,
             attempt = controllerRecon?.attempt ?: 1,
+            // Issue #1654: the fallback for "the controller is not in Reconnecting yet" is the
+            // real ladder's LENGTH, not the deleted 4-attempt default. The band must never
+            // announce a budget the machine does not have.
             maxAttempts = controllerRecon?.maxAttempts
-                ?: ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+                ?: ConnectionController.DEFAULT_RECONNECT_LADDER_MS.size,
             retryDelayMs = controllerRecon?.retryDelayMs ?: 0L,
             reason = inlineReconnect?.reason ?: "Reconnecting…",
         )

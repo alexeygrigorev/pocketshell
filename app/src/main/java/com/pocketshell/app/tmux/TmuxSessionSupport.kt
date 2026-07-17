@@ -6,13 +6,17 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.connection.ConnectionController
+import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.terminal.input.BracketedPaste
+import com.pocketshell.core.tmux.TmuxClient
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Issue #1543 — is the current process a JVM/Robolectric UNIT-TEST runtime (as
@@ -518,6 +522,69 @@ internal const val PASSIVE_REATTACH_RESEED_TIMEOUT_MS: Long = 5_000L
 
 internal const val PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS: Long = 250L
 
+/*
+ * ISSUE #1654 — "PassiveGraceBandReprojection": WHY the passive-grace loop re-projects the
+ * displayed band after feeding the controller a rung failure (the ABSORBER this issue turned
+ * out to be about).
+ *
+ * Prose lives here rather than at the call site: [TmuxSessionViewModel] is hygiene-ratcheted
+ * and this explanation is the durable record of a bug that took three rounds to find.
+ *
+ * ## The symptom
+ * #1652's journey, on emulator + Docker, measured `observed attempts=[1]` across 5 consecutive
+ * failed cycles / 222s — while the controller's OWN reducer test was simultaneously green
+ * proving the counter walks `attempt=2,3,4…`. Both were true. Installing the #1539 ladder
+ * (this issue's Defect A) was necessary and NOT sufficient: the escalation was real and never
+ * reached the user.
+ *
+ * ## The mechanism, as MEASURED on-device (not reasoned)
+ * Instrumenting this loop's feed on the real path logged, per cycle:
+ * ```
+ * feed before=Live after=Reconnecting(attempt=2, maxAttempts=8, retryDelayMs=940)
+ *      band=Connected inline=Connected
+ * ```
+ * — `after` climbing `attempt=2,3,4,5 -> Unreachable` with real growing backoff, while `band`
+ * read **`Connected`** the entire time. The app DISPLAYED "Connected" while it was giving up.
+ *
+ * TmuxSessionViewModel.projectStatusFromController's own contract is *"the controller is the
+ * single status source, so its state must be re-projected whenever it can change — not only at
+ * the inline `setConnectionState` choke point"* — but nothing ENFORCED it. Re-projection is
+ * PUSHED, from exactly two families of site: the inline `setConnectionState` edge, and
+ * `ConnectionEffectDriver.submitTransport` (its `onControllerTransition` callback; the driver's
+ * `collectStateTransitions` does NOT re-project). This loop is a THIRD family — it feeds the
+ * controller directly — and it only runs while `inlineConnectionStatus` is `Connected`, so
+ * during a storm the inline path never moves and no push ever fires.
+ *
+ * ## Why HERE and not reactively off `ConnectionController.state`
+ * Re-projecting on EVERY controller transition looks like the tidier single-authority fix, and
+ * it makes this journey green — but it was MEASURED to also surface transient controller states
+ * the inline path deliberately overrides, repainting a calm `Connected` as a spurious
+ * `Reconnecting` band (the #635/#685 class) in `postGraceLifecycleReattachCoalesces*`. The
+ * controller is the authority; the push points are also its SYNC points. So the fix is scoped
+ * to the one site that changes controller state with no push. Reconciling that tension properly
+ * — making the projection reactive without resurrecting the spurious band — is a real design
+ * question, and a release blocker is not where to answer it.
+ */
+/**
+ * Issue #1654: how long the passive-grace loop (the #1610 STORM path) waits before its next
+ * cycle — the SINGLE ladder's backoff for the attempt the just-reported rung failure advanced
+ * the counter to, floored at [PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS].
+ *
+ * The loop used to wait a flat 250ms forever, which is why the storm hammered the maintainer's
+ * link at a ~5s cadence indefinitely: #1633's backoff existed but nothing on this path read it.
+ * [state] is the controller's own post-feed state, so the delay is the already-jittered rung
+ * delay from the one ladder — never a second, parallel backoff schedule (D28: one ladder, one
+ * counter).
+ *
+ * The floor matters for rung 1 only, whose ladder delay is exactly 0 by design (the instant
+ * silent heal, #680/#621); without it that rung would busy-loop. A non-Reconnecting state
+ * (the feed did not escalate — e.g. the drop was suppressed) also takes the floor: the loop
+ * still must not spin.
+ */
+internal fun passiveGraceCycleRetryDelayMs(state: ConnectionState): Long =
+    ((state as? ConnectionState.Reconnecting)?.retryDelayMs ?: 0L)
+        .coerceAtLeast(PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS)
+
 /**
  * Issue #1539: the per-stage budgets for one passive-grace reattach rung. Replaces the single
  * all-inclusive 5s budget that shared one clock across dial, handshake, attach, panes-ready and
@@ -577,6 +644,35 @@ internal fun passiveReattachStageBudgets(
  * Investigation B (#1610) is the reason this reads the vouch at FALLTHROUGH time rather than
  * trusting the stage verdict: a 5s stage timeout on a transport that is still vouched alive
  * must not evict the shared per-host lease.
+ *
+ * ## Issue #1653: this is the ONLY eviction authority, and that is load-bearing
+ *
+ * #1539 wired this into the rung's `!ready` exit ONLY, and #1652's storm journey proved the
+ * result RED on `main` with the whole #1610 wave landed: **a fully-handshaken, provably-live
+ * transport still died for a slow tail.** A stalled tail does not politely return null. The
+ * `tmux has-session` preflight's INNER sshj timeout (10s) beats the rung's OUTER
+ * `withTimeoutOrNull(attachMs)` (also 10s), so the identical event — a tail stage failing on a
+ * link the handshake already proved up — is delivered as a THROWN `TmuxClientException` instead
+ * of as `ready == false`. That landed in an unguarded `catch` that evicted unconditionally
+ * (`evictedLease = true`, hard-coded), and the evicted lease is the SHARED per-host transport,
+ * so one busy tmux server tore down every session on that host.
+ *
+ * #1539 therefore fixed the branch a virtual clock can reach and left the branch only a real one
+ * can: **a virtual clock never throws.** Five slices, three reviewers and mutation testing all
+ * missed it; the first real-path multi-cycle test caught it on its first run.
+ *
+ * So both exits of `TmuxSessionViewModel.silentlyReconnectTransportAfterPassiveDisconnect` route
+ * through `resolveRungStageFailure`, which is the sole caller of this function and the sole code
+ * that may kill a rung's own transport. Do NOT add a second `vouchedAlive()` check on a new exit
+ * — two branches independently answering "should we evict?" is free to drift apart exactly as
+ * these two did, and that drift IS #1653 (D22 hard-cut / D28 no-patches-on-patches). A new exit
+ * routes through the one authority or it is a bug.
+ *
+ * Two inputs there are NOT stage verdicts and bypass this function deliberately: a null lease
+ * (the throw beat the dial, so nothing handshook and the disconnect is pure cleanup) and
+ * `forceEvict` (cancellation = abandonment — grace expiry, a session switch, or a superseding
+ * connect — where the rung is going away and must not leave refs published for a warm rung that
+ * will never run).
  */
 internal fun shouldEvictTransportAfterStageFailure(transportVouchedAlive: Boolean): Boolean =
     !transportVouchedAlive
@@ -793,6 +889,48 @@ internal enum class RuntimeHealthVerdict(val failReason: String) {
     NOT_CONNECTED("not_connected"),
     TIMEOUT("timeout"),
     ERROR("error"),
+}
+
+/**
+ * Probe the live tmux control channel and classify the result.
+ *
+ * Issue #635 / #636 (Slice 1): the within-grace foreground resume must
+ * NOT treat a probe *timeout* as proof of death. `SshSession.isConnected`
+ * only reflects whether the socket object is open — for a silently
+ * dropped TCP path it stays `true` until sshj's keepalive miss-counter
+ * trips (15s × 4 = 60s, deliberately matched to the 60s background
+ * grace). A `display-message` round-trip that takes longer than the
+ * 750ms probe budget on a still-`isConnected` transport means the link
+ * is slow/recovering, not dead. Returning a distinct
+ * [RuntimeHealthVerdict.TIMEOUT] lets the foreground probe ride that
+ * through and defer the death verdict to sshj's keepalive oracle, while
+ * the switch-path activation still falls back on any non-healthy result.
+ *
+ * Issue #1654: this is a PURE function of its arguments — it reads no
+ * `TmuxSessionViewModel` state — and both things it resolves against
+ * ([RuntimeHealthVerdict] and [RUNTIME_HEALTH_PROBE_TIMEOUT_MS]) already
+ * live here. It was the one stranded member of that cluster, so it is
+ * homed next to them rather than in the connection-core god object (D28).
+ * Behavior is unchanged: same body, same single caller.
+ */
+internal suspend fun probeRuntimeControlChannel(
+    client: TmuxClient,
+    session: SshSession?,
+): RuntimeHealthVerdict {
+    if (client.disconnected.value) return RuntimeHealthVerdict.DISCONNECTED
+    if (session?.isConnected != true) return RuntimeHealthVerdict.NOT_CONNECTED
+    val outcome = runCatching {
+        withTimeoutOrNull(RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
+            client.sendBestEffortCommand("display-message -p '#{session_name}'")
+        }
+    }
+    val response = outcome.getOrElse {
+        // A thrown write/read failure (e.g. a TCP reset the SSH library
+        // surfaced as an exception) is a genuine transport error, not a
+        // ride-through-able slowness.
+        return RuntimeHealthVerdict.ERROR
+    } ?: return RuntimeHealthVerdict.TIMEOUT
+    return if (response.isError) RuntimeHealthVerdict.ERROR else RuntimeHealthVerdict.HEALTHY
 }
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
@@ -1025,12 +1163,14 @@ internal const val ISSUE_464_KILL_TAG: String = "issue464-killsession"
  * NO jitter here: #1633 applies it inside `ConnectionController.retryDelayForAttempt`, and the
  * VM waits on the controller's `recon.retryDelayMs` — adding it here would double-apply it.
  *
- * PROPOSED, NOT LOCKED (#1539): how patient the app should be before it stops trying is the
- * maintainer's tuning call. #1633 made the controller behave correctly with either ladder
- * length, so retuning is a one-line change here.
+ * Issue #1654 (D22 hard-cut): this is now an ALIAS, not a second copy. The list itself lives in
+ * `ConnectionController.DEFAULT_RECONNECT_LADDER_MS`, which the controller installs at
+ * construction. Two independently-written copies of the ladder is precisely how #1654 happened
+ * — the app had 8 rungs while the controller, never told about them, ran on a 4-attempt
+ * fallback. One value, one place; retune it there.
  */
 internal val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> =
-    listOf(0L, 1_000L, 2_000L, 5_000L, 10_000L, 20_000L, 30_000L, 30_000L)
+    ConnectionController.DEFAULT_RECONNECT_LADDER_MS
 
 // Issue #1537 (option b, D22 hard-cut): the bespoke `STALE_LEASE_AUTO_RECOVER_MAX`
 // two-counter budget is DELETED. Loop protection for the residual attach-EOF

@@ -173,6 +173,23 @@ class Issue926SeedIoOffMainTest {
         waitUntil("switched to other") {
             vm.panes.value.any { it.paneId == "%2" }
         }
+        // Issue #1649: the pane publish above is NOT a barrier for the seed, so it
+        // must not be used as one. The switch's `list-panes` reconcile publishes
+        // `_panes` (applyParsedPanes) and only THEN runs the seed `capture-pane`
+        // (preloadVisibleContentForNewPanes) — both inside the same applyOnMain
+        // block. A test that asserts on the capture the moment `%2` appears
+        // therefore races that round-trip and reads `null` whenever it wins
+        // (~1-in-10 on a loaded CI runner; reproduced deterministically by making
+        // the capture take wall-clock time, as a real SSH round-trip does).
+        //
+        // Wait for the thing we are about to assert about — exactly as the
+        // wedged-channel sibling below already does. This does NOT weaken the
+        // load-bearing off-Main guarantee: it only removes the "not yet" reading,
+        // so `assertRanOffMain` always judges a REAL recorded thread. Verified by
+        // mutation: forcing the seed capture onto Main still fails this test red.
+        waitUntil("seed capture round-trip recorded") {
+            switchClient.lastCaptureThreadName != null
+        }
 
         assertNotNull("the fast switch must run a list-panes round-trip", switchClient.lastListPanesThreadName)
         assertRanOffMain(

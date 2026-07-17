@@ -28,8 +28,11 @@ fail() {
 #   * a fake `adb` reporting POOL_SERIALS as online emulators
 #   * a stub `./gradlew` that records its invocation and exits 0 (or with a
 #     caller-chosen exit code) WITHOUT touching a real device
-#   * a private ROOT clone so per-serial lock files (build/.avd-lock-*) live in
-#     the sandbox, not the real worktree.
+#   * a private ROOT clone plus a private POCKETSHELL_AVD_LOCK_DIR so this
+#     test's lock files never touch the REAL machine-wide lock dir (which a
+#     live emulator run may be holding). Since issue #1657 the lock is anchored
+#     to the machine, not to $root_dir, so isolating the root is no longer
+#     enough on its own -- the lock dir must be sandboxed explicitly.
 # The sandbox is a directory; the caller passes it to the *_in_sandbox helpers.
 make_sandbox() {
   local sandbox="$1"
@@ -37,6 +40,10 @@ make_sandbox() {
   local pool_serials="$1"   # space-separated emulator-XXXX serials
 
   mkdir -p "$sandbox/bin" "$sandbox/root/scripts/lib" "$sandbox/root/build"
+
+  # Issue #1657: point the machine-wide lock anchor at this sandbox so the test
+  # cannot contend with (or corrupt) a real connected-test run on this box.
+  export POCKETSHELL_AVD_LOCK_DIR="$sandbox/locks"
 
   # Fake adb: only the `devices` subcommand matters for pool claim. Report each
   # pool serial as a `device`-state emulator. Everything else is a harmless no-op.
@@ -56,10 +63,17 @@ exit 0
 ADB
   chmod +x "$sandbox/bin/adb"
 
-  # Symlink the real scripts into the sandbox root so connected-test.sh runs the
-  # ACTUAL production logic, but with build/ (lock files) isolated to the sandbox.
+  # Copy the real scripts into the sandbox root so connected-test.sh runs the
+  # ACTUAL production logic against sandboxed lock state.
+  #
+  # Copy the WHOLE scripts/lib: connected-test.sh sources agents-pool.sh (#724)
+  # and scope-run.sh (#730), both of which it grew AFTER this harness was
+  # written. The harness only ever copied avd-lock.sh, so every case died at
+  # `source .../agents-pool.sh: No such file or directory` -- this suite has been
+  # failing on `main` (it is wired to no lane, so nobody saw it). Globbing the
+  # directory keeps it from rotting again the next time a lib is added.
   cp "$ROOT_DIR/scripts/connected-test.sh" "$sandbox/root/scripts/connected-test.sh"
-  cp "$ROOT_DIR/scripts/lib/avd-lock.sh" "$sandbox/root/scripts/lib/avd-lock.sh"
+  cp "$ROOT_DIR"/scripts/lib/*.sh "$sandbox/root/scripts/lib/"
 
   # Stub gradlew at the sandbox root: connected-test.sh invokes `./gradlew`
   # relative to ROOT_DIR (which it cd's into). Record args + a marker file so the
@@ -121,6 +135,7 @@ reclaim_after_full_pool_run() {
       ANDROID_SDK="$sandbox" \
       POCKETSHELL_POOL_WAIT_SECONDS=5 \
       POCKETSHELL_POOL_SERIALS="$pool_serials" \
+      POCKETSHELL_AGENTS_PORT=2222 \
       STUB_GRADLEW_ARGS_FILE="$args_file" \
       STUB_GRADLEW_MARKER="$marker" \
       STUB_GRADLEW_RC=0 \
@@ -162,6 +177,7 @@ failed_run_still_releases_and_propagates_rc() {
     ANDROID_SDK="$sandbox" \
     POCKETSHELL_POOL_WAIT_SECONDS=5 \
     POCKETSHELL_POOL_SERIALS="$pool_serials" \
+    POCKETSHELL_AGENTS_PORT=2222 \
     STUB_GRADLEW_ARGS_FILE="$sandbox/args.txt" \
     STUB_GRADLEW_MARKER="$sandbox/marker.txt" \
     STUB_GRADLEW_RC=7 \
@@ -205,7 +221,9 @@ non_pool_suffix_run_acquires_and_releases_base_lock() {
     || fail "suffix was not threaded into gradle on non-pool path"
 
   # The base lock must be free again after the run (trap released the holder).
-  local base_lock="$sroot/build/.avd-lock"
+  # Issue #1657: the base lock lives in the machine-wide lock dir (sandboxed
+  # here via POCKETSHELL_AVD_LOCK_DIR), no longer under the checkout's build/.
+  local base_lock="$POCKETSHELL_AVD_LOCK_DIR/avd-lock"
   [[ -e "$base_lock" ]] || fail "base AVD lock file was never created on non-pool path"
   flock -n "$base_lock" true \
     || fail "non-pool run leaked the base AVD lock holder (deadlock-fix regression)"

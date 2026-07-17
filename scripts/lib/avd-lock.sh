@@ -1,16 +1,82 @@
 #!/usr/bin/env bash
 
-# Derive a per-serial AVD lock file path so that independent shards, each
-# targeting a *distinct* emulator (`ANDROID_SERIAL`), can hold their own lock
-# concurrently instead of serialising on the single global `build/.avd-lock`.
+# ---------------------------------------------------------------------------
+# Where AVD lock files live (issue #1657)
 #
-# Callers that don't opt in keep the single-lock default: nothing here changes
-# the behaviour of `pocketshell_acquire_avd_lock` unless the caller explicitly
-# exports `POCKETSHELL_AVD_LOCK_FILE` (which a shard does, via this helper).
+# The lock protects the EMULATOR — a machine-wide singleton — so the lock file
+# must be machine-wide too. It used to be derived from `$root_dir`, i.e. the
+# *worktree* root, which meant every checkout got its OWN lock file. `flock` on
+# distinct files serialises NOTHING: two agents running connected-test.sh from
+# `.worktrees/issue-A` and `.worktrees/issue-B` held different locks and ran on
+# the one emulator concurrently. `process.md` has told agents since #672 that
+# this flock "is what makes parallel agents safe"; it never did.
+#
+# Anchor choice — a fixed per-user path under $HOME, NOT the checkout:
+#   * `$root_dir` / `$PWD`: the bug. Different per worktree, and the resource
+#     being protected has nothing to do with which checkout is driving it.
+#   * `git rev-parse --git-common-dir`: shared across `git worktree`s of ONE
+#     clone, but the `.claude/worktrees/agent-*` runners are full-repo copies
+#     and the maintainer may have a second clone — those would still collide.
+#     Wrong axis: the emulator is a property of the machine, not of the clone.
+#   * `$XDG_RUNTIME_DIR`: correct lifetime, but it is env-dependent — a process
+#     started without it (cron, a container, a bare CI shell) would silently
+#     fall back to a different directory and reintroduce the exact split-lock
+#     bug this fixes. Rejected for that silent-divergence risk.
+#   * `$HOME/.cache/pocketshell/avd-locks` (chosen): identical for every process
+#     the same user runs on the box regardless of cwd, env, or systemd unit —
+#     including `systemd-run --user` units, which do not get a private /tmp but
+#     could in principle, so /tmp is only the fallback for a HOME-less shell.
+#
+# Stale locks are a non-issue by construction: `flock` is held on an open FD, so
+# the kernel drops it the instant the holder dies (SIGKILL, OOM, harness
+# timeout, stray pkill). The lock FILE persisting is harmless — it carries no
+# state. Never replace this with a pidfile/lock-content scheme, which WOULD
+# wedge on a crash. Pinned by `crashed_holder_does_not_wedge_the_lock` in
+# tests/scripts/avd-lock-sharing-test.sh.
+#
+# `POCKETSHELL_AVD_LOCK_DIR` overrides the directory (tests sandbox it; an
+# operator can point it elsewhere). `POCKETSHELL_AVD_LOCK_FILE` still overrides
+# an individual lock file outright — that is the shard opt-out below.
+# ---------------------------------------------------------------------------
+pocketshell_avd_lock_dir() {
+  if [[ -n "${POCKETSHELL_AVD_LOCK_DIR:-}" ]]; then
+    printf '%s\n' "${POCKETSHELL_AVD_LOCK_DIR%/}"
+    return 0
+  fi
+  if [[ -n "${HOME:-}" && -d "$HOME" && -w "$HOME" ]]; then
+    printf '%s/.cache/pocketshell/avd-locks\n' "$HOME"
+    return 0
+  fi
+  # HOME-less/read-only-HOME shell: still machine-wide, still per-user.
+  printf '/tmp/pocketshell-avd-locks-%s\n' "$(id -u)"
+}
+
+# Resolve (and create) a machine-wide lock path by basename.
+pocketshell_avd_lock_path() {
+  local name="$1"
+  local dir
+  dir="$(pocketshell_avd_lock_dir)"
+  mkdir -p "$dir" 2>/dev/null || true
+  printf '%s/%s\n' "$dir" "$name"
+}
+
+# Derive a per-serial AVD lock file path so that independent shards and #724
+# pool lanes, each targeting a *distinct* emulator (`ANDROID_SERIAL`), can hold
+# their own lock concurrently instead of serialising on the single global
+# `avd-lock`. That concurrency is deliberate and load-bearing: collapsing it
+# into one global lock would queue every parallel journey lane behind every
+# other. Pinned by `distinct_serials_still_run_concurrently_across_worktrees`.
+#
+# Conversely, the SAME serial from two different worktrees now resolves to the
+# SAME file, so the pool's "never co-locate two lanes on one emulator" promise
+# (P4 below) finally holds across checkouts.
+#
+# `$root_dir` is accepted for call-site compatibility and deliberately unused:
+# the lock is anchored to the machine, not the checkout (issue #1657).
 #
 # Usage: lock_path="$(pocketshell_avd_lock_file_for_serial "$root_dir" "$serial")"
 pocketshell_avd_lock_file_for_serial() {
-  local root_dir="$1"
+  local _root_dir_unused="$1"
   local serial="$2"
   # Sanitise the serial into a filename-safe token (e.g. emulator-5556 ->
   # emulator-5556; host:port style serials lose the colon).
@@ -18,11 +84,13 @@ pocketshell_avd_lock_file_for_serial() {
   if [[ -z "$token" ]]; then
     token="default"
   fi
-  printf '%s/build/.avd-lock-%s\n' "$root_dir" "$token"
+  pocketshell_avd_lock_path "avd-lock-$token"
 }
 
 pocketshell_acquire_avd_lock() {
-  local root_dir="$1"
+  # $1 (root_dir) is accepted for call-site compatibility and unused: the lock
+  # path is machine-wide, not checkout-relative (issue #1657).
+  local _root_dir_unused="$1"
   local help_arg="${2:-}"
 
   if [[ "$help_arg" == "--help" || "$help_arg" == "-h" ]]; then
@@ -33,7 +101,11 @@ pocketshell_acquire_avd_lock() {
     return 0
   fi
 
-  local lock_file="${POCKETSHELL_AVD_LOCK_FILE:-$root_dir/build/.avd-lock}"
+  # The default is ONE machine-wide lock shared by every checkout on the box
+  # (issue #1657). A caller that has pinned a specific emulator (a shard, a
+  # #724 pool lane) exports POCKETSHELL_AVD_LOCK_FILE to opt into that
+  # emulator's own lock instead, and keeps its concurrency.
+  local lock_file="${POCKETSHELL_AVD_LOCK_FILE:-$(pocketshell_avd_lock_path avd-lock)}"
   mkdir -p "$(dirname "$lock_file")"
 
   # P6 (issue #776): a non-blocking probe purely to TELL the operator we are
@@ -121,12 +193,19 @@ pocketshell_release_all() {
 # the per-serial AVD lock (two lanes on different emulators each hold their own
 # serial lock but must still NOT share the proxy). Released by
 # pocketshell_release_all on exit.
+#
+# Issue #1657: this lock carried the SAME defect as the AVD lock — it promised
+# "ONE shared, machine-wide flock" while living under `$root_dir/build/`, so two
+# worktrees got two different files and two network-fault lanes could still
+# corrupt each other's toxics. The proxy is ONE global singleton, so it takes the
+# machine-wide anchor with NO per-serial token: every lane shares this one file.
 pocketshell_acquire_toxiproxy_lock() {
-  local root_dir="$1"
+  local _root_dir_unused="$1"
   if [[ -n "${POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID:-}" ]]; then
     return 0
   fi
-  local lock_file="$root_dir/build/.toxiproxy-serial-lock"
+  local lock_file
+  lock_file="$(pocketshell_avd_lock_path toxiproxy-serial-lock)"
   mkdir -p "$(dirname "$lock_file")"
 
   local state_dir

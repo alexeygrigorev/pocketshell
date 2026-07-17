@@ -431,6 +431,16 @@ Minimum pre-push gate:
   backup and **verify the restore** (diffstat or md5) before believing any
   subsequent result.
 
+  **A mutation that never happened is not a passing mutation test.** #1641's
+  first mutation killed **0 tests** — the implementer did not believe it, and
+  found the mutant had landed **inside a KDoc example block**. Re-anchored, it
+  killed 13. A no-op mutation reads exactly like "my tests are inadequate", so it
+  invites the wrong fix (weakening the code under test) instead of the right one
+  (fixing the mutant). **Before concluding a mutation survived, prove the mutant
+  is live**: compile it, or assert the mutated line is reachable. This is the
+  vacuous green wearing mutation-testing clothes — and mutation is the technique
+  that caught most of tonight's fakes, so its own failure mode matters.
+
   **Cross-agent damage is real on a contended box.** Two separate incidents this
   session: a sibling's `gradlew --stop` silently killed another agent's daemon
   (disguise 5), and a `pkill -f "GradleWrapperMain.*test"` matched a *sibling

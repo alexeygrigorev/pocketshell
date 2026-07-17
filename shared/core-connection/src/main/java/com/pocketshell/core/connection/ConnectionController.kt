@@ -55,7 +55,21 @@ import kotlin.random.Random
 class ConnectionController(
     private val clock: Clock,
     private val transport: TransportPort,
-    private val maxReconnectAttempts: Int = DEFAULT_MAX_RECONNECT_ATTEMPTS,
+    /**
+     * Issue #1654: the reconnect backoff ladder — the SINGLE source of the attempt budget and
+     * the per-attempt backoff, installed HERE, at construction, so it exists from the
+     * controller's first instant.
+     *
+     * It is a CONSTRUCTOR property, not a lazily-installed `var`, because "the ladder is
+     * whatever the last code path to think about it installed" was the #1654 release blocker:
+     * the ONLY production caller of [setReconnectLadder] was the auto-reconnect effect body,
+     * and the passive-grace loop — the #1610 STORM path — never went through it. The ladder was
+     * therefore EMPTY during every storm, the budget silently degraded to a 4-attempt default
+     * with 0ms backoff, and #1539's 8 rungs / #1633's backoff were inert on the only path that
+     * mattered. A construction-time ladder cannot be path-dependent, so that class of bug is
+     * gone by construction rather than by remembering to call a setter on every new path.
+     */
+    reconnectLadderMs: List<Long> = DEFAULT_RECONNECT_LADDER_MS,
     private val graceMs: Long = DEFAULT_GRACE_MS,
     // Item 6 (#1234): debug-gated dispatcher-confinement assertion. Defaults to
     // `BuildConfig.DEBUG` so the guard is active under `testDebugUnitTest` and
@@ -116,18 +130,23 @@ class ConnectionController(
     private var graceDeadlineMs: Long? = null
 
     /**
-     * Issue #1328 (S5): the reconnect backoff ladder — the SINGLE source of the
+     * Issue #1328 (S5) / #1654: the reconnect backoff ladder — the SINGLE source of the
      * attempt budget ([effectiveMaxAttempts]) and per-attempt backoff
-     * ([retryDelayForAttempt]). Injected by the VM ([ConnectionManager.setReconnectLadder])
-     * from its `autoReconnectDelaysMs`, so the controller's ladder and the VM effect's
-     * backoff timing are ONE ladder, not two. Empty (the default until the VM sets it,
-     * and in the many controller unit tests) means "flat: [maxReconnectAttempts]
-     * attempts, 0 ms delay" — byte-identical to the pre-S5 counter.
+     * ([retryDelayForAttempt]).
+     *
+     * Issue #1654 (D22 hard-cut): it can NEVER be empty. It is installed at construction
+     * from the [reconnectLadderMs] constructor property and re-installed only by
+     * [setReconnectLadder], which rejects an empty list. The old "empty means flat:
+     * `maxReconnectAttempts` attempts, 0 ms delay" fallback is DELETED — that silent
+     * degradation was the bug, not a safety net: it turned "nobody installed the ladder"
+     * into "retry 4 times as fast as possible, then surrender", which is the exact
+     * OPPOSITE of the ladder's purpose (ride out ~98s of mobile flap, THEN surrender).
+     * A missing ladder now cannot happen; a bad one fails loudly at the boundary.
      *
      * A plain `var` mutated only from the confining dispatcher (via [setReconnectLadder]),
      * same single-confining-dispatcher contract as [graceDeadlineMs].
      */
-    private var reconnectLadderMs: List<Long> = emptyList()
+    private var reconnectLadderMs: List<Long> = jitteredLadder(reconnectLadderMs)
 
     /**
      * Issue #1328 (S5): the SINGLE reconnect-attempt counter. It lives HERE, in the
@@ -240,7 +259,7 @@ class ConnectionController(
         // stopped being a function of its input sequence. Rolling at install keeps the
         // reducer deterministic (same inputs + same ladder -> same states) while preserving
         // the desynchronisation property: every ladder install is a fresh independent roll.
-        reconnectLadderMs = delaysMs.map(::jittered)
+        reconnectLadderMs = jitteredLadder(delaysMs)
         // If a reconnect is already in flight when the ladder is (re)installed — the
         // proactive network-handoff / passive-drop paths enter [ConnectionState.Reconnecting]
         // BEFORE the VM effect installs its `autoReconnectDelaysMs` — re-stamp the current
@@ -252,20 +271,44 @@ class ConnectionController(
         }
     }
 
-    /** The attempt budget for the current ladder — the ONE exhaustion boundary. */
+    /**
+     * The attempt budget for the current ladder — the ONE exhaustion boundary.
+     *
+     * Issue #1654: this is the ladder's size, FULL STOP. There is no `?: maxReconnectAttempts`
+     * fallback any more, because [reconnectLadderMs] can no longer be empty (installed at
+     * construction, [setReconnectLadder] rejects empty). The fallback was not a safety net —
+     * it was the release blocker: it silently answered "4" on the storm path, where the real
+     * answer is 8.
+     */
     private val effectiveMaxAttempts: Int
-        get() = reconnectLadderMs.size.takeIf { it > 0 } ?: maxReconnectAttempts
+        get() = reconnectLadderMs.size
 
     /**
      * Backoff before the 1-based [attempt]'s dial; clamps to the last ladder step. A PURE
      * lookup into the already-jittered [reconnectLadderMs] (issue #1633 round 2) — the roll
-     * happens once, in [setReconnectLadder], so repeated builds of the same attempt's state
+     * happens once, per ladder install, so repeated builds of the same attempt's state
      * always report the SAME backoff.
      */
     private fun retryDelayForAttempt(attempt: Int): Long {
-        if (reconnectLadderMs.isEmpty()) return 0L
         val index = (attempt - 1).coerceIn(0, reconnectLadderMs.lastIndex)
         return reconnectLadderMs[index]
+    }
+
+    /**
+     * Issue #1654: the ONE place a ladder becomes the installed ladder — construction and
+     * [setReconnectLadder] both route through it, so the non-empty invariant and the
+     * jitter roll cannot diverge between the two entry points.
+     *
+     * An empty ladder is rejected LOUDLY rather than degraded silently: "no ladder" is a
+     * wiring bug, and the old silent degradation (`emptyList()` -> 4 instant attempts ->
+     * give up) shipped as a user-visible "the app surrenders in under a second" regression.
+     */
+    private fun jitteredLadder(delaysMs: List<Long>): List<Long> {
+        require(delaysMs.isNotEmpty()) {
+            "reconnect ladder must not be empty — an empty ladder used to degrade silently to " +
+                "a 4-attempt/0ms budget, which is the #1654 instant-surrender regression"
+        }
+        return delaysMs.map(::jittered)
     }
 
     /**
@@ -728,8 +771,29 @@ class ConnectionController(
          */
         const val DEFAULT_GRACE_MS: Long = 90_000L
 
-        /** Silent reconnect attempts before the only honest error ([Unreachable]). */
-        const val DEFAULT_MAX_RECONNECT_ATTEMPTS: Int = 4
+        /**
+         * Issue #1654: the reconnect backoff ladder — the SINGLE definition of how patient the
+         * app is before it surrenders, and the SINGLE value the app-side
+         * `DEFAULT_AUTO_RECONNECT_DELAYS_MS` resolves to. Two copies of this list would drift,
+         * and drift in this exact place is what #1654 was.
+         *
+         * 8 rungs (`[0,1,2,5,10,20,30,30]s`), calibrated in the #1331 design against the #1610
+         * forensics of the maintainer's real mobile link:
+         *  - rung 1 at 0ms is the instant silent heal (#680/#621) — covers the majority of blips;
+         *  - rungs 2-4 (1s, 2s, 5s) cover a RAT handover / brief coverage hole (the 07-15 class
+         *    that healed at attempts 2-4);
+         *  - rungs 5-8 (10s, 20s, 30s, 30s) cover an elevator / platform gap / tunnel stretch at
+         *    a calm, unchanged cadence.
+         *
+         * The size IS the attempt budget ([effectiveMaxAttempts]); the total (98s) is how long
+         * a flap can last before the app gives up honestly. NO jitter is baked in here —
+         * [jittered] applies it once, per install.
+         *
+         * PROPOSED, NOT LOCKED (#1539/#1331): how patient the app should be is the maintainer's
+         * tuning call. Retuning is a one-line change here, and nowhere else.
+         */
+        val DEFAULT_RECONNECT_LADDER_MS: List<Long> =
+            listOf(0L, 1_000L, 2_000L, 5_000L, 10_000L, 20_000L, 30_000L, 30_000L)
 
         /**
          * Issue #1633: how long the connection must stay continuously
@@ -751,11 +815,22 @@ class ConnectionController(
          * gives up honestly ([ConnectionState.Unreachable]) even if rungs remain, so a flap
          * too slow to exhaust the rung budget cannot grind forever.
          *
-         * **PROPOSED, not locked** — from the #1331 design. 120s roughly matches the
-         * 8-rung `[0,1,2,5,10,20,30,30]s` ladder's own span, so whichever bound trips first
-         * lands in the same neighbourhood.
+         * Issue #1654: raised 120s -> **180s**. The wall clock must not TRUNCATE the ladder it
+         * bounds, and 120s did: [DEFAULT_RECONNECT_LADDER_MS]'s 8 rungs are 98s of delay ON TOP
+         * OF 8 dial/attach cycles at the measured 2-15s each, so a full ladder run takes
+         * ~115-180s. At 120s the two 30s rungs would essentially never execute — either the
+         * rungs shouldn't exist or the clock shouldn't cut them. 180s lets the ladder
+         * substantially complete while still hard-bounding the pathological slow-flap case the
+         * wall clock exists for (a ~25s-period flap now terminates at ~7 cycles instead of
+         * grinding indefinitely), and it matches the worst burst the #1610 forensics recorded
+         * (193s) — the machine surrenders at about the point the maintainer historically gave
+         * up and backgrounded the app.
+         *
+         * **PROPOSED, not locked** — from the #1331 design (Fable's decision A2/B). The tuning
+         * feedback loop is the cause trail the fix itself emits: give-ups on links that recover
+         * <60s later mean raise it (toward 240s).
          */
-        const val DEFAULT_EPISODE_BUDGET_MS: Long = 120_000L
+        const val DEFAULT_EPISODE_BUDGET_MS: Long = 180_000L
 
         /**
          * Issue #1633: full jitter applied to every non-zero ladder rung (the gRPC backoff

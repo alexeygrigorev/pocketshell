@@ -744,7 +744,27 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setPassiveDisconnectRecoveryForTest(graceMs = 500L, silentReattachTimeoutMs = 500L)
-        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        // Issue #1654: `listOf(60_000L)` no longer expresses what this fixture MEANS, because
+        // #1654 gives the single ladder two jobs this test depends on independently:
+        //
+        //  1. its LENGTH is now the real attempt BUDGET (the VM's `autoReconnectDelaysMs` IS
+        //     the controller's ladder; it used to never reach the controller, so the length was
+        //     inert). A 1-rung ladder means "give up after ONE failure", so the grace loop's
+        //     very first rung-failure feed exhausted it and painted the honest Failed band
+        //     499ms into a 500ms grace window — breaking the calm-band assertion below.
+        //  2. its DELAYS now pace the grace loop's own cycles (#1654's A2 fix: the loop read a
+        //     flat 250ms constant and so could never back off). 60s rungs would space the
+        //     cycles 60s apart, so the loop would dial ONCE in this 500ms window — breaking the
+        //     #833 re-dial assertion below.
+        //
+        // Both jobs are satisfied by the ladder this test always wanted: FOUR rungs (a budget
+        // as real as production's 8, so a couple of grace cycles cannot exhaust it) at ZERO
+        // delay, which `passiveGraceCycleRetryDelayMs` floors to the SAME 250ms spacing the
+        // #833 comment below describes. Production's own value is the 8-rung
+        // DEFAULT_AUTO_RECONNECT_DELAYS_MS, so this is a fixture artifact being corrected, not
+        // a behaviour change — #1539's fixture comment predicted exactly this trap. Every
+        // assertion below is UNCHANGED and still load-bearing.
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
         val deadClient = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,

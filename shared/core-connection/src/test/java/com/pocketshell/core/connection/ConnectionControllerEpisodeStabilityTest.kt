@@ -581,7 +581,7 @@ class ConnectionControllerEpisodeStabilityTest {
          * `DEFAULT_EPISODE_BUDGET_MS`, so they cannot silently drift.
          */
         private const val STABILITY_WINDOW_MS = 30_000L
-        private const val EPISODE_BUDGET_MS = 120_000L
+        private const val EPISODE_BUDGET_MS = 180_000L // issue #1654: was 120_000L
 
         /** The maintainer's observed cadence: the link dies ~5s after each successful dial. */
         private const val LINK_LIFETIME_MS = 5_000L

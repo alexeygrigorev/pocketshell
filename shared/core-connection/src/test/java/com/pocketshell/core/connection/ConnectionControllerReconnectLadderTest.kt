@@ -121,13 +121,24 @@ class ConnectionControllerReconnectLadderTest {
     }
 
     @Test
-    fun `empty ladder falls back to the flat default budget with zero delay`() {
+    fun `a controller with no explicit ladder still walks the real production ladder`() {
+        // Issue #1654 (D22 hard-cut): this test used to assert the OPPOSITE — that an empty
+        // ladder "falls back to the flat default budget with zero delay". That fallback was
+        // the release blocker, not a feature: the passive-grace loop never installed a ladder,
+        // so the storm path silently ran on a 4-attempt/0ms budget and the app surrendered in
+        // under a second. There is no empty-ladder state any more; the controller installs the
+        // real ladder at construction, so "nobody called setReconnectLadder" now yields the
+        // production ladder rather than a degraded one.
         val (c, transport) = controller(ladder = emptyList())
         c.bringToReconnecting(transport)
         val recon = c.state.value as ConnectionState.Reconnecting
         assertEquals(1, recon.attempt)
-        assertEquals(ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS, recon.maxAttempts)
-        assertEquals(0L, recon.retryDelayMs)
+        assertEquals(ConnectionController.DEFAULT_RECONNECT_LADDER_MS.size, recon.maxAttempts)
+        assertEquals(
+            "rung 1 is the instant silent heal (#680/#621)",
+            0L,
+            recon.retryDelayMs,
+        )
     }
 
     @Test

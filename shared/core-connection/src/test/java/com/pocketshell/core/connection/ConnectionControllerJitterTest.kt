@@ -204,7 +204,7 @@ class ConnectionControllerJitterTest {
         )
         assertEquals(
             "ConnectionControllerEpisodeStabilityTest.EPISODE_BUDGET_MS mirror has drifted",
-            120_000L,
+            180_000L,
             ConnectionController.DEFAULT_EPISODE_BUDGET_MS,
         )
         assertEquals(0.2, ConnectionController.RETRY_JITTER_FRACTION, 0.0001)

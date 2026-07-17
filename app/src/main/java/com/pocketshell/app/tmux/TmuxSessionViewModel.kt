@@ -8403,6 +8403,44 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #1653: the ONE teardown authority for a POST-dial rung failure — both exits of
+     * [silentlyReconnectTransportAfterPassiveDisconnect] (`!ready` and thrown) route here. Why a
+     * second parallel guard is forbidden, and the [lease]-null / [forceEvict] cases:
+     * [shouldEvictTransportAfterStageFailure]. Returns whether the lease was evicted.
+     */
+    private suspend fun resolveRungStageFailure(
+        lease: SshLease?,
+        leaseKey: SshLeaseKey,
+        replacement: TmuxClient?,
+        staleClient: TmuxClient?,
+        forceEvict: Boolean = false,
+    ): Boolean {
+        val session = lease?.session
+        val evict = forceEvict ||
+            session == null ||
+            shouldEvictTransportAfterStageFailure(session.vouchedAlive())
+        // Re-point clientRef off the replacement BEFORE closing it (#866 cancel storm — see the
+        // warm rung's swap-then-close for the full why). The `-CC` CHANNEL always drops; only the
+        // TRANSPORT under it is the vouch's call.
+        if (clientRef === replacement) {
+            clientRef = staleClient
+        }
+        runCatching { replacement?.close() }
+        if (evict) {
+            if (session == null || sessionRef === session) sessionRef = null
+            if (lease == null || leaseRef === lease) leaseRef = null
+            // The lease is the SHARED per-host transport: only a genuine death reaches this.
+            withContext(NonCancellable) {
+                runCatching { sshLeaseManager.disconnect(leaseKey) }
+            }
+        } else {
+            leaseRef = lease
+            sessionRef = session
+        }
+        return evict
+    }
+
     private suspend fun silentlyReconnectTransportAfterPassiveDisconnect(
         // Nullable (EPIC #687 P2): the within-grace foreground heal may have no stale
         // client handle to close (the passive path already unregistered it). The
@@ -8453,6 +8491,7 @@ public class TmuxSessionViewModel @Inject constructor(
             if (lease == null) {
                 // #1539: never handshook -> not a live link -> abandoned (the preserved
                 // fast-fail). The loop feeds the counter per failed cycle (#1610 Q3).
+                // #1653: not the post-dial authority's business — nothing handshook to weigh.
                 recordTransportReattachStageFail(
                     target = target,
                     cause = "dial_handshake_timeout",
@@ -8509,29 +8548,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 true
             } == true
             if (!ready) {
-                // Issue #1539 — THE kill site: used to close + lease-evict unconditionally, unable
-                // to tell a timed-out DIAL from a slow ATTACH on a proven-up link.
-                // See [shouldEvictTransportAfterStageFailure].
-                val evict = shouldEvictTransportAfterStageFailure(session.vouchedAlive())
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                }
-                // The `-CC` CHANNEL never came up so it always drops; the TRANSPORT under it is
-                // the vouch's call.
-                runCatching { replacement?.close() }
-                if (evict) {
-                    if (sessionRef === session) sessionRef = null
-                    if (leaseRef === lease) leaseRef = null
-                    withContext(NonCancellable) {
-                        runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                    }
-                } else {
-                    // KEEP the handshaken transport, PUBLISHED as live, so the next tick's
-                    // re-vouch retries the attach over it via the channel-only warm rung. Nulling
-                    // these refs is what used to disable that rung and force the redial.
-                    leaseRef = lease
-                    sessionRef = session
-                }
+                // #1539's kill site; #1653 routed it through the authority the throw exit shares.
+                val evict = resolveRungStageFailure(
+                    lease = lease,
+                    leaseKey = leaseTarget.leaseKey,
+                    replacement = replacement,
+                    staleClient = staleClient,
+                )
                 recordTransportReattachStageFail(
                     target = target,
                     cause = if (evict) "attach_not_ready" else "attach_slow_transport_kept",
@@ -8588,32 +8611,25 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
-            if (t is CancellationException) {
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                    sessionRef = null
-                    leaseRef = null
-                }
-                runCatching { replacement?.close() }
-                withContext(NonCancellable) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                }
-                throw t
-            }
-            runCatching { replacement?.close() }
-            withContext(NonCancellable) {
-                runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-            }
-            if (clientRef === replacement) {
-                clientRef = staleClient
-                sessionRef = null
-                leaseRef = null
-            }
+            // Issue #1653 — THE OTHER kill site, the one #1539 missed: a stalled tail's INNER
+            // sshj timeout beats the OUTER stage budget, so the same "slow tail on a proven-up
+            // link" arrives here THROWN instead of as `!ready`. This evicted unconditionally, so
+            // the vouch never ran and a live SHARED transport still died. Same authority now.
+            val evict = resolveRungStageFailure(
+                lease = acquiredLease,
+                leaseKey = leaseTarget.leaseKey,
+                replacement = replacement,
+                staleClient = staleClient,
+                // Cancellation = deliberate abandonment (grace expiry / switch / a superseding
+                // connect), not a stage verdict — the rung is going away. Unchanged from base.
+                forceEvict = t is CancellationException,
+            )
+            if (t is CancellationException) throw t
             recordPassiveReattachThrewFail(
                 target = target,
                 source = "silent_transport_reattach",
                 throwable = t,
-                evictedLease = true,
+                evictedLease = evict,
                 clientHash = replacement?.let { System.identityHashCode(it) },
                 elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
                 shortAppSwitchFields = passiveReattachLogFields(target),

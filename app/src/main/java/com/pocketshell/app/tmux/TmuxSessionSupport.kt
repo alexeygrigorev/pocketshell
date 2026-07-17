@@ -577,6 +577,35 @@ internal fun passiveReattachStageBudgets(
  * Investigation B (#1610) is the reason this reads the vouch at FALLTHROUGH time rather than
  * trusting the stage verdict: a 5s stage timeout on a transport that is still vouched alive
  * must not evict the shared per-host lease.
+ *
+ * ## Issue #1653: this is the ONLY eviction authority, and that is load-bearing
+ *
+ * #1539 wired this into the rung's `!ready` exit ONLY, and #1652's storm journey proved the
+ * result RED on `main` with the whole #1610 wave landed: **a fully-handshaken, provably-live
+ * transport still died for a slow tail.** A stalled tail does not politely return null. The
+ * `tmux has-session` preflight's INNER sshj timeout (10s) beats the rung's OUTER
+ * `withTimeoutOrNull(attachMs)` (also 10s), so the identical event — a tail stage failing on a
+ * link the handshake already proved up — is delivered as a THROWN `TmuxClientException` instead
+ * of as `ready == false`. That landed in an unguarded `catch` that evicted unconditionally
+ * (`evictedLease = true`, hard-coded), and the evicted lease is the SHARED per-host transport,
+ * so one busy tmux server tore down every session on that host.
+ *
+ * #1539 therefore fixed the branch a virtual clock can reach and left the branch only a real one
+ * can: **a virtual clock never throws.** Five slices, three reviewers and mutation testing all
+ * missed it; the first real-path multi-cycle test caught it on its first run.
+ *
+ * So both exits of `TmuxSessionViewModel.silentlyReconnectTransportAfterPassiveDisconnect` route
+ * through `resolveRungStageFailure`, which is the sole caller of this function and the sole code
+ * that may kill a rung's own transport. Do NOT add a second `vouchedAlive()` check on a new exit
+ * — two branches independently answering "should we evict?" is free to drift apart exactly as
+ * these two did, and that drift IS #1653 (D22 hard-cut / D28 no-patches-on-patches). A new exit
+ * routes through the one authority or it is a bug.
+ *
+ * Two inputs there are NOT stage verdicts and bypass this function deliberately: a null lease
+ * (the throw beat the dial, so nothing handshook and the disconnect is pure cleanup) and
+ * `forceEvict` (cancellation = abandonment — grace expiry, a session switch, or a superseding
+ * connect — where the rung is going away and must not leave refs published for a warm rung that
+ * will never run).
  */
 internal fun shouldEvictTransportAfterStageFailure(transportVouchedAlive: Boolean): Boolean =
     !transportVouchedAlive

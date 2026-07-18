@@ -12,6 +12,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -125,8 +126,24 @@ class AgentKindRemoteSourceTest {
         assertTrue(result.isEmpty())
     }
 
+    /**
+     * Issue #1641 (D22 hard-cut): this test used to assert the OPPOSITE — that a
+     * timed-out RPC "must close the session so the pooled connection can
+     * recover". That was the bug, pinned as intended behaviour: `close()` here
+     * tears down the SHARED per-host lease transport that the live tmux `-CC`
+     * reader rides, so a merely-SLOW classify (a cold host Python CLI over
+     * mobile RTT routinely exceeds 3.5s) self-inflicted the `SSHException` that
+     * the #1610 storm then re-ingested as a genuine link drop.
+     *
+     * Per #1567's contract, a starved exec is NOT evidence of a dead link; only
+     * a genuine TRANSPORT-level death (keepalive/liveness) may close the
+     * session. The full class-covering proof — every bounded-exec site, the
+     * re-fire loop, transport identity, and the load-bearing negative case —
+     * lives in
+     * `com.pocketshell.app.ssh.Issue1641SlowExecMustNotCloseSharedTransportTest`.
+     */
     @Test
-    fun wedgedExecTimesOutToEmptyMapAndClosesSession() = runBlocking {
+    fun wedgedExecTimesOutToEmptyMapAndLeavesTheSharedSessionOpen() = runBlocking {
         val session = WedgingSshSession()
         val timedSource = AgentKindRemoteSource(execReadTimeoutMs = 50L)
 
@@ -137,8 +154,8 @@ class AgentKindRemoteSourceTest {
 
         assertTrue("wedged daemon RPC must degrade to no verdicts", result.isEmpty())
         assertTrue("exec must have started before the timeout path returned", session.execStarted.isCompleted)
-        assertTrue(
-            "timed-out RPC must close the session so the pooled connection can recover",
+        assertFalse(
+            "a merely-SLOW RPC must NOT close the shared lease transport (#1641)",
             session.closed,
         )
     }

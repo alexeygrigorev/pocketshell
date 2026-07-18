@@ -173,15 +173,26 @@ class TreeRemoteSourceTest {
         assertNull(source.reconcileTree(session, host = "h"))
     }
 
+    /**
+     * Issue #1641 (D22 hard-cut): this used to assert the session was CLOSED on timeout.
+     * That was the bug pinned as intended behaviour — the session here is the SHARED
+     * per-host lease transport the live tmux `-CC` reader rides, so closing it because
+     * an exec was merely SLOW self-inflicted the #1610 reconnect storm. Per #1567 a
+     * starved exec is NOT evidence of a dead link; only keepalive/liveness may close
+     * the session. Class-covering proof: `com.pocketshell.app.ssh.Issue1641SlowExecMustNotCloseSharedTransportTest`.
+     */
     @Test
-    fun wedgedTreeExecsTimeOutCloseSessionAndDegrade() = runBlocking {
+    fun wedgedTreeExecsTimeOutAndDegradeWithoutClosingTheSharedSession() = runBlocking {
         val timeoutSource = TreeRemoteSource().apply { remoteExecTimeoutMs = 50L }
 
         val getSession = WedgingSshSession()
         val tree = timeoutSource.getTree(getSession, host = "h")
         assertTrue(tree.nodes.isEmpty())
         assertNull(tree.cliVersion)
-        assertTrue("wedged tree get must close the session", getSession.closed)
+        assertFalse(
+            "wedged tree get must NOT close the shared lease transport (#1641)",
+            getSession.closed,
+        )
         assertTrue(getSession.recorded.single().contains("tree get"))
 
         val upsertSession = WedgingSshSession()
@@ -192,12 +203,18 @@ class TreeRemoteSourceTest {
                 nodes = listOf(TreeRemoteSource.TreeNode("a", 0, "/p/a", collapsed = false)),
             ),
         )
-        assertTrue("wedged tree upsert must close the session", upsertSession.closed)
+        assertFalse(
+            "wedged tree upsert must NOT close the shared lease transport (#1641)",
+            upsertSession.closed,
+        )
         assertTrue(upsertSession.recorded.single().contains("tree upsert"))
 
         val reconcileSession = WedgingSshSession()
         assertNull(timeoutSource.reconcileTree(reconcileSession, host = "h"))
-        assertTrue("wedged tree reconcile must close the session", reconcileSession.closed)
+        assertFalse(
+            "wedged tree reconcile must NOT close the shared lease transport (#1641)",
+            reconcileSession.closed,
+        )
         assertTrue(reconcileSession.recorded.single().contains("tree reconcile"))
     }
 

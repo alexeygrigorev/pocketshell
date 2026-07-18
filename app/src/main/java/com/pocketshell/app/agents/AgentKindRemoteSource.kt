@@ -1,16 +1,13 @@
 package com.pocketshell.app.agents
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import javax.inject.Inject
 
@@ -182,27 +179,33 @@ public class AgentKindRemoteSource @Inject constructor() {
         "'" + value.replace("'", "'\"'\"'") + "'"
 
     /**
-     * Bound the host-side daemon RPC exec. This mirrors the connect-path remote
-     * source pattern in `SshFolderListGateway`: run the potentially wedged SSH
-     * read in a child IO coroutine, then await that child with a timeout. A
-     * timeout is best-effort "no verdict" for callers, but we still close the
-     * session because cancellation alone cannot interrupt a blocking SSH stream
-     * read.
+     * Bound the host-side daemon RPC exec — issue #1641.
+     *
+     * A timeout is best-effort "no verdict" for callers and NOTHING more: the
+     * exec is abandoned and the SHARED per-host lease transport is left alone.
+     *
+     * This used to `close()` that shared transport on timeout, which made a
+     * merely-SLOW foreign-pane classify (a cold host Python CLI over mobile RTT
+     * routinely exceeds 3.5s) tear down the live `-CC` reader's transport and
+     * enter the #1610 reconnect storm — silently, with no log or cause trail.
+     * A confirmed-shell pane re-classifies on EVERY reconcile, so it re-fired
+     * for the life of the session. Per #1567's contract, a starved exec is NOT
+     * evidence of a dead link; only keepalive/liveness may close the session.
+     * See [BoundedSessionExec] for the full rationale.
      */
     private suspend fun SshSession.execBounded(command: String): ExecResult? =
-        withContext(execDispatcher) {
-            val deferred = async { exec(command) }
-            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
-                ?: run {
-                    deferred.cancel()
-                    withContext(NonCancellable) {
-                        runCatching { close() }
-                    }
-                    null
-                }
-        }
+        BoundedSessionExec.execBounded(
+            session = this,
+            command = command,
+            timeoutMs = execReadTimeoutMs,
+            dispatcher = execDispatcher,
+            callerSite = TRAIL_CALLER_SITE,
+        )
 
     private companion object {
         const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+
+        /** Stable, non-PII attribution token for the cause trail (#1641). */
+        const val TRAIL_CALLER_SITE: String = "agent_kind_classify"
     }
 }

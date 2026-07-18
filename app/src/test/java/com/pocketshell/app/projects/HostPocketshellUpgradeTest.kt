@@ -10,6 +10,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,8 +71,16 @@ class HostPocketshellUpgradeTest {
         )
     }
 
+    /**
+     * Issue #1641 (D22 hard-cut): this used to assert the session was CLOSED on timeout.
+     * That was the bug pinned as intended behaviour — the session here is the SHARED
+     * per-host lease transport the live tmux `-CC` reader rides, so closing it because
+     * an exec was merely SLOW self-inflicted the #1610 reconnect storm. Per #1567 a
+     * starved exec is NOT evidence of a dead link; only keepalive/liveness may close
+     * the session. Class-covering proof: `com.pocketshell.app.ssh.Issue1641SlowExecMustNotCloseSharedTransportTest`.
+     */
     @Test
-    fun failure_onTimeout_closesSession() = runTest {
+    fun failure_onTimeout_leavesTheSharedSessionOpen() = runTest {
         val session = FakeSession { awaitCancellation() }
         val upgrade = HostPocketshellUpgrade().apply {
             execDispatcher = UnconfinedTestDispatcher(testScheduler)
@@ -79,7 +88,10 @@ class HostPocketshellUpgradeTest {
         }
         val result = upgrade.run(session)
         assertTrue("a wedged installer must time out to a Failure", result is HostPocketshellUpgrade.Result.Failure)
-        assertTrue("timed-out exec closes the session for reconnect", session.closed)
+        assertFalse(
+            "a merely-SLOW installer exec must NOT close the shared lease transport (#1641)",
+            session.closed,
+        )
     }
 
     private class FakeSession(

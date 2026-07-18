@@ -9,6 +9,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
 import com.pocketshell.app.sessions.remoteStartDirectoryExistsCommand
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
@@ -28,7 +29,6 @@ import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -654,32 +654,39 @@ class SshFolderListGateway internal constructor(
      * folder-list poll cadence so the timeout — not an external poll
      * restart — is what surfaces a wedged read.
      */
-    private suspend fun SshSession.execBounded(command: String): ExecResult =
-        withContext(Dispatchers.IO) {
-            val deferred = async { exec(command) }
-            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
-                ?: run {
-                    Log.w(
-                        PROBE_LOG_TAG,
-                        "folder-list SSH exec read wedged >${execReadTimeoutMs}ms; " +
-                            "closing wedged session + surfacing bounded failure. " +
-                            "cmd=${command.takeLast(48)}",
-                    )
-                    // Stop awaiting the wedged read so this coroutine can
-                    // resume, then CLOSE the session: cancellation alone can
-                    // NOT interrupt the in-flight blocking `readBytes()`, so
-                    // close() is what tears down the transport, unparks the
-                    // read (it throws), and lets exec's `use {}` finally free
-                    // the channel — no orphaned channel/thread leak. The
-                    // pooled lease self-heals: a now-disconnected session is
-                    // discarded and re-opened on the next acquire.
-                    deferred.cancel()
-                    withContext(NonCancellable) {
-                        runCatching { close() }
-                    }
-                    throw FolderListExecTimeoutException(command, execReadTimeoutMs)
-                }
-        }
+    private suspend fun SshSession.execBounded(command: String): ExecResult {
+        val result = BoundedSessionExec.execBounded(
+            session = this,
+            command = command,
+            timeoutMs = execReadTimeoutMs,
+            dispatcher = Dispatchers.IO,
+            callerSite = TRAIL_CALLER_SITE,
+        )
+        if (result != null) return result
+        Log.w(
+            PROBE_LOG_TAG,
+            "folder-list SSH exec read made no progress within ${execReadTimeoutMs}ms; " +
+                "ABANDONING the exec + surfacing a bounded, retryable failure. The SHARED " +
+                "lease transport stays UP — recovery is the refcount-aware evictIdle below " +
+                "(issue #1641). cmd=${command.takeLast(48)}",
+        )
+        // Issue #1641: this used to `close()` the SHARED per-host lease
+        // transport here, on the premise that "cancellation alone cannot
+        // interrupt the in-flight blocking readBytes()". That premise is STALE
+        // (since #1567 the read is interruptible and bounded channel-locally),
+        // and the close was catastrophic: it tore down the transport the live
+        // tmux `-CC` reader rides, whose read then threw SSHException — an
+        // uncredited #1610 storm entry trigger, fired by an exec merely being
+        // SLOW. It also bypassed the #758 refcount guard 20 lines below, so it
+        // could yank a transport an ACTIVE session VM still held.
+        //
+        // Instead: surface the retryable timeout. [isStaleChannelSymptom] now
+        // covers it, so `runLeaseAttempt` heals via `evictIdle` — which closes
+        // the corpse ONLY when no live consumer holds it, and retries once on a
+        // fresh lease. That preserves recovery for a genuinely dead transport
+        // while never killing a slow-but-alive one.
+        throw FolderListExecTimeoutException(command, execReadTimeoutMs)
+    }
 
     private suspend fun <T> withLeaseSession(
         host: HostEntity,
@@ -798,7 +805,35 @@ class SshFolderListGateway internal constructor(
         isChannelOpenFailure(cause) ||
             isTransportDisconnected(cause) ||
             isSessionNotConnected(cause) ||
-            isTransportEofDrop(cause)
+            isTransportEofDrop(cause) ||
+            isWedgedReadTimeout(cause)
+
+    /**
+     * Issue #1641: a bounded-exec timeout is a stale-channel symptom, so the
+     * heal path — `evictIdle` + retry once on a fresh lease — owns the recovery
+     * that the deleted `close()` used to do unsafely.
+     *
+     * This is the LOAD-BEARING negative half of #1641. Removing the close
+     * without this would over-guard: a genuinely dead transport would never be
+     * discarded, every poll would re-grab the corpse, and the tree would stop
+     * recovering at all — strictly worse than the storm. Routing it through
+     * `evictIdle` instead of `close()` keeps recovery while making it
+     * refcount-aware: a transport an ACTIVE session VM still holds is left
+     * alone (#758) and healed by that VM's own stale-lease path, while an idle
+     * corpse no consumer holds is still discarded so the next poll re-dials.
+     *
+     * Mirrors [com.pocketshell.app.sessions.LeaseSessionExec.isStaleChannelSymptom],
+     * which already treats its wedged-read/block timeouts this way.
+     */
+    private fun isWedgedReadTimeout(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            if (current is FolderListExecTimeoutException) return true
+            current = current.cause
+        }
+        return false
+    }
 
     /**
      * Issue #711: true when [cause] is the transient transport-EOF family that
@@ -1902,6 +1937,9 @@ class SshFolderListGateway internal constructor(
          * just protects the single in-flight reconcile probe.)
          */
         const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+
+        /** Stable, non-PII attribution token for the cause trail (#1641). */
+        const val TRAIL_CALLER_SITE: String = "folder_list_probe"
 
         /**
          * Issue #702: upper bound on the LIVE `-CC` client enumeration

@@ -1394,16 +1394,44 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun b1PrimeDedupOrderingReProbesConfirmedShellPaneOnUnchangedInput() = runTest(scheduler) {
-        // B1′ (dedup ordering): a `claude` started INSIDE an already-detected
-        // shell pane does NOT change the `(cwd, command, tty)` triple. On base the
-        // dedup early-return PRECEDED the cache-bust, so the stale one-shot "no
-        // agent" guess persisted and the pane never re-probed. The fix busts the
-        // confirmed-shell foreign-guess cache BEFORE the dedup check, so the next
-        // probe re-evaluates. Here: seed a cached `unknown` guess, confirm it is
-        // cached, then a confirmed-shell detection re-run must have BUSTED it.
+    fun confirmedShellReClassifiesOnlyOnRealInputChangeNotEveryReconcile() = runTest(scheduler) {
+        // Issue #1641 (C2), which SUPERSEDES the #975 B1′ contract this test used
+        // to pin. B1′ made a confirmed-shell pane bust its one-shot foreign
+        // kind-guess on EVERY probe, so `startAgentDetectionForPane` — invoked for
+        // every pane on every reconcile — re-ran the 3.5s `agents kind` daemon
+        // classify continuously. Before #1641's transport fix, that classify
+        // closed the shared `-CC` lease whenever it exceeded its bound on a slow
+        // link, an uncredited entry trigger of the #1610 reconnect storm. The old
+        // assertion here ("a re-probe on UNCHANGED input re-queries the daemon
+        // once more") was pinning exactly that per-reconcile re-fire as intended
+        // behaviour — it is the bug, inverted below.
+        //
+        // New contract: a confirmed-shell pane re-classifies ONLY on a real
+        // trigger — its detection input `(cwd, command, tty)` changing — which is
+        // what a `claude`/`codex`/`opencode` started in the shell produces (the
+        // pane's foreground command changes, e.g. `node`→`claude`). That preserves
+        // #962/#975 (the live agent still binds and clears the confirmed-shell
+        // verdict) while killing the storm's per-reconcile RPC.
+        //
+        // RED on base (the unconditional per-reconcile bust): classifyExecCount
+        // climbs by one per reconcile. GREEN: unchanged reconciles fire ZERO
+        // classify; a command change fires exactly ONE.
         val session = MaskedAgentSshSession(classifyAgentKind = "unknown", detectionOutput = "")
         val vm = newVm()
+
+        fun shellPane(command: String) = TmuxSessionViewModel.ParsedPane(
+            paneId = "%0",
+            windowId = "@0",
+            sessionId = "$0",
+            title = command,
+            paneIndex = 0,
+            cwd = "/workspace/proj",
+            currentCommand = command,
+            paneTty = "/dev/pts/7",
+            panePid = 4242L,
+            sessionName = "work",
+        )
+
         vm.connectWithRichPaneForTest(
             paneId = "%0",
             windowId = "@0",
@@ -1415,39 +1443,55 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
         runCurrent()
         vm.applyRecordedShellVerdictForTest(sessionId = "$0", isShell = true)
         runCurrent()
-
-        // Simulate the one-shot guess having cached "no agent" before the agent
-        // launched (the stale guess the dedup bug never re-evaluated). Re-seeding
-        // the cache after the connect-path probe models the stale verdict the
-        // dedup bug never re-evaluated; capture the daemon round-trip count as a
-        // baseline so we can prove the re-probe forces a FRESH query past it.
-        vm.seedForeignGuessCacheForTest("$0")
         assertTrue(
-            "#975 (B1′): precondition — the stale one-shot guess is cached",
-            vm.foreignGuessIsCachedForTest("$0"),
+            "#1641 precondition: the recorded-shell pane is published confirmed-shell",
+            "%0" in vm.confirmedShellPaneIds.value,
         )
-        val classifyCountBeforeReProbe = session.classifyExecCount
 
-        // A re-probe of the confirmed-shell pane (same unchanged input) must BUST
-        // the cache BEFORE the dedup early-return, so the daemon re-evaluates.
-        // Issue #1001: with the detection exec now confined to the shared test
-        // scheduler, `runCurrent()` deterministically drains the re-probe job to
-        // completion — including the FRESH daemon classify the bust enabled. The
-        // load-bearing proof of the B1′ fix is therefore that the cache-bust
-        // forced a NEW daemon round-trip (classifyExecCount incremented past the
-        // baseline), not that the cache stays empty (which only ever held because
-        // the race left the re-probe unfinished — exactly the #1001 flake this
-        // change removes).
-        vm.startAgentDetectionForPaneForTest("%0")
-        runCurrent()
+        // Baseline: the daemon classify count once the confirmed-shell verdict has
+        // settled (the connect path itself does the one legitimate first probe).
+        val afterVerdict = session.classifyExecCount
 
+        // Five plain reconciles with UNCHANGED pane input (command = "node").
+        // On base each busted the one-shot guess and re-fired the 3.5s classify;
+        // the #1641 one-shot fix fires ZERO — the guess cannot change while the
+        // input is unchanged.
+        repeat(5) {
+            vm.applyParsedPanesForTest(listOf(shellPane(command = "node")))
+            runCurrent()
+        }
         assertEquals(
-            "#975 (B1′): re-probing a confirmed-shell pane busts the stale foreign " +
-                "guess cache BEFORE the dedup early-return, so the daemon is " +
-                "re-queried exactly once more — RED on base where the early-return " +
-                "skipped the bust and the stale seeded guess suppressed any " +
-                "re-evaluation (the daemon round-trip count stayed at the baseline)",
-            classifyCountBeforeReProbe + 1,
+            "#1641: a confirmed-shell pane must NOT re-run the agents-kind classify " +
+                "on reconciles where its (cwd, command, tty) input is unchanged — " +
+                "RED on base where each of the 5 reconciles busted the guess and " +
+                "re-fired the 3.5s classify RPC (the #1610 storm entry trigger)",
+            afterVerdict,
+            session.classifyExecCount,
+        )
+
+        // A REAL trigger: the user starts an agent, so the pane's foreground
+        // command changes (node→claude). Exactly ONE fresh classify — #962/#975
+        // preserved (the daemon re-evaluates so a live agent can bind).
+        vm.applyParsedPanesForTest(listOf(shellPane(command = "claude")))
+        runCurrent()
+        assertEquals(
+            "#962/#975 preserved: a real input change (an agent starting in the " +
+                "shell → command change) busts the one-shot guess and re-evaluates " +
+                "the daemon exactly ONCE so the live agent can bind",
+            afterVerdict + 1,
+            session.classifyExecCount,
+        )
+
+        // The changed input is now the dedup key — subsequent unchanged reconciles
+        // are one-shot again (no per-reconcile re-fire).
+        repeat(3) {
+            vm.applyParsedPanesForTest(listOf(shellPane(command = "claude")))
+            runCurrent()
+        }
+        assertEquals(
+            "#1641: after re-classifying on the real trigger, subsequent unchanged " +
+                "reconciles do not re-fire the classify",
+            afterVerdict + 1,
             session.classifyExecCount,
         )
     }

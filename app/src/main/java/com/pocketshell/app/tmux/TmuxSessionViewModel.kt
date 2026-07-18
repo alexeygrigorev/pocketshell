@@ -12695,25 +12695,40 @@ public class TmuxSessionViewModel @Inject constructor(
         // moved between ttys would keep its stale "no agent" verdict
         // even after the agent CLI was started on the new tty.
         val input = Triple(cwd, command, tty)
-        // Issue #975 (B1′, dedup ordering): bust the one-shot foreign kind-guess
-        // cache for a CONFIRMED-SHELL pane BEFORE the dedup early-return, not
-        // after it. A `claude` started inside an already-detected shell pane does
-        // NOT change the `(cwd, command, tty)` triple (no tty change), so the
-        // dedup key matches and — with the bust ordered AFTER the early-return
-        // (the #962 ordering bug) — the cache-bust never ran and the stale "no
-        // agent" guess persisted for the life of the session, suppressing the
-        // Conversation toggle. Busting first means the next re-probe of a
-        // confirmed-shell pane always re-evaluates the daemon (and the #975 B1
-        // transcript fallback), so a live agent started in the shell can bind and
-        // clear the verdict even when the input triple is unchanged. A genuine
-        // shell re-evaluates to "no agent" again (no flap — #894).
-        refreshForeignGuessForConfirmedShellPane(pane)
+        // Issue #1641 (C2): re-classify a CONFIRMED-SHELL pane ONLY on a real
+        // trigger — its detection input `(cwd, command, tty)` changing since the
+        // last probe — NOT on every reconcile.
+        //
+        // `applyParsedPanes` calls this for every pane on EVERY reconcile. The
+        // #975 B1′ ordering fix used to bust the one-shot foreign kind-guess
+        // cache UNCONDITIONALLY here, so a confirmed-shell pane re-ran the 3.5s
+        // `agents kind` daemon classify (AgentKindRemoteSource) on every single
+        // reconcile — a steady per-reconcile RPC that, before #1641's transport
+        // fix, closed the shared `-CC` lease whenever it exceeded its bound on a
+        // slow link, an uncredited entry trigger of the #1610 reconnect storm.
+        // The classify verdict cannot change while the pane's input is unchanged,
+        // so re-firing it every reconcile was pure waste (and worse than waste on
+        // a degraded link). Restoring the one-shot rule: bust + force a re-probe
+        // only when the input actually changed.
+        //
+        // This preserves #962/#975. A `claude`/`codex`/`opencode` started inside
+        // an already-detected shell changes the pane's foreground command
+        // (e.g. `bash`→`node`), so the input triple changes → the guess is busted
+        // and the daemon (plus the #975 B1 transcript fallback) re-evaluates
+        // exactly once, binds the live agent, and
+        // [clearConfirmedShellOnLiveAgentDetection] lifts the confirmed-shell
+        // verdict so the Conversation toggle returns. A genuine shell whose input
+        // has not changed keeps its cached "no agent" guess (no flap — #894) and,
+        // crucially, spawns no further classify RPC.
+        val inputChanged = paneAgentInputs[pane.paneId] != input
+        if (inputChanged) {
+            refreshForeignGuessForConfirmedShellPane(pane)
+        }
         if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) {
-            // The cache-bust above already forced the daemon to re-evaluate on
-            // the NEXT probe. A confirmed-shell pane whose input is unchanged but
-            // whose one-shot guess was just invalidated must not be left deduped
-            // on a stale in-flight job — re-probe it so the bust takes effect.
-            if (!isConfirmedShellSession(pane.sessionId)) return
+            // Input unchanged and a probe is already in flight — dedup. Nothing
+            // triggered a re-classify (the #1641 guarantee: no per-reconcile
+            // re-probe of an unchanged confirmed-shell pane).
+            return
         }
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentTailGenerations.remove(pane.paneId)
@@ -15179,35 +15194,6 @@ public class TmuxSessionViewModel @Inject constructor(
             cwd = pane.cwd,
             tty = pane.paneTty,
             command = pane.currentCommand,
-        )
-    }
-
-    /**
-     * Issue #975 (B1′, dedup ordering) test seam: true when a re-probe of
-     * [paneId] would re-evaluate the daemon — i.e. the one-shot foreign-kind
-     * guess cache for the pane's session is ABSENT (busted). Lets a JVM test
-     * assert that [startAgentDetectionForPane] busts the cache for a
-     * confirmed-shell pane BEFORE the dedup early-return, so a `claude` started
-     * inside an already-detected shell pane (unchanged `(cwd, command, tty)`)
-     * still forces a re-probe instead of keeping the stale "no agent" guess.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun foreignGuessIsCachedForTest(sessionId: String): Boolean =
-        sessionForeignKindGuessCache.containsKey(sessionId.trim())
-
-    /**
-     * Issue #975 (B1′) test seam: seed the one-shot foreign-kind guess cache for
-     * [sessionId] with a `unknown`-shaped (kind null) verdict, mirroring a daemon
-     * classify that already cached "no agent" before the agent launched. A
-     * subsequent [startAgentDetectionForPaneForTest] on a confirmed-shell pane of
-     * that session must BUST this entry (the B1′ ordering fix) so the daemon
-     * re-evaluates.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun seedForeignGuessCacheForTest(sessionId: String) {
-        sessionForeignKindGuessCache.putIfAbsent(
-            sessionId.trim(),
-            ForeignKindGuessEntry(kind = null, isShell = false),
         )
     }
 

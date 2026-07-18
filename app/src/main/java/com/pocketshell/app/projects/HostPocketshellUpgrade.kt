@@ -1,15 +1,12 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Issue #947: run the host-side `pocketshell` upgrade over the EXISTING warm SSH
@@ -112,18 +109,22 @@ public class HostPocketshellUpgrade {
         }
     }
 
+    /**
+     * Issue #1641: on timeout the upgrade exec is ABANDONED and the SHARED
+     * per-host lease transport is left alone. This used to `close()` that shared
+     * transport, tearing down the live `-CC` reader riding it and entering the
+     * #1610 reconnect storm. Per #1567's contract a starved exec is NOT evidence
+     * of a dead link; only keepalive/liveness may close the session. See
+     * [BoundedSessionExec].
+     */
     private suspend fun SshSession.execBounded(command: String): ExecResult? =
-        withContext(execDispatcher) {
-            val deferred = async { exec(command) }
-            withTimeoutOrNull(upgradeTimeoutMs) { deferred.await() }
-                ?: run {
-                    deferred.cancel()
-                    withContext(NonCancellable) {
-                        runCatching { close() }
-                    }
-                    null
-                }
-        }
+        BoundedSessionExec.execBounded(
+            session = this,
+            command = command,
+            timeoutMs = upgradeTimeoutMs,
+            dispatcher = execDispatcher,
+            callerSite = TRAIL_CALLER_SITE,
+        )
 
     public companion object {
         /** 4 minutes: an installer download + build is slow; this only guards a true wedge. */
@@ -131,6 +132,9 @@ public class HostPocketshellUpgrade {
 
         /** Exit code the [UPGRADE_COMMAND] uses when no installer owns pocketshell. */
         internal const val NO_INSTALLER_EXIT: Int = 127
+
+        /** Stable, non-PII attribution token for the cause trail (#1641). */
+        private const val TRAIL_CALLER_SITE: String = "host_pocketshell_upgrade"
 
         private const val MAX_ERROR_LINES: Int = 6
         private const val MAX_ERROR_CHARS: Int = 600

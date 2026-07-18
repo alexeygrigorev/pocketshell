@@ -158,6 +158,31 @@ case "${1:-}" in
     fi
     shift
 
+    # Issue #1641: connected latency-fixture hook for the storm-entry-edge
+    # journey. A foreign-pane kind-classify runs over the SHARED per-host `-CC`
+    # lease transport under a fixed 3.5s bound (AgentKindRemoteSource /
+    # BoundedSessionExec). Before the fix, a classify SLOWER than that bound
+    # `close()`d the shared transport — killing the live `-CC` reader and
+    # entering the #1610 reconnect storm. A localhost-fast classify can never
+    # exceed 3.5s, so it proves NOTHING about that edge (the v0.4.10/#847
+    # happy-fixture-masks-reality lesson, G10). This hook makes ONLY `agents
+    # kind` genuinely slow — an alive-but-slow host CLI, exactly the reported
+    # non-happy state — for the duration a connected test needs it.
+    #
+    # A test writes an integer number of seconds into the delay file over the
+    # SAME warm SSH session; the classify then sleeps that long BEFORE it
+    # answers (still returning a valid envelope, so the host is proven ALIVE,
+    # not failing). No file / empty / non-integer => zero delay, so every other
+    # `agents kind` consumer (the deterministic guess fixtures) is unaffected.
+    delay_file="${POCKETSHELL_AGENTS_KIND_DELAY_FILE:-/tmp/pocketshell-agents-kind-delay-secs}"
+    if [ -r "$delay_file" ]; then
+      delay_secs="$(cat "$delay_file" 2>/dev/null || printf '')"
+      case "$delay_secs" in
+        '' | *[!0-9]*) : ;;
+        *) sleep "$delay_secs" ;;
+      esac
+    fi
+
     # Collect panes from --pane PANE_ID=PANE_PID options.
     pane_specs=""
     while [ "$#" -gt 0 ]; do

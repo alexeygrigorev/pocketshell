@@ -1,15 +1,12 @@
 package com.pocketshell.app.cards
 
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -291,22 +288,29 @@ public class SessionCardsRemoteSource @Inject constructor() {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
+    /**
+     * Issue #1641: on timeout the exec is ABANDONED and the SHARED per-host
+     * lease transport is left alone. This used to `close()` that shared
+     * transport, so a merely-SLOW card RPC tore down the live `-CC` reader's
+     * transport and entered the #1610 reconnect storm. Per #1567's contract a
+     * starved exec is NOT evidence of a dead link; only keepalive/liveness may
+     * close the session. See [BoundedSessionExec].
+     */
     private suspend fun SshSession.execCardRpcBounded(command: String): ExecResult? =
-        withContext(execDispatcher) {
-            val deferred = async { exec(command) }
-            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
-                ?: run {
-                    deferred.cancel()
-                    withContext(NonCancellable) {
-                        runCatching { close() }
-                    }
-                    null
-                }
-        }
+        BoundedSessionExec.execBounded(
+            session = this,
+            command = command,
+            timeoutMs = execReadTimeoutMs,
+            dispatcher = execDispatcher,
+            callerSite = TRAIL_CALLER_SITE,
+        )
 
     public companion object {
         public const val TYPE_CHECKLIST: String = "checklist"
         public const val TYPE_NOTE: String = "note"
         private const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+
+        /** Stable, non-PII attribution token for the cause trail (#1641). */
+        private const val TRAIL_CALLER_SITE: String = "session_cards_rpc"
     }
 }

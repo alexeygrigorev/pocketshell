@@ -290,8 +290,16 @@ class SessionCardsRemoteSourceTest {
         )
     }
 
+    /**
+     * Issue #1641 (D22 hard-cut): this used to assert the session was CLOSED on timeout.
+     * That was the bug pinned as intended behaviour — the session here is the SHARED
+     * per-host lease transport the live tmux `-CC` reader rides, so closing it because
+     * an exec was merely SLOW self-inflicted the #1610 reconnect storm. Per #1567 a
+     * starved exec is NOT evidence of a dead link; only keepalive/liveness may close
+     * the session. Class-covering proof: `com.pocketshell.app.ssh.Issue1641SlowExecMustNotCloseSharedTransportTest`.
+     */
     @Test
-    fun getCardsTimeoutDegradesToEmptyFeedAndClosesSession() = runTest {
+    fun getCardsTimeoutDegradesToEmptyFeedWithoutClosingTheSharedSession() = runTest {
         val timeoutSource = SessionCardsRemoteSource(execReadTimeoutMs = 10L).also {
             it.setExecDispatcherForTest(StandardTestDispatcher(testScheduler))
         }
@@ -300,11 +308,14 @@ class SessionCardsRemoteSourceTest {
         val feed = timeoutSource.getCards(session, tmuxSessionName = "demo")
 
         assertTrue(feed.cards.isEmpty())
-        assertTrue(session.closed)
+        assertFalse(
+            "a merely-SLOW card read must NOT close the shared lease transport (#1641)",
+            session.closed,
+        )
     }
 
     @Test
-    fun checklistWriteTimeoutReturnsFalseAndClosesSession() = runTest {
+    fun checklistWriteTimeoutReturnsFalseWithoutClosingTheSharedSession() = runTest {
         val timeoutSource = SessionCardsRemoteSource(execReadTimeoutMs = 10L).also {
             it.setExecDispatcherForTest(StandardTestDispatcher(testScheduler))
         }
@@ -319,7 +330,10 @@ class SessionCardsRemoteSourceTest {
         )
 
         assertFalse(ok)
-        assertTrue(session.closed)
+        assertFalse(
+            "a merely-SLOW checklist write must NOT close the shared lease transport (#1641)",
+            session.closed,
+        )
     }
 
     @Test

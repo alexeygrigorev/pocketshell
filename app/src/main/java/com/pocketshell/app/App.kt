@@ -29,6 +29,8 @@ import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
 import com.pocketshell.app.tmux.closeCachedRuntime
 import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.core.connection.ConnectionDiagnostics
+import com.pocketshell.core.ssh.SshDiagnostics
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import dagger.hilt.android.HiltAndroidApp
@@ -355,6 +357,18 @@ class App : Application() {
         super.onCreate()
         DiagnosticEvents.install(diagnosticRecorder)
         TmuxClientDiagnostics.install { event, fields ->
+            DiagnosticEvents.record("connection", event, *fields.toList().toTypedArray())
+        }
+        // Issue #1683 — forward the connection-core / transport dead-detection
+        // INPUTS (liveness probe ticks + keepalive-coordination consultations;
+        // keepalive misses) into the same `connection`-category timeline as the
+        // verdicts, so they mirror to the host alongside them. Same shape as the
+        // TmuxClientDiagnostics bridge above (the core modules cannot depend on the
+        // app recorder directly).
+        ConnectionDiagnostics.install { event, fields ->
+            DiagnosticEvents.record("connection", event, *fields.toList().toTypedArray())
+        }
+        SshDiagnostics.install { event, fields ->
             DiagnosticEvents.record("connection", event, *fields.toList().toTypedArray())
         }
         DiagnosticEvents.record("app", "created")

@@ -125,6 +125,14 @@ class LivenessProbe(
      * still recovers a truly-stuck control channel. A virtual-clock test shortens it.
      */
     private val absoluteWedgeBudgetMs: Long = DEFAULT_ABSOLUTE_WEDGE_BUDGET_MS,
+    /**
+     * Issue #1683 — the monotonic clock the per-tick latency INPUT is measured
+     * against. Production uses [System.nanoTime]; a test injects a controllable
+     * clock so the recorded `latencyMs` is deterministic. Diagnostics-only: the
+     * measured latency is RECORDED, never used in any detection decision, so this
+     * cannot change probe behavior.
+     */
+    private val nowNanos: () -> Long = { System.nanoTime() },
     private val log: (String) -> Unit = {},
 ) {
     init {
@@ -255,10 +263,21 @@ class LivenessProbe(
                     wedgedFailureTicks = 0
                     continue
                 }
+                val probeStartNanos = nowNanos()
                 val alive = runProbe()
+                val latencyMs = (nowNanos() - probeStartNanos) / 1_000_000L
                 if (alive) {
                     if (consecutiveFailures != 0) {
                         log("liveness-probe recovered after $consecutiveFailures failure(s)")
+                        // Issue #1683 — record the first success AFTER a miss run as an
+                        // INPUT: it is the evidence that the run was a slow-but-live
+                        // blip rather than a real death (a false-dead would NOT recover).
+                        ConnectionDiagnostics.record(
+                            "liveness_probe_tick",
+                            "result" to "recovered",
+                            "latencyMs" to latencyMs,
+                            "afterConsecutiveMisses" to consecutiveFailures,
+                        )
                     }
                     // A successful `-CC` probe clears the failure run: the control
                     // channel is answering again, so the slow-but-live blip is over
@@ -271,6 +290,17 @@ class LivenessProbe(
                     log(
                         "liveness-probe failed consecutive=$consecutiveFailures " +
                             "threshold=$failureThreshold",
+                    )
+                    // Issue #1683 — record every MISS tick as an INPUT (miss count +
+                    // latency), rate-limited by construction to misses only (a healthy
+                    // link records nothing). This is the per-tick series behind the
+                    // `liveness_probe_silent_drop` VERDICT, so a false-dead is provable.
+                    ConnectionDiagnostics.record(
+                        "liveness_probe_tick",
+                        "result" to "miss",
+                        "latencyMs" to latencyMs,
+                        "consecutiveMisses" to consecutiveFailures,
+                        "failureThreshold" to failureThreshold,
                     )
                     if (consecutiveFailures >= failureThreshold) {
                         // Re-check the gate immediately before acting: a
@@ -289,6 +319,23 @@ class LivenessProbe(
                             // interval (virtual-clock friendly — see wedgedFailureTicks).
                             val wedgedForMs = wedgedFailureTicks.toLong() * intervalMs
                             val absoluteWedgeTripped = wedgedForMs >= absoluteWedgeBudgetMs
+                            // Issue #1683 — record EVERY `transportProvenAliveRecently`
+                            // consultation and its answer. This is THE input to the
+                            // defer-vs-escalate branch below: whether the following
+                            // `liveness_probe_silent_drop` verdict was an over-eager
+                            // false-dead (keepalive still proving alive, escalated only by
+                            // the wedge backstop) or a real death (keepalive stopped
+                            // proving alive) is decidable from the log alone only if this
+                            // input is on the same timeline as the verdict.
+                            ConnectionDiagnostics.record(
+                                "liveness_probe_keepalive_consult",
+                                "keepAliveProvesAlive" to keepAliveProvesAlive,
+                                "consecutiveMisses" to consecutiveFailures,
+                                "wedgedForMs" to wedgedForMs,
+                                "absoluteWedgeBudgetMs" to absoluteWedgeBudgetMs,
+                                "absoluteWedgeTripped" to absoluteWedgeTripped,
+                                "willDeclareDrop" to (!keepAliveProvesAlive || absoluteWedgeTripped),
+                            )
                             if (keepAliveProvesAlive && !absoluteWedgeTripped) {
                                 // Issue #982/#984 — DEFER to the transport keepalive
                                 // UNCONDITIONALLY (no deferral count, no time ceiling).

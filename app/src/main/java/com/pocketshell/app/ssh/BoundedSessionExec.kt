@@ -108,7 +108,9 @@ object BoundedSessionExec {
         timeoutMs: Long,
         dispatcher: CoroutineDispatcher,
         callerSite: String,
+        nowNanos: () -> Long = { System.nanoTime() },
     ): ExecResult? = withContext(dispatcher) {
+        val startNanos = nowNanos()
         val deferred = async { session.exec(command) }
         val result = withTimeoutOrNull(timeoutMs) { deferred.await() }
         if (result != null) return@withContext result
@@ -119,6 +121,14 @@ object BoundedSessionExec {
         // channel-local by construction (#1567).
         deferred.cancel()
 
+        // Issue #1683 — the actual wall-clock the exec ran before we abandoned it.
+        // A lease-attributable close (or a degraded/empty result) must be pinned to
+        // a specific SITE *and* the LATENCY that tripped it, so the log alone shows
+        // whether the timeout was a genuine dead link or a slow-but-alive host that
+        // over-ran its bound. Diagnostics-only: elapsed is RECORDED, never used in
+        // any close/abandon decision.
+        val elapsedMs = (nowNanos() - startNanos) / 1_000_000L
+
         // The teardown used to be invisible; the abandonment must not be.
         // Recorded BEFORE we return so the breadcrumb exists even if the caller
         // swallows the null into a degraded/empty result (all five do).
@@ -128,6 +138,11 @@ object BoundedSessionExec {
             cause = "exec_no_result_within_bound",
             "callerSite" to callerSite,
             "timeoutMs" to timeoutMs,
+            // Issue #1683 — the INPUT behind the abandonment: the site's measured
+            // latency at the moment we gave up. `timeoutMs` is the bound; `elapsedMs`
+            // is what actually elapsed (≥ the bound), so the two together attribute
+            // the close to "site X over-ran its Nms budget after Mms".
+            "elapsedMs" to elapsedMs,
             // Proof, in the trail itself, that we walked away from a transport
             // that was still ALIVE — the exact fact the silent close destroyed.
             "transportAlive" to session.isConnected,

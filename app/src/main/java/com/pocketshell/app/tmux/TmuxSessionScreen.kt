@@ -442,6 +442,7 @@ public fun TmuxSessionScreen(
         outboundQueueAutoFlushController.onConnectionWindowChanged(
             sessionLive = sessionLive,
             targetSessionId = targetSessionId.value,
+            connectionStatusLabel = connectionStatusDiagnosticLabel(rawStatus), // #1682
         ) {
             promptComposerViewModel.requeueStaleOutboundInFlight()
         }

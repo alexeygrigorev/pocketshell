@@ -46,6 +46,18 @@ internal object MirroredDiagnostics {
     const val CONNECTION_CATEGORY: String = "connection"
 
     /**
+     * The composer outbound-queue diagnostic category (issue #1682): `enqueue`,
+     * `window_flip`, `drain_attempt`, `row_state`, `wedge_verdict`,
+     * `watchdog_timeout`. Mirrored WHOLE (like [CONNECTION_CATEGORY], unlike the
+     * device-only `action` chatter) so a real-world clog reaches the host on the
+     * SAME correlated timeline as the connection events it disagreed with — the
+     * enum-vs-transport smoking gun Track C named. Redaction (ids/sizes only, no
+     * raw content) is enforced by
+     * [com.pocketshell.app.composer.ComposerQueueDiagnostics] at record time.
+     */
+    const val QUEUE_CATEGORY: String = "queue"
+
+    /**
      * Ceiling on the rendered host payload. Sized at ~the real per-upload payload
      * observed in the maintainer's corpus today (56,215 bytes / 164 events), so
      * broadening the mirror does not grow a storm day's mobile-data spend. NOT a
@@ -67,6 +79,8 @@ internal object MirroredDiagnostics {
         ReconnectCauseTrail.CATEGORY -> event.name == ReconnectCauseTrail.NAME
         // The whole curated connection lifecycle (#1642 slice 1 / #1598).
         CONNECTION_CATEGORY -> true
+        // The whole composer outbound-queue diagnostic surface (#1682).
+        QUEUE_CATEGORY -> true
         else -> false
     }
 

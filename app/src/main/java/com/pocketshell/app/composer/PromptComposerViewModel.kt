@@ -1205,6 +1205,7 @@ public class PromptComposerViewModel @Inject constructor(
             restoreFailedSend(request, message = noRowFallbackMessage)
             return
         }
+        requeued.recordQueueRowState("InFlight", "Queued", "deferred") // #1682
         DiagnosticEvents.record(
             "action",
             "composer_send_deferred_to_queue",
@@ -1514,15 +1515,18 @@ public class PromptComposerViewModel @Inject constructor(
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
         // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
         // drain skips it and the healthy tail drains; per-row Retry re-drives it.
-        val plan = _outboundQueueItems.value.planComposerAutoFlush(target, excludingIds)
+        val itemsSnapshot = _outboundQueueItems.value
+        val plan = itemsSnapshot.planComposerAutoFlush(target, excludingIds)
         if (plan.parkIds.isNotEmpty()) {
             plan.parkIds.forEach {
                 outboundQueueStore.markFailed(it, lastError = OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE)
             }
             refreshOutboundQueueItemsFor(target)
         }
-        val nextId = plan.nextId ?: return null
-        return if (dispatchOutboundItem(nextId)) nextId else null
+        val nextId = plan.nextId
+        val dispatched = nextId != null && dispatchOutboundItem(nextId)
+        ComposerQueueDiagnostics.recordDrainCycle(target, itemsSnapshot, plan, excludingIds.size, dispatched) // #1682
+        return if (dispatched) nextId else null
     }
 
     /**
@@ -1576,6 +1580,7 @@ public class PromptComposerViewModel @Inject constructor(
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
         val cutoffMs = clock() - staleAfterMs
         val requeued = outboundQueueStore.requeueStaleInFlight(target, cutoffMs)
+        requeued.forEach { it.recordQueueRowState("InFlight", "Queued", "stale_inflight_requeue") } // #1682
         if (requeued.isNotEmpty()) refreshOutboundQueueItemsFor(target)
         return requeued
     }
@@ -1733,10 +1738,12 @@ public class PromptComposerViewModel @Inject constructor(
             clearStrandedSendInFlight()
             return false
         }
+        active.recordQueueRowState("Queued", "InFlight", "claimed") // #1682
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {
             outboundQueueStore.markFailed(id, lastError = "Nothing to send")
+            active.recordQueueRowState("InFlight", "Failed", "nothing_to_send") // #1682
             refreshOutboundQueueItemsFor(active.sessionKey)
             clearStrandedSendInFlight()
             return false
@@ -1773,6 +1780,7 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
+        outboundQueueStore.item(id)?.recordQueueRowState("InFlight", "Sent", "delivered")
         outboundQueueStore.markDelivered(id)
         launchSidecarRemoval(id)
         request.sendTarget.sessionKey

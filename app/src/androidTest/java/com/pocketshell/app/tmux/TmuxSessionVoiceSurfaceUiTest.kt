@@ -369,6 +369,120 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     /**
+     * Issue #1672: the maintainer's on-device report — while the session is
+     * Reconnecting / Attaching (terminal HELD behind the "Attaching…" loader), the
+     * bottom quick-command band (`git status` / `tmux ls` / `k logs` / `clear`) was
+     * still rendered, only DISABLED — an operable-looking command surface while
+     * nothing could be sent. This asserts the fix: while `terminalHeld = true` the
+     * static command chips AND the primary cluster (`Enter` / `show keyboard` /
+     * `snippets`) are NOT shown (hidden, not merely disabled) so the bottom chrome
+     * reads the SAME connection state as the held terminal above it. The composer
+     * launcher keeps its #810 unconditional presence (it can still open the composer
+     * to queue a message while reconnecting).
+     */
+    @Test
+    fun heldTerminalHidesQuickCommandBand_keepsComposerLauncher() {
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    // Held ⇒ input is not routable; matches the screen's
+                    // `controlsInputEnabled = false` during connect.
+                    sessionLive = false,
+                    // Issue #1672: the terminal is held behind the "Attaching…"
+                    // loader (Reconnecting / Attaching — the reported state).
+                    terminalHeld = true,
+                    isAgentPane = false,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onShowHotkeysTap = {},
+                )
+            }
+        }
+
+        captureViewportArtifact("issue1672-held-terminal-no-command-band.png")
+
+        // The quick-command chip band is HIDDEN — none of the DefaultSessionChips
+        // render while the terminal is held.
+        DefaultSessionChips.forEach { chip ->
+            compose.onNodeWithText(chip).assertDoesNotExist()
+        }
+        // The primary cluster is gone too (nothing operable while held).
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
+
+        // …but the composer launcher stays present (#810) and fully within the
+        // viewport so a message can still be queued while reconnecting.
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
+    }
+
+    /**
+     * Issue #1672: the companion Live-state assertion — when the terminal is NOT held
+     * (`terminalHeld = false`, the surface reached `Live`), the full quick-command
+     * band returns exactly as before. This is the "present when Live" half of the
+     * absent-while-held / present-when-Live regression pair.
+     */
+    @Test
+    fun liveTerminalShowsQuickCommandBand() {
+        compose.setContent {
+            PocketShellTheme {
+                TmuxTerminalBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    terminalHeld = false,
+                    isAgentPane = false,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onEnterTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    onShowHotkeysTap = {},
+                )
+            }
+        }
+
+        captureViewportArtifact("issue1672-live-terminal-command-band.png")
+
+        // The static command band RETURNS when the terminal is live: every
+        // `DefaultSessionChips` entry is present in the tree — the exact mirror of
+        // the held test's `assertDoesNotExist()`. This is the load-bearing AC2
+        // assertion: if the surface fn wrongly returned `LauncherOnly` for the
+        // Live case, `BottomChipControls` would not render and these nodes would
+        // not exist, so this fails.
+        //
+        // These use `assertExists()` — NOT `assertIsDisplayed()` — deliberately.
+        // Per the #813 layout the static-chip strip is the LOWEST-priority row: it
+        // yields and horizontally scrolls FIRST so the higher-priority primary
+        // cluster (`Enter` / `show keyboard` / `hotkeys` / `snippets`) and the
+        // composer launcher keep their width and stay on-screen. At the real
+        // emulator viewport width the cluster consumes the whole capped chip area,
+        // so the static strip collapses and scrolls entirely off (see
+        // `issue1672-live-terminal-command-band.png` — the live band shows the
+        // cluster + `>_` launcher, the static chips are scrolled off the left).
+        // That is the PRODUCTION behaviour of the live band, byte-identical to
+        // pre-#1672; asserting `assertIsDisplayed()` on all four would contradict
+        // the real layout. "The band returned" is proven by existence here plus the
+        // containment checks below on the parts the live band actually presents.
+        DefaultSessionChips.forEach { chip ->
+            compose.onNodeWithText(chip).assertExists()
+        }
+        // The primary cluster is the visible face of the returned command band
+        // (the held state showed ONLY the launcher). F3 containment — the
+        // maintainer must actually SEE and reach these — so assert full within-root
+        // bounds, not a bare `assertIsDisplayed()`. `Enter` + `show keyboard` are
+        // the leftmost cluster chips shown in the live viewport artifact.
+        compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
+    }
+
+    /**
      * Issue #641 (reopened): the exact dogfood state — a shell band with the
      * full primary cluster (`Enter` + `show keyboard` + `snippets`) plus the
      * launcher present. (Issue #787 hard-cut the former `/ commands` chip, so it

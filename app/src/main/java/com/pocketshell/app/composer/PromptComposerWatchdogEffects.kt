@@ -47,6 +47,13 @@ internal fun PromptComposerViewModel.onSendWatchdogExpired() {
         "composer_send_watchdog_timeout",
         "attachmentCount" to request.attachments.size,
     )
+    // Issue #1682: also surface the wedged-send timeout on the mirrored `queue`
+    // timeline (the `action` copy above stays device-only) so a delivery that
+    // wedged past its budget is visible in a real host-mirrored trace.
+    ComposerQueueDiagnostics.watchdogTimeout(
+        attachmentCount = request.attachments.size,
+        hadInFlightRequest = inFlightSendRequest != null,
+    )
     // Issue #971/#987: a wedged send is a connection problem, not a permanent
     // rejection — defer it to the queue so it auto-retries on reconnect
     // (Option A). When the request owns a durable queue row this keeps it

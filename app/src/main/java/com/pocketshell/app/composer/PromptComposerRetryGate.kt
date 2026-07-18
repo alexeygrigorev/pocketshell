@@ -70,7 +70,22 @@ internal fun PromptComposerViewModel.activeSendIsWedged(nowMs: Long = clock()): 
  * tap re-arms the row and lets the existing FIFO drain claim it after A resolves.
  */
 internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
-    if (_uiState.value.sendInFlight && !activeSendIsWedged()) {
+    val inFlight = _uiState.value.sendInFlight
+    val wedged = inFlight && activeSendIsWedged()
+    if (inFlight) {
+        // Issue #1682: record the wedge discriminator's verdict at this recovery
+        // decision (a wedged in-flight send is the #1602 clog the strand-clear rescues).
+        val owningInFlight = composerTarget?.takeIf { it.isNotBlank() }
+            ?.let { outboundQueueStore.itemsFor(it) }
+            ?.count { it.state == OutboundState.InFlight || it.state == OutboundState.Uploading }
+            ?: 0
+        ComposerQueueDiagnostics.wedgeVerdict(
+            wedged = wedged,
+            owningInFlightCount = owningInFlight,
+            sendInFlight = true,
+        )
+    }
+    if (inFlight && !wedged) {
         rearmOutboundItemForDrain(id)
         return
     }
@@ -101,5 +116,9 @@ private fun PromptComposerViewModel.rearmOutboundItemForDrain(id: String) {
     val item = outboundQueueStore.item(id) ?: return
     if (!item.isComposerQueueRetryable()) return
     outboundQueueStore.requeueForRetry(id, resetAttempts = true)
+    // Issue #1682: a user's manual Retry un-parks a row (esp. a budget-parked
+    // Failed one) — the trace shows whether a stuck row recovered by hand vs the
+    // connected edge (which does NOT auto-un-park it, the Track C clog signal).
+    item.recordQueueRowState(item.state.name, "Queued", "manual_retry")
     refreshOutboundQueueItemsFor(item.sessionKey)
 }

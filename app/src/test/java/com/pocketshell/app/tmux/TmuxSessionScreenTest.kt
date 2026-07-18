@@ -2679,4 +2679,72 @@ class TmuxSessionScreenTest {
             )
         }
     }
+
+    // ---- Issue #1672: hide the quick-command chip band while the terminal is held ----
+    //
+    // The maintainer's on-device report (Reconnecting / Attaching, terminal held behind
+    // the "Attaching…" loader) showed the bottom quick-command band (`git status` /
+    // `tmux ls` / …) still rendered, only DISABLED — an operable-looking surface while
+    // nothing could be sent. [tmuxTerminalHiddenImeSurface] is the SINGLE decision the
+    // keyboard-down bottom band composable dispatches on, so these assertions are
+    // load-bearing for the visible outcome (chips ABSENT while held, PRESENT when Live).
+    //
+    // The `terminalHeld` input is derived here from the REAL production surface states
+    // via the `.terminalHeld` authority (#1326 AC-6) — the same signal the screen wires
+    // — so the test reproduces the reported connection states, not a convenient proxy.
+
+    @Test
+    fun bottomBand_hidesCommandChips_whileTerminalHeldDuringReconnectAndAttach() {
+        // The maintainer's EXACT reported states — Reconnecting + Attaching — plus the
+        // sibling in-flight holds Connecting / Navigating. Each holds the terminal, so
+        // the band collapses to launcher-only (the static `git status`/`tmux ls`/…
+        // command chips are NOT rendered).
+        val heldStates: List<SessionSurfaceState> = listOf(
+            SessionSurfaceState.Reconnecting(sid, "work", "h", 22, "u", 1, 3, 0L),
+            SessionSurfaceState.Attaching(sid, "work", "h", 22, "u"),
+            SessionSurfaceState.Connecting(sid, "work", "h", 22, "u"),
+            SessionSurfaceState.Navigating(sid, "work"),
+        )
+        heldStates.forEach { state ->
+            assertTrue("$state must hold the terminal", state.terminalHeld)
+            assertEquals(
+                "held ($state) → launcher-only band, quick-command chips hidden",
+                TmuxTerminalHiddenImeSurface.LauncherOnly,
+                tmuxTerminalHiddenImeSurface(
+                    showConversation = false,
+                    terminalHeld = state.terminalHeld,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun bottomBand_showsCommandChips_whenTerminalLive() {
+        // When the surface reaches Live the terminal is shown and input can be sent, so
+        // the full quick-command band returns.
+        val live = SessionSurfaceState.Live(sid, "work", emptyList())
+        assertFalse("Live surface does not hold the terminal", live.terminalHeld)
+        assertEquals(
+            "Live → full command-chip band returns",
+            TmuxTerminalHiddenImeSurface.CommandChips,
+            tmuxTerminalHiddenImeSurface(
+                showConversation = false,
+                terminalHeld = live.terminalHeld,
+            ),
+        )
+    }
+
+    @Test
+    fun bottomBand_conversationTabStaysLauncherOnly_regardlessOfHeld() {
+        // The Conversation tab is launcher-only in every connection state (#786) — the
+        // #1672 held gate does not change that, and does not flip it back to chips when
+        // Live.
+        listOf(true, false).forEach { held ->
+            assertEquals(
+                "conversation tab is launcher-only (held=$held)",
+                TmuxTerminalHiddenImeSurface.LauncherOnly,
+                tmuxTerminalHiddenImeSurface(showConversation = true, terminalHeld = held),
+            )
+        }
+    }
 }

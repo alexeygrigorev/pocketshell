@@ -2231,6 +2231,9 @@ public fun TmuxSessionScreen(
                     showConversationTranscript = showConversation,
                     showConversationDetectingPlaceholder = showConversationPlaceholder,
                     sessionLive = controlsInputEnabled,
+                    // Issue #1672: hide the quick-command band while the terminal is
+                    // held (non-`Live`), off the same surface authority (#1326 AC-6).
+                    terminalHeld = terminalHeld,
                     isAgentPane = isAgentPane,
                     onChipTap = { chip ->
                         // Agent slash commands are opened through the primary

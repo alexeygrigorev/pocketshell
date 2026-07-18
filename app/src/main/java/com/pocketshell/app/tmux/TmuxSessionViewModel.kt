@@ -3318,10 +3318,17 @@ public class TmuxSessionViewModel @Inject constructor(
     // Reconnecting bar, no "Attaching…" overlay, no disconnect band. While set, the
     // displayed-status projection ([projectStatusFromController]) holds `Connected`
     // and the [RevealStateMachine] holds the live frame (see
-    // [RevealStateMachine.setSilentHealInFlight]). Set + cleared together for the
-    // bounded duration of [launchForegroundHealWithinGrace]'s heal job only, so an
-    // unexpected (non-grace) foreground drop keeps its normal calm-Reconnecting band.
+    // [RevealStateMachine.setSilentHealInFlight]). Issue #754 (re-fix): armed at the within-grace
+    // foreground DECISION POINT ([armWithinGraceSilentHealHold]), released once after the bounded
+    // grace window (NOT tied to a single recovery job), so the ride-through covers BOTH the
+    // reseed_only path AND the confirmed-dead heal path whose failed single-shot heal hands off to
+    // the loud auto-reconnect ladder — else that ladder's Reconnecting paints the overlay WITHIN
+    // grace. A real BEYOND-grace drop still surfaces once the bounded release fires.
     private var withinGraceSilentHealInFlight: Boolean = false
+
+    // Issue #754 (re-fix): SINGLE-OWNER bounded release of the hold above. A fresh within-grace
+    // foreground cancels + restarts it; only the CURRENT job's completion clears the hold.
+    private var withinGraceSilentHealReleaseJob: Job? = null
 
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
     // SYNCHRONOUSLY by [detachForBackground] at background time, stashed for the
@@ -3651,46 +3658,31 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppForegrounded(resumedWithinGrace: Boolean = false) {
         appActive = true
-        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground return is now
-        // owned by the driver/controller as a RESEED-ONLY effect, gated on the
-        // controller's grace predicate. Within grace the `-CC` control client was
-        // NEVER torn down (the teardown is deferred to grace-elapsed), so the warm
-        // lease is intact: we re-capture the active pane and let the existing
-        // SeedLanded feedback promote the controller back to Live. We DO NOT run the
-        // old inline `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)`
-        // path, which raised the reveal-machine hold (the "Attaching…" overlay) on any
-        // confirmed-dead probe verdict even inside grace — the D21 violation #754 fixes.
-        // The within-grace gate (`resumedWithinGrace && warm lease`) is exactly the
-        // controller's `onForeground` predicate (`now < deadline && transport.isWarm`),
-        // so the VM and the `ConnectionController` agree on the classification by
-        // construction; the driver's `foregroundReattachEffect` seam fires the SAME
-        // reseed body on the controller's Backgrounded→Reattaching edge (unit-tested in
-        // `ConnectionEffectDriverTest`).
+        // Issue #754 (re-fix): arm the silent-heal hold for the WHOLE bounded grace window BEFORE
+        // the reseed-vs-heal branch below, so BOTH within-grace outcomes ride through without the
+        // "Attaching…" overlay. Beyond grace we never arm, so a real outage still surfaces.
+        if (resumedWithinGrace) {
+            armWithinGraceSilentHealHold()
+        }
+        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground return is a driver/controller
+        // RESEED-ONLY effect gated on the grace predicate. Within grace the `-CC` client was NEVER
+        // torn down, so the warm lease is intact: re-capture the active pane and let SeedLanded
+        // promote the controller back to Live. NO `connect()`, NO reveal-machine "Attaching…"
+        // overlay (the D21 within-grace contract, replacing the deleted inline
+        // `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path). The gate
+        // mirrors the controller's `onForeground` predicate (`now < deadline && transport.isWarm`).
         if (resumedWithinGrace && canReseedWithinGraceForeground()) {
-            // The `-CC` control client was NEVER torn down within grace (the controller
-            // therefore stays Live in production — Background is only submitted at
-            // grace-elapsed teardown, NOT here, so the #738 driver detach never fires).
-            // Run the RESEED-ONLY effect directly: it re-promotes Live (a no-op
-            // TransportLive on an already-Live controller) and heals blank panes over
-            // the warm client. NO connect(), NO the reveal-machine hold "Attaching…"
-            // overlay — the D21 within-grace contract. The driver's
-            // `foregroundReattachEffect` seam invokes this SAME body on the controller's
-            // Backgrounded→Reattaching edge (the classification model, unit-tested in
-            // `ConnectionEffectDriverTest`); both paths share the one reseed owner.
-            // EPIC #792 Slice B: route through the single [GraceEffects] owner (the dead
-            // `foregroundReattachReseedForTest` dual-write override is deleted).
+            // EPIC #792 Slice B: route through the single [GraceEffects] owner — the driver's
+            // `foregroundReattachEffect` seam invokes this SAME reseed body on the controller's
+            // Backgrounded→Reattaching edge (unit-tested in `ConnectionEffectDriverTest`).
             graceEffects.onForegroundReattachReseed()
             return
         }
-        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level
-        // background-grace window (#450) is the SOLE grace authority — when it reports
-        // `resumedWithinGrace=true`, a within-grace foreground must stay CALM (no
-        // Reconnecting/Disconnected/Connecting/Attaching band or overlay) EVEN WHEN the
-        // `-CC` socket dropped while backgrounded (WiFi→cellular handoff / Doze). The
-        // reseed-only fast path above declines in that case (the dropped socket killed
-        // the warm lease / flipped the status off Connected / paused the passive
-        // auto-reconnect), so without this branch the foreground would fall into the
-        // reconnect ladder and paint the maintainer's scary band — the #635 regression.
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level background-grace window (#450)
+        // is the SOLE grace authority — a within-grace foreground must stay CALM even when the
+        // `-CC` socket dropped while backgrounded (WiFi→cellular / Doze). The reseed-only fast path
+        // above declines then (the dropped socket killed the warm lease), so without this branch
+        // the foreground would fall into the reconnect ladder and paint the #635 scary band.
         // Instead we SILENTLY heal the dropped channel within grace: re-open a fresh
         // `-CC` control client over a freshly-acquired lease and reseed, with NO band
         // and NO overlay. The inline passive-disconnect grace clock that fired while
@@ -3893,17 +3885,48 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #754 (re-fix): arm the within-grace silent-heal reveal/status hold for the ENTIRE
+     * bounded grace window, at the within-grace foreground DECISION POINT (BEFORE the
+     * reseed-vs-heal branch in [onAppForegrounded]), so BOTH the reseed_only path AND the
+     * confirmed-dead heal path (a clean cut whose dead lease declines the reseed, whose failed
+     * single-shot heal hands off to the loud auto-reconnect ladder) ride through WITHOUT the
+     * "Attaching…" overlay. SINGLE OWNER: a fresh within-grace foreground cancels + restarts the
+     * bounded release, and only the CURRENT job clears it (guarded), so a genuine BEYOND-grace
+     * drop still surfaces its reconnect band the instant the release fires.
+     */
+    private fun armWithinGraceSilentHealHold() {
+        val previous = withinGraceSilentHealReleaseJob
+        withinGraceSilentHealInFlight = true
+        revealController.setSilentHealInFlight(true)
+        val job = launchContainedTeardown {
+            delay(passiveDisconnectGraceMs.coerceAtLeast(1L))
+        }
+        withinGraceSilentHealReleaseJob = job
+        job.invokeOnCompletion {
+            if (withinGraceSilentHealReleaseJob === job) {
+                withinGraceSilentHealReleaseJob = null
+                withinGraceSilentHealInFlight = false
+                revealController.setSilentHealInFlight(false)
+                // Re-drive the reveal from the CURRENT controller state so a still-failing
+                // BEYOND-grace reconnect surfaces its band the instant the hold lifts (the ongoing
+                // Reconnecting was emitted while gated and the state flow dedupes it); a recovered
+                // Live controller stays Live.
+                revealController.onConnectionState(connectionManager.state)
+                projectStatusFromController()
+            }
+        }
+        // Re-point the owner BEFORE cancelling the prior timer so its guarded handler is a no-op.
+        previous?.cancel()
+    }
+
+    /**
      * EPIC #687 slice 1c-iv-c (#754): the RESEED-ONLY within-grace foreground reattach
      * body — the hard-cut replacement for the deleted inline
      * `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path. The
-     * warm `-CC` control client is still attached (the teardown is deferred to
-     * grace-elapsed), so there is NOTHING to reconnect: the emulator still holds the
-     * live frame the channel streamed while attached. We promote the controller back
-     * to Live (the channel is live) and run the existing blank-pane safety-net reseed
-     * over the SAME live client so a pane that came back blank under a brief link blip
-     * still heals — without a handshake. Crucially this NEVER calls `connect()` and
-     * NEVER raises the reveal-machine hold, so the user sees no "Attaching…" overlay and
-     * no reconnect — the D21 within-grace contract.
+     * warm `-CC` control client is still attached (the teardown is deferred to grace-elapsed), so
+     * there is NOTHING to reconnect. We promote the controller back to Live and run the existing
+     * blank-pane safety-net reseed over the SAME live client so a pane that came back blank under a
+     * brief blip still heals — no handshake, no `connect()`, no "Attaching…" overlay (D21 contract).
      *
      * This is also the body the [ConnectionEffectDriver]'s `foregroundReattachEffect`
      * seam invokes on the controller's Backgrounded→Reattaching edge (unit-tested),
@@ -3926,6 +3949,11 @@ public class TmuxSessionViewModel @Inject constructor(
             "generation" to connectGeneration,
             "clientHash" to System.identityHashCode(client),
         )
+        // Issue #754 (re-fix): arm the SINGLE-OWNER within-grace silent-heal hold. The
+        // [onAppForegrounded] caller already armed it; this ALSO covers the
+        // [ConnectionEffectDriver.foregroundReattachEffect] seam invocation (the guard makes the
+        // double-arm a safe no-op) so a blackhole-blip Reattaching never paints the overlay.
+        armWithinGraceSilentHealHold()
         // The control channel is still live — promote the controller Reattaching → Live
         // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
         connectionManager.observeForegroundReattachLive()
@@ -3961,6 +3989,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
             }
         }
+        // The hold's bounded release is owned by [armWithinGraceSilentHealHold].
     }
 
     /**
@@ -4216,15 +4245,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // ride-through, not a reconnect. Promote the controller back toward Live so the
         // header indicator never shows Reconnecting/Disconnected during the heal.
         connectionManager.observeForegroundReattachLive()
-        // Issue #1098 (item 4 / #635): the within-grace silent heal MUST re-open the
-        // dropped `-CC` transport, which walks the controller `Live -> Reattaching ->
-        // Live`. Without this the [RevealStateMachine] would project that Reattaching as
-        // [RevealState.Seeding] → the screen paints the full-surface "Attaching…" loading
-        // overlay over the live frame (the spurious overlay #635/item-4 reproduces). Hold
-        // the reveal at its current (live) frame for the bounded duration of the heal so
-        // the ride-through stays INVISIBLE; cleared in the job's completion handler below.
-        withinGraceSilentHealInFlight = true
-        revealController.setSilentHealInFlight(true)
+        // Issue #1098 (item 4 / #635): the within-grace silent heal re-opens the dropped `-CC`
+        // transport (controller `Live -> Reattaching -> Live`); a hold keeps [RevealStateMachine]
+        // from projecting that Reattaching as [RevealState.Seeding] (the "Attaching…" overlay).
+        // Issue #754 (re-fix): the hold is armed at the foreground DECISION POINT
+        // ([armWithinGraceSilentHealHold], SINGLE OWNER) and released after the whole grace window
+        // — NOT on this heal job — so the confirmed-dead ride-through survives the single-shot
+        // heal's FAILURE + loud-ladder handoff below (clearing the hold there was the reopened bug).
         projectStatusFromController()
         // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
         // over a fresh lease; a teardown-race throw must not crash the process.
@@ -4269,19 +4296,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }
-        // Issue #1098 (item 4): release the silent-heal reveal hold once the heal
-        // completes. On success the transport re-promoted the controller to Live, so the
-        // reveal is already a live frame; on failure the calm auto-reconnect ladder takes
-        // over and the next Reconnecting projection may show the normal loading surface.
-        // Cleared in the completion handler (success, failure, OR a teardown-race cancel)
-        // so the hold can never get stuck on, which would freeze the "Attaching…" overlay
-        // suppression across an unrelated later attach.
+        // Issue #754 (re-fix): the hold is NOT released here — that premature release (on a failed
+        // single-shot heal that hands off to the loud ladder) was the reopened bug. The SINGLE
+        // OWNER [armWithinGraceSilentHealHold] releases it after the whole grace window; we only
+        // re-project the status on completion so a success settles on the live `Connected`.
         healJob.invokeOnCompletion {
-            withinGraceSilentHealInFlight = false
-            revealController.setSilentHealInFlight(false)
-            // Re-project so a genuine heal FAILURE (the calm auto-reconnect ladder is now
-            // running) surfaces its normal Reconnecting band the instant the hold lifts,
-            // and a SUCCESS settles on the live `Connected` it already reached.
             projectStatusFromController()
         }
     }

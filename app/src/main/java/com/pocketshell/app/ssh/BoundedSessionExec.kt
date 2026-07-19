@@ -91,6 +91,29 @@ object BoundedSessionExec {
     const val TRAIL_OUTCOME_ABANDONED: String = "abandoned_transport_preserved"
 
     /**
+     * Issue #1693 — the #780-model SYNTHETIC self-inflicted-close seam. Maps a
+     * [callerSite] token to an action invoked when a bounded exec FOR THAT SITE
+     * times out, deterministically forcing the self-inflicted close the pre-#1641
+     * v0.4.38 shim did (the historical `close()`-on-timeout of the shared lease).
+     *
+     * Keyed strictly on [callerSite] so ONLY the armed site self-closes: arming
+     * `agent_kind_classify` (the ONE site that rides the shared `-CC` lease) makes
+     * the storm reproduce, while a sibling site like `session_cards_rpc` (a
+     * SEPARATE lease that does NOT storm) is never touched — the exact strict-key
+     * requirement the #1681 finding demands so the RED cannot pass vacuously.
+     *
+     * Default EMPTY: in production this map is never populated, so `execBounded`
+     * is pure abandon (real #1641 semantics, no behaviour change, no prod flag —
+     * D22 hard-cut). Only the #1693 reproduction arms it, and MUST clear it in
+     * teardown so it never leaks onto a sibling test (mirrors the
+     * `KeepAliveTestOverride` process-global test-seam contract). `@Volatile` so
+     * the arming instrumentation thread and the exec's IO dispatcher agree.
+     */
+    @Volatile
+    @androidx.annotation.VisibleForTesting
+    internal var onTimeoutSyntheticActionsForTest: Map<String, (SshSession) -> Unit> = emptyMap()
+
+    /**
      * Run [command] on [session] — a SHARED lease transport — bounded by
      * [timeoutMs].
      *
@@ -148,6 +171,16 @@ object BoundedSessionExec {
             "transportAlive" to session.isConnected,
             "transportClosed" to false,
         )
+
+        // Issue #1693 — the #780-model synthetic self-inflicted close. In
+        // production `onTimeoutSyntheticActionsForTest` is EMPTY, so this is a
+        // no-op and the abandon above is the whole story (real #1641 semantics).
+        // The #1693 reproduction arms it ONLY for `agent_kind_classify`, so on a
+        // RED run the shared `-CC` lease is force-killed here — reproducing the
+        // pre-#1641 storm deterministically — while every other caller site is
+        // untouched. Fires AFTER the breadcrumb so a GREEN (disarmed) run still
+        // records the abandonment the attribution assertions read.
+        onTimeoutSyntheticActionsForTest[callerSite]?.invoke(session)
         null
     }
 }

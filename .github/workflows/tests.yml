@@ -153,6 +153,29 @@ jobs:
           scripts/check-connection-vm-ratchet.sh --self-test
           scripts/check-connection-vm-ratchet.sh
 
+      # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
+      # composable family. TmuxSessionScreen is the app's MAIN screen and a single
+      # enormous composable; when its compiled dex method frame crosses ART's
+      # 256-register WIDE-REGISTER cliff the class fails on-device verification
+      # (java.lang.VerifyError) and the screen crashes at load — invisible to the
+      # JVM unit tests. This has recurred THREE times (#1158/#1362/#1685). The
+      # existing on-device proof (TmuxSessionScreenArtVerifyE2eTest) only runs in
+      # the batched post-merge emulator lane, which is exactly why recurrence #3
+      # shipped. This guard runs PER-PR in the cheap Unit lane: it dexes the debug
+      # APK and asserts every TmuxSessionScreen* method stays under a budget (200)
+      # that keeps a hard margin below the 256 cliff, so a creep back toward the
+      # cliff is a per-PR RED here instead of a phone crash later. --self-test
+      # proves the parser/budget red->green logic (no APK) first; then a debug
+      # build + the real check. dexdump comes from the runner's Android build-tools.
+      - name: Dex register-pressure ratchet (issue #1685)
+        run: |
+          chmod +x scripts/check-dex-register-pressure.sh
+          scripts/check-dex-register-pressure.sh --self-test
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+          scripts/check-dex-register-pressure.sh
+
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
       # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite

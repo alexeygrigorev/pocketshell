@@ -14,7 +14,13 @@ class TmuxSessionScreenQuickReplySourceGuardTest {
 
     @Test
     fun rootSessionBodyDoesNotCollectVisibleScreenTextForQuickReplies() {
-        val src = locate("TmuxSessionScreen.kt")
+        // Issue #1685: the quick-reply eligibility derivation moved out of the
+        // TmuxSessionScreen god-method into the rememberTmuxSessionAgentSignals
+        // state holder (TmuxSessionScreenRuntime.kt) as part of the ART
+        // VerifyError decomposition. The invariant is unchanged: the eligibility
+        // derivation must NOT collect visible terminal text — that work belongs in
+        // the AgentQuickReplyBand leaf (checked below).
+        val src = locate("TmuxSessionScreenRuntime.kt")
         val quickReplyEligibility = src.substringBetween(
             start = "val quickReplyInputEligible =",
             end = "// Issue #770",
@@ -40,8 +46,13 @@ class TmuxSessionScreenQuickReplySourceGuardTest {
     @Test
     fun quickReplyTapRoutesThroughSurfacePaneId() {
         val src = locate("TmuxSessionScreen.kt")
+        // Issue #1685: AgentQuickReplyBand moved into the extracted
+        // TmuxSessionSurfaceRegion (still in TmuxSessionScreen.kt) at a shallower
+        // indentation as part of the ART VerifyError decomposition. The routing
+        // invariant (route to pane.paneId, never currentPane/currentPaneId) is
+        // unchanged.
         val quickReplyMount = src.substringBetween(
-            start = "AgentQuickReplyBand(\n                    terminalState = pane.terminalState,",
+            start = "AgentQuickReplyBand(\n            terminalState = pane.terminalState,",
             end = "// Issue #810",
         )
 

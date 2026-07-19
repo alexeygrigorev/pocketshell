@@ -273,9 +273,28 @@ abstract class NetworkFaultProofBase {
         assertTrue("expected terminal input submit for $label", enterCommitted)
     }
 
+    /**
+     * Issue #1676 — the generous slow-link visibility budget every network-fault
+     * proof deserves. These proofs ONLY ever run on the slow emulator + Docker /
+     * toxiproxy path (opt-in gated; they self-skip otherwise), frequently behind a
+     * deliberately-injected multi-second bufferbloat / latency toxic, so a positive
+     * "text became visible" wait must allow the slow link its full drain time. It
+     * early-exits the instant the text appears, so a fast pass pays nothing; the
+     * generous ceiling only matters when a genuinely slow-but-progressing link is
+     * draining. Keying the whole cohort's ceilings off `pocketshellCi` alone was the
+     * root cause of the #1676 correlated cohort: the nightly runs these WITHOUT
+     * `pocketshellCi=true`, so `terminalVisibilityTimeoutMs()` silently returned the
+     * tight 60s dev-box LOCAL value on the SLOWEST swiftshader hardware — exactly the
+     * ceiling `ColdDialUnderBandwidthLimitE2eTest`'s post-dial echo blew (~98.8s vs
+     * 60s) on bad nights. This budget is the CI terminal-visibility value (180s),
+     * applied unconditionally because there is no fast-hardware case for a toxiproxy
+     * proof; it stays well under the 300s per-test ci-journey watchdog.
+     */
+    protected fun faultProofVisibilityBudgetMs(): Long = FAULT_PROOF_VISIBILITY_BUDGET_MS
+
     protected fun waitForVisibleTerminalText(
         label: String,
-        timeoutMillis: Long = TerminalTestTimeouts.terminalVisibilityTimeoutMs(),
+        timeoutMillis: Long = faultProofVisibilityBudgetMs(),
         predicate: (String) -> Boolean,
     ) {
         var last = ""
@@ -295,14 +314,86 @@ abstract class NetworkFaultProofBase {
         )
     }
 
-    protected fun waitForDisconnectBand(label: String, timeoutMillis: Long = 35_000) {
+    /**
+     * Issue #1676 — the load-bearing budget for the disconnect band to surface,
+     * with a reproduce-first measure-PAST-budget capture (D33/G10).
+     *
+     * ## Why the budget is what it is (measured from production, NOT guessed)
+     *
+     * The band is surfaced by the production dead / half-open transport detectors,
+     * whose worst-case detection latencies are DOCUMENTED PRODUCTION CONSTANTS:
+     *
+     *  - the app-level `com.pocketshell.core.connection.LivenessProbe` — the
+     *    half-open / `-CC`-wedged detector for the blackhole + sustained-cut cohort —
+     *    has a worst case of
+     *    `failureThreshold × (intervalMs + perProbeTimeoutMs)` = `4 × (7s + 5s)` = **48s**;
+     *  - the always-on `com.pocketshell.core.ssh.TransportKeepAlive` — the
+     *    silent-peer detector (e.g. `NatIdleMappingSurvivalE2eTest`) — is
+     *    `countMax × intervalMs` (prod 90s; NatIdle's override 3 × 3s = 9s).
+     *
+     * The pre-#1676 flat **35s** default was SMALLER than the LivenessProbe's own
+     * **48s** worst case — so a perfectly-functioning half-open detection could hit
+     * its documented budget and STILL time out the test. On the CI swiftshader runner
+     * the `delay()`-driven detector ticks stretch further under load, so the 35s
+     * ceiling blew on ~6/8 nights (the #1676 correlated cohort) even though detection
+     * was working. That is a HARNESS under-budgeting (a wall-clock flake), NOT a
+     * slow-detection `core-connection` regression:
+     * `Issue1676DisconnectDetectionLatencyTest` (core-connection, per-push Unit gate)
+     * proves the detection logic fires at exactly its deterministic budget on a
+     * virtual clock, decoupled from wall-clock.
+     *
+     * [detectionBudgetMs] therefore defaults to [disconnectBandBudgetMs] — the
+     * production detector worst case plus slow-emulator headroom. The LOAD-BEARING
+     * assertion ("the band surfaces within [detectionBudgetMs]") is unchanged and NOT
+     * widened into a meaningless band (G6): a genuinely never-surfacing or
+     * far-over-budget regression STILL fails, and the TRUE latency is captured up to
+     * [captureCeilingMs] (recorded even when the budget is blown) so the next nightly
+     * emits the decisive flake-vs-regression number instead of just "did not appear".
+     */
+    protected fun waitForDisconnectBand(
+        label: String,
+        detectionBudgetMs: Long = disconnectBandBudgetMs(),
+        captureCeilingMs: Long = DISCONNECT_BAND_CAPTURE_CEILING_MS,
+    ) {
         val start = SystemClock.elapsedRealtime()
-        compose.waitUntil(timeoutMillis = timeoutMillis) {
-            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        recordTiming("${label}_disconnect_visible_ms", SystemClock.elapsedRealtime() - start)
+        // Poll PAST the load-bearing budget up to a generous capture ceiling so the
+        // TRUE detection latency is recorded even on a blown budget (reproduce-first).
+        val appeared = runCatching {
+            compose.waitUntil(timeoutMillis = captureCeilingMs) {
+                compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            true
+        }.getOrDefault(false)
+        val detectMs = SystemClock.elapsedRealtime() - start
+        recordTiming("${label}_disconnect_visible_ms", detectMs)
+        recordTiming("${label}_disconnect_appeared", if (appeared) 1L else 0L)
+        recordTiming("${label}_disconnect_budget_ms", detectionBudgetMs)
+        artifactFile("disconnect-band-latency-$label.txt").writeText(
+            buildString {
+                appendLine("label=$label")
+                appendLine("appeared=$appeared")
+                appendLine("disconnect_visible_ms=$detectMs")
+                appendLine("detection_budget_ms=$detectionBudgetMs")
+                appendLine("capture_ceiling_ms=$captureCeilingMs")
+                appendLine("within_budget=${appeared && detectMs <= detectionBudgetMs}")
+            },
+        )
+        val within = appeared && detectMs <= detectionBudgetMs
+        assertTrue(
+            if (appeared) {
+                "expected the disconnect band for $label to surface within " +
+                    "${detectionBudgetMs}ms (production half-open detection worst case " +
+                    "~48s, LivenessProbe); it surfaced after ${detectMs}ms" +
+                    if (within) "" else " — OVER budget (real slow-detection regression?)"
+            } else {
+                "expected the disconnect band for $label to surface within " +
+                    "${detectionBudgetMs}ms; it NEVER surfaced within the ${captureCeilingMs}ms " +
+                    "capture ceiling (real detection regression — band never appeared)"
+            },
+            within,
+        )
         val reconnectActions = compose.onAllNodesWithTag(
             TMUX_SESSION_RECONNECT_TAG,
             useUnmergedTree = true,
@@ -313,6 +404,18 @@ abstract class NetworkFaultProofBase {
             reconnectActions.isNotEmpty(),
         )
     }
+
+    /**
+     * Issue #1676 — load-bearing budget for the disconnect band to surface. These
+     * proofs ONLY ever run on the slow emulator + Docker / toxiproxy path (opt-in
+     * gated; they self-skip otherwise), so they always deserve the generous
+     * slow-hardware ceiling — there is no "fast hardware deserves a tight budget"
+     * case for a toxiproxy fault proof. The budget covers the production
+     * `LivenessProbe` half-open worst case (~48s) plus swiftshader tick-stretch
+     * headroom, and stays well under the 300s per-test ci-journey watchdog. See the
+     * [waitForDisconnectBand] KDoc for the full derivation.
+     */
+    protected fun disconnectBandBudgetMs(): Long = DISCONNECT_BAND_BUDGET_MS
 
     protected fun tapReconnectAndWait(label: String) {
         val start = SystemClock.elapsedRealtime()
@@ -730,6 +833,30 @@ abstract class NetworkFaultProofBase {
         const val TOXIPROXY_API_PORT: Int = 8474
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue342-network-faults"
+
+        /**
+         * Issue #1676 — the load-bearing disconnect-band budget. Must be ≥ the
+         * production `LivenessProbe` half-open detection worst case (~48s) plus
+         * slow-swiftshader tick-stretch headroom. 90s ≈ 48s × ~1.9 and matches the
+         * always-on keepalive's 90s prod death budget. Pinned against the production
+         * detector budgets by `Issue1676DisconnectDetectionLatencyTest`.
+         */
+        const val DISCONNECT_BAND_BUDGET_MS: Long = 90_000L
+
+        /**
+         * Issue #1676 — poll the band this far PAST the load-bearing budget so the
+         * TRUE detection latency is captured even when the budget is blown
+         * (reproduce-first). > [DISCONNECT_BAND_BUDGET_MS] so an over-budget surface
+         * is measured, not clipped; < the 300s per-test ci-journey watchdog.
+         */
+        const val DISCONNECT_BAND_CAPTURE_CEILING_MS: Long = 120_000L
+
+        /**
+         * Issue #1676 — the generous slow-link positive-visibility budget for the
+         * network-fault proofs (the CI terminal-visibility value, 180s). See
+         * [faultProofVisibilityBudgetMs].
+         */
+        const val FAULT_PROOF_VISIBILITY_BUDGET_MS: Long = 180_000L
 
         /** Issue #1681 — the un-proxied sentinel exec-ping cadence. */
         const val SENTINEL_INTERVAL_MS: Long = 3_000L

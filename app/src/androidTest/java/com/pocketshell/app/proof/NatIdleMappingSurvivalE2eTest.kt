@@ -125,7 +125,7 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
 
         // The keepalive must DETECT the dead half-open transport within its budget
         // and surface the connection-lost band (the user-visible recovery signal).
-        waitForDisconnectBand("severed NAT mapping", timeoutMillis = KEEPALIVE_DEATH_DETECT_TIMEOUT_MS)
+        waitForDisconnectBand("severed NAT mapping", detectionBudgetMs = KEEPALIVE_DEATH_DETECT_TIMEOUT_MS)
         val detectMs = SystemClock.elapsedRealtime() - severStart
         recordTiming("recover_detect_ms", detectMs)
 
@@ -246,14 +246,21 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
         const val PROBE_DISABLED_TIMEOUT_MS: Long = 5_000L
         const val PROBE_FAILURE_THRESHOLD: Int = 4
 
-        val CONNECTED_TIMEOUT_MS: Long =
-            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 20_000L
+        // Issue #1676 — these budgets are slow-hardware UNCONDITIONALLY. This proof
+        // only ever runs on the slow emulator + Docker / toxiproxy path (opt-in
+        // gated; self-skips otherwise), and the nightly runs it WITHOUT
+        // `pocketshellCi=true`, so keying the ceilings off `isRunningOnCi()` silently
+        // used the tight dev-box LOCAL values on the SLOWEST swiftshader hardware —
+        // the cohort's root cause: this test's `waitForDisconnectBand` blew its 30s
+        // LOCAL budget on ~6/8 nights while passing on faster nights. The detection
+        // itself is bounded by the SHORT keepalive death budget ([KEEPALIVE_DEATH_
+        // BUDGET_MS] = 9s); the ceiling below covers that nominal 9s plus generous
+        // swiftshader tick-stretch (~5×), so the load-bearing "detect within budget"
+        // assertion still constrains a real slow-keepalive regression (which would
+        // exceed even 50s) while absorbing runner jitter.
+        const val CONNECTED_TIMEOUT_MS: Long = 40_000L
 
-        // Detection budget + a generous reconnect/AVD margin for the half-open
-        // recovery arm.
-        val KEEPALIVE_DEATH_DETECT_TIMEOUT_MS: Long =
-            if (TerminalTestTimeouts.isRunningOnCi()) 40_000L else 30_000L
-        val RECOVERY_CONNECTED_TIMEOUT_MS: Long =
-            if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 45_000L
+        const val KEEPALIVE_DEATH_DETECT_TIMEOUT_MS: Long = 50_000L
+        const val RECOVERY_CONNECTED_TIMEOUT_MS: Long = 60_000L
     }
 }

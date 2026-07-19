@@ -117,6 +117,19 @@ NETWORK_FAULT_CLASSES=(
   # keepalive layer in shared/core-ssh (NatIdleMappingSurvivalKeepAliveTest, the
   # Unit gate). Reuses network-fault-proxy:2228 + toxiproxy API:8474 (no new fixture).
   "$FQCN_PREFIX.NatIdleMappingSurvivalE2eTest"
+  # Issue #1681 (#1680 Track B / H1): the DETERMINISTIC mobile-network
+  # self-inflicted lease-close storm reproduction. A toxiproxy symmetric-latency
+  # profile (RTT ≈ 4.0s mobile pin, ≈ 150ms wifi pin) makes a confirmed-shell
+  # `agents kind` classify overrun the real 3.5s bounded-exec budget over the
+  # SHARED `-CC` lease, while an UN-PROXIED sentinel proves the host stayed healthy
+  # (so any drop is self-inflicted by construction — G6). RED on the pre-#1641
+  # close()-on-timeout shim (passive_disconnect classification=
+  # real_tmux_control_channel_closed); GREEN on merged #1641 (bounded_exec_timeout
+  # abandonment, status stays Connected). Self-skips per-push (needs
+  # network-fault-proxy:2228 + toxiproxy API:8474 which tests.yml leaves down), so
+  # it is enrolled here with its toxiproxy siblings. Reuses network-fault-proxy:2228
+  # + toxiproxy API:8474 (no new fixture).
+  "$FQCN_PREFIX.MobileLatencyStormSelfInflictedCloseE2eTest"
 )
 
 # ---------------------------------------------------------------------------

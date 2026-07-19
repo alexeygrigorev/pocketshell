@@ -40,6 +40,11 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -47,6 +52,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Rule
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Shared harness for opt-in network-fault proof tests.
@@ -114,6 +120,22 @@ abstract class NetworkFaultProofBase {
 
     protected fun toxiproxy(): ToxiproxyControl =
         ToxiproxyControl(baseUrl = "http://$DEFAULT_HOST:$TOXIPROXY_API_PORT")
+
+    /**
+     * Issue #1681 — open the UN-PROXIED sentinel: a direct SSH connection to the
+     * fixture SSH port (2222, no toxiproxy in the path) that exec-pings on a fixed
+     * cadence for the whole storm window. It is the "everything else works fine"
+     * control — because it never rides the delayed proxy, it hard-proves the host
+     * + sshd + network path stayed perfectly healthy throughout, so ANY lease
+     * death the app suffers over the merely-DELAYED (never-severed) proxy is
+     * SELF-INFLICTED by construction, not a real remote drop. [SshSentinel.stop]
+     * must be called in teardown.
+     */
+    protected suspend fun openUnProxiedSentinel(
+        key: String,
+        scope: CoroutineScope,
+        intervalMs: Long = SENTINEL_INTERVAL_MS,
+    ): SshSentinel = SshSentinel.open(key, scope, intervalMs)
 
     protected suspend fun prepareProxyAndRemoteSession(
         key: String,
@@ -708,11 +730,85 @@ abstract class NetworkFaultProofBase {
         const val TOXIPROXY_API_PORT: Int = 8474
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue342-network-faults"
+
+        /** Issue #1681 — the un-proxied sentinel exec-ping cadence. */
+        const val SENTINEL_INTERVAL_MS: Long = 3_000L
+
         val NETWORK_FAULT_FOLDER_CANDIDATES: List<String> = listOf(
             FolderListViewModel.UNTRACKED_PATH,
             "/home/testuser",
             "~",
         )
+    }
+}
+
+/**
+ * Issue #1681 — the un-proxied liveness sentinel (see
+ * [NetworkFaultProofBase.openUnProxiedSentinel]). Holds a single direct SSH
+ * session to the fixture SSH port (never through toxiproxy) and exec-pings it on
+ * a fixed cadence in the background for the life of the storm window. Every
+ * failed or timed-out ping is recorded; [isAlive] is true only when EVERY ping
+ * round-tripped and the session is still connected. That is the constructive
+ * proof the host + network stayed healthy, so a lease death over the delayed
+ * proxy is attributable to the app, not the link.
+ */
+class SshSentinel private constructor(
+    private val session: SshSession,
+    scope: CoroutineScope,
+    private val intervalMs: Long,
+) {
+    private val failures = CopyOnWriteArrayList<String>()
+
+    @Volatile
+    private var pings: Int = 0
+
+    @Volatile
+    private var attempts: Int = 0
+
+    private val job: Job = scope.launch(Dispatchers.IO) {
+        while (isActive) {
+            attempts += 1
+            val outcome = runCatching {
+                withTimeout(SENTINEL_PING_TIMEOUT_MS) { session.exec("printf pong") }
+            }.getOrNull()
+            if (outcome != null && outcome.exitCode == 0 && outcome.stdout.contains("pong")) {
+                pings += 1
+            } else {
+                failures += "ping #$attempts: exit=${outcome?.exitCode} " +
+                    "stdout='${outcome?.stdout?.take(80)}' stderr='${outcome?.stderr?.take(80)}'"
+            }
+            delay(intervalMs)
+        }
+    }
+
+    val pingCount: Int get() = pings
+    val attemptCount: Int get() = attempts
+    val failureLog: List<String> get() = failures.toList()
+
+    /** True only when no ping ever failed AND the un-proxied session is still up. */
+    val isAlive: Boolean get() = failures.isEmpty() && runCatching { session.isConnected }.getOrDefault(false)
+
+    fun stop() {
+        job.cancel()
+        runCatching { runBlocking { session.close() } }
+    }
+
+    companion object {
+        private const val SENTINEL_PING_TIMEOUT_MS: Long = 20_000L
+
+        suspend fun open(key: String, scope: CoroutineScope, intervalMs: Long): SshSentinel {
+            val session = withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).getOrThrow()
+            }
+            return SshSentinel(session, scope, intervalMs)
+        }
     }
 }
 

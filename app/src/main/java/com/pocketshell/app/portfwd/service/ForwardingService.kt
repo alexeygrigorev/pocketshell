@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
@@ -316,8 +317,24 @@ class ForwardingService : Service() {
                 controller.flowOfTotalTunnelCount(),
                 controller.flowOfPrimaryHostName(),
                 controller.flowOfRestoringHostCount(),
-            ) { activeHosts, tunnels, primaryHost, restoringHosts ->
-                NotificationSnapshot(activeHosts, tunnels, primaryHost, restoringHosts)
+                // Issue #1487: the live forwarded remote ports across every
+                // active host, so the Android-16 promoted status-bar chip's
+                // short critical text can NAME the port (`:2222`) rather than
+                // only a count. The set is the union of every active host's
+                // activeRemotePorts (each active tunnel is one forwarded port).
+                controller.flowOfHostSnapshots(),
+            ) { activeHosts, tunnels, primaryHost, restoringHosts, snapshots ->
+                NotificationSnapshot(
+                    activeHosts,
+                    tunnels,
+                    primaryHost,
+                    restoringHosts,
+                    activePorts = snapshots.values
+                        .asSequence()
+                        .filter { it.active }
+                        .flatMap { it.activeRemotePorts.asSequence() }
+                        .toSortedSet(),
+                )
             }
                 .distinctUntilChanged()
                 .collect { snapshot ->
@@ -335,6 +352,7 @@ class ForwardingService : Service() {
                             snapshot.activeHosts,
                             snapshot.tunnels,
                             snapshot.restoringHosts,
+                            snapshot.activePorts,
                         )
                     }
                 }
@@ -402,8 +420,10 @@ class ForwardingService : Service() {
         hostCount: Int,
         tunnelCount: Int,
         restoringHostCount: Int = 0,
+        activePorts: Set<Int> = emptySet(),
     ) {
-        val notification = buildNotification(hostName, hostCount, tunnelCount, restoringHostCount)
+        val notification =
+            buildNotification(hostName, hostCount, tunnelCount, restoringHostCount, activePorts)
         if (!hasStartedForeground) {
             promoteToForegroundIfNeeded(notification)
             return
@@ -423,6 +443,10 @@ class ForwardingService : Service() {
         val tunnels: Int,
         val primaryHost: String,
         val restoringHosts: Int,
+        // Issue #1487: forwarded remote ports across active hosts, for the
+        // promoted status-bar chip's short critical text. A sorted set so
+        // distinctUntilChanged collapses on stable equality.
+        val activePorts: Set<Int> = emptySet(),
     )
 
     private fun initialNotification(): Notification = buildNotification(
@@ -447,6 +471,7 @@ class ForwardingService : Service() {
         hostCount: Int,
         tunnelCount: Int,
         restoringHostCount: Int = 0,
+        activePorts: Set<Int> = emptySet(),
         contentTextOverride: String? = null,
     ): Notification {
         // Issue #446: body-tap deep-links to the port-forward panel entry
@@ -515,7 +540,13 @@ class ForwardingService : Service() {
         // active background process the user controls.
         val contentText = "Running in the background · $detail"
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        // Issue #1487: the terse short-critical label for the Android-16 promoted
+        // status-bar chip — names the forwarded port (`:2222` / `:2222 +2`),
+        // falls back to a count (`3 ports`) before the live port set posts, and
+        // shows `…` while spinning up / restoring (never "0 ports").
+        val chipLabel = forwardingChipShortLabel(tunnelCount, restoringHostCount, activePorts)
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             // Issue #521: title explicitly says it's running (not just
             // "active"), matching Recorder's persistent-status headline.
             .setContentTitle("Port forwarding running")
@@ -570,7 +601,27 @@ class ForwardingService : Service() {
                 "Stop",
                 stopPendingIntent,
             )
-            .build()
+            // Issue #1487: the short critical text is the chip's glanceable
+            // label. Setting it is harmless on pre-36 devices (NotificationCompat
+            // no-ops it) — the OS only surfaces it once the notification is
+            // promoted into the status-bar activity chip, so it always carries the
+            // port label ready for promotion.
+            .setShortCriticalText(chipLabel)
+
+        // Issue #1487: request promotion to the Google-Maps-style status-bar
+        // activity chip next to the clock, but ONLY when the OS will actually
+        // grant it — the app compiled against API 36 and holds
+        // POST_PROMOTED_NOTIFICATIONS and the user hasn't disabled promotion.
+        // Guarding on canPostPromotedNotifications() keeps the request a no-op on
+        // pre-36 devices / when promotion is unavailable, where the existing
+        // ongoing status-bar icon + badge (#752) remains the indicator. NOTE: no
+        // setColorized(true) — a colorized notification is a promotion
+        // DISQUALIFIER, so the two are mutually exclusive.
+        if (NotificationManagerCompat.from(this).canPostPromotedNotifications()) {
+            builder.setRequestPromotedOngoing(true)
+        }
+
+        val notification = builder.build()
 
         // Issue #487 (reopened): make the non-clearable contract explicit on the
         // raw notification. NotificationCompat.setOngoing(true) already sets both
@@ -630,4 +681,39 @@ class ForwardingService : Service() {
         }
         manager.createNotificationChannel(channel)
     }
+}
+
+/**
+ * Issue #1487: the terse **short critical text** for the Android-16 promoted
+ * status-bar activity chip (the Google-Maps-style pill next to the clock).
+ *
+ * Pure so a JVM test asserts every case directly (G9) — the chip label is the
+ * load-bearing user-visible bit of the promotion. It must be very short (the OS
+ * truncates the chip), name the forwarded port where known, and NEVER read
+ * "0 ports":
+ *
+ *  - `restoring` (a host's transport is briefly down, re-establishing forwards)
+ *    OR nothing forwarded yet → `…` (transient, not "gone", never "0").
+ *  - a single known port → `:2222`.
+ *  - multiple with the live set known → `:2222 +2` (first port + remainder).
+ *  - the count known but the live port set not yet posted → `3 ports` / `1 port`.
+ *
+ * On pre-36 devices the value is unused (NotificationCompat no-ops
+ * setShortCriticalText below API 36), so this only shapes the chip.
+ */
+internal fun forwardingChipShortLabel(
+    tunnelCount: Int,
+    restoringHostCount: Int,
+    activePorts: Set<Int>,
+): String {
+    // Restoring / spinning up: transient, never surface "0 ports".
+    if (restoringHostCount > 0 || tunnelCount <= 0) return "…"
+    val sorted = activePorts.sorted()
+    if (sorted.isNotEmpty()) {
+        val first = sorted.first()
+        val remainder = tunnelCount - 1
+        return if (remainder > 0) ":$first +$remainder" else ":$first"
+    }
+    // Count fallback: we know how many, but not (yet) which ports.
+    return if (tunnelCount == 1) "1 port" else "$tunnelCount ports"
 }

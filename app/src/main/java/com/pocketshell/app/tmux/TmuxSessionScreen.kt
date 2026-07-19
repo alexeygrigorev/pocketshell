@@ -952,6 +952,9 @@ private fun TmuxSessionHeaderRegion(
                             )
                         },
                         connectionStatus = surfaceState.toUiStatus(),
+                        // Issue #1487: surface the already-collected per-host
+                        // forwarding state as the always-visible top-chrome pill.
+                        forwardingState = sessionForwardingState,
                         modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                     )
                 }

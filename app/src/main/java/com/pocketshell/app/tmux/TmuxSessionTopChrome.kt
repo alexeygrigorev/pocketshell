@@ -34,10 +34,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.portfwd.ForwardingGlyph
+import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -184,6 +188,14 @@ internal fun ConsolidatedTopChrome(
     // steady-state breadcrumb.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    // Issue #1487: the always-visible in-session port-forwarding indicator. When
+    // the shown host has ≥1 active tunnel a compact `⇄` pill appears in the top
+    // chrome (Google-Maps-chip intent, glanceable, out of the buried kebab menu);
+    // it renders NOTHING while inactive (no empty pill / no layout gap). Defaulted
+    // to the hidden state so the screenshot harness / unit tests stay
+    // source-compatible.
+    forwardingState: com.pocketshell.app.portfwd.SessionForwardingIndicatorState =
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(),
 ) {
     Row(
         modifier = modifier
@@ -286,6 +298,18 @@ internal fun ConsolidatedTopChrome(
             // to the toggle) so, under extreme width pressure, it clips AFTER
             // the title but BEFORE the toggle (#1320 - the toggle never yields).
             ConnectionStatusPill(connectionStatus)
+
+            // Issue #1487: the always-visible port-forwarding pill. Rendered ONLY
+            // while forwarding is active for the host on screen (both the Spacer
+            // and the pill are inside the guard, so an inactive host leaves NO gap
+            // - the #641-class absent-direction trap). It sits at the trailing
+            // edge of the #1320 weighted-yielding region, so under extreme width
+            // pressure it clips AFTER the title but BEFORE the Terminal/
+            // Conversation toggle, which never yields.
+            if (forwardingState.visible) {
+                Spacer(modifier = Modifier.width(6.dp))
+                ForwardingStatusPill(forwardingState)
+            }
         }
 
         // Issue #1320: the Terminal/Conversation toggle - a PRIMARY control that
@@ -615,4 +639,53 @@ private fun ConnectionStatusPill(
             .padding(horizontal = 8.dp, vertical = 3.dp)
             .testTag(TMUX_CONNECTION_STATUS_PILL_TAG),
     )
+}
+
+/**
+ * Issue #1487: the always-visible in-session port-forwarding pill — a compact
+ * `⇄`-glyph chip that tells the user "a tunnel is open on the host you are
+ * looking at right now" at a glance, out of the buried kebab menu. Mirrors the
+ * sibling [ConnectionStatusPill] pill vocabulary (tinted `PocketShellShapes.small`
+ * background, 11sp Medium label) so the two read as the same top-chrome system.
+ *
+ * Only ever composed by the caller while [state] is active (its `visible`
+ * guard), so it never renders an empty pill. Accent-tinted normally; amber while
+ * [SessionForwardingIndicatorState.restoring] so a transient transport blip reads
+ * as "restoring", not "gone".
+ */
+@Composable
+private fun ForwardingStatusPill(state: SessionForwardingIndicatorState) {
+    val tint = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(color = tint.copy(alpha = 0.14f), shape = PocketShellShapes.small)
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .semantics { contentDescription = state.contentDescription }
+            .testTag(TMUX_PORT_FORWARD_PILL_TAG),
+    ) {
+        ForwardingGlyph(modifier = Modifier.size(12.dp), color = tint)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = forwardingPillLabel(state),
+            color = tint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * Issue #1487: the terse pill label. Pure so a JVM unit test asserts every case
+ * directly (G9). Communicates single-vs-multiple at a glance and NEVER reads
+ * "0 ports": a single tunnel is `1 port`, multiple is `N ports`, and an active
+ * host whose count is still spinning up or whose transport is restoring reads
+ * `…` rather than a removed-looking "0".
+ */
+internal fun forwardingPillLabel(state: SessionForwardingIndicatorState): String = when {
+    state.restoring -> "…"
+    state.tunnelCount == 1 -> "1 port"
+    state.tunnelCount > 1 -> "${state.tunnelCount} ports"
+    else -> "…"
 }

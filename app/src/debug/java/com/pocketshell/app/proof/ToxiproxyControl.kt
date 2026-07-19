@@ -72,6 +72,41 @@ class ToxiproxyControl(
     }
 
     /**
+     * Issue #1681 — the pinned MOBILE-SPIKE profile: a symmetric one-way latency
+     * of [MOBILE_ONE_WAY_LATENCY_MS] on BOTH directions, so a single SSH
+     * round-trip costs ~2 × that ≈ [MOBILE_RTT_MS] ms. That RTT is the
+     * deterministic "WiFi ok, mobile breaks" pin (#1680 Track B): a bounded
+     * remote exec is a channel-open + exec + read (~2–3 round-trips + host CLI),
+     * so at ~1.8 s RTT it costs ~5 s and OVERRUNS the 3.5 s bounded-exec budget
+     * (`AgentKindRemoteSource`, `SessionCardsRemoteSource`, `FolderListGateway`),
+     * while the `-CC` liveness probe (5 s per-probe, a single-round-trip
+     * refresh-client), the transport keepalive (30 s interval), the tmux command
+     * timeout (10 s), AND the 8 s TransportDispatcher per-op wall-clock ceiling
+     * (#937/#1567) all stay green — only the 3.5 s bounded-exec threshold
+     * crosses. Jitter is 0 so the RTT is a stable, citable figure (the #817
+     * fixed-RTT model, not a fuzz model), which is what makes the red→green gate
+     * deterministic.
+     *
+     * NB (#1681 implementation finding): the RTT is deliberately ~1.8 s, NOT the
+     * ~4.0 s the original #1681 recipe pinned. That recipe's budget analysis
+     * omitted the 8 s TransportDispatcher per-op ceiling; at ~4.0 s RTT a raw
+     * multi-round-trip exec exceeds 8 s and is killed by the TRANSPORT ceiling,
+     * confounding the classify's 3.5 s self-close attribution. ~1.8 s RTT (a
+     * realistic loaded-LTE figure — the design's own table calls RTT 0.5–4 s
+     * routine) crosses the 3.5 s classify bound while a fresh exec still finishes
+     * under 8 s, keeping the self-inflicted signal surgical (G6).
+     *
+     * The matching under-threshold extreme is [addSymmetricLatency] with
+     * [WIFI_ONE_WAY_LATENCY_MS] (RTT ≈ 150 ms) — the #1633 both-extremes pin:
+     * the same journey must show ZERO overruns on WiFi, bracketing the monotonic
+     * RTT-vs-3.5 s-bound variable at both ends.
+     *
+     * Folded into the standard `latency_upstream` / `latency_downstream` toxic
+     * names (via [addSymmetricLatency]) so [clearToxics] / [reset] remove it.
+     */
+    fun addMobileProfile() = addSymmetricLatency(MOBILE_ONE_WAY_LATENCY_MS)
+
+    /**
      * Issue #970 (the realistic-wifi stability gate): a STABLE-but-JITTERY link.
      * A steady base [latencyMs] one-way latency on BOTH directions WITH a
      * [jitterMs] random jitter band models a physically stable wifi/mobile link
@@ -169,9 +204,28 @@ class ToxiproxyControl(
         )
     }
 
-    private companion object {
-        const val PROXY_NAME: String = "agents_ssh"
-        val KNOWN_TOXICS: List<String> = listOf(
+    companion object {
+        /**
+         * Issue #1681 — the mobile-spike one-way latency. RTT ≈ 2× ≈ 1.8 s; a
+         * fresh multi-round-trip exec (~5 s) clears the 3.5 s bounded-exec budget
+         * while staying under the 5 s liveness-probe, 8 s transport per-op
+         * ceiling, 10 s tmux-command, and 30 s keepalive thresholds (see
+         * [addMobileProfile] for why this is ~1.8 s, not the recipe's ~4.0 s).
+         */
+        const val MOBILE_ONE_WAY_LATENCY_MS: Int = 900
+
+        /** The resulting round-trip time for [MOBILE_ONE_WAY_LATENCY_MS] (documentation only). */
+        const val MOBILE_RTT_MS: Int = MOBILE_ONE_WAY_LATENCY_MS * 2
+
+        /**
+         * Issue #1681 — the WiFi baseline one-way latency (RTT ≈ 150 ms), the
+         * #1633 both-extremes under-threshold pin: a classify at this RTT never
+         * overruns the 3.5 s bound, so the same journey shows ZERO storm.
+         */
+        const val WIFI_ONE_WAY_LATENCY_MS: Int = 75
+
+        private const val PROXY_NAME: String = "agents_ssh"
+        private val KNOWN_TOXICS: List<String> = listOf(
             "blackhole_upstream",
             "blackhole_downstream",
             "latency_upstream",

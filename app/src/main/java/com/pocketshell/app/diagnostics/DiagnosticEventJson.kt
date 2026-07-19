@@ -12,6 +12,13 @@ data class DiagnosticsEvent(
     val category: String,
     val name: String,
     val metadata: Map<String, Any?> = emptyMap(),
+    // Issue #1669: every event is version-stamped at record time so the field
+    // connection log is self-describing — the maintainer can read WHICH build
+    // produced a storm straight from the log, without a `git ls-remote` to guess
+    // the phone's version (which is what today's forensics had to do). Defaulted
+    // so historical lines / synthetic test events decode without a stamp.
+    val versionName: String = "",
+    val versionCode: Long = 0L,
 )
 
 data class DiagnosticEventFilter(
@@ -51,6 +58,10 @@ internal object DiagnosticEventJson {
             .put("monotonicTimestampNanos", event.monotonicTimestampNanos)
             .put("category", sanitizeToken(event.category))
             .put("name", sanitizeToken(event.name))
+            // Issue #1669: top-level (not under `metadata`) so a forensic `jq`/
+            // `head` sees the build on every line without descending into metadata.
+            .put("versionName", event.versionName)
+            .put("versionCode", event.versionCode)
         val metadata = JSONObject()
         event.metadata.toSortedMap().forEach { (key, value) ->
             metadata.put(sanitizeKey(key), JSONObject.wrap(value))
@@ -74,6 +85,8 @@ internal object DiagnosticEventJson {
             category = root.getString("category"),
             name = root.getString("name"),
             metadata = metadata,
+            versionName = root.optString("versionName", ""),
+            versionCode = root.optLong("versionCode", 0L),
         )
     }.getOrNull()
 

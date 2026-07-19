@@ -356,6 +356,20 @@ jobs:
           scripts/check-version-coupling.sh --self-test
           scripts/check-version-coupling.sh
 
+      # Issue #1669: fail at push time when the app versionName leads the newest
+      # origin release tag by more than one release — the "bumped but never
+      # tagged" miss that stranded v0.4.38 (the maintainer had to git ls-remote to
+      # discover the phone's build did not match any release). --self-test first
+      # proves the guard's own red->green logic on synthetic fixtures, then the
+      # bare run checks the real tree against origin's tags. Cheap (~1s), kept in
+      # this cheap Python job. `fetch-tags`/`ls-remote` provides the tag list even
+      # in the shallow checkout.
+      - name: "Stranded-release guard (issue #1669)"
+        run: |
+          chmod +x scripts/check-stranded-release.sh
+          scripts/check-stranded-release.sh --self-test
+          scripts/check-stranded-release.sh
+
       - name: Smoke-test installed CLI
         working-directory: tools/pocketshell
         run: |

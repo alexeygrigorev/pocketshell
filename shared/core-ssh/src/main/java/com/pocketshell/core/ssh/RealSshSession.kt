@@ -317,6 +317,34 @@ internal class RealSshSession(
     }
 
     /**
+     * Issue #1693 — the #780-model SYNTHETIC self-inflicted-close seam. Kills the
+     * underlying sshj transport RAW and SYNCHRONOUSLY, as an ANONYMOUS peer-style
+     * drop: a direct `client.disconnect()` that does NOT touch [closeStarted]
+     * (so [isCloseInitiated] stays `false`), never launches the async [closeScope]
+     * teardown, and never drains through the [dispatcher] or the lease refcount.
+     *
+     * This deterministically reproduces the pre-#1641 / v0.4.38 synchronous
+     * `close()`-on-timeout shim: any live `-CC` reader riding THIS transport sees
+     * its blocking channel read throw immediately (a `ReaderException` → the storm
+     * signature `passive_disconnect classification=real_tmux_control_channel_closed`).
+     *
+     * Why a dedicated raw kill instead of just calling [close]: the modern [close]
+     * (idempotent + async + `isCloseInitiated`-tagging + lease-refcount-aware,
+     * #1135/#1139/#1222/#1567) attributes the resulting drop as SELF-INFLICTED,
+     * so restoring the historical shim only storms ~1/3 of the time — a flaky RED
+     * that is not a clean D33 gate (issue #1693). This seam removes that flakiness
+     * by dying like an anonymous peer drop, every time.
+     *
+     * TEST-ONLY. Never reached in production: the app-level trigger
+     * ([com.pocketshell.core.ssh.SshSessionTestControl]) is armed only by the
+     * #1693 connected reproduction. Leaves [closeStarted] `false`, so a later real
+     * [close] on this session (test teardown) still runs and stays idempotent.
+     */
+    internal fun forceTransportDeathForTest() {
+        runCatching { client.disconnect() }
+    }
+
+    /**
      * Issue #985/#983 — single-flight guard for the keepalive reply wait. Holds
      * the throwaway [awaitKeepAliveReply] `retrieve()` coroutine launched for the
      * most recent ping that has NOT yet completed (the reply has not landed and the

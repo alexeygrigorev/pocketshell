@@ -8,12 +8,15 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.pocketshell.PocketshellCommand
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshSessionTestControl
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -100,16 +103,33 @@ import org.junit.runner.RunWith
  *
  * ## Red → green (validating both the repro and #1641 — G1/D33)
  *
- * - **RED** (v0.4.38 `close()`-on-timeout shim restored in
- *   [com.pocketshell.app.ssh.BoundedSessionExec] — the one-file revert quoted in
- *   its own class doc): the bounded exec overruns at 3.5 s → closes the shared
- *   lease → `-CC` reader EOF → `passive_disconnect classification=real_tmux_
- *   control_channel_closed`. [assertConnectedStaysNoSelfInflictedDrop] FAILS with
- *   that exact signature while the sentinel is still alive.
- * - **GREEN** (current main, post-#1641): the bounded exec is abandoned, a
- *   `cause_trail stage=bounded_exec_timeout outcome=abandoned_transport_preserved
- *   transportAlive=true transportClosed=false` breadcrumb is recorded, status
- *   never leaves Connected, and a fresh marker still round-trips.
+ * The RED is driven by a DETERMINISTIC #780-model synthetic seam (issue #1693),
+ * NOT the old flaky "restore the v0.4.38 `close()` shim" revert. That shim-revert
+ * stormed only ~1/3 of runs because the modern `RealSshSession.close()` is
+ * idempotent + async + `isCloseInitiated`-tagging + lease-refcount-aware
+ * (#1135/#1139/#1222/#1567), so it no longer reliably reaches the `-CC` reader —
+ * a flaky RED is not a clean D33 gate. The seam
+ * ([com.pocketshell.app.ssh.BoundedSessionExec.onTimeoutSyntheticActionsForTest],
+ * armed ONLY for `agent_kind_classify` via [SYNTHETIC_SELF_CLOSE_ARG]) makes the
+ * classify's REAL 3.5 s overrun force-kill the shared transport RAW and
+ * SYNCHRONOUSLY ([SshSessionTestControl.forceTransportDeath]) — an anonymous
+ * peer-style drop that EOFs the reader every RED run.
+ *
+ * - **RED** (run with `-Pandroid.testInstrumentationRunnerArguments.$SYNTHETIC_
+ *   SELF_CLOSE_ARG=true`): the mobile-profile classify overruns 3.5 s → the armed
+ *   seam force-kills the shared `-CC` lease → `-CC` reader EOF →
+ *   `passive_disconnect classification=real_tmux_control_channel_closed`.
+ *   [assertConnectedStaysNoSelfInflictedDrop] FAILS with that exact signature
+ *   while the sentinel is still alive — DETERMINISTICALLY (20/20).
+ * - **GREEN** (current main, seam DISARMED — the committed default): the bounded
+ *   exec is abandoned, a `cause_trail stage=bounded_exec_timeout
+ *   outcome=abandoned_transport_preserved transportAlive=true transportClosed=false`
+ *   breadcrumb is recorded, status never leaves Connected, and a fresh marker
+ *   still round-trips (20/20 no storm).
+ *
+ * The seam mechanism's determinism + strict `agent_kind_classify` keying is
+ * pinned at per-push speed by
+ * [com.pocketshell.app.ssh.Issue1693SyntheticSelfInflictedCloseSeamTest].
  *
  * ## Gate wiring
  *
@@ -154,12 +174,38 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
 
     @After
     fun tearDownStorm() {
+        // Issue #1693 — never leak the process-global synthetic-close seam onto a
+        // sibling test on the shared AVD (the KeepAliveTestOverride teardown rule).
+        BoundedSessionExec.onTimeoutSyntheticActionsForTest = emptyMap()
         runCatching { sentinel?.stop() }
         runCatching { sentinelScope.cancel() }
         runCatching { toxiproxy().reset() }
         runCatching { diagnostics?.close() }
         diagnostics = null
         clearLastSessionPrefs()
+    }
+
+    /**
+     * Issue #1693 — arm the DETERMINISTIC synthetic self-inflicted-close seam when
+     * the RED reproduction is requested via [SYNTHETIC_SELF_CLOSE_ARG]. Keyed
+     * STRICTLY on `agent_kind_classify` (the ONE bounded-exec site that rides the
+     * shared `-CC` lease); `session_cards_rpc` and every other site are untouched,
+     * so the RED cannot storm through a separate lease (the #1681 finding). When
+     * the arg is absent (the committed GREEN default) this is a no-op and the real
+     * #1641 abandon path runs. Returns whether the seam was armed.
+     */
+    private fun armSyntheticSelfInflictedCloseIfRequested(): Boolean {
+        val requested = InstrumentationRegistry.getArguments()
+            .getString(SYNTHETIC_SELF_CLOSE_ARG)
+            ?.toBooleanStrictOrNull() == true
+        if (requested) {
+            BoundedSessionExec.onTimeoutSyntheticActionsForTest = mapOf(
+                CLASSIFY_CALLER_SITE to { session: SshSession ->
+                    SshSessionTestControl.forceTransportDeath(session)
+                },
+            )
+        }
+        return requested
     }
 
     /**
@@ -203,6 +249,12 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
 
             diagnostics!!.clear()
             observedStatuses.clear()
+
+            // (4b) Issue #1693 — arm the DETERMINISTIC synthetic self-inflicted
+            //      close (RED only; committed GREEN default leaves it disarmed).
+            //      Keyed strictly on `agent_kind_classify`; fires on the classify's
+            //      REAL mobile-RTT overrun below.
+            val redArmed = armSyntheticSelfInflictedCloseIfRequested()
 
             // (5) DEGRADE the link to the mobile profile (RTT ≈ 1.8 s).
             toxiproxy().addMobileProfile()
@@ -314,6 +366,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
                     "marker=$marker",
                     "profile=mobile RTT≈${ToxiproxyControl.MOBILE_RTT_MS}ms " +
                         "(one_way=${ToxiproxyControl.MOBILE_ONE_WAY_LATENCY_MS}ms)",
+                    "synthetic_self_inflicted_close_armed=$redArmed",
                     "reclassify_kicks=$RECLASSIFY_KICKS",
                     "bounded_exec_timeout_breadcrumbs=${breadcrumbs.size}",
                     "sentinel_pings=${sentinel?.pingCount} attempts=${sentinel?.attemptCount} " +
@@ -635,6 +688,16 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
          * fidelity/attribution assertions key strictly on this callerSite.
          */
         const val CLASSIFY_CALLER_SITE: String = "agent_kind_classify"
+
+        /**
+         * Issue #1693 — instrumentation arg that arms the DETERMINISTIC synthetic
+         * self-inflicted-close seam for the RED reproduction. Absent (the committed
+         * GREEN default) → the real #1641 abandon path runs and nothing storms. Set
+         * `true` → the classify's real mobile-RTT overrun force-kills the shared
+         * `-CC` lease every run. Enable with
+         * `-Pandroid.testInstrumentationRunnerArguments.pocketshellSyntheticSelfInflictedClose=true`.
+         */
+        const val SYNTHETIC_SELF_CLOSE_ARG: String = "pocketshellSyntheticSelfInflictedClose"
 
         /** How many degraded-link classify kicks to fire (RED self-sustains after the first). */
         const val RECLASSIFY_KICKS: Int = 4

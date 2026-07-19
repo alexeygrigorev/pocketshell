@@ -60,37 +60,40 @@ class DiagnosticRecorder @Inject constructor(
      * Every store consumer (the channel loop, [exportSnapshot], [readEvents])
      * awaits this, so the warm-up runs exactly once on IO.
      */
-    private val storeDeferred: Deferred<DiagnosticLogStore> = scope.async {
+    private val storeDeferred: Deferred<RecorderStores> = scope.async {
         val store = DiagnosticLogStore(
             logFile = File(context.filesDir, "diagnostics/pocketshell-diagnostics.jsonl"),
             exportDirectory = File(context.cacheDir, DIAGNOSTICS_EXPORT_CACHE_DIR),
         )
+        val connectionLog = ConnectionLogPartStore(
+            directory = File(context.filesDir, "diagnostics/connection-log"),
+        )
         lastSequenceReadThreadName = currentPhysicalThreadName()
         sequence.set(store.lastSequence())
-        store
+        RecorderStores(events = store, connectionLog = connectionLog)
     }
 
     init {
         scope.launch {
             // Await the off-main seed BEFORE processing any command, so every
             // sequence assigned below starts from the persisted high-water mark.
-            val store = storeDeferred.await()
+            val stores = storeDeferred.await()
             for (command in commands) {
                 when (command) {
-                    is RecorderCommand.Line -> store.appendLine(encode(command.pending))
+                    is RecorderCommand.Line -> persist(stores, command.pending)
                     is RecorderCommand.Flush -> command.done.complete(Unit)
                     is RecorderCommand.Clear -> {
-                        store.clear()
+                        stores.events.clear()
+                        stores.connectionLog.clear()
                         sequence.set(0L)
                         command.done.complete(Unit)
                     }
                     is RecorderCommand.ClearAndRecord -> {
-                        store.clear()
+                        stores.events.clear()
+                        stores.connectionLog.clear()
                         sequence.set(0L)
                         if (settingsRepository.settings.value.diagnosticsRecordingEnabled) {
-                            store.appendLine(
-                                encode(pendingEvent(command.category, command.event, command.fields)),
-                            )
+                            persist(stores, pendingEvent(command.category, command.event, command.fields))
                         }
                         command.done.complete(Unit)
                     }
@@ -129,14 +132,29 @@ class DiagnosticRecorder @Inject constructor(
     suspend fun exportSnapshot(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): File? {
         flush()
         return withContext(Dispatchers.IO) {
-            storeDeferred.await().exportSnapshot(deviceLabel(), appVersion(), filter)
+            storeDeferred.await().events.exportSnapshot(deviceLabel(), appVersionLabel(), filter)
         }
     }
 
     suspend fun readEvents(filter: DiagnosticEventFilter = DiagnosticEventFilter.All): List<DiagnosticsEvent> {
         flush()
         return withContext(Dispatchers.IO) {
-            storeDeferred.await().readEvents(filter)
+            storeDeferred.await().events.readEvents(filter)
+        }
+    }
+
+    /**
+     * The full, LOSSLESS connection-log archive (issue #1669): every mirrored
+     * connection-lifecycle event ever recorded (bounded only by the part store's
+     * count-compaction, not by the 64KB per-upload budget nor the 512KB device
+     * ring buffer that `readEvents` is subject to). This is the source
+     * [connectionLogJsonl] renders from, so nothing is dropped before the upload's
+     * budget cap.
+     */
+    suspend fun connectionLogArchive(): List<DiagnosticsEvent> {
+        flush()
+        return withContext(Dispatchers.IO) {
+            storeDeferred.await().connectionLog.readAllLines().mapNotNull(DiagnosticEventJson::decode)
         }
     }
 
@@ -160,9 +178,7 @@ class DiagnosticRecorder @Inject constructor(
      * never writes an empty host file.
      */
     suspend fun connectionLogJsonl(): String =
-        MirroredDiagnostics.render(
-            readEvents(DiagnosticEventFilter.All).filter(MirroredDiagnostics::isMirrored),
-        )
+        MirroredDiagnostics.render(connectionLogArchive())
 
     /**
      * Test-only (#1124): block until the off-main store build + `lastSequence()`
@@ -205,16 +221,31 @@ class DiagnosticRecorder @Inject constructor(
             metadata = DiagnosticRedactor.redact(fields, category),
         )
 
-    private fun encode(pending: PendingEvent): String =
-        DiagnosticEventJson.encode(
-            DiagnosticsEvent(
-                sequence = sequence.incrementAndGet(),
-                wallClockTime = pending.wallClockTime,
-                monotonicTimestampNanos = pending.monotonicTimestampNanos,
-                category = pending.category,
-                name = pending.name,
-                metadata = pending.metadata,
-            ),
+    /**
+     * Assign the monotonic [sequence], version-stamp (#1669), and persist [pending]
+     * to the ring-buffer store AND — when it is a mirrored connection-lifecycle
+     * event — to the lossless [ConnectionLogPartStore] archive. Runs on the single
+     * IO channel-consumer coroutine, so both writes are serialized.
+     */
+    private fun persist(stores: RecorderStores, pending: PendingEvent) {
+        val event = buildEvent(pending)
+        val line = DiagnosticEventJson.encode(event)
+        stores.events.appendLine(line)
+        if (MirroredDiagnostics.isMirrored(event)) {
+            stores.connectionLog.append(line)
+        }
+    }
+
+    private fun buildEvent(pending: PendingEvent): DiagnosticsEvent =
+        DiagnosticsEvent(
+            sequence = sequence.incrementAndGet(),
+            wallClockTime = pending.wallClockTime,
+            monotonicTimestampNanos = pending.monotonicTimestampNanos,
+            category = pending.category,
+            name = pending.name,
+            metadata = pending.metadata,
+            versionName = appVersion.name,
+            versionCode = appVersion.code,
         )
 
     private fun deviceLabel(): String =
@@ -223,7 +254,20 @@ class DiagnosticRecorder @Inject constructor(
             .joinToString(separator = " ")
             .ifBlank { "device" }
 
-    private fun appVersion(): String =
+    /**
+     * The app version used to stamp every event (#1669). Resolved lazily on first
+     * use — which happens on the IO channel-consumer coroutine, never the Main
+     * thread — so the `packageManager` read stays off the cold-launch path (#1124).
+     * A test may pin [appVersionOverride] before the first record to assert the
+     * stamp deterministically.
+     */
+    private val appVersion: AppVersion by lazy { appVersionOverride ?: readAppVersion() }
+
+    @Volatile
+    @VisibleForTesting
+    internal var appVersionOverride: AppVersion? = null
+
+    private fun readAppVersion(): AppVersion =
         runCatching {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
             val name = info.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
@@ -233,8 +277,10 @@ class DiagnosticRecorder @Inject constructor(
                 @Suppress("DEPRECATION")
                 info.versionCode.toLong()
             }
-            "$name ($code)"
-        }.getOrDefault("unknown")
+            AppVersion(name = name, code = code)
+        }.getOrDefault(AppVersion(name = "unknown", code = 0L))
+
+    private fun appVersionLabel(): String = appVersion.let { "${it.name} (${it.code})" }
 
     private class PendingEvent(
         val category: String,
@@ -242,6 +288,16 @@ class DiagnosticRecorder @Inject constructor(
         val wallClockTime: Instant,
         val monotonicTimestampNanos: Long,
         val metadata: Map<String, Any?>,
+    )
+
+    /** The app version stamped onto every event (#1669). */
+    @VisibleForTesting
+    internal data class AppVersion(val name: String, val code: Long)
+
+    /** The two on-disk sinks: the ring-buffer store + the lossless archive. */
+    private class RecorderStores(
+        val events: DiagnosticLogStore,
+        val connectionLog: ConnectionLogPartStore,
     )
 
     private sealed interface RecorderCommand {

@@ -375,6 +375,14 @@ Minimum pre-push gate:
   asserted synchronous post-`close()` state that the new async contract broke.
   Reviewer briefs for connection-core contract changes must call out running the
   integration suite.
+- **For connection-core transport/storm/reconnect/lease fixes, an OBSERVED
+  headless real-transport reproduction (JVM + Docker/toxiproxy
+  `:shared:core-ssh:integrationTest`) is first-class D33 proof (D34); the
+  emulator journey is the batched backstop.** Reviewers must not return `BLOCKED`
+  for a missing emulator when a qualifying headless observation exists — and must
+  still reject headless proof that only exercises plumbing (the assertion must be
+  on the symptom-defining signal on the real transport, never on a seam/lambda
+  having fired — the #1693 round-1 failure).
 - **The gate command is `./gradlew test`, NOT `:app:testDebugUnitTest`. The CI
   `Unit tests` job runs BOTH variants, and `:app:testReleaseUnitTest` is a
   required check.** The v0.4.37 #1633 merge went red on `main` at
@@ -1138,6 +1146,13 @@ Reviewer briefs include:
 - Instruction to run emulator validation for any user-facing Android flow,
   terminal/input behavior, SSH/tmux/agent workflow, screenshot/UI audit, or
   release-gate issue
+- **D34 flag for connection-core mechanism fixes** (transport/storm/reconnect/
+  lease): instruct the reviewer to accept an OBSERVED headless real-transport
+  red→green (JVM + Docker `:shared:core-ssh:integrationTest` / toxiproxy, or the
+  reducer-replay path) as the real path — do NOT return `BLOCKED` for a missing
+  emulator when a qualifying headless observation exists — while still rejecting
+  seam/plumbing-only proof (`CHANGES REQUESTED`). The end-to-end emulator journey
+  stays the batched backstop.
 - Instruction to inspect authoritative artifacts and reject stale, blank,
   missing, contradictory, or non-reproducible terminal viewport screenshots,
   visible terminal text, logs, or timing evidence

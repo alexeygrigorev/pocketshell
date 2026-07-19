@@ -13869,27 +13869,14 @@ public class TmuxSessionViewModel @Inject constructor(
             -> Unit
             else -> {
                 // ISSUE #872 / #785 twin: TRUST THE WARM LEASE ON SEND, DON'T REDIAL.
-                //
-                // This is the un-applied twin of the #785 attachment fix
-                // ([awaitLiveSessionForAttachment] above). The maintainer reported that
-                // tapping Send on a STABLE wifi connection flashed "Reconnecting" for ~1s
-                // and then "Retry" — and the staged attachment was gone. Root cause: this
-                // wait read a SYNCHRONOUS "Connected right now?" snapshot
-                // ([liveTmuxClientForSendOrNull] gates on [inlineConnectionStatus] +
-                // [clientRef]) and, finding it TRANSIENTLY not-Connected (a within-grace
-                // heal mid-flight, or the status momentarily off after a quick bg/fg
-                // round-trip), UNCONDITIONALLY fired a fresh-lease `onManualReconnect()` —
-                // a LOUD `connect(trigger = Reconnect)` that tore the transport (the
-                // spurious flap) AND wiped the staged attachment.
-                //
-                // The fix mirrors slice-3: when the active target's SSH lease is still
-                // WARM ([liveLeaseKeys] membership — the single grace owner is holding the
-                // `-CC` connection and a silent heal is already re-promoting it), do NOT
-                // redial. POLL for the live client to land instead (the loop below), so a
-                // Send on a stable/warm connection reuses the live lease with no flap. We
-                // only fall back to the connect-on-action reconnect when the lease is
-                // genuinely COLD (grace elapsed / socket truly dead), where a redial is the
-                // correct recovery.
+                // Reached only when there is NO live writable client (#1686 admits a live
+                // one above). The maintainer saw Send on a STABLE link flash "Reconnecting"
+                // then "Retry" (staged attachment gone) because a transiently-not-Connected
+                // snapshot UNCONDITIONALLY fired a fresh-lease `onManualReconnect()` — a loud
+                // redial that tore the transport. Fix: when the active target's SSH lease is
+                // still WARM ([liveLeaseKeys] — the grace owner holds the `-CC` and a silent
+                // heal is re-promoting it) POLL the heal (loop below), do NOT redial; only a
+                // genuinely COLD lease (grace elapsed / socket dead) falls back to a redial.
                 if (isSendLeaseWarm()) {
                     // Warm lease: POLL the silent heal (fall through to the wait below);
                     // do NOT fire a reconnect on a stable connection.
@@ -13947,9 +13934,22 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun sendWaitWouldRedialForTest(): Boolean = !isSendLeaseWarm()
 
-    private fun liveTmuxClientForSendOrNull(): TmuxClient? {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return null
-        return clientRef?.takeUnless { it.disconnected.value }
+    // Issue #1686: the WIRE is the oracle — admit on the transport's own truth, not
+    // the ConnectionStatus enum (the old gate refused a live clientRef on a false
+    // not-Connected label — the #1680-storm composer clog). Redial stays enum-driven.
+    private fun liveTmuxClientForSendOrNull(): TmuxClient? =
+        clientRef?.takeUnless { it.disconnected.value }
+
+    // Issue #1686: wire-truth the composer queue reads instead of the enum.
+    internal fun isSendTransportWritable(): Boolean = liveTmuxClientForSendOrNull() != null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun liveTmuxClientForSendOrNullForTest(): TmuxClient? = liveTmuxClientForSendOrNull()
+
+    // #1686 seam: force a false NOT-Connected label without touching clientRef.
+    @androidx.annotation.VisibleForTesting
+    internal fun forceInlineReconnectingStatusKeepingClientForTest() {
+        _connectionState = ConnectionState.Reconnecting("t", 0, "t", 1, 5, 0L, "false-disconnect")
     }
 
     internal suspend fun sendToAgentPaneResult(

@@ -545,8 +545,12 @@ private fun TmuxSessionScreenEffects(
         promptComposerViewModel.setOutboundAttachmentSidecarUploader { refs ->
             viewModel.uploadQueuedAttachmentSidecars(refs)
         }
+        // Issue #1686: wire the WIRE-oracle probe so the failure taxonomy + drain gate
+        // read the transport's own truth instead of the ConnectionStatus enum.
+        promptComposerViewModel.setTransportWritableProbe { viewModel.isSendTransportWritable() }
         onDispose {
             promptComposerViewModel.setOutboundAttachmentSidecarUploader(null)
+            promptComposerViewModel.setTransportWritableProbe { false }
         }
     }
     LaunchedEffect(sessionLive, targetSessionId.value) {
@@ -557,6 +561,9 @@ private fun TmuxSessionScreenEffects(
             connectionStatusLabel = connectionStatusDiagnosticLabel(conn.rawStatus), // #1682
         ) {
             promptComposerViewModel.requeueStaleOutboundInFlight()
+            // Issue #1686: on the connected edge the wire (re)became available — un-park
+            // the auto-parked backlog so it self-heals instead of stranding Failed.
+            promptComposerViewModel.unparkTransportFailedRows()
         }
     }
     TmuxOutboundQueueAutoFlushEffect(
@@ -564,6 +571,7 @@ private fun TmuxSessionScreenEffects(
         targetSessionKey = targetSessionId.value,
         promptComposerViewModel = promptComposerViewModel,
         controller = outboundQueueAutoFlushController,
+        transportWritable = { viewModel.isSendTransportWritable() }, // #1686
     )
     LaunchedEffect(sessionLive, activeSessionCardsTargetKey) {
         if (sessionLive) viewModel.refreshActiveSessionCards()

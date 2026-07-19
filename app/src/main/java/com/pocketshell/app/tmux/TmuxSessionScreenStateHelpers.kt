@@ -141,12 +141,17 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
     targetSessionKey: String,
     promptComposerViewModel: PromptComposerViewModel,
     controller: OutboundQueueAutoFlushController,
+    // Issue #1686: the wire-oracle drain gate — the transport-writable probe wired to
+    // `TmuxSessionViewModel.isSendTransportWritable()`. Defaulted so callers/tests that
+    // only exercise the enum gate compile unchanged.
+    transportWritable: () -> Boolean = { false },
 ) {
     LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
         runOutboundQueueAutoFlush(
             sessionLive = sessionLive,
             outboundQueueItems = promptComposerViewModel.outboundQueueItems,
             controller = controller,
+            transportWritable = transportWritable,
             retryNext = { excludingIds ->
                 promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
             },
@@ -222,22 +227,32 @@ internal suspend fun runOutboundQueueAutoFlush(
     // controller's `not_live` drain diagnostic (see [OutboundQueueAutoFlushController.onQueueSnapshotChanged]).
     // Defaulted so existing unit call sites compile.
     hasPendingWork: () -> Boolean = { false },
+    // Issue #1686 (make the WIRE the oracle): the transport-writable probe. The drain
+    // gate is OPEN whenever the enum says Connected ([sessionLive]) OR a live, writable
+    // transport handle exists — so a FALSE/flapping not-Connected label (the #1680
+    // storm) no longer shuts the drain (the composer clog). The poll lane now runs
+    // UNCONDITIONALLY and re-evaluates this gate each tick, so a transport that heals
+    // WITHOUT an enum window flip (a silent false-disconnect recovery) is still drained
+    // within one backoff. A tick with the gate shut is a cheap diagnostic no-op — no
+    // dispatch, no reconnect kick (a genuinely-dead wire keeps the gate closed, so
+    // there is no new reconnect pressure). Defaulted to `{ false }` so existing unit
+    // call sites keep the pure-`sessionLive` gate and compile unchanged.
+    transportWritable: () -> Boolean = { false },
 ): Unit = coroutineScope {
+    fun drainGateOpen(): Boolean = sessionLive || transportWritable()
     launch {
         outboundQueueItems.collect {
-            controller.onQueueSnapshotChanged(sessionLive, hasPendingWork, retryNext)
+            controller.onQueueSnapshotChanged(drainGateOpen(), hasPendingWork, retryNext)
         }
     }
-    if (sessionLive) {
-        // One sweep up front so a row already stranded when the live window opens
-        // (e.g. an app restart that left an `Uploading`/`InFlight` row) recovers
-        // promptly instead of waiting a full backoff for the first poll tick.
-        sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
-        while (isActive) {
-            delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
-            sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
-            controller.onQueueSnapshotChanged(sessionLive, hasPendingWork, retryNext)
-        }
+    // One sweep up front so a row already stranded when the gate opens (e.g. an app
+    // restart that left an `Uploading`/`InFlight` row) recovers promptly instead of
+    // waiting a full backoff for the first poll tick.
+    if (drainGateOpen()) sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
+    while (isActive) {
+        delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
+        if (drainGateOpen()) sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
+        controller.onQueueSnapshotChanged(drainGateOpen(), hasPendingWork, retryNext)
     }
 }
 

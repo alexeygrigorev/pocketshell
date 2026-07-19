@@ -167,6 +167,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerSendPipeliningE2eTest"  # #1621 real-sheet A-active/B-queued FIFO, once-only completion, queue-empty and quiescent-close proof
   "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"  # #1108 #694 #872 #971 the composer send/dismiss + ATTACHMENT-on-failed-send journe…
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was
+  "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest"  # #1686 D33/G4 the composer-queue clog fix on the REAL wire: a false not-Connected label (inline enum Reconnecting + drain-gate sessionLive=false) while the -CC transport is writable — the queued prompt must DRAIN to the real tmux pane (capture-pane), and the transport-alive edge un-parks the storm-stranded backlog
   "$FQCN_PREFIX.OutboundExactlyOnceAcrossFlapE2eTest"  # #1526 S1/S6 D31: delivery-level exactly-once across a mid-send flap (server capture-pane occurrence == 1, composer + keystroke lanes)
   "com.pocketshell.app.composer.PromptComposerUndeliveredRetryTest"  # #1272 #1341 the durable couldn't deliver — retry surface wired into
   "com.pocketshell.app.composer.PromptComposerUndeliveredRetryHiltWiringTest"  # #1272 #1341 round-2, finding 1): the PRODUCTION-WIRING proof. The class…

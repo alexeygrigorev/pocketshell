@@ -16,6 +16,24 @@ set -euo pipefail
 # kept the claim held forever. With a 3-emulator pool that stranded one serial
 # per run. This test would have caught it: it asserts `claimable-after-run`
 # equals the pool size, not size-1.
+#
+# Hermetic harness (issue #1702): a driving shell that already holds the machine
+# AVD lock (pre-release-confidence-gate.sh acquires it BEFORE `assembleDebug
+# check` -> this suite) EXPORTS the acquire STATE below. Inherited, it
+# short-circuits pocketshell_acquire_avd_lock inside the wrapper (early-returns
+# "already acquired"), so the base lock is never created and the non-pool
+# assertion fails -- the gate self-contends. Scrub the process-internal acquire
+# state so the harness is correct whether or not a gate holds the real lock; the
+# #1663 anchoring is untouched.
+unset POCKETSHELL_AVD_LOCK_ACQUIRED \
+      POCKETSHELL_AVD_LOCK_FILE \
+      POCKETSHELL_AVD_LOCK_HOLDER_PID \
+      POCKETSHELL_AVD_LOCK_OWNER_PID \
+      POCKETSHELL_POOL_HOLDER_PID \
+      POCKETSHELL_POOL_OWNER_PID \
+      POCKETSHELL_POOL_SERIAL \
+      POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID \
+      POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 

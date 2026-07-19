@@ -96,6 +96,16 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
   it's already merged; that's how stale worktrees pile up. Prune anytime: a
   worktree whose issue is CLOSED is safe to remove; never touch locked
   `.claude/worktrees/agent-*` or open in-flight worktrees.
+- **A HELD / parked / WIP slice must be pushed or backed up BEFORE it can be
+  pruned — never rely on the worktree to preserve it.** Routine `agent-*`
+  cleanup (and `git worktree remove --force`) destroys uncommitted work with no
+  recovery. On 2026-07-19 this cost the entire #1487 compileSdk-36
+  implementation (held only in an `agent-*` worktree, no branch/patch) and an
+  in-flight `FolderListScreen.kt` WIP. Before removing ANY worktree that holds
+  uncommitted work you intend to keep, first push its branch OR save a
+  `.pickup/issue-<N>-*.patch` (tracked diff + a copy of untracked files —
+  `git diff` omits untracked). "Held pending a decision" is exactly the state
+  most at risk, because it can sit for days while cleanups run around it.
 - **Release freeze.** During an intermediate release or pre-release, hold
   non-critical merges to `main`. Release-blocker / CI fixes stay allowed because
   they stabilize the cut.

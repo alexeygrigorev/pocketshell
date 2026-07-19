@@ -17,7 +17,7 @@ plugins {
 // bridge test) honest while sharing the bounded-deadline core.
 android {
     namespace = "com.pocketshell.testsupport"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 26

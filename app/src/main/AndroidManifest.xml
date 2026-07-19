@@ -51,6 +51,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+        Issue #1487: on Android 16 (API 36) an eligible ongoing foreground-service
+        notification can be PROMOTED into the compact system status-bar activity
+        chip next to the clock (Google-Maps-navigation style). Requesting that
+        promotion (NotificationCompat.setRequestPromotedOngoing) requires this
+        permission; without it the OS silently declines promotion. Compiling
+        against API 36 (compileSdk 36) is required for the promotion APIs;
+        targetSdk stays 35, so the Android-16 targetSdk behavior changes are not
+        opted into. On pre-36 devices the permission is a harmless no-op and the
+        forwarding notification keeps its existing ongoing status-bar icon (#752).
+    -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
+    <!--
         Issue #203 expanded scope (round 3, foreground-service slice):
         the auto-forward feature carve-out (D21, see `docs/decisions.md`)
         allows a foreground service while ≥1 SSH tunnel is active so the

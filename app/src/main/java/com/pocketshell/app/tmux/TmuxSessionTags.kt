@@ -44,6 +44,10 @@ internal const val TMUX_PROJECT_SWITCHER_ROW_TAG_PREFIX = "tmux:chrome:project-s
 
 internal const val TMUX_CONNECTION_STATUS_PILL_TAG = "tmux:chrome:connection-pill"
 
+// Issue #1487: the always-visible in-session port-forwarding pill in the top
+// chrome (shown only while forwarding is active for the host on screen).
+internal const val TMUX_PORT_FORWARD_PILL_TAG = "tmux:chrome:port-forward-pill"
+
 internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
 internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
 internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"

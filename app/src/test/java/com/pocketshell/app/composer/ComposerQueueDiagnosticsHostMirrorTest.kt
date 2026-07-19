@@ -9,6 +9,7 @@ import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.MirroredDiagnostics
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.tmux.OutboundQueueAutoFlushController
+import com.pocketshell.app.tmux.outboundBudgetTestComposer
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -125,7 +126,7 @@ class ComposerQueueDiagnosticsHostMirrorTest {
     fun `window_flip reaches the host log with sessionLive and the driving status`() = runTest {
         val recorder = newRecorder()
 
-        val controller = OutboundQueueAutoFlushController()
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer())
         // The drain gate closes while the wire may still be alive (Reconnecting enum).
         controller.onConnectionWindowChanged(
             sessionLive = false,
@@ -154,7 +155,7 @@ class ComposerQueueDiagnosticsHostMirrorTest {
     fun `a drain tick against a shut gate records not_live`() = runTest {
         val recorder = newRecorder()
 
-        val controller = OutboundQueueAutoFlushController()
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer())
         controller.onConnectionWindowChanged(
             sessionLive = false,
             targetSessionId = sessionPath,
@@ -181,7 +182,7 @@ class ComposerQueueDiagnosticsHostMirrorTest {
     fun `an idle shut gate records no drain tick`() = runTest {
         val recorder = newRecorder()
 
-        val controller = OutboundQueueAutoFlushController()
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer())
         controller.onConnectionWindowChanged(
             sessionLive = false,
             targetSessionId = sessionPath,

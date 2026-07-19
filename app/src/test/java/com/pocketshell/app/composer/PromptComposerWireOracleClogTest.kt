@@ -6,6 +6,7 @@ import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.tmux.OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS
 import com.pocketshell.app.tmux.OutboundQueueAutoFlushController
+import com.pocketshell.app.tmux.outboundBudgetTestComposer
 import com.pocketshell.app.tmux.runOutboundQueueAutoFlush
 import com.pocketshell.core.voice.WhisperClient
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -117,7 +118,7 @@ class PromptComposerWireOracleClogTest {
         // with sessionLive=false NOTHING attempts the wire even though the transport
         // is writable — the false-disconnect clog. GREEN: the wire-oracle gate opens
         // on `sessionLive || transportWritable()`, so the drain attempts and drains.
-        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer(), clock = { testScheduler.currentTime })
         controller.onConnectionWindowChanged(sessionLive = false, targetSessionId = "1/s") {}
         val dispatched = mutableListOf<String>()
         val retryEligible: (Set<String>) -> String? = { ex -> if ("r1" in ex) null else "r1" }
@@ -152,7 +153,7 @@ class PromptComposerWireOracleClogTest {
         // Class coverage (G2) + no-new-reconnect-pressure: a GENUINELY dead wire keeps
         // the gate shut (enum false AND transport not writable), so the drain does NOT
         // attempt — no dispatch, no reconnect kick during a real outage.
-        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer(), clock = { testScheduler.currentTime })
         controller.onConnectionWindowChanged(sessionLive = false, targetSessionId = "1/s") {}
         val dispatched = mutableListOf<String>()
         val quietQueue = flow<Any?> { emit(Unit); awaitCancellation() }

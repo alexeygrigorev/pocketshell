@@ -6,8 +6,6 @@ import com.pocketshell.app.composer.OutboundWireAttemptDurableStore
 import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.tmux.TmuxClient
-import com.pocketshell.core.tmux.TmuxDisconnectEvent
-import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
@@ -554,7 +552,6 @@ internal suspend fun deliverDequeuedInputBatch(
     queue: TmuxPaneInputQueue,
     currentClient: () -> TmuxClient?,
     sendBytes: suspend (TmuxClient, String, ByteArray) -> Unit,
-    onPersistentFailureOfCurrentClient: suspend (TmuxDisconnectEvent) -> Unit,
 ): Boolean {
     var lastFailure: Throwable? = null
     var ambiguousWireAttempt = false
@@ -632,22 +629,18 @@ internal suspend fun deliverDequeuedInputBatch(
             "clientCurrent=${client === currentClient()} clientDisconnected=${client.disconnected.value}",
         failure,
     )
-    if (client === currentClient()) {
-        onPersistentFailureOfCurrentClient(
-            TmuxDisconnectEvent(
-                reason = if (client.disconnected.value) {
-                    TmuxDisconnectReason.ReaderEof
-                } else {
-                    TmuxDisconnectReason.ReaderException
-                },
-                source = "pane_input_send",
-                intent = "input_send_failure",
-                commandKind = "send-keys",
-                exceptionClass = failure?.javaClass?.simpleName,
-                message = failure?.message,
-            ),
-        )
-    }
+    // Issue #1635 / design D2 (#1331): the exhausted batch used to fire a SYNTHETIC
+    // `TmuxDisconnectEvent(source = "pane_input_send")` into `handlePassiveClientDisconnect`
+    // — the outbound queue driving the connection state machine. DELETED (hard-cut,
+    // D22). It made the queue AMPLIFY the storm it was suffering from: a failed
+    // keystroke send fed a passive-disconnect into the reconnect ladder, which caused
+    // more failed sends, which fired more disconnects. That feedback loop is visible
+    // in the maintainer's own device log as `disconnectSource=pane_input_send`
+    // (#1610, 07-15). It is also strictly redundant — a genuinely dead client is
+    // detected by the reader/keepalive that OWN that judgement — and under the #1633
+    // episode semantics it became actively harmful: each synthetic drop ADVANCES the
+    // reconnect attempt counter toward give-up. The queue's only legitimate signal to
+    // the machine is `SendWake` (design D1/A4); a delivery failure is never one.
     queue.recordDropped(batch)
     return true
 }

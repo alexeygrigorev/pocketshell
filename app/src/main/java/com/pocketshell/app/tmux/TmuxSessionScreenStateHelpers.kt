@@ -8,6 +8,8 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import com.pocketshell.app.composer.ComposerQueueDiagnostics
+import com.pocketshell.app.composer.OutboundAttemptBudgetTracker
+import com.pocketshell.app.composer.OutboundDeliveryWindow
 import com.pocketshell.app.composer.OutboundLauncherBadge
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.outboundLauncherBadge
@@ -292,9 +294,59 @@ internal fun connectionStatusDiagnosticLabel(
  * verify-before-resend ledger in the send path — a re-dispatch of an
  * already-landed payload is suppressed there, never doubled.
  */
-internal class OutboundQueueAutoFlushController(
-    private val clock: () -> Long = { System.currentTimeMillis() },
+internal class OutboundQueueAutoFlushController private constructor(
+    // Issue #1635-A (design D4): the outbound retry budget this controller's delivery
+    // window drives. PRIVATE constructor — see [boundTo]. No caller outside this class
+    // can name a tracker, so neither of the two failure modes below is expressible at a
+    // call site.
+    budget: OutboundAttemptBudgetTracker,
+    private val clock: () -> Long,
 ) {
+    init {
+        budget.window = { deliveryWindow }
+    }
+
+    internal companion object {
+        /**
+         * Issue #1635-A (design D4): the ONLY way to build a controller. The budget is
+         * READ FROM [composer] — the single authority that owns it and whose send path
+         * (`requeueDeferredSend`, `onClaim`) actually consumes it — rather than passed
+         * in, so a caller cannot supply a tracker the composer does not consume.
+         *
+         * ## Why a factory and not a required constructor argument
+         *
+         * This binding has TWO failure modes, and a required argument only kills one:
+         *
+         *  - **Omission** — the binding used to be a separate
+         *    `budget.window = { controller.deliveryWindow }` statement in the screen's
+         *    `LaunchedEffect`. Deleting that ONE line left the whole app suite green
+         *    while silently restoring the reported bug: the budget fell back to
+         *    [OUTBOUND_ASSUMED_STABLE_WINDOW], every storm failure became chargeable,
+         *    the queue parked at [OUTBOUND_MAX_AUTO_ATTEMPTS] and never auto-sent after
+         *    the link healed. Making `budget` a required constructor argument fixed
+         *    THIS: omitting it stopped compiling.
+         *  - **Wrong value** — but a required argument only enforces that AN argument is
+         *    passed, never that it is THE composer's budget.
+         *    `OutboundQueueAutoFlushController(budget = OutboundAttemptBudgetTracker())`
+         *    compiled, kept 3,968 tests green, and fully restored the maintainer's bug:
+         *    a fresh tracker is bound, the composer's own tracker never is, and every
+         *    storm failure charges exactly as before. The wrong-value idiom was even
+         *    copy-pasteable — it sat in three test files.
+         *
+         * A private constructor plus this factory kills BOTH: there is no `budget`
+         * parameter to forget, and no tracker to get wrong. The one remaining seam is
+         * this factory's own body (the companion can reach the private constructor);
+         * `OutboundDeliveryWindowWiringTest.theOnlyControllerFactoryBindsTheComposersOwnBudget`
+         * is what reds if it ever stops reading `composer.outboundAttemptBudget`.
+         * Hard-cut per D22 — the deletable wiring statement is gone, not duplicated.
+         */
+        fun boundTo(
+            composer: PromptComposerViewModel,
+            clock: () -> Long = { System.currentTimeMillis() },
+        ): OutboundQueueAutoFlushController =
+            OutboundQueueAutoFlushController(budget = composer.outboundAttemptBudget, clock = clock)
+    }
+
     private var windowKey: Pair<Boolean, String>? = null
 
     // Issue #1532 (RC-B): per-row timestamp of the last auto-flush dispatch
@@ -302,6 +354,29 @@ internal class OutboundQueueAutoFlushController(
     // its [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] backoff; expired entries are
     // pruned each snapshot, which also bounds the map on a long-lived screen.
     private val lastAttemptAtMs = mutableMapOf<String, Long>()
+
+    // Issue #1635-A (design D4): the CURRENT delivery window. `epoch` counts every
+    // `(sessionLive, target)` flip this controller has observed, so an outbound row
+    // claimed in one window and failing in another can prove the window was torn
+    // down UNDER its attempt — the failure is the storm's fault, not the row's, and
+    // burns zero of its bounded auto-retry budget. Liveness alone cannot show that:
+    // under the #1610 storm the link dies and heals several times inside one ~50s
+    // send timeout, so claim and failure BOTH read `live = true` across a window that
+    // no longer exists. The epoch is the only thing that makes that flip visible.
+    private var deliveryWindowEpoch: Long = 0L
+
+    // Starts LIVE so a controller that has not observed its first flip yet reports
+    // exactly [OUTBOUND_ASSUMED_STABLE_WINDOW] (live, epoch 0) — the same window an
+    // un-bound budget assumed. The binding now happens at CONSTRUCTION (composition)
+    // while the first flip arrives from the screen's `LaunchedEffect`, so that gap is
+    // real; resolving it toward "stable/live" keeps it fail-safe TOWARD the #1602 park
+    // (charge) and never toward an unbounded retry loop (refund-everything), which is
+    // the G6 negative this fix must not mint. Same for a controller stranded by an
+    // abandoned composition.
+    private var deliveryWindowLive: Boolean = true
+
+    val deliveryWindow: OutboundDeliveryWindow
+        get() = OutboundDeliveryWindow(live = deliveryWindowLive, epoch = deliveryWindowEpoch)
 
     fun onConnectionWindowChanged(
         sessionLive: Boolean,
@@ -316,6 +391,11 @@ internal class OutboundQueueAutoFlushController(
         val nextKey = sessionLive to targetSessionId
         if (nextKey == windowKey) return
         windowKey = nextKey
+        // Issue #1635-A: a flip means every attempt claimed in the PREVIOUS window
+        // lost the window it needed. Bump before anything else so a resolution that
+        // races this flip already reads the new epoch and refunds.
+        deliveryWindowEpoch += 1L
+        deliveryWindowLive = sessionLive
         // Issue #1682: the drain window opened/closed — capture WHICH status enum
         // drove it (the smoking-gun pairing). Diagnostics-only; no behaviour change.
         ComposerQueueDiagnostics.windowFlip(

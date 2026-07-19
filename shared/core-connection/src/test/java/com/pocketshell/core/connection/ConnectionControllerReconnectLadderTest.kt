@@ -39,8 +39,8 @@ class ConnectionControllerReconnectLadderTest {
         transport.setWarm(host, true)
         submit(ConnectionEvent.TransportLive)
         submit(ConnectionEvent.SeedLanded(a, "%0")) // Live
-        submit(ConnectionEvent.TransportDropped("d")) // Live -> Reattaching
-        submit(ConnectionEvent.TransportDropped("d")) // Reattaching -> Reconnecting(1)
+        submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d"))) // Live -> Reattaching
+        submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d"))) // Reattaching -> Reconnecting(1)
     }
 
     /**
@@ -88,8 +88,8 @@ class ConnectionControllerReconnectLadderTest {
         val (c, transport) = controller(ladder = listOf(0L, 0L, 0L))
         c.bringToReconnecting(transport)
         assertEquals(1, (c.state.value as ConnectionState.Reconnecting).attempt)
-        c.submit(ConnectionEvent.TransportDropped("incidental churn"))
-        c.submit(ConnectionEvent.TransportDropped("incidental churn"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("incidental churn")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("incidental churn")))
         assertEquals(
             "raw drops while already Reconnecting hold the attempt (loop owns advancement)",
             1,

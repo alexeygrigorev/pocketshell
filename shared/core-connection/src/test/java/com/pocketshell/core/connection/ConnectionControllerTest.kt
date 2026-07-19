@@ -247,7 +247,7 @@ class ConnectionControllerTest {
         val transport = FakeTransportPort()
         val controller = controller(transport = transport).bringLive(transport, targetId = a)
 
-        controller.submit(ConnectionEvent.TransportDropped("eof"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("eof")))
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportLive)
@@ -260,10 +260,10 @@ class ConnectionControllerTest {
         val controller = controller(transport = transport, maxReconnectAttempts = 2)
             .bringLive(transport, targetId = a)
 
-        controller.submit(ConnectionEvent.TransportDropped("d1"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d1")))
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
-        controller.submit(ConnectionEvent.TransportDropped("d2"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d2")))
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 2), controller.state.value)
 
         // Issue #1328 (S5): within the numbered ladder, advancement is the effect's

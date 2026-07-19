@@ -90,10 +90,17 @@ sealed interface ConnectionEvent {
 
     /**
      * Transport dropped: `TmuxClient.disconnected == true` or lease `Closed`.
-     * `reason` is the human-readable cause for logging (never surfaced as a
-     * scary band on its own — heal first).
+     *
+     * Issue #1666 (D28 Layer 3): the drop carries a TYPED [DropCause], derived once at
+     * the app's single close authority (`SelfInflictedClose`) off the reason the emitter
+     * named. [ConnectionController.onTransportDropped] REFUSES to advance the episode when
+     * the cause is [DropCause.SelfInflicted] — our own teardown echo is not remote death —
+     * so a self-inflicted close can never storm-feed the ladder, by construction (defense
+     * in depth beneath the #1643 driver filter). A [DropCause.RemoteFailure] /
+     * [DropCause.KeepaliveDead] / [DropCause.Unknown] still walks the honest recovery
+     * ladder. The cause is never surfaced as a scary band on its own — heal first.
      */
-    data class TransportDropped(val reason: String) : ConnectionEvent
+    data class TransportDropped(val cause: DropCause) : ConnectionEvent
 
     /** Transport is live again: lease `Connected` / `-CC` attached. */
     data object TransportLive : ConnectionEvent

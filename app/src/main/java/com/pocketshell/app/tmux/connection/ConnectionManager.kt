@@ -4,6 +4,7 @@ import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.ConnectionState
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.TransportPort
@@ -204,7 +205,21 @@ class ConnectionManager(
         ensureTargeting(host, targetId)
         val state = controller.state.value
         if (state is ConnectionState.Reattaching || state is ConnectionState.Reconnecting) return
-        controller.submit(ConnectionEvent.TransportDropped("reconnect"))
+        // Issue #1666: a SYNTHETIC escalation intent (the inline-transition mirror), NOT a
+        // self-inflicted transport teardown — it must walk the calm ladder, so it carries a
+        // non-[DropCause.SelfInflicted] cause the reducer acts on.
+        reportRemoteDrop("reconnect")
+    }
+
+    /**
+     * Issue #1666 (D28 Layer 3): submit a GENUINE (non-self-inflicted) transport drop, typed
+     * [DropCause.RemoteFailure], so the reducer walks the honest recovery ladder. This is the
+     * ONE seam callers (the VM's liveness-probe / clean-outage detectors, the escalation
+     * mirror) use to report a real drop, so the [DropCause] construction lives here at the
+     * connection wiring rather than being re-spelled at every call site.
+     */
+    fun reportRemoteDrop(reason: String) {
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure(reason)))
     }
 
     /**

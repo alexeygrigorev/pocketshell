@@ -73,8 +73,8 @@ class ConnectionControllerEpisodeStabilityTest {
      * ladder (the terminal give-up — the loop this test exists to prove is reachable).
      */
     private fun ConnectionController.driveConnectThenDieCycle(clock: FakeClock, aliveMs: Long): Rung? {
-        submit(ConnectionEvent.TransportDropped("keepalive death")) // Live -> Reattaching
-        submit(ConnectionEvent.TransportDropped("silent heal failed")) // -> Reconnecting
+        submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive death"))) // Live -> Reattaching
+        submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("silent heal failed"))) // -> Reconnecting
         setReconnectLadder(ladder) // the VM installs its autoReconnectDelaysMs
         submit(ConnectionEvent.ReconnectLadderEntered) // the VM enters the numbered ladder
         val recon = state.value as? ConnectionState.Reconnecting ?: return null
@@ -205,7 +205,7 @@ class ConnectionControllerEpisodeStabilityTest {
             ConnectionState.Unreachable(host, a),
             c.state.value,
         )
-        c.submit(ConnectionEvent.TransportDropped("late churn"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("late churn")))
         assertEquals(ConnectionState.Unreachable(host, a), c.state.value)
 
         // Explicit user intent (the manual Reconnect affordance) starts a FRESH episode.
@@ -213,8 +213,8 @@ class ConnectionControllerEpisodeStabilityTest {
         c.submit(ConnectionEvent.TransportLive)
         c.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), c.state.value)
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         assertEquals(
             "a manual reconnect must start a fresh episode at attempt 1",
             1,
@@ -289,8 +289,8 @@ class ConnectionControllerEpisodeStabilityTest {
         }
         // The link finally holds, well past the stability window.
         clock.advanceBy(STABILITY_WINDOW_MS + 1_000L)
-        c.submit(ConnectionEvent.TransportDropped("a much later, unrelated drop"))
-        c.submit(ConnectionEvent.TransportDropped("heal failed"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("a much later, unrelated drop")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("heal failed")))
         assertEquals(
             "a proven-stable Live must commit the episode even when the rungs were " +
                 "grace-loop-fed",
@@ -318,8 +318,8 @@ class ConnectionControllerEpisodeStabilityTest {
 
         repeat(3) { c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS) }
         // Back to a short-lived Live, mid-episode.
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         val mid = (c.state.value as ConnectionState.Reconnecting).attempt
         assertTrue("fixture precondition: an episode must be in flight", mid > 1)
         c.submit(ConnectionEvent.TransportLive)
@@ -346,8 +346,8 @@ class ConnectionControllerEpisodeStabilityTest {
         c.bringLive(transport)
 
         repeat(3) { c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS) }
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         c.submit(ConnectionEvent.TransportLive)
         c.submit(ConnectionEvent.SeedLanded(a, "%0"))
         clock.advanceBy(STABILITY_WINDOW_MS + 1_000L) // the link genuinely recovered
@@ -381,8 +381,8 @@ class ConnectionControllerEpisodeStabilityTest {
         c.submit(ConnectionEvent.Enter(host, a)) // the user re-opens after the give-up
         c.submit(ConnectionEvent.TransportLive)
         c.submit(ConnectionEvent.SeedLanded(a, "%0"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         assertTrue(c.state.value is ConnectionState.Reconnecting)
 
         c.submit(ConnectionEvent.Background)
@@ -422,8 +422,8 @@ class ConnectionControllerEpisodeStabilityTest {
 
         // Burn three uncommitted cycles: the counter is now deep in the ladder.
         repeat(3) { c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS) }
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         val escalated = c.state.value as ConnectionState.Reconnecting
         assertTrue(
             "fixture precondition: the counter must be escalated before the stable window",
@@ -437,13 +437,13 @@ class ConnectionControllerEpisodeStabilityTest {
         clock.advanceBy(STABILITY_WINDOW_MS + 1_000L)
 
         // A later, unrelated drop: a FRESH episode, attempt 1, instant first rung.
-        c.submit(ConnectionEvent.TransportDropped("unrelated later drop"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("unrelated later drop")))
         assertEquals(
             "a proven-stable link must heal silently first, exactly as before",
             ConnectionState.Reattaching(host, a),
             c.state.value,
         )
-        c.submit(ConnectionEvent.TransportDropped("heal failed"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("heal failed")))
         val fresh = c.state.value as ConnectionState.Reconnecting
         assertEquals(
             "a stable connection did NOT commit the episode — a normal reconnect would " +
@@ -463,15 +463,15 @@ class ConnectionControllerEpisodeStabilityTest {
         c.bringLive(transport)
 
         c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS) // attempt 1 burned
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         val before = (c.state.value as ConnectionState.Reconnecting).attempt
         c.submit(ConnectionEvent.TransportLive)
         c.submit(ConnectionEvent.SeedLanded(a, "%0"))
 
         clock.advanceBy(STABILITY_WINDOW_MS - 1)
-        c.submit(ConnectionEvent.TransportDropped("died just short of the window"))
-        c.submit(ConnectionEvent.TransportDropped("heal failed"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("died just short of the window")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("heal failed")))
         assertEquals(
             "a link that died 1ms short of the stability window must RESUME the episode",
             before + 1,
@@ -487,15 +487,15 @@ class ConnectionControllerEpisodeStabilityTest {
         c.bringLive(transport)
 
         c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS)
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         assertTrue((c.state.value as ConnectionState.Reconnecting).attempt > 0)
         c.submit(ConnectionEvent.TransportLive)
         c.submit(ConnectionEvent.SeedLanded(a, "%0"))
 
         clock.advanceBy(STABILITY_WINDOW_MS)
-        c.submit(ConnectionEvent.TransportDropped("died exactly at the boundary"))
-        c.submit(ConnectionEvent.TransportDropped("heal failed"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("died exactly at the boundary")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("heal failed")))
         assertEquals(
             "at exactly the stability window the connection has proven stable — commit",
             1,
@@ -518,8 +518,8 @@ class ConnectionControllerEpisodeStabilityTest {
 
         var cycles = 0
         while (cycles < CYCLE_CAP && c.state.value !is ConnectionState.Unreachable) {
-            c.submit(ConnectionEvent.TransportDropped("d"))
-            c.submit(ConnectionEvent.TransportDropped("d"))
+            c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+            c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
             c.setReconnectLadder(flat)
             c.submit(ConnectionEvent.ReconnectLadderEntered)
             val recon = c.state.value as? ConnectionState.Reconnecting ?: break
@@ -558,15 +558,15 @@ class ConnectionControllerEpisodeStabilityTest {
         c.bringLive(transport)
 
         repeat(3) { c.driveConnectThenDieCycle(clock, aliveMs = LINK_LIFETIME_MS) }
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         assertTrue((c.state.value as ConnectionState.Reconnecting).attempt > 1)
 
         c.submit(ConnectionEvent.Switch(b))
         assertEquals(ConnectionState.Attaching(host, b), c.state.value)
         c.submit(ConnectionEvent.SeedLanded(b, "%1"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
         val afterSwitch = c.state.value as ConnectionState.Reconnecting
         assertEquals("a user switch is explicit intent — fresh episode at attempt 1", 1, afterSwitch.attempt)
         assertEquals(0L, afterSwitch.retryDelayMs)

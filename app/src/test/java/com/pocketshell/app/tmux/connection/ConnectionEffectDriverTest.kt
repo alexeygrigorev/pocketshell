@@ -4,6 +4,7 @@ import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.SessionId
@@ -277,7 +278,7 @@ class ConnectionEffectDriverTest {
         controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
         controller.submit(ConnectionEvent.Switch(sessionB))
         controller.submit(ConnectionEvent.SeedLanded(sessionB, paneId = "%0")) // Live
-        controller.submit(ConnectionEvent.TransportDropped("drop")) // -> Reattaching
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop"))) // -> Reattaching
 
         assertEquals("detach trigger only on Backgrounded entry", 0, detachTriggers)
         scope.cancel()
@@ -347,7 +348,7 @@ class ConnectionEffectDriverTest {
         // NOT a foreground return, so the reseed-only foreground effect must NOT fire.
         controller.submit(ConnectionEvent.Enter(host, sessionA))
         controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
-        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // Live -> Reattaching
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive"))) // Live -> Reattaching
 
         assertEquals(
             "the within-grace foreground reseed must only fire on Backgrounded -> Reattaching",
@@ -493,8 +494,8 @@ class ConnectionEffectDriverTest {
         // must NOT fire — only the Backgrounded -> Reconnecting edge does.
         controller.submit(ConnectionEvent.Enter(host, sessionA))
         controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
-        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // -> Reattaching
-        controller.submit(ConnectionEvent.TransportDropped("keepalive")) // -> Reconnecting(1)
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive"))) // -> Reattaching
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive"))) // -> Reconnecting(1)
 
         assertEquals(
             "the foreground arm must only fire on Backgrounded -> Reconnecting",
@@ -1001,7 +1002,7 @@ class ConnectionEffectDriverTest {
 
         h.controller.submit(ConnectionEvent.Enter(host, sessionA))
         h.controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0")) // Live
-        h.controller.submit(ConnectionEvent.TransportDropped("keepalive")) // -> Reattaching
+        h.controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive"))) // -> Reattaching
 
         assertEquals(listOf("Idle", "Attaching", "Live", "Reattaching"), h.stateNames())
         scope.cancel()
@@ -1053,7 +1054,7 @@ class ConnectionEffectDriverTest {
         h.controller.submit(ConnectionEvent.SeedLanded(sessionB, paneId = "%0"))
         h.controller.submit(ConnectionEvent.Background)
         h.controller.submit(ConnectionEvent.Foreground)
-        h.controller.submit(ConnectionEvent.TransportDropped("drop"))
+        h.controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop")))
         h.tmuxPort.disconnectedFlow.emit(true)
         h.transportPort.transportEventsFlow.emit(TransportUpDown.Down(host, "closed", locallyInitiated = false))
 

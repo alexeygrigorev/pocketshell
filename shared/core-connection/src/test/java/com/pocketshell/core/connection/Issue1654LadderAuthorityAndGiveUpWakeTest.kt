@@ -80,7 +80,7 @@ class Issue1654LadderAuthorityAndGiveUpWakeTest {
     private fun ConnectionController.stormToGiveUp(): List<ConnectionState.Reconnecting> {
         submit(ConnectionEvent.Enter(host, target))
         submit(ConnectionEvent.SeedLanded(target, "p"))
-        submit(ConnectionEvent.TransportDropped("blip"))
+        submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("blip")))
         val rungs = mutableListOf<ConnectionState.Reconnecting>()
         repeat(40) {
             val s = submit(ConnectionEvent.ReconnectFailed)
@@ -191,7 +191,7 @@ class Issue1654LadderAuthorityAndGiveUpWakeTest {
         val c = productionShapedController(clock = clock)
         c.submit(ConnectionEvent.Enter(host, target))
         c.submit(ConnectionEvent.SeedLanded(target, "p"))
-        c.submit(ConnectionEvent.TransportDropped("blip"))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("blip")))
         // Two rungs, then jump the wall clock past the budget: the budget, not the rung count,
         // must be what terminates. This is the bound that stops a slow flap grinding forever.
         c.submit(ConnectionEvent.ReconnectFailed)
@@ -221,7 +221,7 @@ class Issue1654LadderAuthorityAndGiveUpWakeTest {
         // Every signal that is NOT a wake must leave the give-up alone. If any of these
         // re-armed the ladder we would have traded the strand back for the infinite storm.
         val nonWakeEvents = listOf(
-            ConnectionEvent.TransportDropped("still dead"),
+            ConnectionEvent.TransportDropped(DropCause.RemoteFailure("still dead")),
             ConnectionEvent.ReconnectFailed,
             ConnectionEvent.ReconnectLadderEntered,
             ConnectionEvent.ReconnectGaveUp,

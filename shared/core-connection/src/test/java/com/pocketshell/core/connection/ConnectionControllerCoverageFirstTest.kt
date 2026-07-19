@@ -78,7 +78,7 @@ class ConnectionControllerCoverageFirstTest {
         // passive disconnect the #630 inline skip guards against). The
         // controller interprets the drop against the CURRENT target (B) — it
         // heals B silently and never pauses/stalls/resurrects A.
-        controller.submit(ConnectionEvent.TransportDropped("late EOF from left session A"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("late EOF from left session A")))
         val state = controller.state.value
         assertEquals(ConnectionState.Reattaching(host, b), state)
         // Still on B's identity, never A.
@@ -106,7 +106,7 @@ class ConnectionControllerCoverageFirstTest {
         val transport = FakeTransportPort()
         val controller = controller(transport = transport).bringLive(transport, a)
 
-        controller.submit(ConnectionEvent.TransportDropped("network blip / non-validated change"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("network blip / non-validated change")))
 
         // SILENT recovery — Reattaching, NOT Unreachable. This is the
         // suppress-don't-reconnect-on-a-blip guarantee the #548 inline decision
@@ -127,7 +127,7 @@ class ConnectionControllerCoverageFirstTest {
         controller.submit(ConnectionEvent.Enter(host, a))
         assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
 
-        controller.submit(ConnectionEvent.TransportDropped("control channel closed before first seed"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("control channel closed before first seed")))
 
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
         assertEquals(a, controller.state.value.targetIdOrNull())
@@ -144,10 +144,10 @@ class ConnectionControllerCoverageFirstTest {
         val controller = controller(transport = transport, maxReconnectAttempts = 3)
             .bringLive(transport, a)
 
-        controller.submit(ConnectionEvent.TransportDropped("drop 1"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop 1")))
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
-        controller.submit(ConnectionEvent.TransportDropped("drop 2"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop 2")))
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 3), controller.state.value)
         assertEquals(a, controller.state.value.targetIdOrNull())
 
@@ -178,11 +178,11 @@ class ConnectionControllerCoverageFirstTest {
             .bringLive(transport, a)
 
         // Live -> Reattaching (silent heal).
-        controller.submit(ConnectionEvent.TransportDropped("drop 1"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop 1")))
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         // Heal failed -> silent reconnect ladder (attempt 1).
-        controller.submit(ConnectionEvent.TransportDropped("drop 2"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("drop 2")))
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1, maxAttempts = 2), controller.state.value)
 
         // attempt 2 (still silent — no band). #1328: ReconnectFailed advances the ladder.

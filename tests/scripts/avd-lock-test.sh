@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Hermetic harness (issue #1702). A driving shell that already holds the machine
+# AVD lock -- e.g. pre-release-confidence-gate.sh, which calls
+# pocketshell_acquire_avd_lock BEFORE running `assembleDebug check` -> this suite
+# -- EXPORTS the acquire STATE (POCKETSHELL_AVD_LOCK_ACQUIRED and friends). When
+# these cases fork a fresh gate, that inherited state short-circuits
+# pocketshell_acquire_avd_lock (it early-returns "already acquired"), so the lock
+# is never actually taken and the ownership assertions fail against the gate's
+# own lock -- self-contention, not a product bug. Scrub the process-internal
+# acquire state so the harness is correct whether or not a gate holds the real
+# lock. The real #1663 machine-anchoring behaviour is untouched (only avd-lock.sh
+# defines it; this only clears inherited runtime state).
+unset POCKETSHELL_AVD_LOCK_ACQUIRED \
+      POCKETSHELL_AVD_LOCK_FILE \
+      POCKETSHELL_AVD_LOCK_HOLDER_PID \
+      POCKETSHELL_AVD_LOCK_OWNER_PID \
+      POCKETSHELL_POOL_HOLDER_PID \
+      POCKETSHELL_POOL_OWNER_PID \
+      POCKETSHELL_POOL_SERIAL \
+      POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID \
+      POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fail() {

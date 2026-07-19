@@ -3,6 +3,7 @@ package com.pocketshell.app.scripts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
@@ -59,10 +60,30 @@ class AvdLockScriptTest {
         val script = projectRoot.resolve(relativePath)
         assertTrue("harness is missing: $relativePath", script.toFile().exists())
 
-        val process = ProcessBuilder("bash", script.toString())
+        // Hermetic invocation (issue #1702). `scripts/pre-release-confidence-gate.sh`
+        // acquires the machine AVD lock and EXPORTS the acquire state
+        // (POCKETSHELL_AVD_LOCK_ACQUIRED and friends) BEFORE running
+        // `assembleDebug check` -> this suite. Inherited through gradle -> the test
+        // worker -> bash, that state short-circuits `pocketshell_acquire_avd_lock`
+        // so the harness self-contends with the gate's own lock. Scrub the inherited
+        // acquire state, and sandbox the lock dir + TMPDIR into a fresh per-run temp
+        // dir so no case can touch the real `$HOME/.cache/pocketshell/avd-locks/`.
+        // (The harness scripts scrub the same state themselves too; this makes the
+        // JVM boundary hermetic regardless of caller.)
+        val lockSandbox = Files.createTempDirectory("pocketshell-avd-lock-test").toFile()
+        lockSandbox.deleteOnExit()
+
+        val builder = ProcessBuilder("bash", script.toString())
             .directory(projectRoot.toFile())
             .redirectErrorStream(true)
-            .start()
+        builder.environment().apply {
+            keys.removeAll { it.startsWith("POCKETSHELL_AVD_LOCK") }
+            keys.removeAll { it.startsWith("POCKETSHELL_POOL") }
+            keys.removeAll { it.startsWith("POCKETSHELL_TOXIPROXY") }
+            put("POCKETSHELL_AVD_LOCK_DIR", lockSandbox.resolve("locks").toString())
+            put("TMPDIR", lockSandbox.toString())
+        }
+        val process = builder.start()
 
         val output = process.inputStream.bufferedReader().use { it.readText() }
         val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)

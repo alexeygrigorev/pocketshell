@@ -27,6 +27,24 @@ set -euo pipefail
 #
 # No emulator is touched: the lock semantics are provable with two processes and
 # a lock file, and racing the real AVD would corrupt a sibling agent's run.
+#
+# Hermetic harness (issue #1702): a driving shell that already holds the machine
+# AVD lock (pre-release-confidence-gate.sh acquires it BEFORE `assembleDebug
+# check` -> this suite) EXPORTS the acquire STATE below. Inherited, it
+# short-circuits pocketshell_acquire_avd_lock in these cases (early-returns
+# "already acquired"), so worktree B "acquires" instantly while A "holds" -- the
+# gate self-contends and the load-bearing assertion fails against the gate's own
+# lock. Scrub the process-internal acquire state so the harness is correct
+# whether or not a gate holds the real lock; the #1663 anchoring is untouched.
+unset POCKETSHELL_AVD_LOCK_ACQUIRED \
+      POCKETSHELL_AVD_LOCK_FILE \
+      POCKETSHELL_AVD_LOCK_HOLDER_PID \
+      POCKETSHELL_AVD_LOCK_OWNER_PID \
+      POCKETSHELL_POOL_HOLDER_PID \
+      POCKETSHELL_POOL_OWNER_PID \
+      POCKETSHELL_POOL_SERIAL \
+      POCKETSHELL_TOXIPROXY_LOCK_HOLDER_PID \
+      POCKETSHELL_TOXIPROXY_LOCK_OWNER_PID
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -272,18 +290,30 @@ crashed_holder_does_not_wedge_the_lock() {
 # --------------------------------------------------------------------------
 default_lock_path_is_not_under_the_worktree() {
   local tmp="$1"
+  # Exercise the REAL HOME-anchored fallback (avd-lock.sh: the $HOME/.cache branch
+  # #1663), NOT the POCKETSHELL_AVD_LOCK_DIR override -- so a revert of the anchor
+  # back to $root_dir would be caught. Point HOME at a sandbox dir so the case
+  # stays hermetic (issue #1702): it resolves under the fake HOME, never the real
+  # machine lock dir, and still proves the anchor is machine-wide (same across
+  # worktrees) and not under the checkout.
   unset POCKETSHELL_AVD_LOCK_DIR || true
+  local fake_home="$tmp/home"
+  mkdir -p "$fake_home"
   make_worktree "$tmp/wt-a"
   make_worktree "$tmp/wt-b"
 
   local path_a path_b
-  path_a="$(bash -c 'source "$1/scripts/lib/avd-lock.sh"; pocketshell_avd_lock_file_for_serial "$1" emulator-5554' bash "$tmp/wt-a")"
-  path_b="$(bash -c 'source "$1/scripts/lib/avd-lock.sh"; pocketshell_avd_lock_file_for_serial "$1" emulator-5554' bash "$tmp/wt-b")"
+  path_a="$(HOME="$fake_home" bash -c 'source "$1/scripts/lib/avd-lock.sh"; pocketshell_avd_lock_file_for_serial "$1" emulator-5554' bash "$tmp/wt-a")"
+  path_b="$(HOME="$fake_home" bash -c 'source "$1/scripts/lib/avd-lock.sh"; pocketshell_avd_lock_file_for_serial "$1" emulator-5554' bash "$tmp/wt-b")"
 
   [[ "$path_a" == "$path_b" ]] \
     || fail "the same serial resolved to different lock files from two worktrees ($path_a vs $path_b) -- still worktree-anchored (issue #1657)"
   [[ "$path_a" != "$tmp/wt-a"* ]] \
     || fail "lock path is still under the worktree root: $path_a"
+  # The anchor must be the machine-wide HOME cache dir (#1663), proving it is NOT
+  # derived from the checkout.
+  [[ "$path_a" == "$fake_home/.cache/pocketshell/avd-locks/"* ]] \
+    || fail "default lock path is not HOME-anchored (#1663): $path_a"
 }
 
 with_tmpdir() {

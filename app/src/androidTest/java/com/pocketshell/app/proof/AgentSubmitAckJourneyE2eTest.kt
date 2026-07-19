@@ -21,6 +21,7 @@ import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.agentSubmitCollapsedPasteMarkerCount
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -73,6 +74,12 @@ import java.io.File
  * (wired into `scripts/ci-journey-suite.sh`); the load-bearing assertions do NOT
  * self-skip on CI. It uses ONLY the deterministic `agents:2222` fixture that
  * `tests.yml` already brings up — no new Docker service/port.
+ *
+ * Issue #1687 adds [multiLinePasteCollapsedToClaudeChipAcksWithoutTimeoutStall]: the
+ * same fixture also reproduces the REAL Claude Code collapsed-paste chip
+ * (`[Pasted text #N +M lines]`) so the connected journey proves a MULTI-LINE send is
+ * ack-recognised and submitted WITHOUT the per-send 2s ack-timeout stall — the
+ * dominant "takes too long to send" symptom.
  */
 @RunWith(AndroidJUnit4::class)
 class AgentSubmitAckJourneyE2eTest {
@@ -217,6 +224,148 @@ class AgentSubmitAckJourneyE2eTest {
             appendLine("long_prompt=$longPrompt")
         })
     } }
+
+    /**
+     * Issue #1687 (reviewer BLOCKED-G4 follow-up): the LOAD-BEARING on-device proof
+     * that a MULTI-LINE composer paste — which the REAL Claude Code TUI collapses to
+     * a `[Pasted text #N +M lines]` placeholder chip and does NOT echo the body — is
+     * ack-recognised and submitted WITHOUT the per-send 2s ack-timeout stall.
+     *
+     * The maintainer's symptom: "takes too long to send even when the connection is
+     * okay." Root cause: the payload-tail ack needle can NEVER match a collapsed
+     * paste (the body is not on the pane), so before #1687 the ack polled to the full
+     * `AGENT_SUBMIT_ACK_TIMEOUT_MS` + fallback floor on EVERY multi-line send. The fix
+     * ALSO confirms the ack on the `[Pasted text #N +M lines]` chip's count-baseline
+     * increase. This proof needs a pane that reproduces the REAL Claude collapse — the
+     * deterministic `agents` shell doesn't, and unauthenticated real `claude` wedges on
+     * its connectivity screen and never renders an input box (verified in this env). So
+     * the `pocketshell-fake-agent` fixture reproduces the EXACT chip the shipped Claude
+     * Code 2.1.150 binary renders (`[Pasted text #N +M lines]`, verified against the
+     * binary; the real-agent-gated
+     * [RealAgentReleaseGateTest.collapsedPasteChipFormatMatchesShippedClaudeBinaryAndProductionRecogniser]
+     * anchors the fixture's format to the real binary so it can't drift).
+     *
+     * RED on base (no collapsed recogniser): the needle misses the chip → the ack
+     * times out → the `agent_submit_ack` diagnostic is `fallback_floor` and the send
+     * pays the stall, AND [agentSubmitCollapsedPasteMarkerCount] returns 0 on a real
+     * `capture-pane` of the chip. GREEN with the fix: `ack_observed`, no stall, chip
+     * recognised.
+     */
+    @Test
+    fun multiLinePasteCollapsedToClaudeChipAcksWithoutTimeoutStall() { runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
+        captureViewport("issue1687-01-fake-agent-ready")
+
+        val viewModel = currentViewModel()
+        val paneId = requireNotNull(viewModel.panes.value.firstOrNull()?.paneId) {
+            "expected at least one seeded pane to send into"
+        }
+
+        // A genuine MULTI-LINE payload (no trailing newline so the needle's "last line"
+        // is real). The fake-agent reproduces the REAL Claude input box: this collapses
+        // to `[Pasted text #N +M lines]` and the body is NOT echoed, so the payload-tail
+        // needle can NEVER match — the ONLY thing that can confirm the ack is the #1687
+        // collapsed-marker recogniser.
+        val multiLinePayload = listOf(
+            "refactor the auth module so that",
+            "every inbound request is validated",
+            "against the rotating token format",
+            "and the structured audit schema",
+            "before it reaches the handler layer",
+        ).joinToString("\n")
+
+        // ---- STEP A (LOAD-BEARING end-to-end): the production ack-gated send on a
+        // CLEAN pane. Since the fake-agent shows ONLY the chip (never the body), an
+        // `ack_observed` here can ONLY come from the collapsed-marker recogniser — the
+        // needle has nothing to match. Measure wall-clock to prove there is NO stall.
+        diagnostics!!.clear()
+        val startMs = SystemClock.elapsedRealtime()
+        val sendResult = viewModel.sendAgentPayloadToPaneResult(
+            paneId, multiLinePayload, AgentKind.ClaudeCode,
+        )
+        val elapsedMs = SystemClock.elapsedRealtime() - startMs
+        assertTrue("multi-line send should succeed: $sendResult", sendResult.isSuccess)
+
+        // The submit Enter was gated on an OBSERVED capture ack (the collapsed chip),
+        // NOT the timeout fallback. On base this is `fallback_floor` → RED.
+        assertAckObserved("multi-line collapsed paste")
+        assertNoFallbackFloor("multi-line collapsed paste")
+
+        // No 2s stall: the ack fired on the chip (~1 RTT), far under the pre-#1687
+        // `AGENT_SUBMIT_ACK_TIMEOUT_MS` (2s) + fallback floor every multi-line send used
+        // to pay. On base (needle-miss → timeout) elapsed would exceed this budget.
+        assertTrue(
+            "the multi-line send must NOT pay the ack-timeout stall: elapsed=${elapsedMs}ms " +
+                "must be under the pre-#1687 2s ack-timeout stall (budget ${NO_STALL_BUDGET_MS}ms)",
+            elapsedMs < NO_STALL_BUDGET_MS,
+        )
+
+        // The message actually LANDS: on submit the fake-agent emits the REAL multi-line
+        // body (not the chip), proving the collapsed send delivered the real content.
+        waitForVisibleTerminal("multi-line body submitted") { text ->
+            text.containsStripped(FAKE_AGENT_SUBMITTED + multiLinePayload)
+        }
+        captureViewport("issue1687-02-multiline-submitted")
+
+        // ---- STEP B (explicit chip + recogniser artifact): render a fresh chip via the
+        // production input path and prove, on a REAL `capture-pane -p`, that (a) the pane
+        // shows the `[Pasted text #N +M lines]` chip and (b) the PRODUCTION recogniser
+        // [agentSubmitCollapsedPasteMarkerCount] counts it. This is the exact recogniser
+        // the ack gate runs, fed the exact real capture — no proxy string. `writeInputToPane`
+        // sends multi-line input through the SAME bracketed-paste route as a real composer
+        // paste (no submit Enter), so the chip sits in the input box for the capture.
+        viewModel.writeInputToPane(paneId, multiLinePayload.toByteArray(Charsets.UTF_8))
+        val chipCapture = waitForSidecarCaptureContains(
+            label = "collapsed paste chip",
+            needleStripped = COLLAPSED_CHIP_PREFIX_STRIPPED,
+        )
+        writeText("issue1687-03-collapsed-chip-capture.txt", chipCapture)
+        val markerCount = agentSubmitCollapsedPasteMarkerCount(chipCapture.lines())
+        assertTrue(
+            "the PRODUCTION collapsed-paste recogniser must count the `[Pasted text #N " +
+                "+M lines]` chip on a REAL capture-pane of the fixture (the exact real " +
+                "Claude Code render); recogniser count=$markerCount, capture:\n$chipCapture",
+            markerCount > 0,
+        )
+        assertTrue(
+            "the capture must contain the REAL Claude chip shape `[Pasted text #N +M lines]`; " +
+                "capture:\n$chipCapture",
+            COLLAPSED_CHIP_REGEX.containsMatchIn(chipCapture.filterNot { it.isWhitespace() }),
+        )
+        // Clear the box so the pane is left clean.
+        viewModel.writeInputToPane(paneId, byteArrayOf(0x15))
+        captureViewport("issue1687-04-collapsed-chip-rendered")
+
+        writeText("issue1687-acceptance.txt", buildString {
+            appendLine("issue=1687")
+            appendLine("multiline_send_ack_observed_via_collapsed_recogniser=true")
+            appendLine("multiline_send_no_fallback_floor=true")
+            appendLine("multiline_send_no_stall_elapsed_ms=$elapsedMs")
+            appendLine("no_stall_budget_ms=$NO_STALL_BUDGET_MS")
+            appendLine("real_multiline_body_submitted=true")
+            appendLine("collapsed_chip_on_pane_recognised_count=$markerCount")
+            appendLine("payload_lines=${multiLinePayload.lines().size}")
+        })
+    } }
+
+    /**
+     * Issue #1687: assert the ack for [label]'s send did NOT fall back to the timeout
+     * floor — the collapsed-paste chip was recognised, not stalled past the ack
+     * timeout. Complements [assertAckObserved]: `fallback_floor` is the exact
+     * diagnostic the base (unfixed) code records for a collapsed multi-line paste.
+     */
+    private fun assertNoFallbackFloor(label: String) {
+        // Give the (single) ack diagnostic for this cleared send a moment to record.
+        SystemClock.sleep(200)
+        val acks = diagnostics!!.eventsNamed("agent_submit_ack")
+        assertTrue(
+            "$label: the multi-line send must NOT pay the ack-timeout fallback floor " +
+                "(the pre-#1687 stall); recorded acks=$acks",
+            acks.none { it.fields["result"] == "fallback_floor" },
+        )
+    }
 
     /**
      * Sidecar SSH `capture-pane -p` of the seeded session, polled until the
@@ -581,6 +730,18 @@ class AgentSubmitAckJourneyE2eTest {
         const val SESSION_NAME: String = "issue869-fake-agent"
         const val FAKE_AGENT_READY: String = "FAKE-AGENT-READY"
         const val FAKE_AGENT_SUBMITTED: String = "FAKE-AGENT SUBMITTED: "
+
+        // Issue #1687: the whitespace-stripped prefix of the Claude Code collapsed-paste
+        // chip, and the full chip shape. Matches the production
+        // `agentSubmitCollapsedPasteMarkerCount` normalisation (join + strip whitespace).
+        const val COLLAPSED_CHIP_PREFIX_STRIPPED: String = "[Pastedtext#"
+        val COLLAPSED_CHIP_REGEX: Regex = Regex("""\[Pastedtext#\d+\+\d+lines?]""")
+
+        // Issue #1687: a multi-line send must fire the ack on the collapsed chip within
+        // ~1 capture RTT — FAR under the pre-#1687 2s `AGENT_SUBMIT_ACK_TIMEOUT_MS`
+        // stall. 1500ms leaves generous headroom for a slow-CI capture round-trip while
+        // still failing the base needle-miss timeout (which pays the full 2s + floor).
+        const val NO_STALL_BUDGET_MS: Long = 1_500L
 
         // Issue #1350: how long to poll the authoritative `capture-pane -p` for the
         // input box to clear after the submit Enter (the fake-agent renders the

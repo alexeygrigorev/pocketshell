@@ -17,9 +17,22 @@
 #     the terminal wraps it across visible rows, so `capture-pane` returns the
 #     payload split across rows. This is the most likely real-world needle MISS
 #     (a substring spanning a wrap boundary), so the proof MUST exercise it.
-#   * Strips bracketed-paste markers (`\e[200~` / `\e[201~`) so a pasted payload
-#     is shown as plain text, like a readline agent input box, not the literal
-#     escape sequence.
+#   * A SINGLE-LINE bracketed paste (`\e[200~` ... `\e[201~` with no embedded
+#     newline) is shown as plain text, like a readline agent input box, not the
+#     literal escape sequence.
+#   * Issue #1687 — a MULTI-LINE bracketed paste is COLLAPSED to a Claude-Code
+#     placeholder chip `[Pasted text #N +M lines]` and the body is NOT echoed,
+#     EXACTLY as the real `claude` TUI does (verified against the shipped Claude
+#     Code 2.1.150 binary: `jgH(H,$){...return`[Pasted text #${H} +${$} lines]`}`,
+#     `#N` a session-relative paste counter, `+M` the extra-line count). This is
+#     the case the #1687 ack-gate fix hinges on: the payload-tail needle can
+#     NEVER match a collapsed paste (the body is not on the pane), so before the
+#     fix the ack polled to its full timeout + fallback floor on EVERY multi-line
+#     send — the maintainer's "takes too long to send even when the connection is
+#     okay". The pane now reproduces that exact chip so the connected journey can
+#     prove the ack recognises it (the collapsed-marker count-baseline) and fires
+#     the submit Enter WITHOUT the stall. The real (multi-line) body is retained
+#     internally so the submit still lands the real content.
 #   * On Enter (`\r` / `\n`) it SUBMITS: prints a `FAKE-AGENT SUBMITTED: <text>`
 #     line into the scrollback and clears the input box. The connected test
 #     asserts this submitted marker appears AND the input box is left empty —
@@ -52,8 +65,16 @@ trap cleanup INT TERM
 # Raw, no-echo: we draw the input box ourselves so the echo is deterministic.
 stty -echo -icanon -icrnl min 1 time 0 2>/dev/null || true
 
+# `buffer` is what the input box DISPLAYS (`> <buffer>`). For normal typing and a
+# single-line paste it equals the entered text. For a #1687 collapsed multi-line
+# paste it holds the `[Pasted text #N +M lines]` chip. `submit_buffer` is what a
+# submit Enter actually sends — always the REAL entered/pasted content, so a
+# collapsed paste still submits its real multi-line body.
 buffer=""
+submit_buffer=""
 last_submitted=""
+# Issue #1687: session-relative paste counter, mirroring Claude Code's `#N`.
+paste_counter=0
 
 # Redraw the whole viewport cleanly: home + clear screen, print the readiness
 # marker, the most-recent submitted line (if any), then the input box. Clearing
@@ -89,6 +110,118 @@ read_byte() {
   IFS= read -r -s -N 1 REPLY
 }
 
+# Issue #1687: read a bracketed-paste body until the `\e[201~` end marker. The
+# body may arrive across several `send-keys -H` chunks (the composer chunks the
+# paste by BODY_CHUNK_BYTES), so this blocks until the end marker — which the
+# composer always writes. Returns the body in PASTE_BODY and whether it spanned
+# more than one line in PASTE_HAD_LF (a `\n`/`\r` inside the paste is CONTENT
+# here, NOT a submit — a multi-line paste is one paste, not many submits).
+read_paste_body() {
+  PASTE_BODY=""
+  PASTE_HAD_LF=0
+  while true; do
+    read_byte || cleanup
+    b="$REPLY"
+    if [ "$b" = "$ESC" ]; then
+      read_byte || cleanup
+      if [ "$REPLY" = "[" ]; then
+        csi=""
+        while true; do
+          read_byte || cleanup
+          case "$REPLY" in
+            [@A-Za-z~]) fin="$REPLY"; break ;;
+            *) csi="$csi$REPLY" ;;
+          esac
+        done
+        # `201~` closes the paste; any other CSI inside the body is ignored.
+        if [ "$fin" = "~" ] && [ "$csi" = "201" ]; then return 0; fi
+        continue
+      fi
+      continue
+    fi
+    case "$b" in
+      "$CR"|"$LF") PASTE_HAD_LF=1; PASTE_BODY="$PASTE_BODY$LF" ;;
+      "") : ;;
+      *) PASTE_BODY="$PASTE_BODY$b" ;;
+    esac
+  done
+}
+
+# Consume a CSI escape sequence. A bracketed-paste START (`\e[200~`) reads the
+# whole paste body (see read_paste_body) and then either:
+#   * COLLAPSES a MULTI-LINE paste to the Claude-Code `[Pasted text #N +M lines]`
+#     chip in the DISPLAY buffer while keeping the real body for submit (#1687), or
+#   * echoes a SINGLE-LINE paste inline (the pre-#1687 readline-box behaviour the
+#     #869 / #1526 journeys rely on).
+# Any other CSI (bracketed-paste markers aside — cursor keys etc.) is ignored,
+# same as before.
+handle_esc() {
+  read_byte || cleanup
+  [ "$REPLY" = "[" ] || return 0
+  local csi="" fin=""
+  while true; do
+    read_byte || cleanup
+    case "$REPLY" in
+      [@A-Za-z~]) fin="$REPLY"; break ;;
+      *) csi="$csi$REPLY" ;;
+    esac
+  done
+  if [ "$fin" = "~" ] && [ "$csi" = "200" ]; then
+    read_paste_body
+    if [ "$PASTE_HAD_LF" = "1" ]; then
+      # Extra-line count = number of newlines, matching Claude Code's `+M`.
+      extra=$(printf '%s' "$PASTE_BODY" | tr -cd "$LF" | wc -c | tr -d ' ')
+      paste_counter=$((paste_counter + 1))
+      buffer="$buffer[Pasted text #$paste_counter +$extra lines]"
+      submit_buffer="$submit_buffer$PASTE_BODY"
+    else
+      buffer="$buffer$PASTE_BODY"
+      submit_buffer="$submit_buffer$PASTE_BODY"
+    fi
+    dirty=1
+  fi
+}
+
+# Handle one input byte. Shared by the initial read and the debounce drain so a
+# paste is parsed identically no matter which loop sees its leading ESC.
+process_byte() {
+  ch="$1"
+  [ -z "$ch" ] && return 0
+  case "$ch" in
+    "$CR"|"$LF")
+      # Submit: record the submitted line (shown by the next render) and clear
+      # the input box, so `capture-pane` shows the SUBMITTED marker AND an empty
+      # input — proving the composer Send actually submitted the line. The
+      # submitted text is the REAL content (submit_buffer), so a #1687 collapsed
+      # paste still lands its real multi-line body.
+      last_submitted="$submit_buffer"
+      buffer=""
+      submit_buffer=""
+      dirty=1
+      ;;
+    "$DEL"|"$BS")
+      buffer="${buffer%?}"
+      submit_buffer="${submit_buffer%?}"
+      dirty=1
+      ;;
+    "$CU")
+      # Ctrl-U: clear the whole input line (readline kill-line). Lets a test
+      # reset the input box between cases deterministically.
+      buffer=""
+      submit_buffer=""
+      dirty=1
+      ;;
+    "$ESC")
+      handle_esc
+      ;;
+    *)
+      buffer="$buffer$ch"
+      submit_buffer="$submit_buffer$ch"
+      dirty=1
+      ;;
+  esac
+}
+
 # Render is debounced: after each byte we keep reading any IMMEDIATELY-available
 # bytes (a burst from `send-keys -l` arrives back-to-back) and only redraw once
 # the burst drains, so a 300-char paste renders once, not 300 times.
@@ -105,72 +238,10 @@ while true; do
     # EOF on the channel — exit; the outer `exec sh` keeps the pane alive.
     cleanup
   fi
-  ch="$REPLY"
-  if [ -z "$ch" ]; then
-    # A NUL byte — ignore.
-    continue
-  fi
-  case "$ch" in
-    "$CR"|"$LF")
-      # Submit: record the submitted line (shown by the next render) and clear
-      # the input box, so `capture-pane` shows the SUBMITTED marker AND an empty
-      # input — proving the composer Send actually submitted the line.
-      last_submitted="$buffer"
-      buffer=""
-      dirty=1
-      ;;
-    "$DEL"|"$BS")
-      buffer="${buffer%?}"
-      dirty=1
-      ;;
-    "$CU")
-      # Ctrl-U: clear the whole input line (readline kill-line). Lets a test
-      # reset the input box between cases deterministically.
-      buffer=""
-      dirty=1
-      ;;
-    "$ESC")
-      # Escape: consume a CSI sequence. Bracketed-paste markers are
-      # `\e[200~` (start) and `\e[201~` (end) — strip them so the pasted text
-      # shows as plain input, like a readline agent box.
-      read_byte || cleanup
-      if [ "$REPLY" = "[" ]; then
-        # Read until a final byte in the @-~ CSI-terminator range.
-        while true; do
-          read_byte || cleanup
-          case "$REPLY" in
-            [@A-Z\[\\\]\^_\`a-z\{\|\}~]) break ;;
-            *) : ;;
-          esac
-        done
-        # `200~` / `201~` are bracketed-paste markers — drop them entirely.
-        # Any other CSI (cursor keys etc.) is ignored for this minimal box.
-      fi
-      ;;
-    *)
-      buffer="$buffer$ch"
-      dirty=1
-      ;;
-  esac
+  process_byte "$REPLY"
   # Drain any back-to-back burst bytes before redrawing (debounce).
   while IFS= read -r -s -N 1 -t 0.02 REPLY; do
-    ch="$REPLY"
-    [ -z "$ch" ] && continue
-    case "$ch" in
-      "$CR"|"$LF") last_submitted="$buffer"; buffer=""; dirty=1 ;;
-      "$DEL"|"$BS") buffer="${buffer%?}"; dirty=1 ;;
-      "$CU") buffer=""; dirty=1 ;;
-      "$ESC")
-        read_byte || cleanup
-        if [ "$REPLY" = "[" ]; then
-          while true; do
-            read_byte || cleanup
-            case "$REPLY" in [@A-Z\[\\\]\^_\`a-z\{\|\}~]) break ;; *) : ;; esac
-          done
-        fi
-        ;;
-      *) buffer="$buffer$ch"; dirty=1 ;;
-    esac
+    process_byte "$REPLY"
   done
   flush
 done

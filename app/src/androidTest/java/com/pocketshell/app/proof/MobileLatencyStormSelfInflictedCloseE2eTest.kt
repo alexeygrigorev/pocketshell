@@ -128,6 +128,14 @@ import org.junit.runner.RunWith
  * @see com.pocketshell.app.agents.AgentKindRemoteSource
  * @see SlowClassifyKeepsSharedLeaseJourneyDockerTest
  */
+// CI_JOURNEY_SUITE_JUSTIFIED: NetworkFaultProofBase toxiproxy proof; gated by
+// assumeNetworkFaultProofsEnabled() (self-skips on CI since tests.yml does not
+// start network-fault-proxy:2228). This is a heavy phase-2 fault-injection
+// reproduction — too slow for the per-push journey suite. Its durable gate is
+// the nightly phase-2 NETWORK_FAULT_CLASSES cohort
+// (scripts/nightly-extensive-suite.sh) alongside its ReconnectStormLivelockE2eTest
+// / NatIdleMappingSurvivalE2eTest / PacketLossNetworkFaultE2eTest siblings —
+// wiring it into ci-journey-suite.sh would only produce a vacuous CI skip.
 @RunWith(AndroidJUnit4::class)
 class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
 
@@ -162,7 +170,8 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
      * the session stays Connected.
      */
     @Test
-    fun mobileLatencyStormIsSelfInflicted() = runBlocking<Unit> {
+    fun mobileLatencyStormIsSelfInflicted() {
+        runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -319,6 +328,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
         } finally {
             runCatching { runBlocking { latencyProbe.close() } }
         }
+        }
     }
 
     /**
@@ -328,7 +338,8 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
      * constrains the THRESHOLD, not "reconnects are banned universally".
      */
     @Test
-    fun wifiBaselineNoStormNoReconnect() = runBlocking<Unit> {
+    fun wifiBaselineNoStormNoReconnect() {
+        runBlocking {
         assumeNetworkFaultProofsEnabled()
 
         val key = readFixtureKey()
@@ -382,6 +393,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
                 "expectation=zero overrun, zero reconnect (under-threshold extreme)",
             ),
         )
+        }
     }
 
     // -- assertions --------------------------------------------------------------------

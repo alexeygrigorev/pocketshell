@@ -452,6 +452,8 @@ internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
     if (queuedItem.id != itemId) {
         outboundAttachmentSidecarStore?.removeOutboundItem(itemId)
     }
+    // Issue #1682: record the write-ahead commit on the mirrored `queue` timeline.
+    ComposerQueueDiagnostics.enqueue(queuedItem)
     outboundHandoffCommitForTest?.invoke(queuedItem)
     // Enqueue only. The normal FIFO drain owns upload, claim, watchdog,
     // singleton request state, and wire emission.
@@ -478,6 +480,8 @@ internal suspend fun PromptComposerViewModel.enqueueOutboundSend(
         // existing un-delivered row instead of minting a duplicate.
         sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
     )
+    // Issue #1682: record the write-ahead commit on the mirrored `queue` timeline.
+    ComposerQueueDiagnostics.enqueue(item)
     outboundHandoffCommitForTest?.invoke(item)
     return item
 }

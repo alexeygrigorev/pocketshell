@@ -1272,9 +1272,7 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun triggerCleanPassiveDropForTest(): Boolean {
         val client = clientRef ?: return false
         if (passiveTransportDropEffects.classify(client) == PassiveDropArm.Ignore) return false
-        connectionManager.submit(
-            CoreConnectionEvent.TransportDropped(reason = "test_clean_outage_seam"),
-        )
+        connectionManager.reportRemoteDrop("test_clean_outage_seam")
         projectStatusFromController()
         handlePassiveClientDisconnect(
             client = client,
@@ -1413,9 +1411,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Immediate indicator: walk the controller Live -> Reattaching now, so the
         // connection-lost indicator (header pill / band) surfaces immediately —
         // this is the #822 DETECTION half (V7).
-        connectionManager.submit(
-            CoreConnectionEvent.TransportDropped(reason = "liveness_probe_silent_drop"),
-        )
+        connectionManager.reportRemoteDrop("liveness_probe_silent_drop")
         projectStatusFromController()
         // RECOVERY half: drive the SINGLE reconnect entrypoint
         // (`scheduleAutoReconnect` → `TransportEffects`, Slice C, with the #822

@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux.connection
 import android.util.Log
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.core.connection.ConnectionController
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.ConnectionEvent
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.TmuxPort
@@ -331,7 +332,14 @@ class ConnectionEffectDriver(
             } else if (shouldSubmitControlChannelDrop(client)) {
                 val wasTargetless = isTargetless()
                 val changed = submitTransport(
-                    ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"),
+                    // Issue #1666: carry the TYPED cause derived at the single close authority
+                    // off THIS client's disconnect event. This path is NOT pre-filtered for a
+                    // self-inflicted `-CC` close (the lease edge's `locallyInitiated` gate is
+                    // the lease side), so typing it here + the reducer's refusal is what makes
+                    // a self-inflicted control-channel close structurally inert.
+                    ConnectionEvent.TransportDropped(
+                        SelfInflictedClose.dropCauseForControlChannelClose(client.disconnectEvent.value),
+                    ),
                 )
                 if (changed || wasTargetless) {
                     controlChannelDroppedEffect(client)
@@ -362,8 +370,14 @@ class ConnectionEffectDriver(
                     )
                     record(Observation.DropSuppressed)
                 } else {
+                    // Issue #1666: the untyped boolean oracle fallback (feeds that omit the
+                    // typed drop stream) carries no per-close intent token, so it is a genuine
+                    // remote drop by construction — production uses the typed [controlChannelDrops]
+                    // path above, which derives the real cause.
                     submitTransport(
-                        ConnectionEvent.TransportDropped(reason = "control_channel_disconnected"),
+                        ConnectionEvent.TransportDropped(
+                            DropCause.RemoteFailure("control_channel_disconnected"),
+                        ),
                     )
                 }
             }
@@ -480,9 +494,14 @@ class ConnectionEffectDriver(
                             )
                             record(Observation.DropSuppressed)
                         } else {
+                            // Issue #1666: this submit is reached ONLY past the
+                            // `edge.locallyInitiated` self-inflicted gate above, so a lease
+                            // `Down` here is a GENUINE remote drop by construction — carry it
+                            // typed as [DropCause.RemoteFailure] so the reducer runs the honest
+                            // ladder (the load-bearing NEGATIVE: real deaths must still recover).
                             submitTransport(
                                 ConnectionEvent.TransportDropped(
-                                    reason = "lease_down:${edge.reason}",
+                                    DropCause.RemoteFailure("lease_down:${edge.reason}"),
                                 ),
                             )
                         }

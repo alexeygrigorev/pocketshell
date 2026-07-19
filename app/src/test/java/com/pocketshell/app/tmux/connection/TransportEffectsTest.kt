@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.core.connection.ConnectionEvent
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.LivenessProbe
@@ -118,7 +119,7 @@ class TransportEffectsTest {
                     override suspend fun probe(): Boolean = false
                     override fun onProbeFailed(consecutiveFailures: Int) {
                         manager.submit(
-                            ConnectionEvent.TransportDropped("liveness_probe_silent_drop"),
+                            ConnectionEvent.TransportDropped(DropCause.RemoteFailure("liveness_probe_silent_drop")),
                         )
                         effects.onAutoReconnect { io.markAutoBodyRan() }
                     }

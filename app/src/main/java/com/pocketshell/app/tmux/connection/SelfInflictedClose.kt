@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.ssh.SshLeaseCloseReason
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
@@ -39,16 +40,23 @@ import com.pocketshell.core.tmux.TmuxDisconnectReason
 object SelfInflictedClose {
 
     /**
-     * Is this lease `Closed` edge OUR OWN teardown?
+     * Issue #1666 (D28 Layer 3) — the TYPED cause of a lease `Closed` edge. This is the
+     * ONE derivation authority for the lease edge: [isSelfInflictedLeaseClose] is now just
+     * `this is SelfInflicted`, so there is a SINGLE exhaustive `when` (no parallel filter to
+     * drift). The reducer refuses a [DropCause.SelfInflicted] drop by construction
+     * (`ConnectionController.onTransportDropped`), so the storm cannot be re-fed by any close
+     * path that carries this cause.
      *
      * @param reason the [SshLeaseCloseReason] the lease manager stamped on the edge at its
      *   emit site. The reason IS the emitter's intent token — every `emitStateLocked` call
      *   in `SshLeaseManager` names why it is closing — so this is emitter-side tagging, not
      *   consumer-side inference about "was that us?" (the inference that rotted into #1632).
      */
-    fun isSelfInflictedLeaseClose(reason: SshLeaseCloseReason?): Boolean = when (reason) {
+    fun dropCauseForLeaseClose(reason: SshLeaseCloseReason?): DropCause = when (reason) {
         // We asked for the teardown. `ExplicitDisconnect` is the reported defect itself:
-        // recovery's own first act (`TmuxSessionViewModel.kt:8455`).
+        // recovery's own first act (`TmuxSessionViewModel.kt:8455`). This is also the class
+        // the #1681 `agent_kind_classify` self-close falls into — a bounded-exec/probe that
+        // tears down (or force-refreshes) the shared lease it borrowed.
         SshLeaseCloseReason.ExplicitDisconnect,
         // We evicted a warm transport to force a fresh dial (network handoff / recovery).
         SshLeaseCloseReason.ForceRefresh,
@@ -61,47 +69,69 @@ object SelfInflictedClose {
         // We cancelled our own in-flight connect (#1185). It never produced a live
         // transport, so there is no transport to have "dropped".
         SshLeaseCloseReason.ConnectCancelled,
-        -> true
+        -> DropCause.SelfInflicted(reason.name)
 
         // The peer died under us. sshj flipped `isConnected` false — per the #1632
         // investigation a raw SSHException from a channel read means the transport was
         // ALREADY dead, so a redial is justified.
-        SshLeaseCloseReason.Disconnected,
+        SshLeaseCloseReason.Disconnected -> DropCause.RemoteFailure(reason.name)
+
         // The always-on keepalive watchdog (#945) DETECTED a silent peer death and closed
         // the corpse. We executed the close; the peer caused it. This is precisely the
         // mobile silent-drop detector — filtering it would strand the maintainer with no
         // reconnect at all, the one outcome worse than the storm.
-        SshLeaseCloseReason.KeepaliveDead,
+        SshLeaseCloseReason.KeepaliveDead -> DropCause.KeepaliveDead
+
         // An unnamed close carries no evidence of local intent; assume genuine and recover.
-        null,
-        -> false
+        null -> DropCause.Unknown
     }
 
     /**
-     * Is this `-CC` control-channel disconnect OUR OWN close? Preserves the #1568 P0-5
-     * behavior exactly — it is the same predicate, relocated from the deleted inline
-     * `TmuxSessionViewModel` lambda into this authority.
+     * Is this lease `Closed` edge OUR OWN teardown? Thin predicate over the typed
+     * [dropCauseForLeaseClose] authority so the self-inflicted answer is derived in exactly
+     * ONE place. Behaviour is unchanged from the pre-#1666 exhaustive `when`.
      */
-    fun isSelfInflictedControlChannelClose(event: TmuxDisconnectEvent?): Boolean {
-        if (event == null) return false
+    fun isSelfInflictedLeaseClose(reason: SshLeaseCloseReason?): Boolean =
+        dropCauseForLeaseClose(reason) is DropCause.SelfInflicted
+
+    /**
+     * Issue #1666 (D28 Layer 3) — the TYPED cause of a `-CC` control-channel disconnect.
+     * The ONE derivation authority for the `-CC` edge (the driver's control-channel submit
+     * carries this straight onto the [com.pocketshell.core.connection.ConnectionEvent.TransportDropped]
+     * so a self-inflicted `-CC` close the driver does NOT pre-filter is still refused by the
+     * reducer). Preserves the #1568 P0-5 classification exactly.
+     */
+    fun dropCauseForControlChannelClose(event: TmuxDisconnectEvent?): DropCause {
+        // An unnamed close carries no evidence of local intent; assume genuine and recover.
+        if (event == null) return DropCause.Unknown
         // #1568: a detach performed as part of swapping/replacing the attached client.
-        if (event.intent == DETACH_OR_REPLACE_INTENT) return true
+        if (event.intent == DETACH_OR_REPLACE_INTENT) return DropCause.SelfInflicted(DETACH_OR_REPLACE_INTENT)
         return when (event.reason) {
             // Our own `TmuxClient.close()` / detach. Ignoring these is what broke the
             // #1562 dial -> close -> re-arm -> dial storm.
             TmuxDisconnectReason.ExplicitClose,
             TmuxDisconnectReason.ExplicitDetach,
-            -> true
+            -> DropCause.SelfInflicted(event.reason.name)
 
             // Genuine passive losses — recovery depends on every one of these arming.
             TmuxDisconnectReason.ReaderEof,
             TmuxDisconnectReason.ReaderException,
             TmuxDisconnectReason.CommandTimeout,
             TmuxDisconnectReason.ServerExited,
-            TmuxDisconnectReason.Unknown,
-            -> false
+            -> DropCause.RemoteFailure(event.reason.name)
+
+            // A genuinely unattributable reader exit — the conservative not-self-inflicted
+            // bucket, still recovers.
+            TmuxDisconnectReason.Unknown -> DropCause.Unknown
         }
     }
+
+    /**
+     * Is this `-CC` control-channel disconnect OUR OWN close? Thin predicate over the typed
+     * [dropCauseForControlChannelClose] authority. Preserves the #1568 P0-5 behavior exactly.
+     */
+    fun isSelfInflictedControlChannelClose(event: TmuxDisconnectEvent?): Boolean =
+        dropCauseForControlChannelClose(event) is DropCause.SelfInflicted
 
     /** The #1568 client-swap intent marker carried on a detach we performed ourselves. */
     private const val DETACH_OR_REPLACE_INTENT = "detach_or_replace"

@@ -42,8 +42,8 @@ class ConnectionControllerJitterTest {
         val c = ConnectionController(FakeClock(), transport, random = Random(seed))
         c.setReconnectLadder(ladder)
         c.bringLive(transport)
-        c.submit(ConnectionEvent.TransportDropped("d")) // Live -> Reattaching
-        c.submit(ConnectionEvent.TransportDropped("d")) // -> Reconnecting(1)
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d"))) // Live -> Reattaching
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d"))) // -> Reconnecting(1)
         repeat(rungsToBurn) { c.submit(ConnectionEvent.ReconnectFailed) }
         return (c.state.value as ConnectionState.Reconnecting).retryDelayMs
     }
@@ -142,8 +142,8 @@ class ConnectionControllerJitterTest {
         val c = ConnectionController(FakeClock(), transport, random = Random(7))
         c.setReconnectLadder(ladder)
         c.bringLive(transport)
-        c.submit(ConnectionEvent.TransportDropped("d"))
-        c.submit(ConnectionEvent.TransportDropped("d")) // -> Reconnecting(1)
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+        c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d"))) // -> Reconnecting(1)
         c.submit(ConnectionEvent.ReconnectFailed) // -> Reconnecting(2), a jittered rung
 
         val attempt = (c.state.value as ConnectionState.Reconnecting).attempt
@@ -176,8 +176,8 @@ class ConnectionControllerJitterTest {
         val rungPerInstall = (0 until 30).map {
             c.setReconnectLadder(ladder)
             c.bringLive(transport)
-            c.submit(ConnectionEvent.TransportDropped("d"))
-            c.submit(ConnectionEvent.TransportDropped("d"))
+            c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
+            c.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("d")))
             c.submit(ConnectionEvent.ReconnectFailed)
             val d = (c.state.value as ConnectionState.Reconnecting).retryDelayMs
             assertWithinJitterBand(1_000L, d, "per-install rung 2")

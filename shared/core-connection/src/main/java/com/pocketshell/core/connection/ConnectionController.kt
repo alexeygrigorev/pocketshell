@@ -539,8 +539,22 @@ class ConnectionController(
      */
     private fun onTransportDropped(
         current: ConnectionState,
-        @Suppress("UNUSED_PARAMETER") event: ConnectionEvent.TransportDropped,
+        event: ConnectionEvent.TransportDropped,
     ): ConnectionState {
+        // Issue #1666 (D28 Layer 3) — the reducer's OWN refusal, beneath the #1643 driver
+        // filter. A SELF-INFLICTED drop is an ECHO of a teardown WE started (recovery's own
+        // disconnect, a force-refresh eviction, an idle reap, a lifecycle teardown, a
+        // client-swap detach, an agent-classify/bounded-exec self-close) — it is NOT news of
+        // a remote death. Refuse it OUTRIGHT: no episode start, no [reconnectAttempt] advance,
+        // no state change, no ladder. This is what makes the storm impossible by construction
+        // rather than by a single effect-layer branch: any future close path that submits a
+        // self-inflicted drop is structurally inert here.
+        //
+        // The load-bearing NEGATIVE (D31): a genuine death — [DropCause.RemoteFailure] /
+        // [DropCause.KeepaliveDead] / [DropCause.Unknown] — falls straight through to the
+        // honest ladder below, so over-suppression can never silence a real drop and strand
+        // the app (the one outcome worse than the storm).
+        if (event.cause is DropCause.SelfInflicted) return current
         val host = current.hostOrNull() ?: return current
         val target = current.targetIdOrNull() ?: return current
         return when (current) {

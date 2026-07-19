@@ -81,7 +81,7 @@ class ConnectionControllerNetworkChangedTest {
         val controller = controller(transport).bringLive(transport)
 
         // A transient drop puts us mid-heal (silent).
-        controller.submit(ConnectionEvent.TransportDropped("blip"))
+        controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("blip")))
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         // A network change during the heal must NOT restart the ladder or surface

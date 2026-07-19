@@ -3230,9 +3230,18 @@ public class TmuxSessionViewModel @Inject constructor(
         return connectJob
     }
 
+    /**
+     * Issue #1654: the ONE place the VM's ladder is written == the ONE place the controller's
+     * ladder is re-installed (bound to the WRITE, never to a recovery path). Empty means
+     * "auto-reconnect disabled" for the VM's own guards and is NOT pushed down — the
+     * controller's ladder must never be empty. See [DEFAULT_AUTO_RECONNECT_DELAYS_MS].
+     */
     @androidx.annotation.VisibleForTesting
     internal fun setAutoReconnectDelaysForTest(delaysMs: List<Long>) {
         autoReconnectDelaysMs = delaysMs
+        if (delaysMs.isNotEmpty()) {
+            connectionManager.setReconnectLadder(delaysMs)
+        }
     }
 
     @androidx.annotation.VisibleForTesting
@@ -3309,10 +3318,17 @@ public class TmuxSessionViewModel @Inject constructor(
     // Reconnecting bar, no "Attaching…" overlay, no disconnect band. While set, the
     // displayed-status projection ([projectStatusFromController]) holds `Connected`
     // and the [RevealStateMachine] holds the live frame (see
-    // [RevealStateMachine.setSilentHealInFlight]). Set + cleared together for the
-    // bounded duration of [launchForegroundHealWithinGrace]'s heal job only, so an
-    // unexpected (non-grace) foreground drop keeps its normal calm-Reconnecting band.
+    // [RevealStateMachine.setSilentHealInFlight]). Issue #754 (re-fix): armed at the within-grace
+    // foreground DECISION POINT ([armWithinGraceSilentHealHold]), released once after the bounded
+    // grace window (NOT tied to a single recovery job), so the ride-through covers BOTH the
+    // reseed_only path AND the confirmed-dead heal path whose failed single-shot heal hands off to
+    // the loud auto-reconnect ladder — else that ladder's Reconnecting paints the overlay WITHIN
+    // grace. A real BEYOND-grace drop still surfaces once the bounded release fires.
     private var withinGraceSilentHealInFlight: Boolean = false
+
+    // Issue #754 (re-fix): SINGLE-OWNER bounded release of the hold above. A fresh within-grace
+    // foreground cancels + restarts it; only the CURRENT job's completion clears the hold.
+    private var withinGraceSilentHealReleaseJob: Job? = null
 
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
     // SYNCHRONOUSLY by [detachForBackground] at background time, stashed for the
@@ -3642,46 +3658,31 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun onAppForegrounded(resumedWithinGrace: Boolean = false) {
         appActive = true
-        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground return is now
-        // owned by the driver/controller as a RESEED-ONLY effect, gated on the
-        // controller's grace predicate. Within grace the `-CC` control client was
-        // NEVER torn down (the teardown is deferred to grace-elapsed), so the warm
-        // lease is intact: we re-capture the active pane and let the existing
-        // SeedLanded feedback promote the controller back to Live. We DO NOT run the
-        // old inline `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)`
-        // path, which raised the reveal-machine hold (the "Attaching…" overlay) on any
-        // confirmed-dead probe verdict even inside grace — the D21 violation #754 fixes.
-        // The within-grace gate (`resumedWithinGrace && warm lease`) is exactly the
-        // controller's `onForeground` predicate (`now < deadline && transport.isWarm`),
-        // so the VM and the `ConnectionController` agree on the classification by
-        // construction; the driver's `foregroundReattachEffect` seam fires the SAME
-        // reseed body on the controller's Backgrounded→Reattaching edge (unit-tested in
-        // `ConnectionEffectDriverTest`).
+        // Issue #754 (re-fix): arm the silent-heal hold for the WHOLE bounded grace window BEFORE
+        // the reseed-vs-heal branch below, so BOTH within-grace outcomes ride through without the
+        // "Attaching…" overlay. Beyond grace we never arm, so a real outage still surfaces.
+        if (resumedWithinGrace) {
+            armWithinGraceSilentHealHold()
+        }
+        // EPIC #687 slice 1c-iv-c (#754): the within-grace foreground return is a driver/controller
+        // RESEED-ONLY effect gated on the grace predicate. Within grace the `-CC` client was NEVER
+        // torn down, so the warm lease is intact: re-capture the active pane and let SeedLanded
+        // promote the controller back to Live. NO `connect()`, NO reveal-machine "Attaching…"
+        // overlay (the D21 within-grace contract, replacing the deleted inline
+        // `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path). The gate
+        // mirrors the controller's `onForeground` predicate (`now < deadline && transport.isWarm`).
         if (resumedWithinGrace && canReseedWithinGraceForeground()) {
-            // The `-CC` control client was NEVER torn down within grace (the controller
-            // therefore stays Live in production — Background is only submitted at
-            // grace-elapsed teardown, NOT here, so the #738 driver detach never fires).
-            // Run the RESEED-ONLY effect directly: it re-promotes Live (a no-op
-            // TransportLive on an already-Live controller) and heals blank panes over
-            // the warm client. NO connect(), NO the reveal-machine hold "Attaching…"
-            // overlay — the D21 within-grace contract. The driver's
-            // `foregroundReattachEffect` seam invokes this SAME body on the controller's
-            // Backgrounded→Reattaching edge (the classification model, unit-tested in
-            // `ConnectionEffectDriverTest`); both paths share the one reseed owner.
-            // EPIC #792 Slice B: route through the single [GraceEffects] owner (the dead
-            // `foregroundReattachReseedForTest` dual-write override is deleted).
+            // EPIC #792 Slice B: route through the single [GraceEffects] owner — the driver's
+            // `foregroundReattachEffect` seam invokes this SAME reseed body on the controller's
+            // Backgrounded→Reattaching edge (unit-tested in `ConnectionEffectDriverTest`).
             graceEffects.onForegroundReattachReseed()
             return
         }
-        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level
-        // background-grace window (#450) is the SOLE grace authority — when it reports
-        // `resumedWithinGrace=true`, a within-grace foreground must stay CALM (no
-        // Reconnecting/Disconnected/Connecting/Attaching band or overlay) EVEN WHEN the
-        // `-CC` socket dropped while backgrounded (WiFi→cellular handoff / Doze). The
-        // reseed-only fast path above declines in that case (the dropped socket killed
-        // the warm lease / flipped the status off Connected / paused the passive
-        // auto-reconnect), so without this branch the foreground would fall into the
-        // reconnect ladder and paint the maintainer's scary band — the #635 regression.
+        // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level background-grace window (#450)
+        // is the SOLE grace authority — a within-grace foreground must stay CALM even when the
+        // `-CC` socket dropped while backgrounded (WiFi→cellular / Doze). The reseed-only fast path
+        // above declines then (the dropped socket killed the warm lease), so without this branch
+        // the foreground would fall into the reconnect ladder and paint the #635 scary band.
         // Instead we SILENTLY heal the dropped channel within grace: re-open a fresh
         // `-CC` control client over a freshly-acquired lease and reseed, with NO band
         // and NO overlay. The inline passive-disconnect grace clock that fired while
@@ -3884,17 +3885,48 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #754 (re-fix): arm the within-grace silent-heal reveal/status hold for the ENTIRE
+     * bounded grace window, at the within-grace foreground DECISION POINT (BEFORE the
+     * reseed-vs-heal branch in [onAppForegrounded]), so BOTH the reseed_only path AND the
+     * confirmed-dead heal path (a clean cut whose dead lease declines the reseed, whose failed
+     * single-shot heal hands off to the loud auto-reconnect ladder) ride through WITHOUT the
+     * "Attaching…" overlay. SINGLE OWNER: a fresh within-grace foreground cancels + restarts the
+     * bounded release, and only the CURRENT job clears it (guarded), so a genuine BEYOND-grace
+     * drop still surfaces its reconnect band the instant the release fires.
+     */
+    private fun armWithinGraceSilentHealHold() {
+        val previous = withinGraceSilentHealReleaseJob
+        withinGraceSilentHealInFlight = true
+        revealController.setSilentHealInFlight(true)
+        val job = launchContainedTeardown {
+            delay(passiveDisconnectGraceMs.coerceAtLeast(1L))
+        }
+        withinGraceSilentHealReleaseJob = job
+        job.invokeOnCompletion {
+            if (withinGraceSilentHealReleaseJob === job) {
+                withinGraceSilentHealReleaseJob = null
+                withinGraceSilentHealInFlight = false
+                revealController.setSilentHealInFlight(false)
+                // Re-drive the reveal from the CURRENT controller state so a still-failing
+                // BEYOND-grace reconnect surfaces its band the instant the hold lifts (the ongoing
+                // Reconnecting was emitted while gated and the state flow dedupes it); a recovered
+                // Live controller stays Live.
+                revealController.onConnectionState(connectionManager.state)
+                projectStatusFromController()
+            }
+        }
+        // Re-point the owner BEFORE cancelling the prior timer so its guarded handler is a no-op.
+        previous?.cancel()
+    }
+
+    /**
      * EPIC #687 slice 1c-iv-c (#754): the RESEED-ONLY within-grace foreground reattach
      * body — the hard-cut replacement for the deleted inline
      * `probeCurrentRuntimeOnForegroundIfNeeded → connect(LifecycleReattach)` path. The
-     * warm `-CC` control client is still attached (the teardown is deferred to
-     * grace-elapsed), so there is NOTHING to reconnect: the emulator still holds the
-     * live frame the channel streamed while attached. We promote the controller back
-     * to Live (the channel is live) and run the existing blank-pane safety-net reseed
-     * over the SAME live client so a pane that came back blank under a brief link blip
-     * still heals — without a handshake. Crucially this NEVER calls `connect()` and
-     * NEVER raises the reveal-machine hold, so the user sees no "Attaching…" overlay and
-     * no reconnect — the D21 within-grace contract.
+     * warm `-CC` control client is still attached (the teardown is deferred to grace-elapsed), so
+     * there is NOTHING to reconnect. We promote the controller back to Live and run the existing
+     * blank-pane safety-net reseed over the SAME live client so a pane that came back blank under a
+     * brief blip still heals — no handshake, no `connect()`, no "Attaching…" overlay (D21 contract).
      *
      * This is also the body the [ConnectionEffectDriver]'s `foregroundReattachEffect`
      * seam invokes on the controller's Backgrounded→Reattaching edge (unit-tested),
@@ -3917,6 +3949,11 @@ public class TmuxSessionViewModel @Inject constructor(
             "generation" to connectGeneration,
             "clientHash" to System.identityHashCode(client),
         )
+        // Issue #754 (re-fix): arm the SINGLE-OWNER within-grace silent-heal hold. The
+        // [onAppForegrounded] caller already armed it; this ALSO covers the
+        // [ConnectionEffectDriver.foregroundReattachEffect] seam invocation (the guard makes the
+        // double-arm a safe no-op) so a blackhole-blip Reattaching never paints the overlay.
+        armWithinGraceSilentHealHold()
         // The control channel is still live — promote the controller Reattaching → Live
         // so the displayed status stays the calm `Connected` (no Reconnecting/overlay).
         connectionManager.observeForegroundReattachLive()
@@ -3952,6 +3989,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (isCurrentRuntime(guard)) armActivePaneStaleRenderWatchdog(guard)
             }
         }
+        // The hold's bounded release is owned by [armWithinGraceSilentHealHold].
     }
 
     /**
@@ -4207,15 +4245,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // ride-through, not a reconnect. Promote the controller back toward Live so the
         // header indicator never shows Reconnecting/Disconnected during the heal.
         connectionManager.observeForegroundReattachLive()
-        // Issue #1098 (item 4 / #635): the within-grace silent heal MUST re-open the
-        // dropped `-CC` transport, which walks the controller `Live -> Reattaching ->
-        // Live`. Without this the [RevealStateMachine] would project that Reattaching as
-        // [RevealState.Seeding] → the screen paints the full-surface "Attaching…" loading
-        // overlay over the live frame (the spurious overlay #635/item-4 reproduces). Hold
-        // the reveal at its current (live) frame for the bounded duration of the heal so
-        // the ride-through stays INVISIBLE; cleared in the job's completion handler below.
-        withinGraceSilentHealInFlight = true
-        revealController.setSilentHealInFlight(true)
+        // Issue #1098 (item 4 / #635): the within-grace silent heal re-opens the dropped `-CC`
+        // transport (controller `Live -> Reattaching -> Live`); a hold keeps [RevealStateMachine]
+        // from projecting that Reattaching as [RevealState.Seeding] (the "Attaching…" overlay).
+        // Issue #754 (re-fix): the hold is armed at the foreground DECISION POINT
+        // ([armWithinGraceSilentHealHold], SINGLE OWNER) and released after the whole grace window
+        // — NOT on this heal job — so the confirmed-dead ride-through survives the single-shot
+        // heal's FAILURE + loud-ladder handoff below (clearing the hold there was the reopened bug).
         projectStatusFromController()
         // Issue #935 R1: contained — the within-grace heal re-opens a fresh `-CC`
         // over a fresh lease; a teardown-race throw must not crash the process.
@@ -4260,19 +4296,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }
-        // Issue #1098 (item 4): release the silent-heal reveal hold once the heal
-        // completes. On success the transport re-promoted the controller to Live, so the
-        // reveal is already a live frame; on failure the calm auto-reconnect ladder takes
-        // over and the next Reconnecting projection may show the normal loading surface.
-        // Cleared in the completion handler (success, failure, OR a teardown-race cancel)
-        // so the hold can never get stuck on, which would freeze the "Attaching…" overlay
-        // suppression across an unrelated later attach.
+        // Issue #754 (re-fix): the hold is NOT released here — that premature release (on a failed
+        // single-shot heal that hands off to the loud ladder) was the reopened bug. The SINGLE
+        // OWNER [armWithinGraceSilentHealHold] releases it after the whole grace window; we only
+        // re-project the status on completion so a success settles on the live `Connected`.
         healJob.invokeOnCompletion {
-            withinGraceSilentHealInFlight = false
-            revealController.setSilentHealInFlight(false)
-            // Re-project so a genuine heal FAILURE (the calm auto-reconnect ladder is now
-            // running) surfaces its normal Reconnecting band the instant the hold lifts,
-            // and a SUCCESS settles on the live `Connected` it already reached.
             projectStatusFromController()
         }
     }
@@ -5777,41 +5805,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // attach. Here a timeout is a fall-back signal, unlike the
         // within-grace foreground probe which must ride it through.
         return probeRuntimeControlChannel(runtime.client, runtime.session) == RuntimeHealthVerdict.HEALTHY
-    }
-
-    /**
-     * Probe the live tmux control channel and classify the result.
-     *
-     * Issue #635 / #636 (Slice 1): the within-grace foreground resume must
-     * NOT treat a probe *timeout* as proof of death. `SshSession.isConnected`
-     * only reflects whether the socket object is open — for a silently
-     * dropped TCP path it stays `true` until sshj's keepalive miss-counter
-     * trips (15s × 4 = 60s, deliberately matched to the 60s background
-     * grace). A `display-message` round-trip that takes longer than the
-     * 750ms probe budget on a still-`isConnected` transport means the link
-     * is slow/recovering, not dead. Returning a distinct
-     * [RuntimeHealthVerdict.TIMEOUT] lets the foreground probe ride that
-     * through and defer the death verdict to sshj's keepalive oracle, while
-     * the switch-path activation still falls back on any non-healthy result.
-     */
-    private suspend fun probeRuntimeControlChannel(
-        client: TmuxClient,
-        session: SshSession?,
-    ): RuntimeHealthVerdict {
-        if (client.disconnected.value) return RuntimeHealthVerdict.DISCONNECTED
-        if (session?.isConnected != true) return RuntimeHealthVerdict.NOT_CONNECTED
-        val outcome = runCatching {
-            withTimeoutOrNull(RUNTIME_HEALTH_PROBE_TIMEOUT_MS) {
-                client.sendBestEffortCommand("display-message -p '#{session_name}'")
-            }
-        }
-        val response = outcome.getOrElse {
-            // A thrown write/read failure (e.g. a TCP reset the SSH library
-            // surfaced as an exception) is a genuine transport error, not a
-            // ride-through-able slowness.
-            return RuntimeHealthVerdict.ERROR
-        } ?: return RuntimeHealthVerdict.TIMEOUT
-        return if (response.isError) RuntimeHealthVerdict.ERROR else RuntimeHealthVerdict.HEALTHY
     }
 
     private fun deactivateCurrentRuntimeToCache(): List<CachedTmuxRuntime> {
@@ -8212,7 +8205,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 // UNGUARDED on purpose — see [ReconnectRungFailureSource] for why an
                 // `autoReconnectJob?.isActive` guard here would be a measured no-op.
                 connectionManager.reconnectRungFailed(ReconnectRungFailureSource.PassiveGraceLoop)
-                val retryDelayMs = PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS
+                // Issue #1654 (THE ABSORBER): the feed advanced the counter — SHOW it, or
+                // it never reaches the user. See "PassiveGraceBandReprojection" in Support.
+                projectStatusFromController()
+                // Issue #1654: space the next cycle by the SINGLE ladder's backoff for the
+                // attempt the feed advanced to — not a flat 250ms. See
+                // [passiveGraceCycleRetryDelayMs].
+                val retryDelayMs = passiveGraceCycleRetryDelayMs(connectionManager.state)
                 delay(retryDelayMs)
             }
             false
@@ -8403,6 +8402,44 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #1653: the ONE teardown authority for a POST-dial rung failure — both exits of
+     * [silentlyReconnectTransportAfterPassiveDisconnect] (`!ready` and thrown) route here. Why a
+     * second parallel guard is forbidden, and the [lease]-null / [forceEvict] cases:
+     * [shouldEvictTransportAfterStageFailure]. Returns whether the lease was evicted.
+     */
+    private suspend fun resolveRungStageFailure(
+        lease: SshLease?,
+        leaseKey: SshLeaseKey,
+        replacement: TmuxClient?,
+        staleClient: TmuxClient?,
+        forceEvict: Boolean = false,
+    ): Boolean {
+        val session = lease?.session
+        val evict = forceEvict ||
+            session == null ||
+            shouldEvictTransportAfterStageFailure(session.vouchedAlive())
+        // Re-point clientRef off the replacement BEFORE closing it (#866 cancel storm — see the
+        // warm rung's swap-then-close for the full why). The `-CC` CHANNEL always drops; only the
+        // TRANSPORT under it is the vouch's call.
+        if (clientRef === replacement) {
+            clientRef = staleClient
+        }
+        runCatching { replacement?.close() }
+        if (evict) {
+            if (session == null || sessionRef === session) sessionRef = null
+            if (lease == null || leaseRef === lease) leaseRef = null
+            // The lease is the SHARED per-host transport: only a genuine death reaches this.
+            withContext(NonCancellable) {
+                runCatching { sshLeaseManager.disconnect(leaseKey) }
+            }
+        } else {
+            leaseRef = lease
+            sessionRef = session
+        }
+        return evict
+    }
+
     private suspend fun silentlyReconnectTransportAfterPassiveDisconnect(
         // Nullable (EPIC #687 P2): the within-grace foreground heal may have no stale
         // client handle to close (the passive path already unregistered it). The
@@ -8453,6 +8490,7 @@ public class TmuxSessionViewModel @Inject constructor(
             if (lease == null) {
                 // #1539: never handshook -> not a live link -> abandoned (the preserved
                 // fast-fail). The loop feeds the counter per failed cycle (#1610 Q3).
+                // #1653: not the post-dial authority's business — nothing handshook to weigh.
                 recordTransportReattachStageFail(
                     target = target,
                     cause = "dial_handshake_timeout",
@@ -8509,29 +8547,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 true
             } == true
             if (!ready) {
-                // Issue #1539 — THE kill site: used to close + lease-evict unconditionally, unable
-                // to tell a timed-out DIAL from a slow ATTACH on a proven-up link.
-                // See [shouldEvictTransportAfterStageFailure].
-                val evict = shouldEvictTransportAfterStageFailure(session.vouchedAlive())
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                }
-                // The `-CC` CHANNEL never came up so it always drops; the TRANSPORT under it is
-                // the vouch's call.
-                runCatching { replacement?.close() }
-                if (evict) {
-                    if (sessionRef === session) sessionRef = null
-                    if (leaseRef === lease) leaseRef = null
-                    withContext(NonCancellable) {
-                        runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                    }
-                } else {
-                    // KEEP the handshaken transport, PUBLISHED as live, so the next tick's
-                    // re-vouch retries the attach over it via the channel-only warm rung. Nulling
-                    // these refs is what used to disable that rung and force the redial.
-                    leaseRef = lease
-                    sessionRef = session
-                }
+                // #1539's kill site; #1653 routed it through the authority the throw exit shares.
+                val evict = resolveRungStageFailure(
+                    lease = lease,
+                    leaseKey = leaseTarget.leaseKey,
+                    replacement = replacement,
+                    staleClient = staleClient,
+                )
                 recordTransportReattachStageFail(
                     target = target,
                     cause = if (evict) "attach_not_ready" else "attach_slow_transport_kept",
@@ -8588,32 +8610,25 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
-            if (t is CancellationException) {
-                if (clientRef === replacement) {
-                    clientRef = staleClient
-                    sessionRef = null
-                    leaseRef = null
-                }
-                runCatching { replacement?.close() }
-                withContext(NonCancellable) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                }
-                throw t
-            }
-            runCatching { replacement?.close() }
-            withContext(NonCancellable) {
-                runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-            }
-            if (clientRef === replacement) {
-                clientRef = staleClient
-                sessionRef = null
-                leaseRef = null
-            }
+            // Issue #1653 — THE OTHER kill site, the one #1539 missed: a stalled tail's INNER
+            // sshj timeout beats the OUTER stage budget, so the same "slow tail on a proven-up
+            // link" arrives here THROWN instead of as `!ready`. This evicted unconditionally, so
+            // the vouch never ran and a live SHARED transport still died. Same authority now.
+            val evict = resolveRungStageFailure(
+                lease = acquiredLease,
+                leaseKey = leaseTarget.leaseKey,
+                replacement = replacement,
+                staleClient = staleClient,
+                // Cancellation = deliberate abandonment (grace expiry / switch / a superseding
+                // connect), not a stage verdict — the rung is going away. Unchanged from base.
+                forceEvict = t is CancellationException,
+            )
+            if (t is CancellationException) throw t
             recordPassiveReattachThrewFail(
                 target = target,
                 source = "silent_transport_reattach",
                 throwable = t,
-                evictedLease = true,
+                evictedLease = evict,
                 clientHash = replacement?.let { System.identityHashCode(it) },
                 elapsedMs = SystemClock.elapsedRealtime() - startedAtMs,
                 shortAppSwitchFields = passiveReattachLogFields(target),
@@ -8785,9 +8800,8 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         connectingTarget = null
         refreshReconnectAvailability()
-        val delays = autoReconnectDelaysMs.ifEmpty { listOf(0L) }
-        // Issue #1328 (S5): the controller owns the SINGLE ladder; this body only dials.
-        connectionManager.setReconnectLadder(delays)
+        // Issue #1654: this body no longer INSTALLS the ladder — see [DEFAULT_AUTO_RECONNECT_DELAYS_MS].
+        val delays = autoReconnectDelaysMs
         recordAutoReconnectDecision(
             decision = "scheduled",
             target = target,
@@ -12700,25 +12714,40 @@ public class TmuxSessionViewModel @Inject constructor(
         // moved between ttys would keep its stale "no agent" verdict
         // even after the agent CLI was started on the new tty.
         val input = Triple(cwd, command, tty)
-        // Issue #975 (B1′, dedup ordering): bust the one-shot foreign kind-guess
-        // cache for a CONFIRMED-SHELL pane BEFORE the dedup early-return, not
-        // after it. A `claude` started inside an already-detected shell pane does
-        // NOT change the `(cwd, command, tty)` triple (no tty change), so the
-        // dedup key matches and — with the bust ordered AFTER the early-return
-        // (the #962 ordering bug) — the cache-bust never ran and the stale "no
-        // agent" guess persisted for the life of the session, suppressing the
-        // Conversation toggle. Busting first means the next re-probe of a
-        // confirmed-shell pane always re-evaluates the daemon (and the #975 B1
-        // transcript fallback), so a live agent started in the shell can bind and
-        // clear the verdict even when the input triple is unchanged. A genuine
-        // shell re-evaluates to "no agent" again (no flap — #894).
-        refreshForeignGuessForConfirmedShellPane(pane)
+        // Issue #1641 (C2): re-classify a CONFIRMED-SHELL pane ONLY on a real
+        // trigger — its detection input `(cwd, command, tty)` changing since the
+        // last probe — NOT on every reconcile.
+        //
+        // `applyParsedPanes` calls this for every pane on EVERY reconcile. The
+        // #975 B1′ ordering fix used to bust the one-shot foreign kind-guess
+        // cache UNCONDITIONALLY here, so a confirmed-shell pane re-ran the 3.5s
+        // `agents kind` daemon classify (AgentKindRemoteSource) on every single
+        // reconcile — a steady per-reconcile RPC that, before #1641's transport
+        // fix, closed the shared `-CC` lease whenever it exceeded its bound on a
+        // slow link, an uncredited entry trigger of the #1610 reconnect storm.
+        // The classify verdict cannot change while the pane's input is unchanged,
+        // so re-firing it every reconcile was pure waste (and worse than waste on
+        // a degraded link). Restoring the one-shot rule: bust + force a re-probe
+        // only when the input actually changed.
+        //
+        // This preserves #962/#975. A `claude`/`codex`/`opencode` started inside
+        // an already-detected shell changes the pane's foreground command
+        // (e.g. `bash`→`node`), so the input triple changes → the guess is busted
+        // and the daemon (plus the #975 B1 transcript fallback) re-evaluates
+        // exactly once, binds the live agent, and
+        // [clearConfirmedShellOnLiveAgentDetection] lifts the confirmed-shell
+        // verdict so the Conversation toggle returns. A genuine shell whose input
+        // has not changed keeps its cached "no agent" guess (no flap — #894) and,
+        // crucially, spawns no further classify RPC.
+        val inputChanged = paneAgentInputs[pane.paneId] != input
+        if (inputChanged) {
+            refreshForeignGuessForConfirmedShellPane(pane)
+        }
         if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) {
-            // The cache-bust above already forced the daemon to re-evaluate on
-            // the NEXT probe. A confirmed-shell pane whose input is unchanged but
-            // whose one-shot guess was just invalidated must not be left deduped
-            // on a stale in-flight job — re-probe it so the bust takes effect.
-            if (!isConfirmedShellSession(pane.sessionId)) return
+            // Input unchanged and a probe is already in flight — dedup. Nothing
+            // triggered a re-classify (the #1641 guarantee: no per-reconcile
+            // re-probe of an unchanged confirmed-shell pane).
+            return
         }
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentTailGenerations.remove(pane.paneId)
@@ -13840,27 +13869,14 @@ public class TmuxSessionViewModel @Inject constructor(
             -> Unit
             else -> {
                 // ISSUE #872 / #785 twin: TRUST THE WARM LEASE ON SEND, DON'T REDIAL.
-                //
-                // This is the un-applied twin of the #785 attachment fix
-                // ([awaitLiveSessionForAttachment] above). The maintainer reported that
-                // tapping Send on a STABLE wifi connection flashed "Reconnecting" for ~1s
-                // and then "Retry" — and the staged attachment was gone. Root cause: this
-                // wait read a SYNCHRONOUS "Connected right now?" snapshot
-                // ([liveTmuxClientForSendOrNull] gates on [inlineConnectionStatus] +
-                // [clientRef]) and, finding it TRANSIENTLY not-Connected (a within-grace
-                // heal mid-flight, or the status momentarily off after a quick bg/fg
-                // round-trip), UNCONDITIONALLY fired a fresh-lease `onManualReconnect()` —
-                // a LOUD `connect(trigger = Reconnect)` that tore the transport (the
-                // spurious flap) AND wiped the staged attachment.
-                //
-                // The fix mirrors slice-3: when the active target's SSH lease is still
-                // WARM ([liveLeaseKeys] membership — the single grace owner is holding the
-                // `-CC` connection and a silent heal is already re-promoting it), do NOT
-                // redial. POLL for the live client to land instead (the loop below), so a
-                // Send on a stable/warm connection reuses the live lease with no flap. We
-                // only fall back to the connect-on-action reconnect when the lease is
-                // genuinely COLD (grace elapsed / socket truly dead), where a redial is the
-                // correct recovery.
+                // Reached only when there is NO live writable client (#1686 admits a live
+                // one above). The maintainer saw Send on a STABLE link flash "Reconnecting"
+                // then "Retry" (staged attachment gone) because a transiently-not-Connected
+                // snapshot UNCONDITIONALLY fired a fresh-lease `onManualReconnect()` — a loud
+                // redial that tore the transport. Fix: when the active target's SSH lease is
+                // still WARM ([liveLeaseKeys] — the grace owner holds the `-CC` and a silent
+                // heal is re-promoting it) POLL the heal (loop below), do NOT redial; only a
+                // genuinely COLD lease (grace elapsed / socket dead) falls back to a redial.
                 if (isSendLeaseWarm()) {
                     // Warm lease: POLL the silent heal (fall through to the wait below);
                     // do NOT fire a reconnect on a stable connection.
@@ -13918,9 +13934,22 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun sendWaitWouldRedialForTest(): Boolean = !isSendLeaseWarm()
 
-    private fun liveTmuxClientForSendOrNull(): TmuxClient? {
-        if (inlineConnectionStatus !is ConnectionStatus.Connected) return null
-        return clientRef?.takeUnless { it.disconnected.value }
+    // Issue #1686: the WIRE is the oracle — admit on the transport's own truth, not
+    // the ConnectionStatus enum (the old gate refused a live clientRef on a false
+    // not-Connected label — the #1680-storm composer clog). Redial stays enum-driven.
+    private fun liveTmuxClientForSendOrNull(): TmuxClient? =
+        clientRef?.takeUnless { it.disconnected.value }
+
+    // Issue #1686: wire-truth the composer queue reads instead of the enum.
+    internal fun isSendTransportWritable(): Boolean = liveTmuxClientForSendOrNull() != null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun liveTmuxClientForSendOrNullForTest(): TmuxClient? = liveTmuxClientForSendOrNull()
+
+    // #1686 seam: force a false NOT-Connected label without touching clientRef.
+    @androidx.annotation.VisibleForTesting
+    internal fun forceInlineReconnectingStatusKeepingClientForTest() {
+        _connectionState = ConnectionState.Reconnecting("t", 0, "t", 1, 5, 0L, "false-disconnect")
     }
 
     internal suspend fun sendToAgentPaneResult(
@@ -14100,13 +14129,20 @@ public class TmuxSessionViewModel @Inject constructor(
             // (Codex's permanent `(/goal resume)` footer occupies it, so the ack fires
             // only on OUR paste adding an occurrence, never on the footer).
             val ackBaseline = outboundDeliveryLedger.needleBaseline(paneId, sendToken, payload) ?: 0
+            // Issue #1687: pre-paste count of the collapsed-paste chip, so a chip already
+            // on the pane can't false-confirm OUR multi-line send (see the ack gate).
+            val collapsedMarkerBaseline = if (agentSubmitPayloadIsMultiLine(payload)) {
+                agentSubmitCollapsedPasteMarkerCount(listOf(localRenderTextForPane(paneId)))
+            } else {
+                0
+            }
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
                 sendBracketedPaste(client, paneId, payloadBytes)
             } else if (payload.isNotEmpty()) {
                 sendLiteralTextKeys(client, paneId, payload)
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
-            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent, ackBaseline)
+            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent, ackBaseline, collapsedMarkerBaseline)
             consumeSendResultLostSeamForTest()
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
@@ -14181,26 +14217,26 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #869: ack-gate the submit Enter on the pasted composer text actually
-     * landing in the agent's input, instead of the pre-#869 blind fixed sleep that
-     * raced ahead of the TUI's ingestion ("I have to press Enter after"). Two parts:
-     * (1) a MINIMUM floor (the #526 setting; Codex's [CODEX_AGENT_SUBMIT_DELAY_MS]
-     * still applies) and (2) an ack poll of `capture-pane -p` for the payload,
-     * pressing Enter the instant a capture CONFIRMS the paste (RTT-adaptive for
-     * free). Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]; on a needle miss the Enter is
-     * held to `max(minFloor, AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + measuredRtt)` (a
-     * WORKING delay, never the 150ms that raced), never a hung Send.
+     * Issue #869: ack-gate the submit Enter on the pasted text actually landing in the
+     * agent's input (not the pre-#869 blind sleep that raced ingestion). Polls
+     * `capture-pane -p` and presses Enter the INSTANT a capture CONFIRMS the paste
+     * (RTT-adaptive). Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]; a needle miss holds the
+     * Enter to `max(minFloor, FALLBACK_FLOOR + measuredRtt)`, never a hung Send.
      *
-     * Issue #1577b: the ack is COUNT-BASELINE-aware. [baselineNeedleCount] is the
-     * payload needle's pre-paste occurrence count on the pane; the ack fires only
-     * when the CURRENT count INCREASES over it (our paste added an occurrence), NOT
-     * on mere presence. On a Codex pane whose status footer permanently renders the
-     * command it wants (`Goal blocked (/goal resume)`), a presence-only ack matched
-     * that footer INSTANTLY and fired Enter before Codex had read the paste — so on
-     * a busy Codex the text and the CR landed in ONE stdin read batch and Codex's
-     * paste-burst heuristic SWALLOWED the CR, leaving `/goal resume` unsubmitted.
-     * Requiring an increase guarantees a REAL gap: Enter is sent only after the
-     * typed text is confirmed ingested, so the CR lands in a separate read.
+     * Issue #1687: the confirming capture IS the ingestion evidence, so the happy path
+     * submits the moment it lands with NO pre-capture floor. The old
+     * #526/[CODEX_AGENT_SUBMIT_DELAY_MS] "minimum", paid BEFORE the first capture on
+     * EVERY send (150ms, 250ms Codex), was a flat per-send latency tax; it is gone. The
+     * floor now applies only where there is no ack: a bare-Enter payload and the
+     * needle-miss fallback.
+     *
+     * Issue #1577b: COUNT-BASELINE-aware. [baselineNeedleCount] is the needle's
+     * pre-paste count; the ack fires only on an INCREASE, never on mere presence — so a
+     * Codex `(/goal resume)` footer already on the pane can't fire Enter early (the
+     * swallowed-CR bug). Issue #1687: [collapsedMarkerBaseline] is the same for Claude
+     * Code's `[Pasted text #N +M lines]` chip — a collapsed multi-line paste never
+     * echoes its body, so the ack ALSO confirms on that chip's increase (see
+     * [agentSubmitCollapsedPasteMarkerCount]) instead of stalling to the full timeout.
      */
     private suspend fun awaitAgentPasteIngestedBeforeSubmit(
         client: TmuxClient,
@@ -14208,6 +14244,7 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         baselineNeedleCount: Int,
+        collapsedMarkerBaseline: Int,
     ) {
         val configured = agentSubmitEnterDelayMsOverrideForTest
             ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
@@ -14220,22 +14257,21 @@ public class TmuxSessionViewModel @Inject constructor(
 
         val gateStartMs = agentSubmitNowMs()
 
-        // An empty payload (e.g. a bare-Enter submit) has nothing to confirm —
-        // just honour the floor and return so we never poll for a missing needle.
+        // An empty payload (bare-Enter submit) has nothing to confirm — honour the
+        // floor and return so we never poll for a missing needle.
         val ackNeedle = agentSubmitAckNeedle(payload)
         if (ackNeedle == null) {
             if (minFloorMs > 0L) delay(minFloorMs)
             return
         }
 
-        // Pre-floor: never submit before the configured/Codex floor even if the
-        // capture confirms instantly (preserves the #526 tunable minimum).
-        if (minFloorMs > 0L) delay(minFloorMs)
+        // Issue #1687: NO pre-capture floor — the ack poll starts immediately and Enter
+        // fires on the confirming capture (~1 RTT), not a flat 150/250ms per-send tax.
+        val payloadIsMultiLine = agentSubmitPayloadIsMultiLine(payload)
 
         val ackTimeoutMs = agentSubmitAckTimeoutMsOverrideForTest ?: AGENT_SUBMIT_ACK_TIMEOUT_MS
         var poll = 0
-        // The longest single `capture-pane` round-trip seen so far — the RTT
-        // addend for the hardened fallback floor (#869).
+        // Longest single `capture-pane` round-trip — the RTT addend for the fallback floor (#869).
         var maxCaptureRttMs = 0L
         var disconnectedDuringAck = false
         val ackObserved = withTimeoutOrNull(ackTimeoutMs.coerceAtLeast(1L)) {
@@ -14245,7 +14281,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     return@withTimeoutOrNull false
                 }
                 val captureStartMs = agentSubmitNowMs()
-                val visible = agentPaneShowsPayload(client, paneId, ackNeedle, baselineNeedleCount)
+                val visible = agentPaneShowsPayload(
+                    client,
+                    paneId,
+                    ackNeedle,
+                    baselineNeedleCount,
+                    payloadIsMultiLine,
+                    collapsedMarkerBaseline,
+                )
                 maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
                 if (visible) {
                     // The paste is visible in the pane — the agent has ingested it.
@@ -14266,12 +14309,10 @@ public class TmuxSessionViewModel @Inject constructor(
         if (disconnectedDuringAck) return
         if (ackObserved) return
 
-        // Codex input-freeze follow-up: the ack timeout must bound the WHOLE
-        // capture loop, not just the number of polls. A single stuck
-        // `capture-pane` on the busy control lane used to park this coroutine past
-        // the advertised timeout, making Codex sends appear frozen. On timeout,
-        // keep the #869 fallback floor, then let the caller send Enter rather than
-        // blocking user input indefinitely.
+        // Codex input-freeze follow-up: the ack timeout bounds the WHOLE capture loop,
+        // not just the poll count — a single stuck `capture-pane` used to park this
+        // coroutine past the timeout, freezing Codex sends. On timeout, keep the #869
+        // fallback floor, then let the caller send Enter rather than blocking forever.
         val fallbackFloorMs = maxOf(
             minFloorMs,
             com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
@@ -14291,26 +14332,34 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #869/#1577b: `capture-pane -p` the pane and report whether OUR paste has
-     * landed — i.e. the [needle]'s whitespace-stripped occurrence count now EXCEEDS
-     * [baselineNeedleCount] (its pre-paste count). Both text and needle are
-     * whitespace-stripped so a wrapped/reflowed input box still matches. A count
-     * increase (not mere presence) is required so a payload the pane ALREADY showed
-     * before the paste — a Codex `Goal blocked (/goal resume)` footer — does not
-     * false-confirm the ack. A failed/empty capture is "not yet visible" so the
-     * caller keeps polling; best-effort, never throws.
+     * Issue #869/#1577b: `capture-pane -p` the pane and report whether OUR paste landed
+     * — the [needle]'s whitespace-stripped occurrence count now EXCEEDS
+     * [baselineNeedleCount]. Both sides are whitespace-stripped so a wrapped input box
+     * still matches. A count INCREASE (not presence) is required so a payload already on
+     * the pane (a Codex `(/goal resume)` footer) can't false-confirm. A failed/empty
+     * capture is "not yet visible"; best-effort, never throws.
+     *
+     * Issue #1687: a collapsed multi-line paste ([payloadIsMultiLine]) never echoes its
+     * body, so it is EQUALLY confirmed when the `[Pasted text #N +M lines]` chip count
+     * rises above [collapsedMarkerBaseline] — the fix for the per-multi-line-send stall.
      */
     private suspend fun agentPaneShowsPayload(
         client: TmuxClient,
         paneId: String,
         needle: String,
         baselineNeedleCount: Int,
+        payloadIsMultiLine: Boolean,
+        collapsedMarkerBaseline: Int,
     ): Boolean {
         val response = runCatching {
             client.capturePaneTextViaExec(paneId)
         }.getOrNull() ?: return false
         if (response.isError) return false
-        return agentSubmitVisibleTextNeedleCount(response.output, needle) > baselineNeedleCount
+        if (agentSubmitVisibleTextNeedleCount(response.output, needle) > baselineNeedleCount) {
+            return true
+        }
+        return payloadIsMultiLine &&
+            agentSubmitCollapsedPasteMarkerCount(response.output) > collapsedMarkerBaseline
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -15184,35 +15233,6 @@ public class TmuxSessionViewModel @Inject constructor(
             cwd = pane.cwd,
             tty = pane.paneTty,
             command = pane.currentCommand,
-        )
-    }
-
-    /**
-     * Issue #975 (B1′, dedup ordering) test seam: true when a re-probe of
-     * [paneId] would re-evaluate the daemon — i.e. the one-shot foreign-kind
-     * guess cache for the pane's session is ABSENT (busted). Lets a JVM test
-     * assert that [startAgentDetectionForPane] busts the cache for a
-     * confirmed-shell pane BEFORE the dedup early-return, so a `claude` started
-     * inside an already-detected shell pane (unchanged `(cwd, command, tty)`)
-     * still forces a re-probe instead of keeping the stale "no agent" guess.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun foreignGuessIsCachedForTest(sessionId: String): Boolean =
-        sessionForeignKindGuessCache.containsKey(sessionId.trim())
-
-    /**
-     * Issue #975 (B1′) test seam: seed the one-shot foreign-kind guess cache for
-     * [sessionId] with a `unknown`-shaped (kind null) verdict, mirroring a daemon
-     * classify that already cached "no agent" before the agent launched. A
-     * subsequent [startAgentDetectionForPaneForTest] on a confirmed-shell pane of
-     * that session must BUST this entry (the B1′ ordering fix) so the daemon
-     * re-evaluates.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun seedForeignGuessCacheForTest(sessionId: String) {
-        sessionForeignKindGuessCache.putIfAbsent(
-            sessionId.trim(),
-            ForeignKindGuessEntry(kind = null, isShell = false),
         )
     }
 

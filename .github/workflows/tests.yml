@@ -153,6 +153,29 @@ jobs:
           scripts/check-connection-vm-ratchet.sh --self-test
           scripts/check-connection-vm-ratchet.sh
 
+      # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
+      # composable family. TmuxSessionScreen is the app's MAIN screen and a single
+      # enormous composable; when its compiled dex method frame crosses ART's
+      # 256-register WIDE-REGISTER cliff the class fails on-device verification
+      # (java.lang.VerifyError) and the screen crashes at load — invisible to the
+      # JVM unit tests. This has recurred THREE times (#1158/#1362/#1685). The
+      # existing on-device proof (TmuxSessionScreenArtVerifyE2eTest) only runs in
+      # the batched post-merge emulator lane, which is exactly why recurrence #3
+      # shipped. This guard runs PER-PR in the cheap Unit lane: it dexes the debug
+      # APK and asserts every TmuxSessionScreen* method stays under a budget (200)
+      # that keeps a hard margin below the 256 cliff, so a creep back toward the
+      # cliff is a per-PR RED here instead of a phone crash later. --self-test
+      # proves the parser/budget red->green logic (no APK) first; then a debug
+      # build + the real check. dexdump comes from the runner's Android build-tools.
+      - name: Dex register-pressure ratchet (issue #1685)
+        run: |
+          chmod +x scripts/check-dex-register-pressure.sh
+          scripts/check-dex-register-pressure.sh --self-test
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+          scripts/check-dex-register-pressure.sh
+
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
       # JVM-free shell test (stubbed gradle/adb, tiny budget) proving the suite
@@ -205,6 +228,26 @@ jobs:
           chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
           scripts/test-ci-ndk-retry.sh
 
+      # Issue #1646: the executed-test-count guard's OWN red->green self-test.
+      # Proves — with synthetic result XML + synthetic Gradle console output, no
+      # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run
+      # (missing task / UP-TO-DATE / FROM-CACHE / all-skipped / below-floor) and
+      # PASSES a genuine one, and that NO-SOURCE on a genuinely test-free module
+      # does not trip it. Runs BEFORE the Gradle step so a broken guard is caught
+      # in seconds rather than 20 minutes in. The self-test asserts its own check
+      # count, so the anti-vacuous-test guard cannot itself pass vacuously.
+      - name: Executed-test-count guard self-test (issue #1646)
+        run: |
+          chmod +x scripts/check-executed-test-counts.sh
+          scripts/check-executed-test-counts.sh --self-test
+
+      # Issue #1646: mark the start of the test run. Any TEST-*.xml older than
+      # this marker is a leftover from an earlier run whose task was skipped as
+      # UP-TO-DATE, not evidence from THIS run.
+      - name: Mark test-run start (issue #1646)
+        run: |
+          touch "${RUNNER_TEMP}/unit-test-run-start"
+
       # Issue #760: the unit job occasionally failed with ALL visible tests
       # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
       # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out
@@ -215,15 +258,49 @@ jobs:
       # and the explicit -Dorg.gradle.jvmargs caps the gradle daemon/launcher
       # heap while -Pkotlin/test forks inherit the project's modest -Xmx. This is
       # infra robustness only — no test is removed, skipped, or weakened.
+      #
+      # Issue #1646: tee the console to a log (--console=plain) so the count
+      # guard below can see which test tasks actually EXECUTED vs came back
+      # UP-TO-DATE / FROM-CACHE / NO-SOURCE. pipefail keeps Gradle's exit code
+      # authoritative through the tee.
       - name: Run JVM unit tests
+        id: unit_tests
         timeout-minutes: 35
         run: |
-          ./gradlew test --no-daemon --stacktrace \
+          set -o pipefail
+          ./gradlew test --no-daemon --stacktrace --console=plain \
             --max-workers=2 \
-            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/unit-test-gradle.log"
 
-      - name: Upload unit test reports on failure
-        if: failure()
+      # Issue #1646: a green Gradle run that executed ZERO tests is not evidence.
+      # Gradle prints test counts ONLY on failure, so before this step a green
+      # run had no log line and no artifact proving any test ran. Parse the
+      # result XML, hard-fail any expected test task that executed 0 tests (or
+      # fell below its floor), and ECHO the per-task counts into the job log and
+      # the job summary so a human/agent certifying a PR can read them without
+      # downloading an artifact.
+      #
+      # Runs whenever the test step itself ran — on GREEN (the point of the
+      # issue) and on RED alike, since "killed mid-run but reported exit 0"
+      # (incident 3) is a case where the count is the only thing that exposes the
+      # truth. Scoped to the test step's own conclusion rather than a bare
+      # always() so an earlier guard failing (Gradle never ran, no log written)
+      # does not add a confusing second red about a missing log file.
+      - name: Assert tests actually executed (issue #1646)
+        if: always() && steps.unit_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-executed-test-counts.sh
+          scripts/check-executed-test-counts.sh \
+            --newer-than "${RUNNER_TEMP}/unit-test-run-start" \
+            --gradle-log "${RUNNER_TEMP}/unit-test-gradle.log"
+
+      # Issue #1646: upload ALWAYS, not just on failure. A green run's result XML
+      # IS the evidence that the run was real; throwing it away and keeping only
+      # failures is precisely why CI could not prove a green run executed
+      # anything.
+      - name: Upload unit test reports
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: unit-test-reports

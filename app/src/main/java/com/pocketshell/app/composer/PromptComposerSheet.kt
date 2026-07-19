@@ -1403,16 +1403,22 @@ public fun PromptComposerSendDispatcher(
             } else {
                 // Issue #971/#987 (maintainer decision — Option A): a failed /
                 // timed-out send on a degraded link is a connection drop, not a
-                // permanent rejection. The host `onSend` cannot distinguish the
-                // two (it returns only false/timeout), so treat it as the common
-                // drop case: keep the prompt QUEUED and auto-send it on reconnect
-                // (the #900 flush wired in TmuxSessionScreen) instead of returning
-                // it to the composer for a manual resend. This removes the
-                // contradictory "send again or discard" vs "will retry" stacking
-                // the maintainer reported on #987. markOutboundSendDeferred falls
-                // back to a composer-restore only when there is no durable queue
-                // row, so the prompt is never silently lost.
-                viewModel.markOutboundSendDeferred(request)
+                // permanent rejection — keep the prompt QUEUED and auto-send it on
+                // reconnect (the #900 flush wired in TmuxSessionScreen) instead of
+                // returning it to the composer. markOutboundSend* falls back to a
+                // composer-restore only when there is no durable queue row, so the
+                // prompt is never silently lost.
+                //
+                // Issue #1686 (failure taxonomy — the WIRE is the oracle): classify
+                // the failure at the point of knowledge. A live, writable transport
+                // handle RIGHT NOW ⇒ the send reached the wire and was REJECTED → burn
+                // the bounded budget (parks a poison row, #1602). No writable transport
+                // ⇒ transport-class → re-grant the budget so a flapping/prolonged outage
+                // never parks the row (the #1686 clog).
+                viewModel.markOutboundSendDeferred(
+                    request,
+                    resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                )
             }
         }
     }

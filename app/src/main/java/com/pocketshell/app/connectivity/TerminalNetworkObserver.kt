@@ -54,6 +54,18 @@ class TerminalNetworkObserver @Inject constructor(
     private var closed: Boolean = false
 
     /**
+     * Issue #1683 / #1631 — how many default-network callbacks the [detector]
+     * SUPPRESSED (returned null: an idempotent already-lost repeat, or a
+     * same-identity change that emits nothing). These returned before ANY record,
+     * so the #1631 finding "no repeated callbacks in the log" was
+     * unverifiable-BY-CONSTRUCTION: "it didn't happen" and "it happened but wasn't
+     * recorded" were indistinguishable. This counter closes that gap — a
+     * rate-limited `network_change_suppressed` INPUT makes the suppression volume
+     * visible without one line per callback flooding the ring.
+     */
+    private val suppressedCallbackCount = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /**
      * Issue #1098 (item 5) test seam. The synthetic loss/restore proofs
      * ([emitSyntheticSnapshotForTest]) drive a NoValidatedNetwork → Validated
      * sequence through the SAME shared [detector] the real platform callbacks
@@ -157,7 +169,8 @@ class TerminalNetworkObserver @Inject constructor(
         snapshot: TerminalNetworkSnapshot,
         reason: String,
     ): TerminalNetworkChange? {
-        val change = detector.update(snapshot = snapshot, reason = reason) ?: return null
+        val change = detector.update(snapshot = snapshot, reason = reason)
+            ?: return recordSuppressedCallback(reason)
         // Issue #997: the trail outcome is kind-aware so a bare loss / restore is
         // visible in the device trail (not mislabelled as a validated handoff).
         val outcome = when (change.kind) {
@@ -191,6 +204,27 @@ class TerminalNetworkObserver @Inject constructor(
         return change
     }
 
+    /**
+     * Issue #1683 / #1631 — record a SUPPRESSED default-network callback (the
+     * [detector] returned null) as a rate-limited INPUT, then return null so the
+     * caller's suppression semantics are unchanged (diagnostics-only, no behavior
+     * change). The first suppression and then every [SUPPRESSED_LOG_INTERVAL]-th
+     * carry the running total + reason, so the exported trace shows the
+     * suppression VOLUME without one line per callback flooding the shared ring.
+     */
+    private fun recordSuppressedCallback(reason: String): TerminalNetworkChange? {
+        val total = suppressedCallbackCount.incrementAndGet()
+        if (total == 1L || total % SUPPRESSED_LOG_INTERVAL == 0L) {
+            DiagnosticEvents.record(
+                "connection",
+                "network_change_suppressed",
+                "suppressedTotal" to total,
+                "reason" to reason,
+            )
+        }
+        return null
+    }
+
     private fun currentSnapshot(): TerminalNetworkSnapshot {
         val manager = cm ?: return TerminalNetworkSnapshot.NoValidatedNetwork
         val active = manager.activeNetwork ?: return TerminalNetworkSnapshot.NoValidatedNetwork
@@ -217,6 +251,15 @@ class TerminalNetworkObserver @Inject constructor(
 
     companion object {
         private const val TAG = "PsTerminalNetwork"
+
+        /**
+         * Issue #1683 / #1631 — the suppressed-callback rate limit: emit the first
+         * suppression and then every Nth, carrying the running total. Bounds the
+         * volume so a same-identity callback storm cannot flood the shared ring
+         * while still making "the suppression happened, N times" provable.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal const val SUPPRESSED_LOG_INTERVAL = 10L
     }
 }
 

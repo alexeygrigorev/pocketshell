@@ -7,6 +7,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import com.pocketshell.app.composer.ComposerQueueDiagnostics
 import com.pocketshell.app.composer.OutboundLauncherBadge
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.outboundLauncherBadge
@@ -140,12 +141,17 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
     targetSessionKey: String,
     promptComposerViewModel: PromptComposerViewModel,
     controller: OutboundQueueAutoFlushController,
+    // Issue #1686: the wire-oracle drain gate — the transport-writable probe wired to
+    // `TmuxSessionViewModel.isSendTransportWritable()`. Defaulted so callers/tests that
+    // only exercise the enum gate compile unchanged.
+    transportWritable: () -> Boolean = { false },
 ) {
     LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
         runOutboundQueueAutoFlush(
             sessionLive = sessionLive,
             outboundQueueItems = promptComposerViewModel.outboundQueueItems,
             controller = controller,
+            transportWritable = transportWritable,
             retryNext = { excludingIds ->
                 promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
             },
@@ -167,6 +173,13 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
             // verify-before-resend (see the constant's KDoc).
             sweepStaleInFlight = { staleAfterMs ->
                 promptComposerViewModel.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
+            },
+            // Issue #1682: an undelivered row for THIS target exists right now →
+            // a `not_live` drain tick is worth recording (a message waiting behind
+            // a shut gate), vs a bare idle closed window (no record).
+            hasPendingWork = {
+                promptComposerViewModel.outboundQueueItems.value
+                    .outboundLauncherBadge(targetSessionKey) != null
             },
         )
     }
@@ -210,23 +223,55 @@ internal suspend fun runOutboundQueueAutoFlush(
     // Defaulted to a no-op so existing unit tests that only exercise the redispatch
     // lanes keep compiling unchanged.
     sweepStaleInFlight: (staleAfterMs: Long) -> Unit = {},
+    // Issue #1682: whether the target has any undelivered row right now — feeds the
+    // controller's `not_live` drain diagnostic (see [OutboundQueueAutoFlushController.onQueueSnapshotChanged]).
+    // Defaulted so existing unit call sites compile.
+    hasPendingWork: () -> Boolean = { false },
+    // Issue #1686 (make the WIRE the oracle): the transport-writable probe. The drain
+    // gate is OPEN whenever the enum says Connected ([sessionLive]) OR a live, writable
+    // transport handle exists — so a FALSE/flapping not-Connected label (the #1680
+    // storm) no longer shuts the drain (the composer clog). The poll lane now runs
+    // UNCONDITIONALLY and re-evaluates this gate each tick, so a transport that heals
+    // WITHOUT an enum window flip (a silent false-disconnect recovery) is still drained
+    // within one backoff. A tick with the gate shut is a cheap diagnostic no-op — no
+    // dispatch, no reconnect kick (a genuinely-dead wire keeps the gate closed, so
+    // there is no new reconnect pressure). Defaulted to `{ false }` so existing unit
+    // call sites keep the pure-`sessionLive` gate and compile unchanged.
+    transportWritable: () -> Boolean = { false },
 ): Unit = coroutineScope {
+    fun drainGateOpen(): Boolean = sessionLive || transportWritable()
     launch {
         outboundQueueItems.collect {
-            controller.onQueueSnapshotChanged(sessionLive, retryNext)
+            controller.onQueueSnapshotChanged(drainGateOpen(), hasPendingWork, retryNext)
         }
     }
-    if (sessionLive) {
-        // One sweep up front so a row already stranded when the live window opens
-        // (e.g. an app restart that left an `Uploading`/`InFlight` row) recovers
-        // promptly instead of waiting a full backoff for the first poll tick.
-        sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
-        while (isActive) {
-            delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
-            sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
-            controller.onQueueSnapshotChanged(sessionLive, retryNext)
-        }
+    // One sweep up front so a row already stranded when the gate opens (e.g. an app
+    // restart that left an `Uploading`/`InFlight` row) recovers promptly instead of
+    // waiting a full backoff for the first poll tick.
+    if (drainGateOpen()) sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
+    while (isActive) {
+        delay(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS)
+        if (drainGateOpen()) sweepStaleInFlight(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS)
+        controller.onQueueSnapshotChanged(drainGateOpen(), hasPendingWork, retryNext)
     }
+}
+
+/**
+ * Issue #1682: a SAFE, bounded label for a [TmuxSessionViewModel.ConnectionStatus]
+ * — the sealed subtype's name only (`Idle` / `Connecting` / `Switching` /
+ * `Connected` / `Reconnecting` / `Failed`). The status data classes carry
+ * host/port/user and a failure message; those are NEVER surfaced here, only the
+ * coarse shape the queue's drain gate reads. Recorded with each `window_flip`.
+ */
+internal fun connectionStatusDiagnosticLabel(
+    status: TmuxSessionViewModel.ConnectionStatus,
+): String = when (status) {
+    is TmuxSessionViewModel.ConnectionStatus.Idle -> "Idle"
+    is TmuxSessionViewModel.ConnectionStatus.Connecting -> "Connecting"
+    is TmuxSessionViewModel.ConnectionStatus.Switching -> "Switching"
+    is TmuxSessionViewModel.ConnectionStatus.Connected -> "Connected"
+    is TmuxSessionViewModel.ConnectionStatus.Reconnecting -> "Reconnecting"
+    is TmuxSessionViewModel.ConnectionStatus.Failed -> "Failed"
 }
 
 /**
@@ -261,11 +306,23 @@ internal class OutboundQueueAutoFlushController(
     fun onConnectionWindowChanged(
         sessionLive: Boolean,
         targetSessionId: String,
+        // Issue #1682: the raw `ConnectionStatus` label (`Connected` / `Reconnecting`
+        // / `Failed` / …) that drove this flip — recorded on the mirrored `queue`
+        // timeline so an enum-vs-transport disagreement is readable against the
+        // `connection`-category events. Defaulted so existing unit call sites compile.
+        connectionStatusLabel: String = "",
         requeueStaleInFlight: () -> Unit,
     ) {
         val nextKey = sessionLive to targetSessionId
         if (nextKey == windowKey) return
         windowKey = nextKey
+        // Issue #1682: the drain window opened/closed — capture WHICH status enum
+        // drove it (the smoking-gun pairing). Diagnostics-only; no behaviour change.
+        ComposerQueueDiagnostics.windowFlip(
+            sessionLive = sessionLive,
+            connectionStatusLabel = connectionStatusLabel,
+            targetSessionKey = targetSessionId,
+        )
         // A genuine window flip is a fresh slate — clear all per-row backoffs so a
         // reconnect re-arms every row immediately (the existing #900/#993 path).
         lastAttemptAtMs.clear()
@@ -274,9 +331,27 @@ internal class OutboundQueueAutoFlushController(
 
     fun onQueueSnapshotChanged(
         sessionLive: Boolean,
+        // Issue #1682: whether the target has any undelivered row RIGHT NOW. Only
+        // consulted on the closed-gate (`!sessionLive`) path so a `not_live` drain
+        // outcome — a message that arrived while the drain gate was shut and was
+        // NEVER attempted, the clog's core symptom — is recorded WITHOUT spamming an
+        // idle closed window. Defaulted (and placed BEFORE [retryNext]) so existing
+        // `onQueueSnapshotChanged(sessionLive = …) { retryNext }` trailing-lambda
+        // call sites keep binding the lambda to [retryNext] and compile unchanged.
+        hasPendingWork: () -> Boolean = { false },
         retryNext: (excludingIds: Set<String>) -> String?,
     ): String? {
-        if (!sessionLive) return null
+        if (!sessionLive) {
+            // Issue #1682: the gate is shut (enum not-Connected). If rows are
+            // waiting, record that the drain did NOT attempt them. Diagnostics-only.
+            if (hasPendingWork()) {
+                ComposerQueueDiagnostics.drainAttempt(
+                    outcome = "not_live",
+                    sessionKey = windowKey?.second,
+                )
+            }
+            return null
+        }
         val now = clock()
         // Drop rows whose backoff has elapsed — they are eligible to re-dispatch
         // again (this is what un-parks a silently-healed deferred row) and pruning

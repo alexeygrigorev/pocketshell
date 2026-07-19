@@ -42,8 +42,12 @@ class ConnectionControllerCoverageFirstTest {
     private fun controller(
         clock: FakeClock = FakeClock(),
         transport: FakeTransportPort = FakeTransportPort(),
-        maxReconnectAttempts: Int = ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
-    ) = ConnectionController(clock, transport, maxReconnectAttempts)
+        // Issue #1654: the budget IS the ladder's length — the separate `maxReconnectAttempts`
+        // knob (and its empty-ladder fallback) is deleted, because "the ladder is empty so use
+        // a different budget" was the storm-path bug. A flat all-zero ladder of the requested
+        // size preserves each caller's intent (N attempts, no backoff) exactly.
+        maxReconnectAttempts: Int = ConnectionController.DEFAULT_RECONNECT_LADDER_MS.size,
+    ) = ConnectionController(clock, transport, List(maxReconnectAttempts) { 0L })
 
     private fun ConnectionController.bringLive(
         transport: FakeTransportPort,

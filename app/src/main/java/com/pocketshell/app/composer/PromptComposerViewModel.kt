@@ -1155,66 +1155,46 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #971/#987 (maintainer decision — Option A): the canonical
-     * drop/wedge-failure path for a send that owns a durable outbound queue row.
-     * A send that fails because the connection dropped (or wedged past the
-     * watchdog) must NOT return to the composer for a manual resend — it STAYS
-     * QUEUED and auto-sends on reconnect (the #900 flush). This:
+     * Issue #971/#987 (Option A) + #1686 taxonomy: the drop path for a send that owns a
+     * durable queue row. STAYS QUEUED and auto-sends on reconnect (#900): re-arms to
+     * [OutboundState.Queued], clears the in-flight gates + watchdog, composer EMPTY, no
+     * error banner. Falls back to [restoreFailedSend] with [noRowFallbackMessage] ONLY
+     * when there is no durable row.
      *
-     *  - re-arms the durable row to [OutboundState.Queued] and clears its error
-     *    (the single "Will send when reconnected." status),
-     *  - clears the in-flight gates + watchdog so the next foreground/reconnect
-     *    flush ([retryNextOutboundItem]) can re-claim it,
-     *  - leaves the composer EMPTY (the prompt lives in the queue row — the
-     *    single representation; #971) and sets NO "Not sent / send again or
-     *    discard" error banner.
-     *
-     * Falls back to [restoreFailedSend] only when the request has no durable
-     * queue row ([SendRequest.outboundQueueItemId] is null — e.g. the composer
-     * is wired to [DisabledOutboundQueueStore], or an upload-await wedge that
-     * failed before the row was enqueued): there is then nothing to keep queued,
-     * so the prompt must come back to the composer rather than be silently lost.
-     * The user can still cancel/discard a queued item from the queue surface.
+     * [resetAttemptBudget] (#1686 taxonomy): `false` = a LIVE rejection keeps the claim's
+     * attempt bump so a poison row eventually parks (#1602); `true` = transport UNAVAILABLE
+     * (wire-oracle probe not-writable) re-grants the budget so a flapping/prolonged outage
+     * NEVER parks the row (the #1686 clog).
      */
     public fun markOutboundSendDeferred(
         request: SendRequest,
-        // The message used ONLY when there is no durable queue row and we fall
-        // back to [restoreFailedSend] (the prompt comes back to the composer
-        // instead of being lost). The deferred (row-kept) path never sets an
-        // error — its single status is the queue row's "Will send when
-        // reconnected." Defaults to the calm reconnect copy.
         noRowFallbackMessage: String = "Not sent. Reconnect, then send again or discard the draft.",
+        resetAttemptBudget: Boolean = false,
     ) {
-        // Issue #891: the send resolved (deferred to the queue) — disarm the
-        // overall-send watchdog so it cannot re-stamp a stale "Send failed".
+        // #891: disarm the watchdog (no stale "Send failed"); #971: drop the captured request.
         watchdogs.disarmSend()
-        // Issue #971: the in-flight send resolved — drop the captured request so a
-        // later watchdog/strand cannot act on it again.
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
         id?.let(outboundAutoCloseEpochs::remove)
-        val requeued = id?.let { outboundQueueStore.requeueForRetry(it) }
+        val requeued = id?.let { outboundQueueStore.requeueForRetry(it, resetAttempts = resetAttemptBudget) }
             ?: request.sendTarget.sessionKey.takeIf { it.isNotBlank() }?.let { sessionKey ->
                 outboundQueueStore.itemsFor(sessionKey).deferredRetryCandidateFor(request)
             }?.let {
-                outboundQueueStore.requeueForRetry(it.id)
+                outboundQueueStore.requeueForRetry(it.id, resetAttempts = resetAttemptBudget)
             }
         if (requeued == null) {
-            // No durable row to keep queued — fall back to the composer-restore
-            // path so the typed prompt is not silently lost.
+            // No durable row to keep queued — restore to the composer so it is not lost.
             restoreFailedSend(request, message = noRowFallbackMessage)
             return
         }
+        requeued.recordQueueRowState("InFlight", "Queued", "deferred") // #1682
         DiagnosticEvents.record(
             "action",
             "composer_send_deferred_to_queue",
             "attachmentCount" to request.attachments.size,
         )
-        // Issue #1526 S1: clear the in-flight gate BEFORE the queue refresh —
-        // the refresh emission triggers the #900 auto-flush, which self-gates
-        // on `sendInFlight`; the old order made the flush skip the requeued
-        // row and (the list never changing) it sat deferred forever.
-        // The composer stays EMPTY; no error banner.
+        // #1526 S1: clear the in-flight gate BEFORE the queue refresh (the refresh
+        // emission's #900 auto-flush self-gates on `sendInFlight`).
         _uiState.update { current ->
             current.copy(
                 sendInFlight = false,
@@ -1514,15 +1494,18 @@ public class PromptComposerViewModel @Inject constructor(
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
         // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
         // drain skips it and the healthy tail drains; per-row Retry re-drives it.
-        val plan = _outboundQueueItems.value.planComposerAutoFlush(target, excludingIds)
+        val itemsSnapshot = _outboundQueueItems.value
+        val plan = itemsSnapshot.planComposerAutoFlush(target, excludingIds)
         if (plan.parkIds.isNotEmpty()) {
             plan.parkIds.forEach {
                 outboundQueueStore.markFailed(it, lastError = OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE)
             }
             refreshOutboundQueueItemsFor(target)
         }
-        val nextId = plan.nextId ?: return null
-        return if (dispatchOutboundItem(nextId)) nextId else null
+        val nextId = plan.nextId
+        val dispatched = nextId != null && dispatchOutboundItem(nextId)
+        ComposerQueueDiagnostics.recordDrainCycle(target, itemsSnapshot, plan, excludingIds.size, dispatched) // #1682
+        return if (dispatched) nextId else null
     }
 
     /**
@@ -1565,6 +1548,22 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1686 (self-heal on the transport-alive edge): un-park every AUTO-parked
+     * `Failed` row ([OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE]) for the current target and
+     * re-grant its budget, so a storm-stranded backlog self-heals when the wire returns.
+     * A poison row re-parks after another full budget (#1602); other parks (e.g. "Nothing
+     * to send") carry a different `lastError` and are left alone. Returns the re-armed ids.
+     */
+    public fun unparkTransportFailedRows(): List<String> {
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val rearmedIds = outboundQueueStore.itemsFor(target)
+            .filter { it.state == OutboundState.Failed && it.lastError == OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE }
+            .mapNotNull { outboundQueueStore.requeueForRetry(it.id, resetAttempts = true)?.id }
+        if (rearmedIds.isNotEmpty()) refreshOutboundQueueItemsFor(target)
+        return rearmedIds
+    }
+
+    /**
      * Issue #900: process-death / lost-callback recovery. If a row was left
      * [OutboundState.InFlight] longer than the send watchdog window, move it
      * back to [OutboundState.Queued] so the next foreground/reconnect flush can
@@ -1576,6 +1575,7 @@ public class PromptComposerViewModel @Inject constructor(
         val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
         val cutoffMs = clock() - staleAfterMs
         val requeued = outboundQueueStore.requeueStaleInFlight(target, cutoffMs)
+        requeued.forEach { it.recordQueueRowState("InFlight", "Queued", "stale_inflight_requeue") } // #1682
         if (requeued.isNotEmpty()) refreshOutboundQueueItemsFor(target)
         return requeued
     }
@@ -1733,10 +1733,12 @@ public class PromptComposerViewModel @Inject constructor(
             clearStrandedSendInFlight()
             return false
         }
+        active.recordQueueRowState("Queued", "InFlight", "claimed") // #1682
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {
             outboundQueueStore.markFailed(id, lastError = "Nothing to send")
+            active.recordQueueRowState("InFlight", "Failed", "nothing_to_send") // #1682
             refreshOutboundQueueItemsFor(active.sessionKey)
             clearStrandedSendInFlight()
             return false
@@ -1773,6 +1775,7 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
+        outboundQueueStore.item(id)?.recordQueueRowState("InFlight", "Sent", "delivered")
         outboundQueueStore.markDelivered(id)
         launchSidecarRemoval(id)
         request.sendTarget.sessionKey
@@ -1881,6 +1884,15 @@ public class PromptComposerViewModel @Inject constructor(
      * send path connects-on-action, #548), but the user now knows the link is
      * down before they commit.
      */
+    // Issue #1686: WIRE-truth probe the failure taxonomy reads. The screen wires it to
+    // `TmuxSessionViewModel.isSendTransportWritable()`; defaults `false` (unwired ⇒ never park).
+    @Volatile
+    private var transportWritableProbe: () -> Boolean = { false }
+
+    public fun setTransportWritableProbe(probe: () -> Boolean) { transportWritableProbe = probe }
+
+    public fun isSendTransportWritable(): Boolean = transportWritableProbe()
+
     public fun setConnectionDegraded(degraded: Boolean) {
         if (_uiState.value.connectionDegraded == degraded) return
         _uiState.update { it.copy(connectionDegraded = degraded) }

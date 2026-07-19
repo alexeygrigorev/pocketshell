@@ -316,13 +316,37 @@ internal class TransportKeepAlive(
                     }
                     consecutiveMisses += 1
                     log("keepalive: miss consecutive=$consecutiveMisses countMax=$countMax")
+                    // Issue #1683 — record every keepalive MISS as a transport-level
+                    // INPUT (miss count + the death budget it is climbing toward). This
+                    // is the per-tick series behind a `KeepaliveDead` VERDICT: core-ssh
+                    // emitted nothing to the trace before, so a keepalive-driven death
+                    // showed up with none of the inputs that tell an over-eager
+                    // false-dead from a real silent-peer death.
+                    SshDiagnostics.record(
+                        "keepalive_miss",
+                        "consecutiveMisses" to consecutiveMisses,
+                        "countMax" to countMax,
+                    )
                     if (consecutiveMisses >= countMax) {
                         // Re-check liveness before acting: a teardown could have
                         // raced in during the send, in which case the existing
                         // close path already owns recovery and an extra reaction
                         // would be a spurious teardown.
                         if (io.isAlive()) {
-                            if (io.lastActivityNanos() != missStreakStartActivityNanos) {
+                            val inboundAdvanced =
+                                io.lastActivityNanos() != missStreakStartActivityNanos
+                            // Issue #1683 — record the death-budget crossing and WHICH
+                            // way it resolved: rode through (inbound advanced during the
+                            // streak → slow-but-alive) vs declared dead (sustained
+                            // silence). This is the INPUT to the `KeepaliveDead` verdict.
+                            SshDiagnostics.record(
+                                "keepalive_death_budget_crossed",
+                                "consecutiveMisses" to consecutiveMisses,
+                                "countMax" to countMax,
+                                "inboundActivityAdvanced" to inboundAdvanced,
+                                "outcome" to if (inboundAdvanced) "rode_through" else "declared_dead",
+                            )
+                            if (inboundAdvanced) {
                                 // Issue #1059 (R2) / #1072 — slow-but-alive: inbound
                                 // activity OR outbound upload progress advanced during
                                 // the streak, so the peer DID answer (late) or we are

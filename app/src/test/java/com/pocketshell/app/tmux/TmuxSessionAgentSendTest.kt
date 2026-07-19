@@ -218,47 +218,46 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * Issue #869: Codex keeps its known-needed floor of
-     * [CODEX_AGENT_SUBMIT_DELAY_MS] as the MINIMUM wait before the submit Enter
-     * — even when a `capture-pane` confirms the paste instantly. The ack-gate
-     * then presses Enter once that floor elapses AND a capture confirms the
-     * paste (here the very first capture confirms it, so Enter fires right at
-     * the floor).
+     * Issue #1687 (criterion 1, Codex path): the confirming capture — not a fixed
+     * timer — IS the evidence the agent ingested the paste, so a Codex send whose
+     * paste a `capture-pane` confirms fires the submit Enter IMMEDIATELY, WITHOUT
+     * paying the old unconditional [CODEX_AGENT_SUBMIT_DELAY_MS] pre-capture floor.
+     * That flat 250ms-per-send tax on a healthy link is the maintainer's "takes too
+     * long to send even when the connection is okay".
+     *
+     * RED on base (pre-#1687): `awaitAgentPasteIngestedBeforeSubmit` slept the Codex
+     * floor BEFORE the first capture, so the Enter could not fire before
+     * CODEX_AGENT_SUBMIT_DELAY_MS — `enterAtMs < floor` is false.
+     * GREEN with the fix: the ack confirms on the first poll and Enter fires well
+     * before the floor.
      */
     @Test
-    fun codexAgentSubmitHonoursMinimumFloorThenAckGatesEnter() = runTest(scheduler) {
+    fun codexAgentSubmitFiresEnterOnAckWithoutPayingTheFloorTax() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
         vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", newCodexDetection())
 
-        // Capture confirms the paste immediately — but the Codex floor must
-        // still gate the Enter so the TUI has its known-needed minimum.
+        // Capture confirms the paste immediately (healthy link, agent already
+        // rendered the typed text on the first poll).
         repeat(4) {
             client.capturePaneResponses.addLast(
                 CommandResponse(number = 0L, output = listOf("> run tests"), isError = false),
             )
         }
 
+        val gateStart = scheduler.currentTime
+        var enterSentAtMs = -1L
+        client.onCommandSent = { cmd ->
+            if (cmd == "send-keys -t %0 Enter" && enterSentAtMs < 0L) {
+                enterSentAtMs = scheduler.currentTime
+            }
+        }
+
         val send = async { vm.sendToAgentPaneResult("%0", "  run tests  ") }
-        runCurrent()
-
-        assertEquals(
-            "Codex submit should type the prompt before waiting to press Enter",
-            listOf("send-keys -l -t %0 -- 'run tests'"),
-            client.sentCommands.filter { it.startsWith("send-keys") },
-        )
-
-        advanceTimeBy(CODEX_AGENT_SUBMIT_DELAY_MS - 1L)
-        runCurrent()
-        assertEquals(
-            "Codex submit must not press Enter before the Codex floor elapses, " +
-                "even when the capture confirms the paste instantly",
-            listOf("send-keys -l -t %0 -- 'run tests'"),
-            client.sentCommands.filter { it.startsWith("send-keys") },
-        )
-
         advanceUntilIdle()
+
         assertTrue(send.await().isSuccess)
         assertEquals(
             listOf(
@@ -266,6 +265,168 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
                 "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        // Load-bearing (criterion 1): the ack-confirmed Enter must NOT wait the
+        // Codex floor. On base it fired at >= CODEX_AGENT_SUBMIT_DELAY_MS.
+        val enterAtMs = enterSentAtMs - gateStart
+        assertTrue(
+            "an ack-confirmed Codex send must fire Enter without paying the " +
+                "${CODEX_AGENT_SUBMIT_DELAY_MS}ms pre-capture floor tax; Enter fired at ${enterAtMs}ms",
+            enterAtMs in 0 until CODEX_AGENT_SUBMIT_DELAY_MS,
+        )
+    }
+
+    /**
+     * Issue #1687 (criterion 1, healthy-link latency bound): on a healthy link the
+     * confirming capture lands on the first poll, so the submit Enter must fire
+     * well UNDER the configured/default 150ms floor — proving the flat pre-capture
+     * floor tax is gone for the common send.
+     *
+     * RED on base: the ~150ms floor was paid before the first capture, so the Enter
+     * could not fire before 150ms — the tight `< floor` bound fails.
+     * GREEN with the fix: the ack confirms at t≈0 and Enter fires immediately.
+     */
+    @Test
+    fun healthyLinkAgentSendFiresEnterUnderTheFloorTax() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        // Pin the maintainer's default floor so the assertion is against the real tax.
+        val floorMs = com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
+        vm.setAgentSubmitEnterDelayForTest(floorMs)
+
+        val payload = "deploy the staging build"
+        repeat(4) {
+            client.capturePaneResponses.addLast(
+                CommandResponse(number = 0L, output = listOf("> $payload"), isError = false),
+            )
+        }
+
+        val gateStart = scheduler.currentTime
+        var enterSentAtMs = -1L
+        client.onCommandSent = { cmd ->
+            if (cmd == "send-keys -t %0 Enter" && enterSentAtMs < 0L) {
+                enterSentAtMs = scheduler.currentTime
+            }
+        }
+
+        val send = async { vm.sendToAgentPaneResult("%0", payload) }
+        advanceUntilIdle()
+
+        assertTrue(send.await().isSuccess)
+        val enterAtMs = enterSentAtMs - gateStart
+        assertTrue(
+            "a healthy-link send must fire the submit Enter under the ${floorMs}ms floor " +
+                "(evidence-driven, not a flat tax); Enter fired at ${enterAtMs}ms",
+            enterAtMs in 0 until floorMs.toLong(),
+        )
+    }
+
+    /**
+     * Issue #1687 (criterion 2, reproduce-first): a multi-line composer paste is
+     * COLLAPSED by Claude Code to a `[Pasted text #N +M lines]` chip and the pasted
+     * body is NEVER echoed on the pane. The payload-tail ack needle therefore can
+     * never match, so on base the gate polled to the FULL ack timeout on every
+     * normal multi-line send before the fallback fired the Enter — the dominant
+     * "takes too long to send" cost. The fix recognises the chip.
+     *
+     * RED on base: the needle misses the chip → the Enter fires only after the
+     * ~800ms ack timeout (or the old 2s) → the tight `< 200ms` bound fails.
+     * GREEN with the fix: the collapsed chip's count increase confirms the paste on
+     * the first poll → Enter fires promptly.
+     */
+    @Test
+    fun multiLinePasteCollapsedToChipAcksWithoutTimeoutStall() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        // A genuine multi-line paste — Claude Code renders only the collapsed chip,
+        // NOT the body, so no capture ever contains the payload text.
+        val payload = "first line of the message\nsecond line\nthird line here"
+        repeat(8) {
+            client.capturePaneResponses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("> [Pasted text #1 +2 lines]"),
+                    isError = false,
+                ),
+            )
+        }
+
+        val gateStart = scheduler.currentTime
+        var enterSentAtMs = -1L
+        client.onCommandSent = { cmd ->
+            if (cmd == "send-keys -t %0 Enter" && enterSentAtMs < 0L) {
+                enterSentAtMs = scheduler.currentTime
+            }
+        }
+
+        val send = async { vm.sendToAgentPaneResult("%0", payload) }
+        advanceUntilIdle()
+
+        assertTrue("multi-line agent send should succeed", send.await().isSuccess)
+        // Prove it actually polled capture-pane (not a vacuous pass) and confirmed
+        // on the collapsed chip.
+        assertTrue(
+            "the ack-gate must poll capture-pane before submitting",
+            client.capturePaneTextViaExecCalls.isNotEmpty(),
+        )
+        val enterAtMs = enterSentAtMs - gateStart
+        assertTrue(
+            "a collapsed multi-line paste must ack on the `[Pasted text #N +M lines]` " +
+                "chip and NOT stall to the ${AGENT_SUBMIT_ACK_TIMEOUT_MS}ms timeout; " +
+                "Enter fired at ${enterAtMs}ms",
+            enterAtMs in 0 until 200L,
+        )
+    }
+
+    /**
+     * Issue #1687: the collapsed-chip recogniser keeps the #1577b count-baseline
+     * discipline — a chip ALREADY on the pane before our paste (a scrolled-back
+     * prior paste) must NOT false-confirm; only OUR chip (a count increase) does.
+     * Here the pane permanently shows `[Pasted text #1 +9 lines]` and NEVER renders
+     * a new chip, so the ack must poll past the first capture (no instant match) and
+     * fall back — not fire on the pre-existing chip.
+     */
+    @Test
+    fun collapsedChipAlreadyOnPaneDoesNotFalseConfirm() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        // A prior paste's chip is already on the pane BEFORE this send — the send
+        // path samples it as the baseline via the local render text.
+        vm.localRenderTextOverrideForTest["%0"] = "> [Pasted text #1 +9 lines]"
+
+        val payload = "brand new message\nwith two lines"
+        // Every capture keeps showing ONLY the pre-existing chip (count stays 1),
+        // never a new one — a wedged render that must not false-confirm.
+        repeat(200) {
+            client.capturePaneResponses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("> [Pasted text #1 +9 lines]"),
+                    isError = false,
+                ),
+            )
+        }
+
+        val send = async { vm.sendToAgentPaneResult("%0", payload) }
+        advanceUntilIdle()
+
+        assertTrue("send still completes via the bounded fallback", send.await().isSuccess)
+        assertTrue(
+            "a pre-existing collapsed chip must NOT instant-confirm the ack — the gate " +
+                "must poll past the first capture to the fallback (polls=" +
+                "${client.capturePaneTextViaExecCalls.size})",
+            client.capturePaneTextViaExecCalls.size > 2,
         )
     }
 

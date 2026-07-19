@@ -236,17 +236,21 @@ sealed interface ConnectionState {
      *
      * Issue #1328 (S5): this is the SINGLE reconnect-attempt counter and the SINGLE
      * exhaustion point. [attempt] is the 1-based attempt number, [maxAttempts] the
-     * ladder budget (from the injected [ConnectionController.setReconnectLadder]),
-     * and [retryDelayMs] the backoff the VM effect waits before this attempt's dial.
-     * The reducer owns every increment and the `attempt > maxAttempts → Unreachable`
-     * decision; the VM never counts a parallel ladder. [maxAttempts]/[retryDelayMs]
-     * default to the flat pre-S5 shape so the many 3-arg test call sites keep working.
+     * ladder budget, and [retryDelayMs] the backoff the VM effect waits before this
+     * attempt's dial. The reducer owns every increment and the
+     * `attempt > maxAttempts → Unreachable` decision; the VM never counts a parallel ladder.
+     *
+     * Issue #1654: [maxAttempts] defaults to the REAL ladder's length, not a flat 4. The old
+     * default was half of the bug — a `Reconnecting` built without an explicit budget
+     * announced "4" while the ladder says 8. The controller always builds this from its
+     * construction-time ladder ([ConnectionController.DEFAULT_RECONNECT_LADDER_MS]); the
+     * default only serves the 3-arg test call sites, and it must agree with production.
      */
     data class Reconnecting(
         val host: HostKey,
         val targetId: SessionId,
         val attempt: Int,
-        val maxAttempts: Int = ConnectionController.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+        val maxAttempts: Int = ConnectionController.DEFAULT_RECONNECT_LADDER_MS.size,
         val retryDelayMs: Long = 0L,
     ) : ConnectionState
 

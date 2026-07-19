@@ -1,0 +1,21 @@
+# Issue #1646: minimum EXECUTED test counts per Gradle test task.
+#
+# Consumed by scripts/check-executed-test-counts.sh. Any task with test sources
+# that is not listed here uses the default floor of 1 — i.e. "it must have
+# executed at least one test", which is what catches the three 2026-07-16
+# green-over-nothing incidents (wrong task / UP-TO-DATE skip / killed process).
+#
+# THESE FLOORS ARE DELIBERATELY LOOSE, NOT AN EXACT-COUNT RATCHET (G6).
+# A check that red-lights honest runs is worse than the gap it closes, because
+# people then ignore it. The floors below sit FAR under the real counts (:app is
+# ~3900 per variant as of 2026-07-16), so adding, moving, or removing tests
+# never reddens CI. They exist to catch the "a filter matched almost nothing"
+# shape, where the count is non-zero but nowhere near a real run.
+#
+# Only raise a floor when you are confident the task can never legitimately drop
+# to it. When in doubt, leave the task off this list and take the default of 1.
+#
+# format: <task-path> <min-executed>
+
+:app:testDebugUnitTest 1000
+:app:testReleaseUnitTest 1000

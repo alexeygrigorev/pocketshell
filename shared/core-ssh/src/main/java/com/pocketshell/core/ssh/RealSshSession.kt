@@ -1,5 +1,6 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableJob
@@ -101,10 +102,40 @@ internal class RealSshSession(
 ) : SshSession {
 
     /**
+     * Issue #1694 — route an uncaught throw from ANY of this session's
+     * background scopes to the thread's default uncaught handler (the crash
+     * reporter) via a **context** [CoroutineExceptionHandler], instead of
+     * letting it take kotlinx-coroutines' *global*
+     * `handleUncaughtCoroutineException` fallback.
+     *
+     * Why this matters beyond production correctness: [tail] (issue #239)
+     * deliberately lets a genuine programming bug (a non-transport `Throwable`)
+     * propagate to the coroutine root so real bugs still reach the crash
+     * reporter. On the `SupervisorJob` root that throw had no context handler,
+     * so it fell through to the global path — which is exactly where
+     * kotlinx-coroutines-test installs its process-wide `ExceptionCollector`.
+     * Once any `runTest` in the JVM worker primed the collector, an escaped tail
+     * bug was recorded and reported as `UncaughtExceptionsBeforeTest` against
+     * whichever *sibling* `runTest` ran next (order-dependent, seen striking
+     * `SshConnectionCancellationTest`). A context handler short-circuits
+     * `handleCoroutineException` before the global fallback, so the collector
+     * never sees it — killing the async-exception-leak CLASS at its root while
+     * preserving the crash-reporter contract (we forward to the default handler
+     * ourselves). See `RealSshSessionTailScopeLeakTest`.
+     */
+    private val uncaughtHandler = CoroutineExceptionHandler { _, throwable ->
+        // Preserve the production contract: a genuine bug that reaches a
+        // background-scope root is still surfaced to the crash reporter (the
+        // JVM default uncaught handler) — never silently swallowed.
+        Thread.getDefaultUncaughtExceptionHandler()
+            ?.uncaughtException(Thread.currentThread(), throwable)
+    }
+
+    /**
      * Coroutine scope owning any background work (e.g. [tail] jobs). Closed
      * when the session is [close]d so all child jobs cancel deterministically.
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + uncaughtHandler)
 
     /**
      * Independent teardown scope for best-effort channel closes and keepalive-dead
@@ -113,7 +144,7 @@ internal class RealSshSession(
      * and launching those channel-close writes on the same scope lets
      * `scope.cancel()` erase the cleanup before it reaches the dispatcher.
      */
-    private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + uncaughtHandler)
 
     /**
      * Issue #1135 / #1139 (D33 / G1 / G2 — the class SOURCE fix): guards the
@@ -148,7 +179,7 @@ internal class RealSshSession(
      * launched job completes within the ceiling; the scope is discarded with this
      * session after close, so it does not leak.
      */
-    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + uncaughtHandler)
 
     /**
      * Single-writer dispatch owner for this connection's transport (issue

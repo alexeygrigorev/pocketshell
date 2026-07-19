@@ -21,6 +21,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.OutboundDeliverySeams
+import com.pocketshell.app.tmux.PasteChunkSeams
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -136,12 +137,14 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
+        PasteChunkSeams.reset()
     }
 
     @After
     fun tearDown() {
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
+        PasteChunkSeams.reset()
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
@@ -264,6 +267,133 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         writeTimings()
     } }
+
+    /**
+     * Issue #1636 — the PAYLOAD-INTEGRITY limb, against the REAL tmux server.
+     *
+     * The sibling test above proves the prompt is delivered ONCE. This one proves
+     * the bytes it delivers are the RIGHT ones, which is a different failure and
+     * one no occurrence-count assertion can see. The cut is the #1526 S6 spec's
+     * cut point (b) — a teardown at a paste CHUNK BOUNDARY, which no fixture
+     * reproduced before (the seam above models cut point (c), AFTER the whole
+     * paste has landed).
+     *
+     * Journey: a LONG single-line prompt (> one paste chunk, so the paste is
+     * multi-chunk — the shape the #1610 storm's ~5 s teardown lands inside) is
+     * sent from the REAL composer with [PasteChunkSeams] armed to genuinely drop
+     * the transport partway through the paste. The app reconnects for real and
+     * the deferred row is re-sent through the SAME verify-before-resend chain.
+     *
+     * RED on base: chunks 1..k are already in the fake-agent's input box; the
+     * resend's probe keys on the payload's tail (which never landed), reports
+     * `NotLanded`, and re-pastes the FULL payload on top — the fixture submits
+     * `<partial-prefix><payload>`. GREEN: the fill never touches the pane and the
+     * single `paste-buffer` commit delivers the payload whole, so the submitted
+     * content EQUALS the prompt.
+     *
+     * The assertion is CONTENT EQUALITY of the submitted text read back off the
+     * server (`capture-pane` via a sidecar SSH session), not needle presence —
+     * the needle is present in the corrupted text too (G6).
+     */
+    @Test
+    fun multiChunkPromptCutAtAPasteChunkBoundaryIsSubmittedByteExact() { runBlocking<Unit> {
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
+        waitForConnected("initial attach")
+        val viewModel = currentViewModel()
+        viewModel.setAgentSubmitEnterDelayForTest(0)
+        val clientBeforeFlap = viewModel.currentClientIdentityForTest()
+
+        waitForDetectionBound(viewModel)
+        openConversationTab(viewModel)
+
+        // A LONG SINGLE-LINE prompt: > one chunk (so the paste is multi-chunk and
+        // has interior boundaries to cut at) and no line break (the fake-agent
+        // submits on any LF, so a multi-line prompt could not be one submission
+        // there — the multi-line limb of the class is covered byte-exactly by the
+        // JVM `OutboundPastePayloadIntegrityTest`).
+        val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
+        val payload = "byteexact$nonce-" + "abcdefghij".repeat(180) + "-tail$nonce"
+        val payloadStripped = payload.filterNot { it.isWhitespace() }
+
+        // Arm the chunk-boundary cut: partway through the paste the transport is
+        // REALLY dropped (a clean passive drop, the same teardown the storm makes)
+        // and the send fails — exactly the state that used to strand a partial
+        // prefix in the agent's input box.
+        PasteChunkSeams.onCut = { viewModel.triggerCleanPassiveDropForTest() }
+        PasteChunkSeams.failAtFillChunkIndex = 1
+
+        val sendTappedAtMs = SystemClock.elapsedRealtime()
+        openComposerAndSend(payload)
+        waitForDeferral()
+        assertEquals(
+            "the seam must have fired (the cut is the whole point of this journey)",
+            -1,
+            PasteChunkSeams.failAtFillChunkIndex,
+        )
+
+        // The link heals for real; the resend rides the auto-flush, or (when it
+        // races the dying transport) the maintainer's own recovery of re-typing.
+        val submittedPredicate: (String) -> Boolean = {
+            it.filterNot { ch -> ch.isWhitespace() }.contains(FAKE_AGENT_SUBMITTED_STRIPPED)
+        }
+        waitForConnected("post-cut silent heal")
+        if (!pollSidecarCapture(SILENT_HEAL_SUBMIT_WINDOW_MS, submittedPredicate)) {
+            recordTiming("user_retype_resend_used", 1L)
+            openComposerAndSend(payload)
+        }
+        waitForSidecarCapture(
+            "prompt submitted after the chunk-boundary cut",
+            SUBMIT_AFTER_FLAP_TIMEOUT_MS,
+            submittedPredicate,
+        )
+        recordTiming("byte_exact_submitted_after_send_tap_ms", SystemClock.elapsedRealtime() - sendTappedAtMs)
+        captureArtifacts("payload-integrity-submitted")
+
+        // The cut was REAL: the send rode a reconnect (fresh client identity).
+        waitForConnected("post-cut reconnect")
+        val clientAfterFlap = currentViewModel().currentClientIdentityForTest()
+        assertTrue(
+            "the seam must have dropped the transport (fresh tmux client after the " +
+                "cut); before=$clientBeforeFlap after=$clientAfterFlap",
+            clientAfterFlap != null && clientAfterFlap != clientBeforeFlap,
+        )
+
+        // ===== THE payload-integrity assertion (server-side, BYTES). =====
+        val capture = waitForStableSidecarCapture()
+        writeText("payload-integrity-final-capture.txt", capture)
+        val submitted = submittedTextStripped(capture)
+        assertEquals(
+            "the agent must receive the prompt BYTE-EXACT across a paste chunk-boundary " +
+                "teardown + verified resend. On base the resend re-pastes onto the partial " +
+                "prefix the cut stranded, so the submitted text is " +
+                "'<partial-prefix><payload>' — submitted exactly once, silently corrupt. " +
+                "capture:\n$capture",
+            payloadStripped,
+            submitted,
+        )
+        assertInputBoxEmpty("after the byte-exact verified resend", capture)
+        writeTimings()
+    } }
+
+    /**
+     * The text the fake agent SUBMITTED, whitespace-stripped — everything between
+     * its `FAKE-AGENT SUBMITTED: ` marker and the `> ` input box that follows it.
+     * The input box wraps across rows as it grows, so the capture is compared
+     * whitespace-insensitively; the payload carries no whitespace of its own, so
+     * this is exact for the property under test.
+     */
+    private fun submittedTextStripped(capture: String): String {
+        val stripped = capture.filterNot { it.isWhitespace() }
+        val start = stripped.indexOf(FAKE_AGENT_SUBMITTED_STRIPPED)
+        assertTrue(
+            "the fixture must have submitted a prompt; capture:\n$capture",
+            start >= 0,
+        )
+        val body = stripped.substring(start + FAKE_AGENT_SUBMITTED_STRIPPED.length)
+        val inputBox = body.indexOf('>')
+        return if (inputBox >= 0) body.substring(0, inputBox) else body
+    }
 
     /**
      * Keystroke lane: input typed through the REAL TerminalView session (pane

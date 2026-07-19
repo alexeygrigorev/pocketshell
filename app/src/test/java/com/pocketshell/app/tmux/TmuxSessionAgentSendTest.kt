@@ -1030,21 +1030,23 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val result = send.await()
 
         assertTrue("expected long single-line send to succeed", result.isSuccess)
-        val sendKeys = client.sentCommands.filter { it.startsWith("send-keys") }
+        // Issue #1636: the old assertions counted `send-keys -H` chunks — a wire-shape
+        // proxy. What must hold is that a long draft goes through the bounded,
+        // atomically-committed paste route and arrives BYTE-EXACT.
+        val commands = client.sentCommands
         assertTrue(
-            "long single-line draft must not create one unbounded literal command: $sendKeys",
-            sendKeys.none { it.startsWith("send-keys -l") },
+            "long single-line draft must not create one unbounded literal command: $commands",
+            commands.none { it.startsWith("send-keys -l") },
         )
         assertTrue(
-            "expected bracketed-paste chunks for long single-line draft, got $sendKeys",
-            sendKeys.count { it.startsWith("send-keys -H -t %0 ") } > 3,
+            "expected a multi-chunk bounded paste-buffer fill, got $commands",
+            commands.count { it.startsWith("set-buffer ") } > 3,
         )
-        assertEquals("send-keys -t %0 Enter", sendKeys.last())
-        val maxExpectedCommandLength =
-            "send-keys -H -t %0 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
-        val longest = sendKeys.maxOf { it.length }
+        assertEquals("send-keys -t %0 Enter", commands.last())
+        val longest = commands.maxOf { it.length }
+        val maxExpectedCommandLength = TMUX_PASTE_BODY_CHUNK_BYTES + 64
         assertTrue(
-            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength",
             longest <= maxExpectedCommandLength,
         )
     }
@@ -1084,25 +1086,30 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val result = send.await()
 
         assertTrue("expected long dictation plus attachment send to succeed", result.isSuccess)
-        val sendKeys = client.sentCommands.filter { it.startsWith("send-keys") }
+        // Issue #1636: bounded fill + ONE atomic commit + Enter (was: hex chunk counts).
+        val commands = client.sentCommands
         assertTrue(
-            "combined dictation/attachment prompt must use bounded hex paste chunks, got $sendKeys",
-            sendKeys.count { it.startsWith("send-keys -H -t %0 ") } > 3,
+            "combined dictation/attachment prompt must use a bounded paste-buffer fill, got $commands",
+            commands.count { it.startsWith("set-buffer ") } > 3,
         )
         assertTrue(
-            "combined prompt must not use one unbounded literal send-keys command: $sendKeys",
-            sendKeys.none { it.startsWith("send-keys -l") },
+            "combined prompt must not use one unbounded literal send-keys command: $commands",
+            commands.none { it.startsWith("send-keys -l") },
         )
         assertEquals(
-            "combined prompt must be submitted after paste chunks",
-            "send-keys -t %0 Enter",
-            sendKeys.last(),
+            "combined prompt must reach the pane through exactly ONE commit",
+            1,
+            commands.count { it.startsWith("paste-buffer ") },
         )
-        val maxExpectedCommandLength =
-            "send-keys -H -t %0 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
-        val longest = sendKeys.maxOf { it.length }
+        assertEquals(
+            "combined prompt must be submitted after the paste commit",
+            "send-keys -t %0 Enter",
+            commands.last(),
+        )
+        val longest = commands.maxOf { it.length }
+        val maxExpectedCommandLength = TMUX_PASTE_BODY_CHUNK_BYTES + 64
         assertTrue(
-            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength",
             longest <= maxExpectedCommandLength,
         )
     }
@@ -1112,8 +1119,9 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val vm = newVm()
         vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient().apply {
-            closeAndThrowOnCommandPrefix = "send-keys -H"
-            closeAndThrowException = TmuxClientException("failed to write tmux command `send-keys`")
+            // Issue #1636: the multi-chunk paste's wire commands are the buffer fill.
+            closeAndThrowOnCommandPrefix = "set-buffer"
+            closeAndThrowException = TmuxClientException("failed to write tmux command `set-buffer`")
         }
         vm.replaceClientForTest(
             hostId = 42L,
@@ -1179,19 +1187,14 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     @Test
     fun sendToAgentPaneResultFinalEnterTmuxErrorRemovesOptimisticMessage() = runTest(scheduler) {
         val vm = newVm()
+        // Issue #1636: target the Enter by COMMAND rather than by position in the
+        // canned-response FIFO — the paste's command count is an implementation
+        // detail of the paste route, and pinning the error to an index made this
+        // test assert that detail instead of the behaviour under test.
         val client = FakeTmuxClient().apply {
-            repeat(5) {
-                responses.addLast(
-                    CommandResponse(number = it.toLong(), output = emptyList(), isError = false),
-                )
-            }
-            responses.addLast(
-                CommandResponse(
-                    number = 6L,
-                    output = listOf("can't find pane: %0"),
-                    isError = true,
-                ),
-            )
+            errorOnCommandPrefix = "send-keys -t %0 Enter"
+            errorOnCommandRemaining = 1
+            errorOnCommandOutput = listOf("can't find pane: %0")
         }
         vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", newClaudeDetection())

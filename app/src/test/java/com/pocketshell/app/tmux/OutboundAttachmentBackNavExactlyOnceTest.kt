@@ -67,16 +67,30 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
     )
 
     /**
-     * Count the bracketed-paste BODY chunks that carried [payload] to the pane.
-     * An attachment payload is multi-line, so the send path frames it as a
-     * bracketed paste ([sendBracketedPaste] → `send-keys -H`), NOT a literal
-     * `send-keys -l`. The body chunk command is `send-keys -H -t %0 <hex>` where
-     * `<hex>` is the space-separated hex of the payload bytes (single chunk while
-     * ≤ [BracketedPaste.BODY_CHUNK_BYTES]).
+     * Count how many times [payload] was COMMITTED to the pane. An attachment
+     * payload is multi-line, so the send path frames it as a bracketed paste
+     * ([sendBracketedPaste]), NOT a literal `send-keys -l`.
+     *
+     * Issue #1636: the paste is now a `set-buffer` fill followed by ONE
+     * `paste-buffer` commit — the commit is the point at which the payload reaches
+     * the pane, so it is what a "did this get pasted twice?" proof must count. The
+     * fill is matched too, so a commit whose buffer was never filled with THIS
+     * payload is not miscounted as a delivery.
      */
     private fun FakeTmuxClient.bracketedPasteCount(payload: String): Int {
-        val bodyHex = BracketedPaste.hex(payload.toByteArray(Charsets.UTF_8))
-        return sentCommands.count { it.startsWith("send-keys -H -t %0") && it.contains(bodyHex) }
+        val bufferName = pasteBufferNameFor("%0")
+        var filledWithPayload = false
+        var commits = 0
+        for (command in sentCommands) {
+            if (command.startsWith("set-buffer ") && command.contains(bufferName)) {
+                filledWithPayload = filledWithPayload || command.contains(payload)
+            }
+            if (command.startsWith("paste-buffer ") && command.contains(bufferName)) {
+                if (filledWithPayload) commits += 1
+                filledWithPayload = false
+            }
+        }
+        return commits
     }
 
     private fun FakeTmuxClient.literalPasteCount(payload: String): Int =
@@ -252,7 +266,7 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
         // it reaches the pane). The pane shows only a bare prompt.
         val client1 = clientShowingComposed("$ ")
         val vm1 = newDurableConnectedVm(client1)
-        client1.throwOnCommandPrefix = "send-keys -H -t %0"
+        client1.throwOnCommandPrefix = "paste-buffer"
         client1.throwOnCommandRemaining = 1
         val first = async { vm1.sendAgentPayloadToPaneResult("%0", composed, AgentKind.ClaudeCode) }
         advanceUntilIdle()

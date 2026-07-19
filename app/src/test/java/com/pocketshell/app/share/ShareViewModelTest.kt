@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.FakeTmuxClient
+import com.pocketshell.app.tmux.FakeTmuxPaneServer
 import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -266,24 +267,20 @@ class ShareViewModelTest {
 
     @Test
     fun pasteIntoSessionUsesBracketedPasteForMultiLineText() = runTest {
-        // Issue #209: a share payload with embedded newlines must route
-        // through `send-keys -H` with the bracketed-paste markers
-        // (\e[200~ ... \e[201~) so Claude Code / readline-based shells
-        // treat the whole block as one paste rather than N submissions.
+        // Issue #209: a share payload with embedded newlines must route through
+        // the bracketed paste (\e[200~ ... \e[201~) so Claude Code / readline-based
+        // shells treat the whole block as one paste rather than N submissions.
+        // Issue #1636: the share paste now rides the SAME atomic fill-then-commit
+        // route as the composer send, and this asserts the BYTES the pane received
+        // rather than the old hex-chunk wire shape.
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         val host = host(id = 21L, name = "multi-line-host")
-        val client = FakeTmuxClient().apply {
+        val client = FakeTmuxPaneServer().apply {
             // display-message resolves the active pane id.
             responses.addLast(
                 CommandResponse(number = 0L, output = listOf("%7"), isError = false),
             )
-            // send-keys -H start/body/end chunks succeed.
-            repeat(3) {
-                responses.addLast(
-                    CommandResponse(number = 0L, output = emptyList(), isError = false),
-                )
-            }
         }
         registry.register(
             hostId = host.id,
@@ -301,27 +298,18 @@ class ShareViewModelTest {
 
         val state = vm.uploadState.first { it is UploadState.Success }
         assertTrue(state is UploadState.Success)
-        assertEquals(4, client.sentCommands.size)
-        val sendKeys = client.sentCommands.drop(1)
+        // THE assertion: the pane received the shared text verbatim — the paste
+        // markers consumed, the LF a literal content byte, and NOT submitted as two
+        // separate lines.
+        assertEquals("para 1\npara 2", client.inputBox("%7"))
         assertTrue(
-            "expected all paste chunks to target %7, got '$sendKeys'",
-            sendKeys.all { it.startsWith("send-keys -H -t %7 ") },
+            "a multi-line share must be ONE paste, not N submissions",
+            client.submittedPrompts("%7").isEmpty(),
         )
-        assertTrue(
-            "expected bracketed-paste start marker, got '$sendKeys'",
-            sendKeys.first().endsWith("1b 5b 32 30 30 7e"),
-        )
-        assertTrue(
-            "expected bracketed-paste end marker, got '$sendKeys'",
-            sendKeys.last().endsWith("1b 5b 32 30 31 7e"),
-        )
-        // Exactly one LF inside the body (two paragraphs).
-        val hexBody = sendKeys[1].substringAfter("send-keys -H -t %7 ")
-        val tokens = hexBody.split(' ')
         assertEquals(
-            "expected exactly one LF inside the paste body, got '$hexBody'",
+            "the share must reach the pane through exactly ONE atomic commit: ${client.sentCommands}",
             1,
-            tokens.count { it == "0a" },
+            client.sentCommands.count { it.startsWith("paste-buffer ") && it.contains("-t %7") },
         )
     }
 
@@ -396,20 +384,25 @@ class ShareViewModelTest {
         vm.pasteIntoSession(host)
         advanceUntilIdle()
 
-        val sendKeys = client.sentCommands.drop(1).filter { it.startsWith("send-keys") }
+        // Issue #1636: bounded fill + ONE atomic commit (was: bounded hex chunks).
+        val commands = client.sentCommands.drop(1)
         assertTrue(
-            "large single-line share must not create one unbounded literal command: $sendKeys",
-            sendKeys.none { it.startsWith("send-keys -l") },
+            "large single-line share must not create one unbounded literal command: $commands",
+            commands.none { it.startsWith("send-keys -l") },
         )
         assertTrue(
-            "expected bracketed-paste chunks for large single-line share, got $sendKeys",
-            sendKeys.count { it.startsWith("send-keys -H -t %3 ") } > 3,
+            "expected a multi-chunk bounded paste-buffer fill, got $commands",
+            commands.count { it.startsWith("set-buffer ") } > 3,
         )
-        val maxExpectedCommandLength =
-            "send-keys -H -t %3 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
-        val longest = sendKeys.maxOf { it.length }
+        assertEquals(
+            "the large share must reach the pane through exactly ONE commit",
+            1,
+            commands.count { it.startsWith("paste-buffer ") && it.contains("-t %3") },
+        )
+        val longest = commands.maxOf { it.length }
+        val maxExpectedCommandLength = TMUX_PASTE_BODY_CHUNK_BYTES + 64
         assertTrue(
-            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength",
             longest <= maxExpectedCommandLength,
         )
     }
@@ -438,13 +431,14 @@ class ShareViewModelTest {
     @Test
     fun `multi-line bracketed share paste completes on the exec lane while a -CC burst wedges the send`() =
         runTest {
-            // Class coverage (G2): the multi-line bracketed-paste route funnels
-            // through `send-keys -H`, the other interactive-send shape Share uses.
-            // It too must ride the exec lane, not the wedged `-CC` channel.
+            // Class coverage (G2): the multi-line bracketed-paste route (issue #1636:
+            // a `set-buffer` fill + one `paste-buffer` commit) is the other
+            // interactive-send shape Share uses. It too must ride the exec lane, not
+            // the wedged `-CC` channel.
             assertSharePasteCompletesDuringCcSendWedge(
                 hostId = 14751L,
                 text = "para 1\npara 2",
-                expectedSendKeysPrefix = "send-keys -H -t %0 ",
+                expectedSendKeysPrefix = "set-buffer -b ",
             )
         }
 
@@ -490,11 +484,19 @@ class ShareViewModelTest {
                     "-CC channel",
                 state is UploadState.Success,
             )
+            // Issue #1636: the bracketed paste's wire commands are now the buffer
+            // fill + the atomic commit, not `send-keys -H` — but the property under
+            // test is unchanged: EVERY interactive-send command must ride the exec
+            // lane, never the wedged `-CC` channel.
             assertTrue(
                 "the interactive send must ride the send-keys exec lane, got " +
                     "${client.execLaneSendKeys}",
                 client.execLaneSendKeys.isNotEmpty() &&
-                    client.execLaneSendKeys.all { it.startsWith("send-keys") },
+                    client.execLaneSendKeys.all {
+                        it.startsWith("send-keys") ||
+                            it.startsWith("set-buffer") ||
+                            it.startsWith("paste-buffer")
+                    },
             )
             assertTrue(
                 "expected an exec-lane send carrying '$expectedSendKeysPrefix', got " +

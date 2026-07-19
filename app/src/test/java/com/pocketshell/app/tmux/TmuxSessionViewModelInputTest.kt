@@ -87,72 +87,48 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
         assertTrue("failed pane write must close the dead tmux client", client.closed)
     }
 
+    /**
+     * Issue #1636: this asserted the WIRE SHAPE (three `send-keys -H` commands,
+     * hex `0a` token counts) — a proxy that stayed green while the bytes the pane
+     * received were corrupt. It now asserts the bytes themselves, through the
+     * [FakeTmuxPaneServer] input-box model.
+     */
     @Test
     fun writeInputToPaneWrapsMultiLineInputInBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxPaneServer()
         vm.attachClientForTest(client)
 
         val payload = "para one\npara two\npara three"
         vm.writeInputToPane("%4", payload.toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
+        // The pane receives the payload verbatim: the bracketed-paste markers are
+        // consumed by the receiver and the LFs stay literal content bytes.
+        assertEquals(payload, client.inputBox("%4"))
+        assertTrue(
+            "multi-line input must not submit — the LFs are paste content, not Enter",
+            client.submittedPrompts("%4").isEmpty(),
+        )
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals(
-            "expected bracketed paste start, body, and end commands, got $sent",
-            3,
-            sent.size,
-        )
-        val cmd = sent[1]
-        assertTrue(
-            "expected send-keys -H targeting %4, got '$cmd'",
-            cmd.startsWith("send-keys -H -t %4 "),
-        )
-        assertTrue(
-            "expected bracketed-paste start marker in hex payload, got '$cmd'",
-            sent.first().endsWith("1b 5b 32 30 30 7e"),
-        )
-        assertTrue(
-            "expected bracketed-paste end marker in hex payload, got '$cmd'",
-            sent.last().endsWith("1b 5b 32 30 31 7e"),
-        )
-        val hexBody = cmd.substringAfter("send-keys -H -t %4 ")
-        val newlineCount = hexBody.split(' ').count { it == "0a" }
-        assertEquals(
-            "expected exactly 2 literal LF bytes inside bracketed paste, got '$hexBody'",
-            2,
-            newlineCount,
-        )
         assertTrue(
             "multi-line input must not emit a separate Enter named-key, got $sent",
             sent.none { it.contains(" Enter") },
         )
     }
 
+    /** Issue #1636: byte assertion replaces the old hex-token-count proxy. */
     @Test
     fun writeInputToPaneNormalisesCrLfToLfInsideBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxPaneServer()
         vm.attachClientForTest(client)
 
         vm.writeInputToPane("%0", "alpha\r\nbeta".toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
-        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals("expected start, body, and end commands, got $sent", 3, sent.size)
-        val cmd = sent[1]
-        val hexBody = cmd.substringAfter("send-keys -H -t %0 ")
-        val tokens = hexBody.split(' ')
-        assertEquals(
-            "expected exactly 1 LF (not CR LF) inside the paste, got '$hexBody'",
-            1,
-            tokens.count { it == "0a" },
-        )
-        assertEquals(
-            "expected no CR bytes inside the paste, got '$hexBody'",
-            0,
-            tokens.count { it == "0d" },
-        )
+        assertEquals("CR LF must reach the pane as a single LF", "alpha\nbeta", client.inputBox("%0"))
+        assertTrue(client.submittedPrompts("%0").isEmpty())
     }
 
     @Test
@@ -301,31 +277,36 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
         )
     }
 
+    /**
+     * Issue #1636: byte assertion replaces the old "3 send-keys -H invocations"
+     * shape proxy — what matters is that the trailing LF reaches the pane as paste
+     * CONTENT (not as an Enter that would submit).
+     */
     @Test
     fun writeInputToPaneTrailingNewlineGoesThroughBracketedPaste() = runTest(scheduler) {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxPaneServer()
         vm.attachClientForTest(client)
 
         vm.writeInputToPane("%0", "ls\n".toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
-        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals(
-            "expected start, body, and end send-keys -H invocations for `\\n`-terminated input, got $sent",
-            3,
-            sent.size,
-        )
+        assertEquals("ls\n", client.inputBox("%0"))
         assertTrue(
-            "expected send-keys -H, got '$sent'",
-            sent.all { it.startsWith("send-keys -H -t %0 ") },
+            "the trailing LF is paste content, not a submit",
+            client.submittedPrompts("%0").isEmpty(),
         )
     }
 
+    /**
+     * Issue #1636: a large paste must stay BOUNDED per tmux command (no unbounded
+     * command line) AND arrive byte-exact. The old version asserted only the hex
+     * chunk shape; it could not have seen a payload corrupted by the chunking.
+     */
     @Test
-    fun largeBracketedPasteIsSplitIntoBoundedSendKeysCommands() = runTest(scheduler) {
+    fun largeBracketedPasteIsSplitIntoBoundedCommandsAndArrivesByteExact() = runTest(scheduler) {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxPaneServer()
         vm.attachClientForTest(client)
 
         val payload = buildString {
@@ -335,19 +316,18 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
         vm.writeInputToPane("%0", payload.toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
-        val sent = client.sentCommands.filter { it.startsWith("send-keys -H") }
-        assertTrue("expected multiple bounded paste chunks, got ${sent.size}: $sent", sent.size > 3)
-        assertTrue("paste start marker must be its own bounded command", sent.first().endsWith("1b 5b 32 30 30 7e"))
-        assertTrue("paste end marker must be its own bounded command", sent.last().endsWith("1b 5b 32 30 31 7e"))
-        val maxHexTokens = sent.drop(1).dropLast(1)
-            .maxOf { command -> command.substringAfter("send-keys -H -t %0 ").split(' ').size }
+        assertEquals("the large paste must arrive byte-exact", payload, client.inputBox("%0"))
+
+        val fill = client.sentCommands.filter { it.startsWith("set-buffer ") }
+        assertTrue("expected a multi-chunk bounded fill, got ${fill.size}: $fill", fill.size > 3)
         assertTrue(
-            "body chunks must be bounded to $TMUX_PASTE_BODY_CHUNK_BYTES bytes; max tokens=$maxHexTokens",
-            maxHexTokens <= TMUX_PASTE_BODY_CHUNK_BYTES,
+            "the fill must not fall back to one unbounded command: ${fill.map { it.length }}",
+            fill.all { it.length <= "set-buffer -ab pspaste0 -- ''".length + TMUX_PASTE_BODY_CHUNK_BYTES + 8 },
         )
-        assertTrue(
-            "large paste must not fall back to one unbounded command",
-            sent.none { it.substringAfter("send-keys -H -t %0 ").split(' ').size > TMUX_PASTE_BODY_CHUNK_BYTES },
+        assertEquals(
+            "the payload must reach the pane through exactly ONE commit: ${client.sentCommands}",
+            1,
+            client.sentCommands.count { it.startsWith("paste-buffer ") },
         )
     }
 

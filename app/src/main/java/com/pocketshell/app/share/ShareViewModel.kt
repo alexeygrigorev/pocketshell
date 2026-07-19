@@ -9,6 +9,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.tmux.sendBracketedPaste
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -1229,19 +1230,13 @@ internal class ShareViewModel internal constructor(
         val paneId = resolveActivePaneIdOrNull(client)
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (BracketedPaste.containsLineBreak(bytes) || bytes.size > BracketedPaste.BODY_CHUNK_BYTES) {
-            for (hex in BracketedPaste.hexChunks(bytes)) {
-                val response = if (paneId != null) {
-                    client.sendKeysViaExec("send-keys -H -t $paneId $hex")
-                } else {
-                    client.sendKeysViaExec("send-keys -H $hex")
-                }
-                if (response.isError) {
-                    val detail = response.output.joinToString(separator = " ").trim()
-                    throw IllegalStateException(
-                        "tmux rejected paste${if (detail.isNotEmpty()) ": $detail" else ""}",
-                    )
-                }
-            }
+            // Issue #1636: the share paste is the SECOND site of the partial-paste
+            // accretion class — it built the same `send-keys -H` chunk chain, so a
+            // teardown between chunks left a partial prefix in the target's input box
+            // and the user's retry pasted the full text on top of it. Both sites now
+            // share the ONE atomic fill-then-commit paste, so neither can leave a
+            // partial in a pane.
+            sendBracketedPaste(client, paneId, bytes)
             return
         }
         val cmd = run {

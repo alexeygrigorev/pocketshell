@@ -49,25 +49,56 @@ object BracketedPaste {
         return hex(frame(bytes))
     }
 
+    /**
+     * Issue #1636: the [frame]d paste block split into bounded, UTF-8-SAFE text
+     * chunks, for the atomic `set-buffer`(-fill) + `paste-buffer`(-commit) route
+     * that replaced the old `send-keys -H` chunk chain.
+     *
+     * Contract — the load-bearing property the #1636 regression suite pins:
+     * `chunks.joinToString("").toByteArray(UTF_8)` is BYTE-IDENTICAL to
+     * `frame(bytes)`. Two invariants make that hold:
+     *
+     *  - a chunk boundary NEVER falls inside a UTF-8 multi-byte sequence (a
+     *    boundary is only taken where the next byte is not a `10xxxxxx`
+     *    continuation byte), so every chunk is a whole run of complete code
+     *    points and `String(bytes, UTF_8)` round-trips it exactly. A naive
+     *    fixed-byte split would replace the halves of a split character with
+     *    U+FFFD and silently corrupt the payload.
+     *  - when [bodyChunkBytes] is smaller than a single code point the chunk
+     *    grows forward to that code point's end rather than splitting it, so
+     *    the invariant holds at any chunk size.
+     *
+     * Each chunk is a shell/tmux command ARGUMENT (single-quoted by the caller),
+     * so — unlike the hex form — it carries the payload's raw bytes, including
+     * the `\n` line breaks that are the whole point of a bracketed paste.
+     */
     @JvmStatic
-    fun hexChunks(
+    fun frameTextChunks(
         bytes: ByteArray,
         bodyChunkBytes: Int = BODY_CHUNK_BYTES,
     ): List<String> {
         if (bytes.isEmpty()) return emptyList()
+        val framed = frame(bytes)
         val chunkSize = bodyChunkBytes.coerceAtLeast(1)
-        val normalised = normaliseLineEndings(bytes)
-        val chunks = ArrayList<String>((normalised.size + chunkSize - 1) / chunkSize + 2)
-        chunks += hex(pasteStart)
+        val chunks = ArrayList<String>((framed.size + chunkSize - 1) / chunkSize + 1)
         var offset = 0
-        while (offset < normalised.size) {
-            val length = minOf(chunkSize, normalised.size - offset)
-            chunks += hex(normalised, offset, length)
-            offset += length
+        while (offset < framed.size) {
+            var end = minOf(offset + chunkSize, framed.size)
+            // Back off to the nearest code-point boundary at/below the budget.
+            while (end > offset && end < framed.size && isUtf8Continuation(framed[end])) end -= 1
+            if (end <= offset) {
+                // The budget is smaller than this single code point: take the whole
+                // code point instead of splitting it (over-budget by <4 bytes).
+                end = offset + 1
+                while (end < framed.size && isUtf8Continuation(framed[end])) end += 1
+            }
+            chunks += String(framed, offset, end - offset, Charsets.UTF_8)
+            offset = end
         }
-        chunks += hex(pasteEnd)
         return chunks
     }
+
+    private fun isUtf8Continuation(b: Byte): Boolean = (b.toInt() and 0xC0) == 0x80
 
     @JvmStatic
     fun hex(bytes: ByteArray): String =

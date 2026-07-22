@@ -3,6 +3,7 @@ package com.pocketshell.app.composer
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -10,6 +11,7 @@ import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.voice.PendingTranscriptionItem
@@ -45,6 +47,37 @@ class PromptComposerPendingTranscriptionTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
+
+    /**
+     * Scroll [node] into the composer's status viewport, THEN hard-assert it is
+     * displayed. The pending banner + its expanded per-item row live inside the
+     * composer's capped-height `verticalScroll` status region
+     * (`COMPOSER_STATUS_VIEWPORT_TAG`, see `PromptComposerSheet`): on a short
+     * emulator screen (and, config-dependently, on the CI swiftshader AVDs — the
+     * source of this test's nightly "flakiness") the expanded row lays out BELOW
+     * that region's fold, so the "Retrying…" label and the Retry button sit
+     * off-viewport. A bare `assertIsDisplayed()` then fails ("The component is
+     * not displayed!") and a bare `performClick()` misses the off-screen button,
+     * DETERMINISTICALLY on a short screen — not a frame-timing flake. Scrolling
+     * the node into view is exactly what a user on that screen does, so this
+     * asserts the REAL reachability signal (the feedback is visible / the button
+     * is tappable), not a weakened proxy. A short `waitUntil` first absorbs the
+     * one-frame recomposition lag after the driving state flip so the node
+     * exists before we scroll to it.
+     */
+    private fun scrollToAndAssertDisplayed(node: () -> SemanticsNodeInteraction) {
+        compose.waitUntil(timeoutMillis = NODE_APPEAR_TIMEOUT_MS) {
+            try {
+                node().performScrollTo()
+                true
+            } catch (e: AssertionError) {
+                // Node not composed yet — keep polling until recomposition
+                // adds it, then the trailing assert surfaces any real failure.
+                false
+            }
+        }
+        node().performScrollTo().assertIsDisplayed()
+    }
 
     private class TestMicCapture : PromptComposerViewModel.MicCapture {
         var startCount = 0
@@ -210,14 +243,19 @@ class PromptComposerPendingTranscriptionTest {
         assertEquals(1, queue.enqueueCount)
         assertEquals(1, queue.failureIds.size)
         // Banner is rendered (we forced expanded = true so the per-item
-        // row is visible too).
-        compose.onNodeWithTag(COMPOSER_PENDING_BANNER_TAG).assertIsDisplayed()
-        compose.onNodeWithText("1 pending transcription").assertIsDisplayed()
+        // row is visible too). Scroll each node into the capped status
+        // viewport before asserting — on a short screen the expanded row is
+        // below the fold (see scrollToAndAssertDisplayed).
+        scrollToAndAssertDisplayed { compose.onNodeWithTag(COMPOSER_PENDING_BANNER_TAG) }
+        scrollToAndAssertDisplayed { compose.onNodeWithText("1 pending transcription") }
 
         // Tap retry — the second Whisper call succeeds, draft is
-        // appended, queue is cleared.
+        // appended, queue is cleared. Scroll the Retry button into view first:
+        // on a short screen it sits below the status-region fold, and a bare
+        // performClick() on an off-viewport node silently misses (the retry
+        // never fires and the queue never clears — the nightly failure).
         val id = queue.snapshotSync()[0].id
-        compose.onNodeWithTag(composerPendingRetryTestTag(id)).performClick()
+        compose.onNodeWithTag(composerPendingRetryTestTag(id)).performScrollTo().performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) {
             vm.pendingItems.value.isEmpty()
@@ -328,13 +366,16 @@ class PromptComposerPendingTranscriptionTest {
 
         compose.waitForIdle()
         // The Save / Discard buttons are visible, the Retry tag is not
-        // rendered for the capped item.
-        compose.onNodeWithTag(composerPendingSaveTestTag("capped")).assertIsDisplayed()
-        compose.onNodeWithTag(composerPendingDiscardTestTag("capped")).assertIsDisplayed()
+        // rendered for the capped item. Scroll each into the capped status
+        // viewport before asserting — on a short screen the expanded row sits
+        // below the fold (see scrollToAndAssertDisplayed).
+        scrollToAndAssertDisplayed { compose.onNodeWithTag(composerPendingSaveTestTag("capped")) }
+        scrollToAndAssertDisplayed { compose.onNodeWithTag(composerPendingDiscardTestTag("capped")) }
         compose.onNodeWithTag(composerPendingRetryTestTag("capped")).assertDoesNotExist()
 
-        // Tap save — store records the request.
-        compose.onNodeWithTag(composerPendingSaveTestTag("capped")).performClick()
+        // Tap save — store records the request. Scroll first: a bare
+        // performClick() on the off-viewport button silently misses.
+        compose.onNodeWithTag(composerPendingSaveTestTag("capped")).performScrollTo().performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) { queue.savedIds.contains("capped") }
         assertTrue(queue.savedIds.contains("capped"))
@@ -415,8 +456,12 @@ class PromptComposerPendingTranscriptionTest {
         }
         // Visible feedback: both the status line and the Retry button label
         // flip to "Retrying…" while the round-trip is in flight (two nodes),
-        // so the tap is never a silent no-op.
-        compose.onAllNodesWithText("Retrying…").onFirst().assertIsDisplayed()
+        // so the tap is never a silent no-op. Scroll the "Retrying…" node into
+        // the capped status viewport before asserting — on a short screen the
+        // expanded row is below the fold, so a bare assertIsDisplayed() fails
+        // ("not displayed") even though the state flip above already succeeded
+        // (see scrollToAndAssertDisplayed).
+        scrollToAndAssertDisplayed { compose.onAllNodesWithText("Retrying…").onFirst() }
         repeat(3) { compose.runOnUiThread { vm.retryPending("flaky-device") } }
         compose.waitForIdle()
 
@@ -434,6 +479,15 @@ class PromptComposerPendingTranscriptionTest {
         assertTrue(vm.uiState.value.retryingIds.isEmpty())
     }
 }
+
+/**
+ * Timeout for the recomposition-lag wait inside [scrollToAndAssertDisplayed]:
+ * after the driving state flip (retryingIds set, pending item enqueued) the
+ * target node is added by the next recomposition, which can lag a frame under
+ * journey load. Once the node exists we scroll it into view — so this bound
+ * only covers the frame-appear, not any network/coroutine work.
+ */
+private const val NODE_APPEAR_TIMEOUT_MS = 10_000L
 
 /**
  * Synchronous snapshot helper for the in-memory queue. The

@@ -340,7 +340,8 @@ class Issue1686QueueDrainWireOracleDockerTest {
         // The real production drain: the WIRE-oracle gate opens on
         // `sessionLive || transportWritable()`. sessionLive=false models the enum
         // false-disconnect; the probe reads the live wire.
-        val controller = OutboundQueueAutoFlushController { SystemClock.elapsedRealtime() }
+        val controller =
+            OutboundQueueAutoFlushController.boundTo(composer, clock = { SystemClock.elapsedRealtime() })
         harnessScope.launch {
             controller.onConnectionWindowChanged(sessionLive = false, targetSessionId = target) {}
             runOutboundQueueAutoFlush(

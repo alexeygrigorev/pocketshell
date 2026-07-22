@@ -82,7 +82,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.costs.CostsScreenE2eTest"
   "com.pocketshell.app.crash.ShareAllReportsDockerTest"
   "com.pocketshell.app.fileexplorer.FileExplorerDockerTest"
-  "com.pocketshell.app.fileviewer.FileViewerDockerTest"
   "com.pocketshell.app.fileviewer.LinkTapParsingDockerTest"
   "com.pocketshell.app.fileviewer.TerminalFilePathTapToViewerDockerTest"
   "com.pocketshell.app.git.GitHistoryDockerTest"

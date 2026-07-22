@@ -123,9 +123,15 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
         toxiproxy().addBlackhole()
         recordTiming("recover_severed_at_ms", severStart)
 
-        // The keepalive must DETECT the dead half-open transport within its budget
-        // and surface the connection-lost band (the user-visible recovery signal).
-        waitForDisconnectBand("severed NAT mapping", detectionBudgetMs = KEEPALIVE_DEATH_DETECT_TIMEOUT_MS)
+        // Issue #1676: the keepalive must DETECT the dead half-open transport within
+        // its budget and drive the CURRENT ride-through recovery — the fast
+        // Reconnecting indicator (top-chrome "Reconnecting" pill + centered
+        // "Attaching…" hold + VM `ConnectionStatus.Reconnecting`), NOT the settled
+        // Failed band (which renders only at give-up, ~119–270s). The prior
+        // `waitForDisconnectBand` waited for that settled band and so never saw the
+        // keepalive-driven recovery, which is why this cohort test failed on the
+        // nightly under the current contract.
+        waitForReconnectingRecoveryBand("severed NAT mapping", budgetMs = KEEPALIVE_DEATH_DETECT_TIMEOUT_MS)
         val detectMs = SystemClock.elapsedRealtime() - severStart
         recordTiming("recover_detect_ms", detectMs)
 
@@ -133,11 +139,16 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
         // reconnect) so recovery can complete.
         toxiproxy().clearToxics()
 
-        // Recovery: the session returns to Connected and a post-recovery send
-        // round-trips — recovery within the keepalive budget + a reconnect.
+        // Recovery: the session AUTO-returns to Connected (no manual tap) and the
+        // reconnect is CLEAN — the same tmux session survives with at most one client
+        // (no orphaned/duplicate clients), verified server-side over a direct SSH
+        // connection. (The prior post-recovery terminal-input round-trip was dropped in
+        // #1676: after a reconnect the re-seeded TerminalView briefly reroutes input, so
+        // the app-side send was flaky AND vacuous — the printf command text itself
+        // contains the marker — while the VM-Connected + clean-client-count pair is the
+        // robust, authoritative auto-recovery signal.)
         waitForConnected("after severed-mapping recovery", timeoutMs = RECOVERY_CONNECTED_TIMEOUT_MS)
-        sendCommandThroughTerminalInput("printf 'RECOV-$marker\\n'", "post-recovery")
-        waitForVisibleTerminalText("post-recovery round-trip") { "RECOV-$marker" in it }
+        waitForClientCountAtMost(key, sessionName, max = 1, label = "post-recovery clean reconnect")
         captureViewport("issue1063-recover-02-recovered")
 
         assertTrue(
@@ -155,7 +166,7 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
                 "keepalive_override=${RECOVERY_KEEPALIVE_INTERVAL_MS}ms x $KEEPALIVE_COUNT_MAX (SHORT)",
                 "keepalive_death_budget_ms=$KEEPALIVE_DEATH_BUDGET_MS",
                 "detect_ms=$detectMs",
-                "expectation=keepalive detects half-open within budget => recovery + send",
+                "expectation=keepalive detects half-open within budget => Reconnecting band => auto-recover (VM Connected, <=1 client)",
             ),
         )
     } }

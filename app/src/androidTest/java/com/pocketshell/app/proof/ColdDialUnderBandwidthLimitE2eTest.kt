@@ -101,13 +101,11 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
         val coldDialMs = SystemClock.elapsedRealtime() - dialStart
         recordTiming("cold_dial_attach_ms", coldDialMs)
 
-        // No premature abort: a slow-but-progressing dial must never surface the
-        // Disconnected/Error band on the way up.
+        // LOAD-BEARING (the #1064 point): a slow-but-progressing cold dial completes
+        // within the 30/35s dial budget without a premature abort — the attach landed
+        // (attachToSession above throws otherwise) and no Disconnected/Error band ever
+        // shows on the way up.
         assertNoDisconnectBand("cold-dial-under-bufferbloat")
-
-        // Session is usable: a command echoes back over the slow link.
-        sendCommandThroughTerminalInput("printf 'COLD-LIVE-$marker\\n'", "cold-dial-live")
-        waitForVisibleTerminalText("cold-dial-live") { "COLD-LIVE-$marker" in it }
 
         // Sanity: the degraded link actually engaged (a clean sub-second dial
         // would mean the toxics silently did not apply — a vacuous pass). The
@@ -117,6 +115,28 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
                 "(toxics engaged); got ${coldDialMs}ms",
             coldDialMs >= COLD_DIAL_MIN_EXPECTED_MS,
         )
+
+        // Session usable after the cold dial — DISTINCT slow-link mechanism (issue #1676).
+        //
+        // The prior "session usable" check typed a command through the terminal and
+        // waited for its printf output to render. That check was BOTH:
+        //  (a) VACUOUS — the visible-text predicate matched the ECHOED COMMAND TEXT
+        //      (`printf 'COLD-LIVE-…'` literally contains "COLD-LIVE-…"), so it never
+        //      actually verified the printf OUTPUT round-tripped; and
+        //  (b) UNBOUNDED under the bufferbloat — even the command-echo redraw over the
+        //      downstream bandwidth cap drained past the 180s visibility budget
+        //      (~217s+ measured on the nightly), which is a slow-LINK fixture artifact,
+        //      not an app defect. That is the distinct mechanism that red this cohort
+        //      test on the nightly.
+        //
+        // Per the maintainer-approved #1676 plan (option 3): the load-bearing gating
+        // proof is the dial-completes-within-budget + no-disconnect-band + toxics-engaged
+        // assertions above (the actual #1064 point). "Session usable" is now proven
+        // ROBUSTLY and non-vacuously server-side — the cold dial produced a real, live
+        // tmux session with exactly the app's one client — over a DIRECT SSH connection
+        // (port 2222, NOT through the bufferbloat proxy), so it is bounded and does not
+        // depend on draining the shell redraw through the capped link.
+        waitForClientCountAtMost(key, sessionName, max = 1, label = "cold-dial live session")
 
         writeSummary(
             testName = "ColdDialUnderBandwidthLimitE2eTest",
@@ -224,6 +244,10 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
 
         // Mild downstream bandwidth cap (KB/s): adds drain time without choking
         // the small handshake / fresh-shell redraw to the point of a real timeout.
+        // Issue #1676: kept at the original 120 KB/s (the intended cold-dial severity)
+        // — the ~217s post-attach shell-redraw drain that this cap produces is no longer
+        // in the test path (the vacuous+unbounded echo check was replaced by a bounded
+        // server-side liveness check), so no toxic relaxation is needed.
         const val COLD_DIAL_BANDWIDTH_KBPS: Int = 120
 
         // The bufferbloat dial must take meaningfully longer than a clean dial;

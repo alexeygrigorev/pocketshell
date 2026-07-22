@@ -2339,7 +2339,7 @@ class TmuxSessionScreenTest {
 
     @Test
     fun outboundQueueAutoFlushRequeuesOnLiveAndSuppressesSameWindowRetryLoop() {
-        val controller = OutboundQueueAutoFlushController()
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer())
         val requeuedTargets = mutableListOf<String>()
         val retryExclusions = mutableListOf<Set<String>>()
 
@@ -2409,7 +2409,10 @@ class TmuxSessionScreenTest {
         // eligible again after OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS and
         // re-dispatches on the SAME live window.
         var nowMs = 100_000L
-        val controller = OutboundQueueAutoFlushController(clock = { nowMs })
+        val controller = OutboundQueueAutoFlushController.boundTo(
+            composer = outboundBudgetTestComposer(),
+            clock = { nowMs },
+        )
         controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/silent") {}
 
         // 1) First dispatch — the send that the silent drop will defer.
@@ -2459,7 +2462,10 @@ class TmuxSessionScreenTest {
         // block from `runOutboundQueueAutoFlush` and this test goes RED (the parked
         // row is never re-dispatched: `dispatched` stays a single element) — proving
         // it covers the load-bearing mechanism, not a structural proxy.
-        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        val controller = OutboundQueueAutoFlushController.boundTo(
+            composer = outboundBudgetTestComposer(),
+            clock = { testScheduler.currentTime },
+        )
         controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/silent") {}
 
         val dispatched = mutableListOf<String>()
@@ -2520,7 +2526,10 @@ class TmuxSessionScreenTest {
         // Delete the poll-lane `sweepStaleInFlight()` call and this test goes RED (the
         // stranded row is never re-armed, `dispatched` stays empty) — it covers the
         // load-bearing mechanism, not a structural proxy.
-        val controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime })
+        val controller = OutboundQueueAutoFlushController.boundTo(
+            composer = outboundBudgetTestComposer(),
+            clock = { testScheduler.currentTime },
+        )
         controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/stranded") {}
 
         // Model the stranded `Uploading` row: NOT retryable until a stale-in-flight
@@ -2621,7 +2630,7 @@ class TmuxSessionScreenTest {
         // user taps the kebab Reconnect (which is ENABLED in this dropped-with-target state),
         // the session recovers (the live window flips), and the #900 outbound queue
         // auto-flushes the pending message — WITHOUT a session switch.
-        val controller = OutboundQueueAutoFlushController()
+        val controller = OutboundQueueAutoFlushController.boundTo(outboundBudgetTestComposer())
         val flushed = mutableListOf<String>()
         val sessionId = "1/issue993-proof"
 

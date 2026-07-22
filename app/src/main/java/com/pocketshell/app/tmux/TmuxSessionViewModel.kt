@@ -15530,9 +15530,6 @@ public class TmuxSessionViewModel @Inject constructor(
         queue = queue,
         currentClient = { clientRef },
         sendBytes = { c, p, b -> sendInputBytesToPane(c, p, b) },
-        onPersistentFailureOfCurrentClient = { event ->
-            handlePassiveClientDisconnect(client = client, disconnectEvent = event)
-        },
     )
 
     private suspend fun sendInputBytesToPane(

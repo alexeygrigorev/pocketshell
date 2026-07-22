@@ -263,8 +263,25 @@ public interface OutboundQueueStore {
      * by the auto-flush instead of being re-parked on the very next cycle. The
      * auto-defer path (a mid-flight drop) leaves it false so the bound still
      * accumulates across silent reconnect retries.
+     *
+     * Issue #1635 (design D4): [attemptDelta] adjusts [OutboundItem.attemptCount]
+     * by an explicit signed amount (floored at 0, ignored when [resetAttempts]).
+     * The budget is charged at CLAIM, but only the FAILURE knows whether the
+     * attempt was the row's fault, so both corrections happen here:
+     *  - `-1` **refunds** a send attempt that failed because the delivery window
+     *    was closed/flipped under it (#1635-A). Storm failures are not the row's
+     *    fault; charging them is what parked the whole queue and stopped it
+     *    auto-sending after the link recovered.
+     *  - `+1` **charges** an UPLOAD failure (#1635-B). The upload leg transitions
+     *    via [markUploading], which does NOT claim, so an upload-failing row was
+     *    entirely IMMUNE to the bound: it looped from byte 0 every 3s forever,
+     *    starving the tail behind it and burning mobile data without limit.
      */
-    public fun requeueForRetry(id: String, resetAttempts: Boolean = false): OutboundItem?
+    public fun requeueForRetry(
+        id: String,
+        resetAttempts: Boolean = false,
+        attemptDelta: Int = 0,
+    ): OutboundItem?
 
     /**
      * Requeue stale [OutboundState.InFlight] rows for [sessionKey] so a
@@ -662,13 +679,17 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             updated
         }
 
-    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = synchronized(lock) {
+    override fun requeueForRetry(
+        id: String,
+        resetAttempts: Boolean,
+        attemptDelta: Int,
+    ): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered) return null
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
-            attemptCount = if (resetAttempts) 0 else existing.attemptCount,
+            attemptCount = existing.adjustedAttemptCount(resetAttempts, attemptDelta),
         )
         items[updated.id] = updated
         updated
@@ -751,7 +772,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
-    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = null
+    override fun requeueForRetry(id: String, resetAttempts: Boolean, attemptDelta: Int): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
@@ -989,7 +1010,11 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             updated
         }
 
-    override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? = synchronized(lock) {
+    override fun requeueForRetry(
+        id: String,
+        resetAttempts: Boolean,
+        attemptDelta: Int,
+    ): OutboundItem? = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
@@ -997,7 +1022,7 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
-            attemptCount = if (resetAttempts) 0 else existing.attemptCount,
+            attemptCount = existing.adjustedAttemptCount(resetAttempts, attemptDelta),
         )
         replaceAndStore(sessionKey, list, updated)
         updated
@@ -1142,6 +1167,16 @@ private fun List<OutboundItem>.coalesceTargetForSendKey(
  */
 private fun OutboundItem.reArmedForCoalesce(): OutboundItem =
     if (state == OutboundState.Failed) copy(state = OutboundState.Queued, lastError = null) else this
+
+/**
+ * Issue #1635 (design D4): resolve the requeued row's attempt count. An explicit
+ * user reset ([resetAttempts]) always wins and clears the budget outright;
+ * otherwise the signed [attemptDelta] correction is applied and FLOORED AT 0 —
+ * a refund can never drive the count negative and hand a row an unbounded budget
+ * (which would resurrect the #1602 stuck head as a forever-retrying one).
+ */
+private fun OutboundItem.adjustedAttemptCount(resetAttempts: Boolean, attemptDelta: Int): Int =
+    if (resetAttempts) 0 else (attemptCount + attemptDelta).coerceAtLeast(0)
 
 private fun OutboundItem.claimedForAttempt(): OutboundItem {
     // Issue #1542 (enabler Q1): stamp the CLAIM time onto [OutboundItem.lastAttemptAtMs]

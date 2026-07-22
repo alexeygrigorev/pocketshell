@@ -205,6 +205,7 @@ public class PromptComposerViewModel @Inject constructor(
     internal var outboundHandoffAttachmentJob: Job? = null
     internal var composerInteractionEpoch: Long = 0L
     internal val outboundAutoCloseEpochs: MutableMap<String, Long> = mutableMapOf()
+    internal val outboundAttemptBudget = OutboundAttemptBudgetTracker() // #1635-A
     internal var backgroundDeliveredRequest: SendRequest? = null
     internal var legacyAutoCloseEpoch: Long? = null
     internal val composerRevisionTracker = ComposerRevisionTracker()
@@ -1156,15 +1157,14 @@ public class PromptComposerViewModel @Inject constructor(
 
     /**
      * Issue #971/#987 (Option A) + #1686 taxonomy: the drop path for a send that owns a
-     * durable queue row. STAYS QUEUED and auto-sends on reconnect (#900): re-arms to
-     * [OutboundState.Queued], clears the in-flight gates + watchdog, composer EMPTY, no
-     * error banner. Falls back to [restoreFailedSend] with [noRowFallbackMessage] ONLY
-     * when there is no durable row.
+     * durable queue row. STAYS QUEUED and auto-sends on reconnect (#900); falls back to
+     * [restoreFailedSend] with [noRowFallbackMessage] ONLY when there is no durable row.
      *
-     * [resetAttemptBudget] (#1686 taxonomy): `false` = a LIVE rejection keeps the claim's
-     * attempt bump so a poison row eventually parks (#1602); `true` = transport UNAVAILABLE
-     * (wire-oracle probe not-writable) re-grants the budget so a flapping/prolonged outage
-     * NEVER parks the row (the #1686 clog).
+     * The budget composes two signals: the epoch-aware [outboundAttemptBudget] refunds a
+     * failure whose delivery window flipped under it (#1635-A storm), and
+     * [resetAttemptBudget] rides on top — `true` = transport proven not-writable
+     * (#1686 wire-oracle) FULLY re-grants the budget; `false` = a proven-live rejection
+     * lets a poison row park (#1602).
      */
     public fun markOutboundSendDeferred(
         request: SendRequest,
@@ -1176,12 +1176,9 @@ public class PromptComposerViewModel @Inject constructor(
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
         id?.let(outboundAutoCloseEpochs::remove)
-        val requeued = id?.let { outboundQueueStore.requeueForRetry(it, resetAttempts = resetAttemptBudget) }
-            ?: request.sendTarget.sessionKey.takeIf { it.isNotBlank() }?.let { sessionKey ->
-                outboundQueueStore.itemsFor(sessionKey).deferredRetryCandidateFor(request)
-            }?.let {
-                outboundQueueStore.requeueForRetry(it.id, resetAttempts = resetAttemptBudget)
-            }
+        val requeued = outboundQueueStore.requeueDeferredSend(
+            id, request.sendTarget.sessionKey, request, outboundAttemptBudget, resetAttemptBudget,
+        )
         if (requeued == null) {
             // No durable row to keep queued — restore to the composer so it is not lost.
             restoreFailedSend(request, message = noRowFallbackMessage)
@@ -1380,6 +1377,7 @@ public class PromptComposerViewModel @Inject constructor(
         // racing a just-resolved delivery's own consume, which happens inline in the
         // send dispatcher long before any switch.
         outboundAutoCloseEpochs.keys.retainAll { outboundQueueStore.item(it) != null }
+        outboundAttemptBudget.retainRows { outboundQueueStore.item(it) != null } // #1635-A
         val draftOwner = savedStateHandle.get<String>(KEY_DRAFT_OWNER)
         val hasDraft = _uiState.value.draft.isNotEmpty() ||
             _uiState.value.attachments.isNotEmpty()
@@ -1695,13 +1693,13 @@ public class PromptComposerViewModel @Inject constructor(
             Result.failure(t)
         }
         val uploadedPaths = result.getOrElse { error ->
-            outboundQueueStore.requeueForRetry(id)
+            outboundQueueStore.requeueForRetry(id, attemptDelta = OUTBOUND_UPLOAD_FAILURE_ATTEMPT_DELTA)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
             clearStrandedSendInFlight()
             return false
         }.filter { it.isNotBlank() }
         if (uploadedPaths.size != pendingSidecars.size) {
-            outboundQueueStore.requeueForRetry(id)
+            outboundQueueStore.requeueForRetry(id, attemptDelta = OUTBOUND_UPLOAD_FAILURE_ATTEMPT_DELTA)
             refreshOutboundQueueItemsFor(uploading.sessionKey)
             clearStrandedSendInFlight()
             return false
@@ -1734,6 +1732,7 @@ public class PromptComposerViewModel @Inject constructor(
             return false
         }
         active.recordQueueRowState("Queued", "InFlight", "claimed") // #1682
+        outboundAttemptBudget.onClaim(id) // #1635-A
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
         if (text.isEmpty()) {

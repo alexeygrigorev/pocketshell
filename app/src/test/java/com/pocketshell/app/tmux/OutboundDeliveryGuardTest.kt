@@ -3,7 +3,6 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
-import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -96,7 +95,6 @@ class OutboundDeliveryGuardTest {
             queue = queue,
             currentClient = { client },
             sendBytes = { _, _, b -> server.send(b) },
-            onPersistentFailureOfCurrentClient = { },
         )
 
         assertTrue("the batch must resolve (already landed)", resolved)
@@ -125,7 +123,6 @@ class OutboundDeliveryGuardTest {
             queue = queue,
             currentClient = { client },
             sendBytes = { _, _, b -> server.send(b) },
-            onPersistentFailureOfCurrentClient = { },
         )
 
         assertTrue(resolved)
@@ -152,7 +149,6 @@ class OutboundDeliveryGuardTest {
             queue = queue,
             currentClient = { client },
             sendBytes = { _, _, b -> server.send(b) },
-            onPersistentFailureOfCurrentClient = { },
         )
 
         assertTrue(resolved)
@@ -187,7 +183,6 @@ class OutboundDeliveryGuardTest {
                 current = newClient
                 server.send(b)
             },
-            onPersistentFailureOfCurrentClient = { },
         )
 
         assertTrue("the batch must resolve as already-landed, not requeue", resolved)
@@ -211,7 +206,6 @@ class OutboundDeliveryGuardTest {
             queue = queue,
             currentClient = { client },
             sendBytes = { _, _, b -> server.send(b) },
-            onPersistentFailureOfCurrentClient = { },
         )
 
         assertTrue(resolved)
@@ -223,15 +217,37 @@ class OutboundDeliveryGuardTest {
         )
     }
 
-    /** Persistent (twice-failed, probe-NotLanded) batches still drop + report. */
+    /**
+     * Issue #1635 / design D2 (#1331): a persistently-failing keystroke batch is
+     * resolved (dropped) WITHOUT firing a synthetic passive-disconnect into the
+     * reconnect ladder.
+     *
+     * BASE (RED): after 2 failed attempts the lane called
+     * `onPersistentFailureOfCurrentClient(TmuxDisconnectEvent(source = "pane_input_send"))`
+     * -> `handlePassiveClientDisconnect`, i.e. the outbound queue DRIVING the
+     * connection state machine. That made the queue amplify the very storm it was
+     * suffering from — a failed keystroke send caused a reconnect, which caused more
+     * failed sends — and it is visible in the maintainer's own device log as
+     * `disconnectSource=pane_input_send` (#1610, 07-15). Under the #1633 episode
+     * semantics it got worse: each synthetic drop advances the attempt counter
+     * toward give-up.
+     *
+     * GREEN: the injection is DELETED (hard-cut, D22). The batch still resolves and
+     * is still recorded as dropped; the connection's own reader/keepalive keep sole
+     * authority over disconnect judgement.
+     *
+     * The load-bearing assertion is structural-by-necessity: the callback no longer
+     * exists to observe, so the proof is that `deliverDequeuedInputBatch` cannot
+     * report a disconnect at all — there is no seam through which the queue can
+     * reach the ladder. `TmuxDisconnectEvent` is unreferenced by this lane now.
+     */
     @Test
-    fun persistentFailureStillDropsAndReportsDisconnectEvent() = runTest {
+    fun persistentFailureDropsWithoutInjectingAPassiveDisconnect() = runTest {
         val text = "persistently failing batch text"
         val client = captureShowing("$ ")
         val server = AmbiguousServer(failures = 2)
         val queue = newQueue()
         val batch = batchOf(queue, text)
-        var reported: TmuxDisconnectEvent? = null
 
         val resolved = deliverDequeuedInputBatch(
             client = client,
@@ -240,12 +256,27 @@ class OutboundDeliveryGuardTest {
             queue = queue,
             currentClient = { client },
             sendBytes = { _, _, b -> server.send(b) },
-            onPersistentFailureOfCurrentClient = { reported = it },
         )
 
+        // The batch is still resolved and still bounded at 2 wire attempts.
         assertTrue(resolved)
         assertEquals(2, server.received.size)
-        assertEquals("pane_input_send", reported?.source)
+        // And the queue's only remaining effect is on its OWN state — never on the
+        // connection. `deliverDequeuedInputBatch` takes no disconnect sink at all,
+        // so no code path can re-introduce the feedback loop without changing this
+        // signature and failing this test to compile.
+        //
+        // The exhausted batch resolves via `recordDropped` (which only releases the
+        // pending-bytes budget), NOT `recordSent`. Asserting that keeps the give-up
+        // honest: a `recordSent` here would book an undelivered batch into the sent
+        // ledger and hide the loss behind a healthy-looking counter. (This replaces a
+        // duplicate `assertTrue(resolved)` that claimed to check droppedness but
+        // re-asserted the same expression as the line above — it could not fail.)
+        assertEquals(
+            "an exhausted batch must never be counted as SENT — it is given up on, not delivered",
+            0L,
+            queue.snapshot().sentBatchCount,
+        )
     }
 
     // ---------------------------------------------------------------- needle + ledger

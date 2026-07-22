@@ -535,8 +535,12 @@ private fun TmuxSessionScreenEffects(
         )
     }
 
-    val outboundQueueAutoFlushController = remember(targetSessionId.value) {
-        OutboundQueueAutoFlushController()
+    val outboundQueueAutoFlushController = remember(targetSessionId.value, promptComposerViewModel) {
+        // #1635-A (D4): `boundTo` BINDS the retry budget to this screen's delivery
+        // window, so a send that failed with the window closed burns zero attempts. It
+        // reads the budget off the composer itself — the screen never names a tracker —
+        // so the wiring can be neither dropped nor misdirected.
+        OutboundQueueAutoFlushController.boundTo(promptComposerViewModel)
     }
     LaunchedEffect(targetSessionId.value) {
         promptComposerViewModel.onComposerTargetChanged(targetSessionId.value)

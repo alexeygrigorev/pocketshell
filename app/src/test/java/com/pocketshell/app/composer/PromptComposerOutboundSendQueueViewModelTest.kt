@@ -665,7 +665,9 @@ class PromptComposerOutboundSendQueueViewModelTest {
         // row per queue-snapshot emission, on an IMMEDIATELY-resumed collector
         // (UnconfinedTestDispatcher) — the interleave the composed effect
         // produces on-device.
-        val controller = com.pocketshell.app.tmux.OutboundQueueAutoFlushController()
+        val controller = com.pocketshell.app.tmux.OutboundQueueAutoFlushController.boundTo(
+            composer = vm,
+        )
         val flushJob = launch(
             kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler),
         ) {
@@ -927,7 +929,10 @@ class PromptComposerOutboundSendQueueViewModelTest {
             runOutboundQueueAutoFlush(
                 sessionLive = true,
                 outboundQueueItems = vm.outboundQueueItems,
-                controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime }),
+                controller = OutboundQueueAutoFlushController.boundTo(
+                    composer = vm,
+                    clock = { testScheduler.currentTime },
+                ),
                 retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
                 sweepStaleInFlight = { staleAfterMs ->
                     vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
@@ -994,7 +999,10 @@ class PromptComposerOutboundSendQueueViewModelTest {
             runOutboundQueueAutoFlush(
                 sessionLive = true,
                 outboundQueueItems = vm.outboundQueueItems,
-                controller = OutboundQueueAutoFlushController(clock = { testScheduler.currentTime }),
+                controller = OutboundQueueAutoFlushController.boundTo(
+                    composer = vm,
+                    clock = { testScheduler.currentTime },
+                ),
                 retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
                 sweepStaleInFlight = { staleAfterMs ->
                     vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
@@ -1313,9 +1321,13 @@ class PromptComposerOutboundSendQueueViewModelTest {
         // — so the wait genuinely blocks until the flush has completed.
         var requeueCount = 0
         val queue = object : InMemoryOutboundQueueStore() {
-            override fun requeueForRetry(id: String, resetAttempts: Boolean): OutboundItem? {
+            override fun requeueForRetry(
+                id: String,
+                resetAttempts: Boolean,
+                attemptDelta: Int,
+            ): OutboundItem? {
                 requeueCount++
-                return super.requeueForRetry(id, resetAttempts)
+                return super.requeueForRetry(id, resetAttempts, attemptDelta)
             }
         }
         val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))

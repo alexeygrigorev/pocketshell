@@ -375,6 +375,21 @@ Minimum pre-push gate:
   asserted synchronous post-`close()` state that the new async contract broke.
   Reviewer briefs for connection-core contract changes must call out running the
   integration suite.
+- **A change that alters a test-visible API (visibility, signature, or
+  removal of a constructor/factory) on a class used by `androidTest` — especially
+  composer/connection-core helpers — MUST run `:app:compileDebugAndroidTestKotlin`
+  locally before merge.** The required per-PR `Unit tests` job compiles only the
+  `main` + unit `test` source sets, NOT `androidTest`; that set compiles only in
+  the batched emulator job, so an androidTest compile break passes every required
+  PR check and only surfaces after merge — where it breaks EVERY connected/
+  emulator/nightly/release gate at once. In the v0.4.39 wave #1635 made
+  `OutboundQueueAutoFlushController`'s constructor private + added a `boundTo`
+  factory and updated its own unit test, but left the sibling androidTest
+  `Issue1686QueueDrainWireOracleDockerTest` on the removed 1-arg form — Unit
+  stayed green, `:app:compileDebugAndroidTestKotlin` went red on `main` (#1720),
+  and it was only caught when an unrelated PR's rebase compiled the androidTest
+  set. When you privatize/rename/remove any API, grep the `androidTest` tree for
+  callers and compile that source set before merge.
 - **For connection-core transport/storm/reconnect/lease fixes, an OBSERVED
   headless real-transport reproduction (JVM + Docker/toxiproxy
   `:shared:core-ssh:integrationTest`) is first-class D33 proof (D34); the

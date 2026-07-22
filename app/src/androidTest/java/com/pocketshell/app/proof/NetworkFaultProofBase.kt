@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.printToString
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
@@ -24,10 +25,14 @@ import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.projects.folderRowTestTag
+import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
+import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_RECONNECTING_RETRY_NOW_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
-import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
+import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -264,6 +269,15 @@ abstract class NetworkFaultProofBase {
     }
 
     protected fun sendCommandThroughTerminalInput(command: String, label: String) {
+        // Issue #1676 — a benign foreground reconnect (transient transport churn, or a
+        // lifecycle detach/reattach) briefly HOLDS the terminal: the surface goes
+        // Reattaching/Reconnecting and the TerminalView drops out of the view tree. A
+        // send that raced that window used to fail immediately with "TerminalView was
+        // not found". Wait (bounded) for the terminal to be attached again before
+        // typing — the app auto-recovers, so it returns within the budget. This makes
+        // the shared send helper resilient to transient holds without changing what any
+        // test asserts.
+        waitForTerminalAttachedForInput(label)
         command.chunked(4).forEach { chunk ->
             val committed = terminalInputConnection().commitText(chunk, 1)
             assertTrue("expected terminal input commit for $label chunk `$chunk`", committed)
@@ -271,6 +285,21 @@ abstract class NetworkFaultProofBase {
         }
         val enterCommitted = terminalInputConnection().commitText("\n", 1)
         assertTrue("expected terminal input submit for $label", enterCommitted)
+    }
+
+    private fun waitForTerminalAttachedForInput(label: String) {
+        val ready = runCatching {
+            compose.waitUntil(timeoutMillis = TERMINAL_INPUT_READY_TIMEOUT_MS) {
+                terminalViewAttached()
+            }
+            true
+        }.getOrDefault(false)
+        assertTrue(
+            "expected an attached terminal to type $label into within " +
+                "${TERMINAL_INPUT_READY_TIMEOUT_MS}ms (the terminal stayed held/detached — " +
+                "a reconnect that never settled)",
+            ready,
+        )
     }
 
     /**
@@ -314,119 +343,219 @@ abstract class NetworkFaultProofBase {
         )
     }
 
+
     /**
-     * Issue #1676 — the load-bearing budget for the disconnect band to surface,
-     * with a reproduce-first measure-PAST-budget capture (D33/G10).
-     *
-     * ## Why the budget is what it is (measured from production, NOT guessed)
-     *
-     * The band is surfaced by the production dead / half-open transport detectors,
-     * whose worst-case detection latencies are DOCUMENTED PRODUCTION CONSTANTS:
-     *
-     *  - the app-level `com.pocketshell.core.connection.LivenessProbe` — the
-     *    half-open / `-CC`-wedged detector for the blackhole + sustained-cut cohort —
-     *    has a worst case of
-     *    `failureThreshold × (intervalMs + perProbeTimeoutMs)` = `4 × (7s + 5s)` = **48s**;
-     *  - the always-on `com.pocketshell.core.ssh.TransportKeepAlive` — the
-     *    silent-peer detector (e.g. `NatIdleMappingSurvivalE2eTest`) — is
-     *    `countMax × intervalMs` (prod 90s; NatIdle's override 3 × 3s = 9s).
-     *
-     * The pre-#1676 flat **35s** default was SMALLER than the LivenessProbe's own
-     * **48s** worst case — so a perfectly-functioning half-open detection could hit
-     * its documented budget and STILL time out the test. On the CI swiftshader runner
-     * the `delay()`-driven detector ticks stretch further under load, so the 35s
-     * ceiling blew on ~6/8 nights (the #1676 correlated cohort) even though detection
-     * was working. That is a HARNESS under-budgeting (a wall-clock flake), NOT a
-     * slow-detection `core-connection` regression:
-     * `Issue1676DisconnectDetectionLatencyTest` (core-connection, per-push Unit gate)
-     * proves the detection logic fires at exactly its deterministic budget on a
-     * virtual clock, decoupled from wall-clock.
-     *
-     * [detectionBudgetMs] therefore defaults to [disconnectBandBudgetMs] — the
-     * production detector worst case plus slow-emulator headroom. The LOAD-BEARING
-     * assertion ("the band surfaces within [detectionBudgetMs]") is unchanged and NOT
-     * widened into a meaningless band (G6): a genuinely never-surfacing or
-     * far-over-budget regression STILL fails, and the TRUE latency is captured up to
-     * [captureCeilingMs] (recorded even when the budget is blown) so the next nightly
-     * emits the decisive flake-vs-regression number instead of just "did not appear".
+     * Issue #1676 — a single sampled snapshot of every recovery-relevant RENDERED
+     * signal plus the VM connection status, used by [observeRecoveryTimeline] and the
+     * ride-through assertions. These are the ACTUAL on-screen signals a user sees
+     * during the deliberate auto-reconnect episode (the current ride-through
+     * contract), not a seam/lambda proxy (the #1693 trap).
      */
-    protected fun waitForDisconnectBand(
+    protected data class RecoverySnapshot(
+        val elapsedMs: Long,
+        val statusName: String,
+        /** Top-chrome "Reconnecting" (amber) pill — [TMUX_CONNECTION_STATUS_PILL_TAG]. */
+        val reconnectingPill: Boolean,
+        /** Centered "Attaching…" reconnect hold — [TMUX_SWITCHING_LOADING_TAG]. */
+        val attachingHold: Boolean,
+        /** The (architecturally live-frame-only) Reconnecting band "Retry now". */
+        val reconnectBandRetryNow: Boolean,
+        /** The Connecting/Reconnecting progress row root — [TMUX_CONNECTING_PROGRESS_TAG]. */
+        val connectingProgressRow: Boolean,
+        /** The SETTLED Failed band — [TMUX_SESSION_ERROR_TAG] (give-up only). */
+        val settledFailedBand: Boolean,
+    ) {
+        /**
+         * True while an HONEST, escapable recovery indicator is on screen (the
+         * current ride-through contract's fast signal) and the SETTLED Failed band
+         * is NOT — i.e. the app is patiently auto-reconnecting, not surrendered.
+         */
+        val showsRecoveryInProgress: Boolean
+            get() = !settledFailedBand &&
+                (reconnectingPill || attachingHold || reconnectBandRetryNow ||
+                    connectingProgressRow || statusName == "Reconnecting")
+
+        fun asLine(): String =
+            "t=${elapsedMs}ms status=$statusName pill=$reconnectingPill " +
+                "attachingHold=$attachingHold retryNow=$reconnectBandRetryNow " +
+                "progressRow=$connectingProgressRow settledFailed=$settledFailedBand " +
+                "recoveryInProgress=$showsRecoveryInProgress"
+    }
+
+    /** The current [TmuxSessionViewModel.ConnectionStatus] simple name (VM real state). */
+    protected fun currentConnectionStatusName(): String {
+        var name = "unknown"
+        launchedActivity?.onActivity { activity ->
+            name = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                .connectionStatus
+                .value::class
+                .simpleName
+                ?: "null"
+        }
+        return name
+    }
+
+    protected fun sampleRecovery(startedAt: Long): RecoverySnapshot = RecoverySnapshot(
+        elapsedMs = SystemClock.elapsedRealtime() - startedAt,
+        statusName = currentConnectionStatusName(),
+        reconnectingPill = hasReconnectingPill(),
+        attachingHold = hasTag(TMUX_SWITCHING_LOADING_TAG),
+        reconnectBandRetryNow = hasTag(TMUX_RECONNECTING_RETRY_NOW_TAG),
+        connectingProgressRow = hasTag(TMUX_CONNECTING_PROGRESS_TAG),
+        settledFailedBand = hasTag(TMUX_SESSION_ERROR_TAG),
+    )
+
+    /**
+     * The top-chrome "Reconnecting" pill reads its label from the fused surface
+     * status, so the tag alone is present for both "Reconnecting" and "Disconnected".
+     * We treat it as the reconnecting signal only when its visible text is
+     * "Reconnecting" (the amber, in-progress label — not the red "Disconnected").
+     */
+    private fun hasReconnectingPill(): Boolean {
+        if (!hasTag(TMUX_CONNECTION_STATUS_PILL_TAG)) return false
+        return runCatching {
+            compose.onAllNodesWithText("Reconnecting", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Issue #1676 — record a per-tick timeline of the RENDERED recovery signals for
+     * [windowMs] after a link cut, to a `recovery-timeline-<label>.txt` artifact.
+     * Diagnostic + evidence: it captures exactly which honest recovery indicator the
+     * user sees during the deliberate auto-reconnect ladder, and whether the settled
+     * Failed band ever appears (it must not, until give-up).
+     */
+    protected fun observeRecoveryTimeline(
         label: String,
-        detectionBudgetMs: Long = disconnectBandBudgetMs(),
-        captureCeilingMs: Long = DISCONNECT_BAND_CAPTURE_CEILING_MS,
+        windowMs: Long,
+        pollMs: Long = 1_000L,
+    ): List<RecoverySnapshot> {
+        val start = SystemClock.elapsedRealtime()
+        val samples = mutableListOf<RecoverySnapshot>()
+        while (SystemClock.elapsedRealtime() - start < windowMs) {
+            samples += sampleRecovery(start)
+            SystemClock.sleep(pollMs)
+        }
+        artifactFile("recovery-timeline-$label.txt").writeText(
+            buildString {
+                appendLine("label=$label window_ms=$windowMs poll_ms=$pollMs")
+                samples.forEach { appendLine(it.asLine()) }
+            },
+        )
+        return samples
+    }
+
+    /**
+     * Issue #1676 — the CURRENT ride-through contract's load-bearing recovery
+     * assertion. During a link outage the app AUTO-reconnects patiently through the
+     * bounded 8-rung ladder (it does NOT wait for a manual reconnect — the superseded
+     * #342/#552 contract). The user's fast, honest, escapable signal during that
+     * window is a recovery-in-progress indicator (the top-chrome "Reconnecting" pill,
+     * the centered "Attaching…" reconnect hold, and/or the Reconnecting progress row),
+     * while the VM sits in [TmuxSessionViewModel.ConnectionStatus.Reconnecting]. The
+     * SETTLED Failed band ([TMUX_SESSION_ERROR_TAG]) must NOT appear during this
+     * window — that renders ONLY at give-up (`Unreachable`/`Gone`), which the
+     * ride-through is deliberately built to avoid.
+     *
+     * Polls up to [budgetMs] for the first tick that [RecoverySnapshot.showsRecoveryInProgress],
+     * hard-asserting that a settled Failed band never pre-empted it. Writes the full
+     * observation timeline to a `recovery-band-<label>.txt` artifact (the authoritative
+     * evidence). This is the symptom-defining RENDERED signal on the real transport,
+     * not a seam having fired.
+     */
+    protected fun waitForReconnectingRecoveryBand(
+        label: String,
+        budgetMs: Long = RECONNECTING_BAND_BUDGET_MS,
+    ): RecoverySnapshot {
+        val start = SystemClock.elapsedRealtime()
+        val timeline = mutableListOf<RecoverySnapshot>()
+        var recovered: RecoverySnapshot? = null
+        var settledFailedFirst: RecoverySnapshot? = null
+        while (SystemClock.elapsedRealtime() - start < budgetMs) {
+            val snap = sampleRecovery(start)
+            timeline += snap
+            if (snap.settledFailedBand && recovered == null && settledFailedFirst == null) {
+                settledFailedFirst = snap
+            }
+            if (snap.showsRecoveryInProgress) {
+                recovered = snap
+                break
+            }
+            SystemClock.sleep(RECONNECTING_BAND_POLL_MS)
+        }
+        val appeared = recovered != null
+        val detectMs = (recovered ?: timeline.lastOrNull())?.elapsedMs ?: 0L
+        recordTiming("${label}_reconnecting_band_ms", detectMs)
+        recordTiming("${label}_reconnecting_band_appeared", if (appeared) 1L else 0L)
+        artifactFile("recovery-band-$label.txt").writeText(
+            buildString {
+                appendLine("label=$label budget_ms=$budgetMs")
+                appendLine("reconnecting_band_appeared=$appeared")
+                appendLine("reconnecting_band_ms=$detectMs")
+                appendLine("settled_failed_pre_empted=${settledFailedFirst != null}")
+                appendLine("timeline:")
+                timeline.forEach { appendLine("  ${it.asLine()}") }
+            },
+        )
+        assertTrue(
+            "expected the CURRENT ride-through recovery indicator (Reconnecting pill / " +
+                "Attaching hold / progress row, VM=Reconnecting) for $label to appear within " +
+                "${budgetMs}ms WITHOUT the settled Failed band pre-empting it, but a settled " +
+                "Failed band (give-up) appeared first at ${settledFailedFirst?.elapsedMs}ms — " +
+                "the app surrendered instead of riding through (see recovery-band-$label.txt)",
+            settledFailedFirst == null,
+        )
+        assertTrue(
+            "expected the CURRENT ride-through recovery indicator for $label to appear within " +
+                "${budgetMs}ms (top-chrome Reconnecting pill / centered Attaching hold / " +
+                "Reconnecting progress row / VM Reconnecting); none appeared " +
+                "(see recovery-band-$label.txt)",
+            appeared,
+        )
+        return recovered!!
+    }
+
+    /**
+     * Issue #1676 — wait for the session to AUTO-recover to Connected (Live) after
+     * the link is restored within the episode budget — WITHOUT any manual reconnect
+     * tap (the CURRENT ride-through contract; the superseded #342/#552 contract
+     * required a manual Reconnect). Reads the real VM
+     * [TmuxSessionViewModel.ConnectionStatus] and hard-asserts it settled to
+     * `Connected`.
+     */
+    protected fun waitForConnectedStatus(
+        label: String,
+        timeoutMs: Long = AUTO_RECOVERY_CONNECTED_TIMEOUT_MS,
     ) {
         val start = SystemClock.elapsedRealtime()
-        // Poll PAST the load-bearing budget up to a generous capture ceiling so the
-        // TRUE detection latency is recorded even on a blown budget (reproduce-first).
-        val appeared = runCatching {
-            compose.waitUntil(timeoutMillis = captureCeilingMs) {
-                compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+        val settled = runCatching {
+            compose.waitUntil(timeoutMillis = timeoutMs) {
+                currentConnectionStatusName() == "Connected"
             }
             true
         }.getOrDefault(false)
-        val detectMs = SystemClock.elapsedRealtime() - start
-        recordTiming("${label}_disconnect_visible_ms", detectMs)
-        recordTiming("${label}_disconnect_appeared", if (appeared) 1L else 0L)
-        recordTiming("${label}_disconnect_budget_ms", detectionBudgetMs)
-        artifactFile("disconnect-band-latency-$label.txt").writeText(
-            buildString {
-                appendLine("label=$label")
-                appendLine("appeared=$appeared")
-                appendLine("disconnect_visible_ms=$detectMs")
-                appendLine("detection_budget_ms=$detectionBudgetMs")
-                appendLine("capture_ceiling_ms=$captureCeilingMs")
-                appendLine("within_budget=${appeared && detectMs <= detectionBudgetMs}")
-            },
-        )
-        val within = appeared && detectMs <= detectionBudgetMs
+        recordTiming("${label}_auto_recovered_ms", SystemClock.elapsedRealtime() - start)
         assertTrue(
-            if (appeared) {
-                "expected the disconnect band for $label to surface within " +
-                    "${detectionBudgetMs}ms (production half-open detection worst case " +
-                    "~48s, LivenessProbe); it surfaced after ${detectMs}ms" +
-                    if (within) "" else " — OVER budget (real slow-detection regression?)"
-            } else {
-                "expected the disconnect band for $label to surface within " +
-                    "${detectionBudgetMs}ms; it NEVER surfaced within the ${captureCeilingMs}ms " +
-                    "capture ceiling (real detection regression — band never appeared)"
-            },
-            within,
-        )
-        val reconnectActions = compose.onAllNodesWithTag(
-            TMUX_SESSION_RECONNECT_TAG,
-            useUnmergedTree = true,
-        )
-            .fetchSemanticsNodes()
-        assertTrue(
-            "expected reconnect affordance for $label; found ${reconnectActions.size}",
-            reconnectActions.isNotEmpty(),
+            "expected the session for $label to AUTO-recover to Connected within ${timeoutMs}ms " +
+                "after the link restored (no manual reconnect tap — the current ride-through " +
+                "contract), observed=${currentConnectionStatusName()}",
+            settled,
         )
     }
 
     /**
-     * Issue #1676 — load-bearing budget for the disconnect band to surface. These
-     * proofs ONLY ever run on the slow emulator + Docker / toxiproxy path (opt-in
-     * gated; they self-skip otherwise), so they always deserve the generous
-     * slow-hardware ceiling — there is no "fast hardware deserves a tight budget"
-     * case for a toxiproxy fault proof. The budget covers the production
-     * `LivenessProbe` half-open worst case (~48s) plus swiftshader tick-stretch
-     * headroom, and stays well under the 300s per-test ci-journey watchdog. See the
-     * [waitForDisconnectBand] KDoc for the full derivation.
+     * Issue #1676 — assert the VM is Connected RIGHT NOW (a synchronous check, e.g.
+     * to prove a half-open wedge was ridden through WITHOUT tearing the session down).
      */
-    protected fun disconnectBandBudgetMs(): Long = DISCONNECT_BAND_BUDGET_MS
-
-    protected fun tapReconnectAndWait(label: String) {
-        val start = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = 45_000) {
-            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isEmpty()
-        }
-        waitForTerminalViewAttached()
-        recordTiming("${label}_reconnect_ms", SystemClock.elapsedRealtime() - start)
+    protected fun assertConnectedStatus(label: String) {
+        val status = currentConnectionStatusName()
+        assertTrue(
+            "expected the session to stay Connected $label (ride-through, no teardown), " +
+                "observed=$status",
+            status == "Connected",
+        )
     }
 
     protected fun disconnectBandCount(): Int =
@@ -671,14 +800,16 @@ abstract class NetworkFaultProofBase {
         client.sendCommand("capture-pane -p")
 
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 30_000) {
-            var attached = false
-            launchedActivity?.onActivity { activity ->
-                val view = activity.window.decorView.findTerminalView()
-                attached = view?.currentSession != null && view.mEmulator != null
-            }
-            attached
+        compose.waitUntil(timeoutMillis = 30_000) { terminalViewAttached() }
+    }
+
+    private fun terminalViewAttached(): Boolean {
+        var attached = false
+        launchedActivity?.onActivity { activity ->
+            val view = activity.window.decorView.findTerminalView()
+            attached = view?.currentSession != null && view.mEmulator != null
         }
+        return attached
     }
 
     private fun expandFolderUntilSessionRowVisible(
@@ -769,6 +900,15 @@ abstract class NetworkFaultProofBase {
     }
 
     private fun terminalInputConnection(): InputConnection {
+        // Issue #1676 — tolerate a transient hold between chunks: poll (bounded) for the
+        // TerminalView to be present rather than throwing on the first miss.
+        if (!terminalViewAttached()) {
+            runCatching {
+                compose.waitUntil(timeoutMillis = TERMINAL_INPUT_READY_TIMEOUT_MS) {
+                    terminalViewAttached()
+                }
+            }
+        }
         var connection: InputConnection? = null
         launchedActivity?.onActivity { activity ->
             val terminalView = activity.window.decorView.findTerminalView()
@@ -793,6 +933,7 @@ abstract class NetworkFaultProofBase {
         }
         return text
     }
+
 
     private fun View.findTerminalView(): TerminalView? {
         if (this is TerminalView) return this
@@ -835,28 +976,45 @@ abstract class NetworkFaultProofBase {
         const val DEVICE_DIR_NAME: String = "issue342-network-faults"
 
         /**
-         * Issue #1676 — the load-bearing disconnect-band budget. Must be ≥ the
-         * production `LivenessProbe` half-open detection worst case (~48s) plus
-         * slow-swiftshader tick-stretch headroom. 90s ≈ 48s × ~1.9 and matches the
-         * always-on keepalive's 90s prod death budget. Pinned against the production
-         * detector budgets by `Issue1676DisconnectDetectionLatencyTest`.
-         */
-        const val DISCONNECT_BAND_BUDGET_MS: Long = 90_000L
-
-        /**
-         * Issue #1676 — poll the band this far PAST the load-bearing budget so the
-         * TRUE detection latency is captured even when the budget is blown
-         * (reproduce-first). > [DISCONNECT_BAND_BUDGET_MS] so an over-budget surface
-         * is measured, not clipped; < the 300s per-test ci-journey watchdog.
-         */
-        const val DISCONNECT_BAND_CAPTURE_CEILING_MS: Long = 120_000L
-
-        /**
          * Issue #1676 — the generous slow-link positive-visibility budget for the
          * network-fault proofs (the CI terminal-visibility value, 180s). See
          * [faultProofVisibilityBudgetMs].
          */
         const val FAULT_PROOF_VISIBILITY_BUDGET_MS: Long = 180_000L
+
+        /**
+         * Issue #1676 — the budget for the CURRENT ride-through contract's recovery
+         * indicator (top-chrome "Reconnecting" pill / centered "Attaching…" hold /
+         * VM Reconnecting) to appear after a link cut. The reader-EOF that flips the
+         * live transport into the reconnect ladder is bounded by the app-level
+         * half-open detection (`LivenessProbe` ~48s worst case) plus the reveal
+         * transition off the within-grace live-frame hold; 90s covers that on the
+         * slow swiftshader path with headroom while staying well under the 300s
+         * per-test ci-journey watchdog. Unlike the superseded settled-Failed-band
+         * wait, this fast indicator surfaces EARLY in the episode — long before the
+         * ~119–270s give-up the old tests waited for.
+         */
+        const val RECONNECTING_BAND_BUDGET_MS: Long = 90_000L
+
+        /** Issue #1676 — poll cadence for [waitForReconnectingRecoveryBand]. */
+        const val RECONNECTING_BAND_POLL_MS: Long = 500L
+
+        /**
+         * Issue #1676 — budget for the session to AUTO-recover to Connected after the
+         * link is restored within the episode budget. The 8-rung reconnect ladder
+         * (`DEFAULT_RECONNECT_LADDER_MS = [0,1,2,5,10,20,30,30]s`) plus a fresh dial
+         * can span most of a rung interval on the slow emulator; 90s covers a restore
+         * landing on the far rungs with headroom, well under the 300s watchdog.
+         */
+        const val AUTO_RECOVERY_CONNECTED_TIMEOUT_MS: Long = 90_000L
+
+        /**
+         * Issue #1676 — bounded wait for the terminal to (re-)attach before a
+         * terminal-input send, so a benign transient reconnect-hold doesn't fail the
+         * send with "TerminalView was not found". Generous enough to cover a full
+         * ladder auto-recovery on the slow emulator, under the 300s watchdog.
+         */
+        const val TERMINAL_INPUT_READY_TIMEOUT_MS: Long = 90_000L
 
         /** Issue #1681 — the un-proxied sentinel exec-ping cadence. */
         const val SENTINEL_INTERVAL_MS: Long = 3_000L

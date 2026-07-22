@@ -5,6 +5,9 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.util.Base64
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
@@ -495,6 +498,104 @@ class FileViewerDockerTest {
         composeRule.onNodeWithTag(FILE_VIEWER_REVIEW_ATTACH_TAG).performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { attachedPrompts.isNotEmpty() }
         assertEquals(reviewAttachPrompt(surfacedPath), attachedPrompts.single())
+    } }
+
+    /**
+     * Issue #1713 — reopening a file whose host content changed must show the
+     * FRESH content. Opens a text file (body v1), reads it, mutates it on the
+     * host over the same fixture, then reopens the SAME file with the SAME
+     * surviving [FileViewerViewModel] (navigate away + back, driven by toggling
+     * the screen in/out of composition so the real [FileViewerScreen]
+     * `LaunchedEffect` re-fires `bind()` on re-entry). The viewer must reconcile
+     * to the new body — before the fix, `bind()` returned early on the identical
+     * request and the stale body persisted.
+     */
+    @Test
+    fun reopeningAChangedTextFileShowsTheFreshHostContent(): Unit { runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val textPath = "/tmp/issue1713-notes-$suffix.txt"
+        val bodyV1 = "issue #1713 ORIGINAL-BODY-V1\nline two\n"
+        val bodyV2 = "issue #1713 CHANGED-ON-HOST-V2\nfresh line\n"
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec("cat > '$textPath' <<'PSEOF'\n$bodyV1\nPSEOF")
+                assertEquals("seed text v1 exit", 0, exit.exitCode)
+                seededPaths += textPath
+            } ?: error("could not connect to seed fixture file")
+        }
+
+        // A single VM instance survives the reopen (as it does when navigation
+        // reuses a cached back-stack entry / activity-scoped VM).
+        val viewModel = FileViewerViewModel(
+            InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+            leasing.manager,
+        )
+        var showViewer by mutableStateOf(true)
+        composeRule.setContent {
+            if (showViewer) {
+                FileViewerScreen(
+                    hostId = TEST_HOST_ID,
+                    hostName = "agents",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyPath = keyFile.absolutePath,
+                    passphrase = null,
+                    remotePath = textPath,
+                    cwd = null,
+                    onBack = {},
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        // v1 renders.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithText("ORIGINAL-BODY-V1", substring = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("ORIGINAL-BODY-V1", substring = true).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue1713-reopen-before-v1")
+
+        // The host file changes while the viewer is open.
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec("cat > '$textPath' <<'PSEOF'\n$bodyV2\nPSEOF")
+                assertEquals("mutate text v2 exit", 0, exit.exitCode)
+            } ?: error("could not connect to mutate fixture file")
+        }
+
+        // Reopen: navigate away (remove the screen), then back (re-add) — the VM
+        // survives, so this is a reopen of the identical request. The
+        // LaunchedEffect re-fires bind() on re-entry.
+        composeRule.runOnUiThread { showViewer = false }
+        composeRule.waitForIdle()
+        composeRule.runOnUiThread { showViewer = true }
+
+        // The reopen must reconcile to the fresh host content.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithText("CHANGED-ON-HOST-V2", substring = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("CHANGED-ON-HOST-V2", substring = true).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue1713-reopen-after-v2")
+
+        // The authoritative viewer state carries the fresh body, and the stale
+        // body is gone.
+        val shown = viewModel.state.value
+        assertTrue(
+            "viewer state must be the fresh v2 body, was: $shown",
+            shown is FileViewerUiState.TextContent && shown.content.contains("CHANGED-ON-HOST-V2"),
+        )
+        assertTrue(
+            "stale v1 body must be gone after reopen, was: $shown",
+            shown is FileViewerUiState.TextContent && !shown.content.contains("ORIGINAL-BODY-V1"),
+        )
+        assertTrue(
+            "the stale v1 body must not be on screen after reopen",
+            composeRule.onAllNodesWithText("ORIGINAL-BODY-V1", substring = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
     } }
 
     private suspend fun connect() = SshConnection.connect(

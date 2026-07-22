@@ -525,12 +525,29 @@ class FileViewerViewModel @Inject constructor(
         }
 
     /**
-     * Bind to a host + path and fetch. Re-binding with the identical request
-     * is a no-op so a recomposition doesn't re-download.
+     * Bind to a host + path and fetch.
+     *
+     * Re-binding distinguishes a *recomposition re-bind* from a *genuine
+     * reopen* by whether the current fetch has settled (issue #1713):
+     *
+     *  - A re-bind of the IDENTICAL request whose fetch is still **in flight**
+     *    is a true no-op recompose (a config change / composition re-entry
+     *    before the first load landed). Restarting it would cancel and re-issue
+     *    the same download for no benefit — the #697 redundant-download the old
+     *    early-return guarded against — so it is suppressed.
+     *  - A re-bind of the identical request whose fetch has **settled** is a
+     *    genuine reopen: the host-side file may have changed since we last read
+     *    it (the reported bug — the viewer showed stale content on reopen). We
+     *    run [load] again so a fresh SFTP re-fetch reconciles and the live host
+     *    content wins. [load] paints the instant LRU cache first (no flicker,
+     *    no cold handshake — #697), then the background fetch replaces it.
+     *
+     * A different request (fresh navigation) always loads.
      */
     fun bind(request: Request) {
-        if (request == lastRequest && _state.value !is FileViewerUiState.CannotPreview) return
+        val sameRequest = request == lastRequest
         lastRequest = request
+        if (sameRequest && loadJob?.isActive == true) return
         load(request)
     }
 

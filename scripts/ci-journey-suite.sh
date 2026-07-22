@@ -262,6 +262,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"  # #921 D32 G9): rendered Markdown shows GFM pipe tables as
+  "com.pocketshell.app.fileviewer.FileViewerDockerTest#reopeningAChangedTextFileShowsTheFreshHostContent"  # #1713 D33/G10: reopening a text file whose host content changed over the same warm lease must show the FRESH body, not the stale one (bind() no longer early-returns on the identical settled request)
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"  # #885 #117 D32 G9): the post-update Host ready success sheet must
   "com.pocketshell.app.bootstrap.HostNotificationsReadinessTest"  # #1236 D26 / D32 G9): per-host notification readiness + the
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"  # #933 #928 #931 #926 ============================================================…

@@ -447,7 +447,7 @@ the repository root:
 scripts/pre-release-confidence-gate.sh
 ```
 
-The gate uses the explicit SDK paths documented in [agents.md](../agents.md):
+The gate uses the explicit SDK paths documented in [AGENTS.md](../AGENTS.md):
 
 - `adb`: `/home/alexey/Android/Sdk/platform-tools/adb`
 - `emulator`: `/home/alexey/Android/Sdk/emulator/emulator`

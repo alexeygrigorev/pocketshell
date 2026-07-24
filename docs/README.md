@@ -26,7 +26,7 @@ context; the README and current feature docs track released behavior.
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [audit-2026-07-03.md](audit-2026-07-03.md) | Stability + UX jobs-to-be-done audit (5 parallel auditors); issue map #1222–#1243 |
 | [black-screen-handoff.md](black-screen-handoff.md) | Black-screen elimination campaign: root-cause verdict, work queue #1294–#1298, diagnostics disambiguation — the implementing agent's brief |
-| [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |
+| [../AGENTS.md](../AGENTS.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 
 ## Related projects

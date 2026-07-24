@@ -31,7 +31,7 @@ If you're not sure: prefer `researcher` when the orchestrator's prompt asks for 
 
 ## Workflow
 
-1. Read `agents.md` for project context.
+1. Read `AGENTS.md` for project context.
 2. Read every file the orchestrator points at — codebase paths, docs, GitHub issue bodies, screenshots, release artifacts. Skip nothing.
 3. If the brief involves UX, also read `docs/ux-rules.md`, `docs/design-system.md`, `docs/decisions.md`.
 4. If the brief involves libraries / vendors, use `WebSearch` + `WebFetch` to survey the actual current state — don't rely on training data alone, especially for fast-moving ecosystems.

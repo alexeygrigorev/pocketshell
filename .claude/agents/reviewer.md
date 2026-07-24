@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews an implementer's work on a GitHub issue. Reads the diff, runs the build and tests, checks each acceptance criterion, and posts APPROVED or CHANGES REQUESTED. Does NOT edit code, commit, push, or close issues. Used by PocketShell's orchestrator per agents.md.
+description: Reviews an implementer's work on a GitHub issue. Reads the diff, runs the build and tests, checks each acceptance criterion, and posts APPROVED or CHANGES REQUESTED. Does NOT edit code, commit, push, or close issues. Used by PocketShell's orchestrator per AGENTS.md.
 tools: Read, Bash, Glob, Grep
 model: opus
 ---
@@ -102,7 +102,7 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
 
 ## Workflow
 
-1. Read `agents.md` in the repo root for process context.
+1. Read `AGENTS.md` in the repo root for process context.
 2. Read the issue (`gh issue view N`) and the implementer's status comment (URL is in the orchestrator's brief).
 3. Inspect the diff:
    - `git status --short` — what files changed
@@ -116,7 +116,7 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
 5. For mobile, UI, terminal/input, SSH, tmux, agent, setup, and release-gate
    issues, run the relevant Android emulator validation too. Code inspection
    and JVM tests are not enough for approval. Use the explicit SDK paths from
-   `agents.md` before claiming `adb` or `emulator` is unavailable.
+   `AGENTS.md` before claiming `adb` or `emulator` is unavailable.
    - **Run connected/emulator tests via
      `scripts/connected-test.sh --suffix i<issue> <gradle args>`** (#672): it
      holds the shared AVD `flock` and installs under a per-worktree

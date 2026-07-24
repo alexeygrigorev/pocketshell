@@ -450,7 +450,7 @@ local phone-walkthrough harness against an already-booted emulator:
 scripts/phone-walkthrough.sh terminal-lab
 ```
 
-The harness verifies the explicit SDK paths from `agents.md`, fails clearly if
+The harness verifies the explicit SDK paths from `AGENTS.md`, fails clearly if
 no booted emulator is connected, starts/verifies the Docker `agents` SSH
 fixture, builds and installs the debug app/test APKs, runs only the selected
 scenario, and writes one artifact bundle under
@@ -1167,4 +1167,4 @@ For testing-specific work, the minimum local checks are:
    commands, logs/screenshots, Docker involvement when relevant, and observed
    results
 
-[agents.md](../agents.md) is only the quick local agent rule sheet.
+[AGENTS.md](../AGENTS.md) is only the quick local agent rule sheet.

@@ -25,6 +25,6 @@ https://github.com/alexeygrigorev/pocketshell/milestones — phase progress.
 
 Work is delegated to sub-agents via the `Agent` tool. The orchestrator (this main thread) plans, briefs, parallelises, verifies, and merges. Sub-agents do focused implementation work for one issue at a time and never see the orchestrator's conversation.
 
-The full process — implementer/reviewer loop, briefing, parallelisation rules, verification checklist, QA against emulator + Docker — lives in [process.md](process.md). Agent role pointers live in [agents.md](agents.md).
+The full process — implementer/reviewer loop, briefing, parallelisation rules, verification checklist, QA against emulator + Docker — lives in [process.md](process.md). Agent role pointers live in [AGENTS.md](AGENTS.md).
 
 @process.md

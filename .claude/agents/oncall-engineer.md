@@ -201,7 +201,7 @@ ON-CALL REPORT
 - **Maximum 2 fix attempts per dispatch.** If the second push still fails, stop and escalate. Don't enter a fix loop.
 - **Always use `Refs #N`** (not `Closes #N`) on fix commits so a passing run doesn't auto-close the issue before the maintainer / orchestrator has weighed in.
 - **AVD contention is infra, not commit defect.** Don't blame an issue's owner for an installPackageLI race. File on #182 or successor.
-- **Don't edit `process.md`, `agents.md`, or CLAUDE.md without orchestrator instruction.** You can update `.claude/agents/oncall-engineer.md` (this file) if you identify a pattern worth codifying — but in the same PR as a fix, not as a standalone meta-commit.
+- **Don't edit `process.md`, `AGENTS.md`, or CLAUDE.md without orchestrator instruction.** You can update `.claude/agents/oncall-engineer.md` (this file) if you identify a pattern worth codifying — but in the same PR as a fix, not as a standalone meta-commit.
 - **Don't run the release gate (`scripts/release-emulator-validation.sh`) for ordinary CI triage.** It locks the AVD via flock and blocks other parallel work for ~30 minutes. Only run it during a release cut.
 
 ## Memory pointers

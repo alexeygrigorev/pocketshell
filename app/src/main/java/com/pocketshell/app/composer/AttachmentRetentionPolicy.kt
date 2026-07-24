@@ -24,6 +24,7 @@ internal data class AttachmentRetentionPolicy(
     fun plan(
         entries: List<RemoteEntry>,
         nowMillis: Long,
+        retainedNames: Set<String> = emptySet(),
     ): AttachmentPrunePlan {
         val files = entries
             .asSequence()
@@ -46,6 +47,7 @@ internal data class AttachmentRetentionPolicy(
                 attachment = attachment,
                 newestIndex = index,
                 nowMillis = nowMillis,
+                retainedNames = retainedNames,
             )
         }
         return AttachmentPrunePlan(delete = delete)
@@ -55,7 +57,9 @@ internal data class AttachmentRetentionPolicy(
         attachment: RemoteAttachment,
         newestIndex: Int,
         nowMillis: Long,
+        retainedNames: Set<String>,
     ): Boolean {
+        if (attachment.name in retainedNames) return false
         val ageMillis = nowMillis - attachment.modifiedMillis
         if (ageMillis < protectNewestMillis) return false
 
@@ -89,6 +93,7 @@ internal class RemoteAttachmentPruner(
     suspend fun prune(
         session: SshSession,
         remoteDir: String,
+        retainedNames: Set<String> = emptySet(),
     ) {
         val listing = try {
             session.listDirectory(
@@ -102,7 +107,7 @@ internal class RemoteAttachmentPruner(
             return
         }
 
-        val plan = policy.plan(listing.entries, now())
+        val plan = policy.plan(listing.entries, now(), retainedNames)
         if (plan.delete.isEmpty()) {
             Log.i(
                 LOG_TAG,
@@ -187,4 +192,42 @@ internal class RemoteAttachmentPruner(
                 else -> shellQuoteLiteral(path)
             }
     }
+}
+
+internal fun OutboundQueueStore?.retainedRemoteAttachmentNames(
+    sessionKey: String?,
+    remoteDir: String,
+): Set<String> {
+    if (this == null || sessionKey.isNullOrBlank()) return emptySet()
+    val normalizedDir = normalizeHomeRelativeRemotePath(remoteDir) ?: return emptySet()
+    return itemsFor(sessionKey)
+        .asSequence()
+        .filter { it.state != OutboundState.Delivered }
+        .flatMap { it.attachments.asSequence() }
+        .mapNotNull { ref ->
+            val path = normalizeHomeRelativeRemotePath(ref.remotePath) ?: return@mapNotNull null
+            val separator = path.lastIndexOf('/')
+            if (separator <= 0 || path.substring(0, separator) != normalizedDir) {
+                return@mapNotNull null
+            }
+            path.substring(separator + 1).takeIf { it.isNotBlank() }
+        }
+        .toSet()
+}
+
+private fun normalizeHomeRelativeRemotePath(path: String): String? {
+    val trimmed = path.trim()
+    val relative = when {
+        trimmed == "~" -> ""
+        trimmed.startsWith("~/") -> trimmed.removePrefix("~/")
+        trimmed.startsWith("/") || trimmed.startsWith("~") -> return null
+        else -> trimmed
+    }
+    val segments = relative.split('/')
+    // Staged attachment paths never require parent traversal. Reject alternate
+    // spellings rather than allowing them to pin a different remote object.
+    if (".." in segments) return null
+    return segments
+        .filter { it.isNotEmpty() && it != "." }
+        .joinToString("/")
 }

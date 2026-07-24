@@ -40,6 +40,7 @@ internal class PromptAttachmentStager(
         session: SshSession,
         scopeKey: String,
         uris: List<Uri>,
+        retainedAttachmentNames: (remoteDir: String) -> Set<String> = { emptySet() },
     ): Result<List<String>> = withContext(Dispatchers.IO) {
         if (uris.isEmpty()) return@withContext Result.success(emptyList())
         if (!session.isConnected) {
@@ -136,7 +137,13 @@ internal class PromptAttachmentStager(
         // remote dir now has fresh files worth trimming. A prune failure is
         // already swallowed inside the pruner; never let it fail the stage.
         if (uploadedPaths.isNotEmpty()) {
-            runCatching { attachmentPruner.prune(session, remoteDir) }
+            runCatching {
+                attachmentPruner.prune(
+                    session = session,
+                    remoteDir = remoteDir,
+                    retainedNames = retainedAttachmentNames(remoteDir),
+                )
+            }
         }
 
         when {

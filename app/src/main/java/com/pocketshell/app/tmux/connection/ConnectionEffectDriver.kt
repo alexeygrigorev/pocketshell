@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -221,9 +222,9 @@ class ConnectionEffectDriver(
     private val _observations = MutableStateFlow<List<Observation>>(emptyList())
 
     /**
-     * The full ordered list of observations the driver has recorded — a read-only
-     * diagnostic for the characterization test. Drives NOTHING; nothing in
-     * production reads it to gate an effect.
+     * A bounded history of the newest 256 observations in original insertion order.
+     * This is a read-only diagnostic for characterization tests. Drives NOTHING;
+     * nothing in production reads it to gate an effect.
      */
     val observations: StateFlow<List<Observation>> = _observations.asStateFlow()
 
@@ -546,7 +547,16 @@ class ConnectionEffectDriver(
     }
 
     private fun record(observation: Observation) {
-        _observations.value = _observations.value + observation
+        _observations.update { current ->
+            if (current.size < OBSERVATION_HISTORY_CAPACITY) {
+                current + observation
+            } else {
+                current.subList(
+                    fromIndex = current.size - OBSERVATION_HISTORY_CAPACITY + 1,
+                    toIndex = current.size,
+                ) + observation
+            }
+        }
         sink(observation.logLine())
     }
 
@@ -620,6 +630,8 @@ class ConnectionEffectDriver(
     companion object {
         /** Logcat tag for the connection effect driver (the facade's wiring layer). */
         const val TAG: String = "PsConnEffectDriver"
+
+        private const val OBSERVATION_HISTORY_CAPACITY = 256
     }
 }
 

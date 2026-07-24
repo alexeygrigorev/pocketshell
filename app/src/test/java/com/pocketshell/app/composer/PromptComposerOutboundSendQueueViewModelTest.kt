@@ -974,6 +974,92 @@ class PromptComposerOutboundSendQueueViewModelTest {
     }
 
     @Test
+    fun issue1556_activeAttachmentUploadPastOrphanBoundIsSweptButNotDoubleDispatched() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val item = OutboundItem(
+            id = "active-past-orphan-bound",
+            sessionKey = "1/session-a",
+            cleanText = "send one active attachment",
+            attachments = listOf(
+                DurableAttachmentRef("stale-local", "active.txt", "text/plain"),
+            ),
+            createdAtMs = 0L,
+        )
+        queue.enqueueExisting(item)
+        sidecars.stage(
+            outboundItemId = item.id,
+            uris = listOf(Uri.fromFile(localAttachmentFile("active.txt", "active bytes"))),
+        )
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadResult = CompletableDeferred<Result<List<String>>>()
+        var uploadAttempts = 0
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            clock = { testScheduler.currentTime },
+        )
+        vm.setOutboundAttachmentSidecarUploader {
+            uploadAttempts++
+            uploadStarted.complete(Unit)
+            uploadResult.await()
+        }
+        val sent = collectSendRequests(vm)
+        vm.onComposerTargetChanged("1/session-a")
+
+        assertEquals(item.id, vm.retryNextOutboundItem())
+        runCurrent()
+        uploadStarted.await()
+        assertEquals(1, uploadAttempts)
+        assertEquals(OutboundState.Uploading, queue.item(item.id)!!.state)
+        assertTrue(sent.isEmpty())
+
+        val sweptIds = mutableListOf<String>()
+        val pollJob = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true,
+                outboundQueueItems = vm.outboundQueueItems,
+                controller = OutboundQueueAutoFlushController.boundTo(
+                    composer = vm,
+                    clock = { testScheduler.currentTime },
+                ),
+                retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                sweepStaleInFlight = { staleAfterMs ->
+                    sweptIds += vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
+                        .map { it.id }
+                },
+            )
+        }
+        runCurrent()
+
+        advanceTimeBy(
+            OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS +
+                OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS,
+        )
+        runCurrent()
+
+        assertEquals(listOf(item.id), sweptIds)
+        assertEquals(OutboundState.Queued, queue.item(item.id)!!.state)
+        assertEquals(1, uploadAttempts)
+        assertTrue(sent.isEmpty())
+
+        pollJob.cancelAndJoin()
+        uploadResult.complete(
+            Result.success(listOf("~/.pocketshell/attachments/uploaded/active.txt")),
+        )
+        waitForSendCount(sent, 1)
+
+        assertEquals(1, uploadAttempts)
+        assertEquals(1, sent.size)
+        assertEquals(item.id, sent.single().outboundQueueItemId)
+        vm.markSendDelivered(sent.single())
+        assertTrue(queue.itemsFor("1/session-a").isEmpty())
+        assertNull(vm.retryNextOutboundItem())
+        assertEquals(1, sent.size)
+    }
+
+    @Test
     fun issue1542_D7_freshQueuedRowStillDispatchedByPollLane_noRegression() = runTest {
         // Class coverage (G2): the fresh-Queued path must keep working — the D7
         // orphan-InFlight sweep must not regress the #1532 Queued re-dispatch.

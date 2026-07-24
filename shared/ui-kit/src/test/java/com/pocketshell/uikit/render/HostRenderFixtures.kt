@@ -22,11 +22,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pocketshell.uikit.components.AgentKindBadge
 import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.HostCard
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.StatusDot
+import com.pocketshell.uikit.model.ConnectionStatus
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.SessionAgentState
@@ -138,6 +142,56 @@ internal fun AgentStateChipsRender() {
             AgentStateChip(state = SessionAgentState.Idle)
         }
     }
+}
+
+/**
+ * Issue #1701: the session-list trailing lane after the full status and agent
+ * words were hard-cut. Covers every state × both same-colour primary agent
+ * kinds, proving the CL/CX monograms stay distinct while the long session name
+ * receives the reclaimed width.
+ */
+@Composable
+internal fun SessionListChipIconsRender() {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        ScreenHeader(
+            title = "Sessions",
+            subtitle = "6 active · compact status and kind",
+        )
+        SessionListIconRow(SessionAgentState.Working, "CL", "Claude")
+        SessionListIconRow(SessionAgentState.WaitingForInput, "CL", "Claude")
+        SessionListIconRow(SessionAgentState.Idle, "CL", "Claude")
+        SessionListIconRow(SessionAgentState.Working, "CX", "Codex")
+        SessionListIconRow(SessionAgentState.WaitingForInput, "CX", "Codex")
+        SessionListIconRow(SessionAgentState.Idle, "CX", "Codex")
+    }
+}
+
+@Composable
+private fun SessionListIconRow(
+    state: SessionAgentState,
+    monogram: String,
+    label: String,
+) {
+    ListRow(
+        title = "git-course-management-platform-service",
+        leading = {
+            StatusDot(status = ConnectionStatus.Connected)
+        },
+        trailing = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                AgentStateChip(state = state)
+                AgentKindBadge(
+                    monogram = monogram,
+                    label = label,
+                    isAgent = true,
+                )
+            }
+        },
+        onClick = {},
+    )
 }
 
 @Composable

@@ -639,6 +639,15 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1701: compact status icons + agent monograms in real shared
+     * session-list rows, with the long session name receiving the saved width.
+     */
+    @Test
+    fun sessionListChipIcons() = render("session-list-chip-icons") {
+        SessionListChipIconsRender()
+    }
+
+    /**
      * Issue #603: the host-detail workspace tree with the redesigned
      * inactive / empty watched-root callout.
      *

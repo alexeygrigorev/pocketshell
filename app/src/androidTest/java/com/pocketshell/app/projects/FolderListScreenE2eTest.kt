@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -905,17 +906,15 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("codex conversation active").assertDoesNotExist()
         compose.onNodeWithText("tmux session detached").assertDoesNotExist()
 
-        // Agent / shell badge labels visible on the expanded project. #478
-        // replaced the inline "Claude · Idle" rollup with a compact right-
-        // aligned badge pill carrying just the agent/shell identity (the mockup
-        // shows no activity word on the row), so match the short badge label.
+        // Agent / shell badge labels remain available to accessibility on the
+        // expanded project. #1701 replaces the visible words with monograms.
         // #471: with active folders auto-expanded, more than one "Claude" badge
         // can render (pocketshell + the outside-lab demo), so assert presence
         // rather than a single node; the precise per-session badge tags below
         // pin the pocketshell claude badge specifically.
         assertTrue(
             "a Claude agent badge should render",
-            compose.onAllNodesWithText("Claude", substring = true)
+            compose.onAllNodes(hasContentDescription("Claude"))
                 .fetchSemanticsNodes().isNotEmpty(),
         )
 
@@ -931,17 +930,15 @@ class FolderListScreenE2eTest {
             folderSessionBadgeTestTag("/home/u/git/pocketshell", "build-shell"),
             useUnmergedTree = true,
         ).assertExists()
-        // The agent badge renders "Claude" and the shell badge renders "Shell".
-        // #471: auto-expand can surface more than one Claude badge, so assert
-        // presence on the unmerged tree rather than a single node.
+        // The compact badges expose full Claude/Shell accessibility labels.
         assertTrue(
             "a Claude badge should render on the unmerged tree",
-            compose.onAllNodesWithText("Claude", useUnmergedTree = true)
+            compose.onAllNodes(hasContentDescription("Claude"), useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty(),
         )
         assertTrue(
             "a Shell badge should render on the unmerged tree",
-            compose.onAllNodesWithText("Shell", useUnmergedTree = true)
+            compose.onAllNodes(hasContentDescription("Shell"), useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty(),
         )
 
@@ -1230,22 +1227,20 @@ class FolderListScreenE2eTest {
             folderListFlatRowStatusDotTestTag("claude-main"),
             useUnmergedTree = true,
         ).assertExists()
-        // The badge label `Text` is the single child of the tagged badge `Box`.
-        // The flat row's clickable merges the trailing badge away on the merged
-        // tree, so resolve the badge on the UNMERGED tree and read its one
-        // child's text (the box itself carries no text).
+        // The visible CL/CX/SH monograms are intentionally cleared from
+        // semantics; the tagged badges expose their full labels to TalkBack.
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("claude-main"),
             useUnmergedTree = true,
-        ).onChild().assertTextEquals("Claude")
+        ).assertContentDescriptionEquals("Claude")
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("codex-llm"),
             useUnmergedTree = true,
-        ).onChild().assertTextEquals("Codex")
+        ).assertContentDescriptionEquals("Codex")
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("build-shell"),
             useUnmergedTree = true,
-        ).onChild().assertTextEquals("Shell")
+        ).assertContentDescriptionEquals("Shell")
 
         // #489: sessions group into ACTIVE / IDLE sections (SectionHeaders with
         // counts) and a host header carries the `N active · M idle · K sessions`
@@ -1308,8 +1303,9 @@ class FolderListScreenE2eTest {
     }
 
     /**
-     * Issue #858: the session tree visibly distinguishes a z.ai-profile Claude
-     * from a default Anthropic Claude. CLASS COVERAGE (D31/G2): the flat view is
+     * Issues #858/#1701: the session tree visibly distinguishes a z.ai-profile
+     * Claude from a default Anthropic Claude while rendering compact accessible
+     * state icons and agent monograms. CLASS COVERAGE (D31/G2): the flat view is
      * fed {z.ai-profile Claude, default Claude, named-profile Codex, no-profile
      * Codex}, and the legacy/missing-option case (recordedProfile == null) is the
      * default + no-profile rows. The profiled rows MUST show the profile chip
@@ -1329,15 +1325,19 @@ class FolderListScreenE2eTest {
                     cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Claude,
                     recordedProfile = "Claude (Z.AI)",
+                    agentStateRaw = "working",
+                    agentStateUpdatedAt = 1_700_004_000L,
                 ),
                 // Default Claude — no profile (the legacy/missing-option case).
                 FolderSessionRow(
-                    sessionName = "default-claude",
+                    sessionName = "git-course-management-platform-service",
                     lastActivity = 1_700_003_500L,
                     attached = true,
                     cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Claude,
                     recordedProfile = null,
+                    agentStateRaw = "waiting_for_input",
+                    agentStateUpdatedAt = 1_700_004_000L,
                 ),
                 // Codex WITH a named profile.
                 FolderSessionRow(
@@ -1347,6 +1347,8 @@ class FolderListScreenE2eTest {
                     cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Codex,
                     recordedProfile = "Codex (Work)",
+                    agentStateRaw = "idle",
+                    agentStateUpdatedAt = 1_700_004_000L,
                 ),
                 // Codex WITHOUT a profile.
                 FolderSessionRow(
@@ -1356,6 +1358,8 @@ class FolderListScreenE2eTest {
                     cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Codex,
                     recordedProfile = null,
+                    agentStateRaw = "working",
+                    agentStateUpdatedAt = 1_700_004_000L,
                 ),
             ),
             projectFoldersByRoot = mapOf("~/git" to listOf("/home/u/git/pocketshell")),
@@ -1391,6 +1395,20 @@ class FolderListScreenE2eTest {
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
+        // #1701: the REAL production list exposes every compact state glyph via
+        // its full accessibility label, with no width-consuming status words.
+        listOf("Working", "Waiting", "Idle").forEach { label ->
+            assertTrue(
+                "$label state icon must expose its full content description",
+                compose.onAllNodes(hasContentDescription(label), useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty(),
+            )
+        }
+        compose.onNodeWithText("Working").assertDoesNotExist()
+        compose.onNodeWithText("Waiting").assertDoesNotExist()
+        compose.onNodeWithText("Idle").assertDoesNotExist()
+
         // z.ai Claude: the profile chip is present and reads "Z.AI" (compressed
         // from "Claude (Z.AI)"), next to the "Claude" kind badge.
         compose.onNodeWithTag(
@@ -1400,7 +1418,7 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(
             folderListFlatRowBadgeTestTag("zai-claude"),
             useUnmergedTree = true,
-        ).onChild().assertTextEquals("Claude")
+        ).assertContentDescriptionEquals("Claude")
 
         // Codex with a named profile: chip reads "Work" next to the "Codex" badge.
         compose.onNodeWithTag(
@@ -1412,9 +1430,17 @@ class FolderListScreenE2eTest {
         assertTrue(
             "a default Claude must show no profile chip",
             compose.onAllNodesWithTag(
-                folderListFlatRowProfileChipTestTag("default-claude"),
+                folderListFlatRowProfileChipTestTag("git-course-management-platform-service"),
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isEmpty(),
+        )
+        compose.onNodeWithTag(
+            folderListFlatRowBadgeTestTag("git-course-management-platform-service"),
+            useUnmergedTree = true,
+        ).assertContentDescriptionEquals("Claude")
+        compose.onNodeWithText("git-course-management-platform-service").assertIsDisplayed()
+        assertAccessibleTouchTarget(
+            folderListFlatRowTestTag("git-course-management-platform-service"),
         )
         // No-profile Codex: NO profile chip.
         assertTrue(

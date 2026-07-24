@@ -218,10 +218,10 @@ failed_run_still_releases_and_propagates_rc() {
     || fail "failed run leaked a pool serial: claimable=$claimable expected=$expected"
 }
 
-# Default non-pool path: a --suffix-only run (no --pool, no preset ANDROID_SERIAL)
-# must acquire and RELEASE the single base AVD lock. This guards the #672
-# deadlock fix interaction: after the run, build/.avd-lock is free again.
-non_pool_suffix_run_acquires_and_releases_base_lock() {
+# Issue #1737: the default non-pool path must resolve the one online emulator
+# and acquire/release the SAME per-serial ownership lock used by --pool. The old
+# global base lock was a split domain: pool and legacy could both mutate one AVD.
+non_pool_suffix_run_acquires_and_releases_serial_lock() {
   local sandbox="$1"
   make_sandbox "$sandbox" "emulator-5556"
   local sroot="$sandbox/root"
@@ -240,13 +240,19 @@ non_pool_suffix_run_acquires_and_releases_base_lock() {
   grep -q -- '-PpocketshellAppIdSuffix=i674' "$sandbox/args.txt" \
     || fail "suffix was not threaded into gradle on non-pool path"
 
-  # The base lock must be free again after the run (trap released the holder).
-  # Issue #1657: the base lock lives in the machine-wide lock dir (sandboxed
-  # here via POCKETSHELL_AVD_LOCK_DIR), no longer under the checkout's build/.
-  local base_lock="$POCKETSHELL_AVD_LOCK_DIR/avd-lock"
-  [[ -e "$base_lock" ]] || fail "base AVD lock file was never created on non-pool path"
-  flock -n "$base_lock" true \
-    || fail "non-pool run leaked the base AVD lock holder (deadlock-fix regression)"
+  grep -q 'Pinned legacy lane to owned emulator.*ANDROID_SERIAL=emulator-5556' "$sandbox/run.err" \
+    || fail "non-pool run did not pin the sole online emulator"
+
+  local serial_lock
+  serial_lock="$(
+    source "$sroot/scripts/lib/avd-lock.sh"
+    pocketshell_avd_lock_file_for_serial "$sroot" "emulator-5556"
+  )"
+  [[ -e "$serial_lock" ]] || fail "per-serial ownership lock was never created on non-pool path"
+  flock -n "$serial_lock" true \
+    || fail "non-pool run leaked the per-serial ownership lock"
+  [[ ! -e "$POCKETSHELL_AVD_LOCK_DIR/avd-lock" ]] \
+    || fail "non-pool run regressed to the split global lock domain"
 }
 
 run_case() {
@@ -260,6 +266,6 @@ run_case() {
 
 run_case reclaim_after_full_pool_run
 run_case failed_run_still_releases_and_propagates_rc
-run_case non_pool_suffix_run_acquires_and_releases_base_lock
+run_case non_pool_suffix_run_acquires_and_releases_serial_lock
 
 printf 'PASS: avd-pool claim/release\n'

@@ -20,8 +20,8 @@ import java.util.concurrent.TimeUnit
  * died at `source: No such file or directory`, and no one saw it. A test that
  * no gate runs is not a test (#1640/#1646); this class is the gate.
  *
- * The harnesses are JVM-free, emulator-free, and Docker-free (fake `adb`, stub
- * `gradlew`, sandboxed lock dir, preset agents port), and run in seconds.
+ * The harnesses are JVM-free, emulator-free, and Docker-daemon-free (fake
+ * `adb`/`docker`, stub `gradlew`, sandboxed lock dirs), and run in seconds.
  * Locks are provable with two processes and a lock file — racing a real AVD to
  * test the lock that protects it would corrupt whatever sibling lane is on it.
  */
@@ -63,6 +63,15 @@ class AvdLockScriptTest {
             "tests/scripts/avd-pool-test.sh",
             timeoutSeconds = 180,
             environmentOverrides = mapOf("ANDROID_SERIAL" to "emulator-5554"),
+        )
+    }
+
+    /** #1737: pool and legacy wrappers must share one serial-ownership domain. */
+    @Test
+    fun connectedTestPoolAndLegacyWrappersCannotMutateOneSerialConcurrently() {
+        runShellHarness(
+            "tests/scripts/connected-test-serial-ownership-test.sh",
+            timeoutSeconds = 180,
         )
     }
 

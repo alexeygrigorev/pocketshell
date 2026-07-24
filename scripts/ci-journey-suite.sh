@@ -272,6 +272,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.FolderListHostOutdatedTreeVersionDaemonDockerTest"  # #1509 G10: real agents-daemon (2239) old cli_version through tree envelope -> banner once, background, after tree shown
   "$FQCN_PREFIX.LaunchNoMainThreadRoomReadE2eTest"  # #951 #928 #305 D2 — launch ANR / crash-loop). The reproduce-first end-to-en…
   "com.pocketshell.app.diagnostics.ConnectionLogHostMirrorReconnectDockerTest"  # #972 #969 D33/G4/G10: prove the host connection-log mirror's VM GLUE o…
+  "com.pocketshell.app.diagnostics.ConnectionJournalHostPullJourneyDockerTest"  # #1710 Settings one-shot full journal over the held warm session; no-warm no-dial proof
   "com.pocketshell.app.env.EnvScreenE2eTest"  # #1094 #1092 durability for ): the env edit/add on-device journeys. The
   "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest#cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut"  # #1169 #285 Codex/agent pane rendered CUT: tmux window resized too small
   "com.pocketshell.app.usage.UsageGlancePillE2eTest"  # #1241 #418 the landing app-bar usage GLANCE PILL on-device proof. The

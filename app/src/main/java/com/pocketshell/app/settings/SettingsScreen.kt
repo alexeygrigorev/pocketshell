@@ -37,6 +37,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -53,6 +54,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.diagnostics.ConnectionJournalHostPullState
+import com.pocketshell.app.diagnostics.feedbackText
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.release.launchUpdateDownload
 import com.pocketshell.core.assistant.AssistantProvider
@@ -105,6 +108,10 @@ fun SettingsScreen(
     onOpenAiCosts: () -> Unit = {},
     onScanHostImport: () -> Unit = {},
     onChooseHostImportFile: (Uri) -> Unit = {},
+    connectionJournalHostPullState: ConnectionJournalHostPullState =
+        ConnectionJournalHostPullState.Idle,
+    onMirrorFullConnectionJournal: () -> Unit = {},
+    onConsumeConnectionJournalHostPullState: () -> Unit = {},
     /**
      * Issue #206: per-host watched-folders config entry. The Settings
      * surface routes through a host picker (no decrypted passphrase
@@ -131,6 +138,10 @@ fun SettingsScreen(
     val hostImportFilePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(onChooseHostImportFile) }
+
+    DisposableEffect(Unit) {
+        onDispose(onConsumeConnectionJournalHostPullState)
+    }
 
     val appBuildInfo = remember {
         try {
@@ -268,9 +279,11 @@ fun SettingsScreen(
                 DiagnosticsSection(
                     recordingEnabled = settings.diagnosticsRecordingEnabled,
                     shareState = diagnosticsShareState,
+                    journalHostPullState = connectionJournalHostPullState,
                     onRecordingChange = viewModel::setDiagnosticsRecordingEnabled,
                     onStartFreshCapture = viewModel::startFreshDiagnosticsCapture,
                     onShareLog = viewModel::shareDiagnosticsLog,
+                    onMirrorFullConnectionJournal = onMirrorFullConnectionJournal,
                     onClearLog = viewModel::clearDiagnosticsLog,
                     onOpenCrashReports = onOpenCrashReports,
                 )
@@ -1688,9 +1701,11 @@ private fun UsageSection(
 private fun DiagnosticsSection(
     recordingEnabled: Boolean,
     shareState: DiagnosticsShareState,
+    journalHostPullState: ConnectionJournalHostPullState,
     onRecordingChange: (Boolean) -> Unit,
     onStartFreshCapture: () -> Unit,
     onShareLog: () -> Unit,
+    onMirrorFullConnectionJournal: () -> Unit,
     onClearLog: () -> Unit,
     onOpenCrashReports: () -> Unit,
 ) {
@@ -1763,6 +1778,34 @@ private fun DiagnosticsSection(
                 },
                 modifier = Modifier.testTag(DIAGNOSTICS_SHARE_LOG_TAG),
             )
+            ListRow(
+                title = if (journalHostPullState == ConnectionJournalHostPullState.Mirroring) {
+                    "Mirroring connection journal..."
+                } else {
+                    "Mirror full connection journal to host"
+                },
+                trailing = { NavigationChevron() },
+                onClick = {
+                    if (journalHostPullState != ConnectionJournalHostPullState.Mirroring) {
+                        onMirrorFullConnectionJournal()
+                    }
+                },
+                modifier = Modifier.testTag(DIAGNOSTICS_MIRROR_CONNECTION_JOURNAL_TAG),
+            )
+            journalHostPullState.feedbackText()?.let { feedback ->
+                Text(
+                    text = feedback,
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            horizontal = PocketShellSpacing.md,
+                            vertical = PocketShellSpacing.xs,
+                        )
+                        .testTag(DIAGNOSTICS_MIRROR_CONNECTION_JOURNAL_FEEDBACK_TAG),
+                )
+            }
             ListRow(
                 title = "Clear diagnostics recorder",
                 onClick = onClearLog,
@@ -2044,6 +2087,10 @@ internal const val DIAGNOSTICS_RECORDING_SWITCH_TAG = "settings:diagnostics:reco
 internal const val DIAGNOSTICS_RECORDING_INDICATOR_TAG = "settings:diagnostics:recording-indicator"
 internal const val DIAGNOSTICS_START_CAPTURE_TAG = "settings:diagnostics:start-capture"
 internal const val DIAGNOSTICS_SHARE_LOG_TAG = "settings:diagnostics:share-log"
+internal const val DIAGNOSTICS_MIRROR_CONNECTION_JOURNAL_TAG =
+    "settings:diagnostics:mirror-connection-journal"
+internal const val DIAGNOSTICS_MIRROR_CONNECTION_JOURNAL_FEEDBACK_TAG =
+    "settings:diagnostics:mirror-connection-journal-feedback"
 internal const val DIAGNOSTICS_CLEAR_LOG_TAG = "settings:diagnostics:clear-log"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val USAGE_EMPTY_HINT_TAG = "settings:usage:empty-hint"

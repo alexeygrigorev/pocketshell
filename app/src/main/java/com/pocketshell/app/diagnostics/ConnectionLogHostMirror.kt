@@ -43,6 +43,12 @@ object ConnectionLogHostMirror {
     /** Absolute (home-relative) remote path of the mirrored log. */
     const val REMOTE_PATH: String = "$REMOTE_DIR/$REMOTE_FILENAME"
 
+    /** Fixed filename for the opt-in, full connection-journal pull (#1710). */
+    const val JOURNAL_REMOTE_FILENAME: String = "connection-journal.jsonl"
+
+    /** Fixed home-relative destination for the opt-in replay archive. */
+    const val JOURNAL_REMOTE_PATH: String = "$REMOTE_DIR/$JOURNAL_REMOTE_FILENAME"
+
     /**
      * Write [jsonl] to `~/.pocketshell/connection-log.jsonl` on the host behind
      * [target], reusing [leaseManager]'s warm transport. Returns the absolute
@@ -60,7 +66,12 @@ object ConnectionLogHostMirror {
         if (jsonl.isBlank()) return Result.success(null)
         return try {
             LeaseSessionExec.withSession(leaseManager, target) { session ->
-                writeOverSession(session, jsonl)
+                writeOverSession(
+                    session = session,
+                    jsonl = jsonl,
+                    remoteFilename = REMOTE_FILENAME,
+                    remotePath = REMOTE_PATH,
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -72,7 +83,38 @@ object ConnectionLogHostMirror {
         }
     }
 
-    private suspend fun writeOverSession(session: SshSession, jsonl: String): String {
+    /**
+     * Write the complete replay journal over a session the caller already holds.
+     * There is intentionally no lease-manager/acquire overload: #1710 is
+     * tap-time warm-only and must never cold-dial or retarget.
+     */
+    suspend fun mirrorConnectionJournal(
+        session: SshSession,
+        jsonl: String,
+    ): Result<String?> {
+        if (jsonl.isBlank()) return Result.success(null)
+        return try {
+            Result.success(
+                writeOverSession(
+                    session = session,
+                    jsonl = jsonl,
+                    remoteFilename = JOURNAL_REMOTE_FILENAME,
+                    remotePath = JOURNAL_REMOTE_PATH,
+                ),
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    private suspend fun writeOverSession(
+        session: SshSession,
+        jsonl: String,
+        remoteFilename: String,
+        remotePath: String,
+    ): String {
         // The exec channel drives `mkdir -p $HOME/.pocketshell` (SFTP's per-segment
         // mkdir is more fragile against minimal OpenSSH images — the ShareUploader
         // inbox pattern uses the same exec route).
@@ -86,8 +128,8 @@ object ConnectionLogHostMirror {
         return session.uploadStream(
             input = ByteArrayInputStream(bytes),
             length = bytes.size.toLong(),
-            name = REMOTE_FILENAME,
-            remotePath = REMOTE_PATH,
+            name = remoteFilename,
+            remotePath = remotePath,
         )
     }
 }

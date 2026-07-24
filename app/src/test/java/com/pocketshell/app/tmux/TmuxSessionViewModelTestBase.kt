@@ -173,6 +173,7 @@ abstract class TmuxSessionViewModelTestBase {
             applicationContext?.let {
                 com.pocketshell.app.composer.SharedPrefsOutboundQueueStore(it)
             },
+        diagnosticRecorder: com.pocketshell.app.diagnostics.DiagnosticRecorder? = null,
         // Issue #1617: reconnect stress scenarios can inject a scenario-owned
         // virtual scope instead of sharing this class's real-IO factoryScope.
         // The default preserves the genuine reader-loop coverage used by the
@@ -192,6 +193,7 @@ abstract class TmuxSessionViewModelTestBase {
             agentKindRemoteSource = agentKindRemoteSource,
             applicationContext = applicationContext,
             outboundQueueStore = outboundQueueStore,
+            diagnosticRecorder = diagnosticRecorder,
         ).also {
             // Issue #576 (Slice A of #792): pin the structural-reconcile
             // dispatcher to Main (the MainDispatcherRule's

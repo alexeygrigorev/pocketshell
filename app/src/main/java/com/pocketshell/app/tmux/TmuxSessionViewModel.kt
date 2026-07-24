@@ -30,8 +30,11 @@ import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.composer.retainedRemoteAttachmentNames
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.networkDiagnosticFields
+import com.pocketshell.app.diagnostics.ConnectionJournalHostPull
+import com.pocketshell.app.diagnostics.ConnectionJournalHostPullState
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
+import com.pocketshell.app.diagnostics.consume
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.ClaudeProfile
 import com.pocketshell.app.projects.CodexProfile
@@ -1870,6 +1873,11 @@ public class TmuxSessionViewModel @Inject constructor(
         SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
 
     internal val assistantState: StateFlow<AssistantUiState> = assistant.state
+
+    private val _connectionJournalHostPullState =
+        MutableStateFlow<ConnectionJournalHostPullState>(ConnectionJournalHostPullState.Idle)
+    val connectionJournalHostPullState: StateFlow<ConnectionJournalHostPullState> =
+        _connectionJournalHostPullState.asStateFlow()
 
     // Project roots for the connected host, mirrored from
     // [ProjectRootDao.getByHostId] so the voice planner request can carry
@@ -9066,6 +9074,7 @@ public class TmuxSessionViewModel @Inject constructor(
         session: SshSession? = null,
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
+        lease: SshLease? = null,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -9082,8 +9091,17 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         // #1085: this synchronous test seam must close the replaced client before returning.
         closeCurrentConnection(deferTeardown = false)
-        // #178: inject a live session so same-host switch tests reuse it without a handshake.
-        if (session != null) {
+        // Issue #178: tests for the same-host fast-switch path need a
+        // way to inject a live `SshSession` into the VM so a follow-up
+        // `connect()` to the same host re-uses it instead of going
+        // through the SSH-handshake path (which requires a real
+        // network). Production callers go through `runConnect` /
+        // `runFastSessionSwitch` — those wire the session ref
+        // themselves.
+        if (lease != null) {
+            leaseRef = lease
+            sessionRef = lease.session
+        } else if (session != null) {
             sessionRef = session
         }
         attachClient(client)
@@ -17387,20 +17405,7 @@ public class TmuxSessionViewModel @Inject constructor(
         override fun hashCode(): Int = connectionTargetIdentityHashCode(this)
     }
 
-    /**
-     * Issue #972 — wire the host connection-log mirror to its trigger. Fired by the
-     * [ConnectionEffectDriver] right after the current host's lease transport comes
-     * back `Up` (a reconnect promoted the controller to Live): mirror the recorded
-     * reconnect-cause trail ([DiagnosticRecorder.connectionLogJsonl]) to the host's
-     * `~/.pocketshell/connection-log.jsonl` over the now-warm lease, so the
-     * maintainer can attribute the just-completed drop in the in-app file viewer
-     * with no adb (#969 part 3 was a tested-but-unwired writer; this is the wiring).
-     *
-     * FAIL-SOFT all the way: a missing recorder, no active target, a blank trail,
-     * or any host-write error is a silent no-op — the mirror NEVER perturbs the
-     * live connection. The write runs on [viewModelScope] off the driver's collect
-     * so the transport-edge collector is never blocked by the host round-trip.
-     */
+    /** Automatic #972 connection-log mirror after a transport-up edge. */
     private fun mirrorConnectionLogToHost() {
         val recorder = diagnosticRecorder ?: return
         val target = activeTarget ?: return
@@ -17412,16 +17417,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    /**
-     * The fail-soft mirror body shared by the production fire-and-forget
-     * [mirrorConnectionLogToHost] and the connected-test seam
-     * [mirrorConnectionLogToHostForTest]. Reads the recorder's reconnect-cause
-     * trail and, when non-blank, writes it to the host over the warm lease via
-     * [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] (itself
-     * `Result.failure` fail-soft, never a throw except cancellation). Returns the
-     * mirror's [Result] (the absolute remote path on success, `null` when the
-     * trail was blank so no write happened).
-     */
+    /** Shared fail-soft body for the automatic mirror and its connected seam. */
     private suspend fun mirrorConnectionLogToHostBody(
         recorder: com.pocketshell.app.diagnostics.DiagnosticRecorder,
         leaseTarget: com.pocketshell.app.sessions.LeaseSessionTarget,
@@ -17435,17 +17431,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Issue #972 connected-test seam. Drives the EXACT production mirror glue —
-     * `activeTarget` → [toLeaseSessionTarget] (the byte-identical lease-key
-     * mapping) → the warm-lease write — synchronously and returns the
-     * [ConnectionLogHostMirror][com.pocketshell.app.diagnostics.ConnectionLogHostMirror]
-     * `Result` so a Docker journey can assert the host file actually lands over
-     * the warm lease (a wrong lease-key field mapping would dial a fresh handshake
-     * or fail outright — the exact "wired but the host file never lands" regression
-     * this issue closes). Returns `Result.failure` when there is no recorder or no
-     * active target, exactly like the fire-and-forget production path returns early.
-     */
+    /** Issue #972 connected seam for the exact automatic-mirror VM glue. */
     @androidx.annotation.VisibleForTesting
     internal suspend fun mirrorConnectionLogToHostForTest(): Result<String?> {
         val recorder = diagnosticRecorder
@@ -17453,6 +17439,36 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget
             ?: return Result.failure(IllegalStateException("no activeTarget"))
         return mirrorConnectionLogToHostBody(recorder, target.toLeaseSessionTarget())
+    }
+
+    /**
+     * Settings one-shot (#1710). Snapshot all three identities synchronously at
+     * tap time; the coordinator has no acquire capability and finishes against
+     * this exact held session even if navigation changes meanwhile.
+     */
+    fun mirrorFullConnectionJournalToHost() {
+        if (_connectionJournalHostPullState.value == ConnectionJournalHostPullState.Mirroring) return
+        val recorder = diagnosticRecorder
+        val expectedLeaseKey = activeTarget?.toSshLeaseTarget()?.leaseKey
+        val heldLease = leaseRef
+        val heldSession = sessionRef
+        _connectionJournalHostPullState.value = ConnectionJournalHostPullState.Mirroring
+        viewModelScope.launch {
+            _connectionJournalHostPullState.value = if (recorder == null) {
+                ConnectionJournalHostPullState.Failed
+            } else {
+                ConnectionJournalHostPull.pull(
+                    recorder = recorder,
+                    expectedLeaseKey = expectedLeaseKey,
+                    heldLease = heldLease,
+                    heldSession = heldSession,
+                )
+            }
+        }
+    }
+
+    fun consumeConnectionJournalHostPullState() {
+        _connectionJournalHostPullState.update { it.consume() }
     }
 
     // EPIC #687 Slice 1 (#1047): `reduceBackground()` is DELETED. The background

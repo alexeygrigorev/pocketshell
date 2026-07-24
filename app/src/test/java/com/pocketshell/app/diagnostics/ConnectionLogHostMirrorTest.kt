@@ -106,6 +106,60 @@ class ConnectionLogHostMirrorTest {
         assertFalse("a mirror failure must never close the live transport", session.closed)
     }
 
+    @Test
+    fun writesFullJournalOnlyToTheFixedConnectionJournalPathOverTheProvidedSession() = runTest {
+        val session = RecordingSshSession()
+        val journal = buildString {
+            repeat(400) { index ->
+                append("""{"sequence":$index,"category":"connection_journal","marker":"${"x".repeat(200)}"}""")
+                append('\n')
+            }
+        }
+        assertTrue("fixture must exceed the automatic mirror budget", journal.toByteArray().size > 64 * 1024)
+
+        val result = ConnectionLogHostMirror.mirrorConnectionJournal(session, journal)
+
+        assertTrue("journal mirror must succeed", result.isSuccess)
+        assertEquals(ConnectionLogHostMirror.JOURNAL_REMOTE_PATH, result.getOrNull())
+        assertEquals(".pocketshell/connection-journal.jsonl", ConnectionLogHostMirror.JOURNAL_REMOTE_PATH)
+        assertEquals(ConnectionLogHostMirror.JOURNAL_REMOTE_FILENAME, session.uploadedName)
+        assertEquals(ConnectionLogHostMirror.JOURNAL_REMOTE_PATH, session.uploadedRemotePath)
+        assertFalse(
+            "the one-shot journal must never overwrite the automatic connection log",
+            session.uploadedRemotePath == ConnectionLogHostMirror.REMOTE_PATH,
+        )
+        assertEquals(journal, session.uploadedText())
+        assertFalse("journal upload must leave the held session open", session.closed)
+    }
+
+    @Test
+    fun blankJournalIsANoOpOverTheProvidedSession() = runTest {
+        val session = RecordingSshSession()
+
+        val result = ConnectionLogHostMirror.mirrorConnectionJournal(session, " \n ")
+
+        assertTrue(result.isSuccess)
+        assertNull(result.getOrNull())
+        assertTrue("blank journal must do no SSH work", session.execCommands.isEmpty())
+        assertNull(session.uploadedName)
+    }
+
+    @Test
+    fun journalMkdirAndUploadFailuresAreFailSoftAndConnectionNeutral() = runTest {
+        val mkdirFailure = RecordingSshSession(
+            execResult = { ExecResult("", "denied", 1) },
+        )
+        val mkdirResult = ConnectionLogHostMirror.mirrorConnectionJournal(mkdirFailure, jsonl)
+        assertTrue(mkdirResult.isFailure)
+        assertNull(mkdirFailure.uploadedName)
+        assertFalse(mkdirFailure.closed)
+
+        val uploadFailure = RecordingSshSession(failUpload = true)
+        val uploadResult = ConnectionLogHostMirror.mirrorConnectionJournal(uploadFailure, jsonl)
+        assertTrue(uploadResult.isFailure)
+        assertFalse(uploadFailure.closed)
+    }
+
     private class CountingConnector(private val session: RecordingSshSession) : SshLeaseConnector {
         var connectCount: Int = 0
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {

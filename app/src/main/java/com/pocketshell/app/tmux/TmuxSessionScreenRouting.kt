@@ -594,6 +594,84 @@ internal suspend fun tmuxAgentConversationSendResult(
 }
 
 /**
+ * Issue #1739: route one composer request to the tmux send lane while preserving
+ * its durable delivery identity.
+ *
+ * [PromptComposerViewModel.SendRequest.outboundQueueItemId] is the stable token
+ * for every dispatch of one durable row. The screen used to drop it at this
+ * boundary, so the first attempt and its auto-flush retry each minted a different
+ * token inside the VM. Durable payload lookup happened to find the ambiguous
+ * attempt, but the retry was no longer provably the same send. Resolve the token
+ * once here: durable requests keep their row id; legacy/non-durable requests get
+ * one fresh opaque token for this dispatch.
+ */
+internal suspend fun tmuxComposerSendResult(
+    request: PromptComposerViewModel.SendRequest,
+    targetSessionId: String,
+    fallbackPaneId: String,
+    sendAgentPayload: suspend (
+        paneId: String,
+        text: String,
+        agent: AgentKind,
+        sendToken: String,
+        durableRow: DurableOutboundRowIdentity?,
+    ) -> Boolean,
+    sendToAgent: suspend (
+        paneId: String,
+        text: String,
+        sendToken: String,
+        durableRow: DurableOutboundRowIdentity?,
+    ) -> Boolean,
+    sendRawBytes: suspend (
+        paneId: String,
+        bytes: ByteArray,
+        sendToken: String,
+        durableRow: DurableOutboundRowIdentity?,
+    ) -> Boolean,
+    setTuiNotice: (String) -> Unit,
+): Boolean {
+    val target = request.sendTarget
+    if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId) {
+        return false
+    }
+    val paneId = target.paneId.ifBlank { fallbackPaneId }
+    if (paneId.isBlank()) return false
+
+    val sendToken = request.outboundQueueItemId ?: newOutboundDeliveryToken()
+    val durableRow = request.outboundQueueItemId?.let { rowId ->
+        DurableOutboundRowIdentity(
+            sessionKey = target.sessionKey,
+            rowId = rowId,
+        )
+    }
+    return when (target.route) {
+        OutboundRoute.AgentConversation ->
+            tmuxAgentConversationSendResult(
+                request.text,
+                target.agentKind,
+                { text, agent ->
+                    sendAgentPayload(paneId, text, agent, sendToken, durableRow)
+                },
+                { text -> sendToAgent(paneId, text, sendToken, durableRow) },
+                setTuiNotice,
+            )
+        OutboundRoute.AgentPayload ->
+            tmuxComposerAgentKindFromToken(target.agentKind)?.let { agent ->
+                sendAgentPayload(paneId, request.text, agent, sendToken, durableRow)
+            } ?: false
+        OutboundRoute.RawBytes -> {
+            val payload = if (request.withEnter) request.text + "\r" else request.text
+            sendRawBytes(
+                paneId,
+                payload.toByteArray(Charsets.UTF_8),
+                sendToken,
+                durableRow,
+            )
+        }
+    }
+}
+
+/**
  * Issue #1207: resolve the load state the Conversation-tab placeholder renders
  * when it has NO backing conversation row (`rowLoadState == null`).
  *

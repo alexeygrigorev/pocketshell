@@ -57,13 +57,20 @@ class Issue1587SingleStoreWiringTest : TmuxSessionViewModelTestBase() {
         var wireMarks: Int = 0
 
         override fun markWireAttempted(
-            paneId: String,
-            payload: String,
+            sessionKey: String,
+            itemId: String,
             atMs: Long,
             baselineCount: Int?,
+            collapsedMarkerBaselineCount: Int?,
         ): OutboundItem? {
             wireMarks += 1
-            return super.markWireAttempted(paneId, payload, atMs, baselineCount)
+            return super.markWireAttempted(
+                sessionKey,
+                itemId,
+                atMs,
+                baselineCount,
+                collapsedMarkerBaselineCount,
+            )
         }
     }
 
@@ -73,7 +80,7 @@ class Issue1587SingleStoreWiringTest : TmuxSessionViewModelTestBase() {
         val paneId = "%0"
         val payload = "wire this exactly once please"
         // The composer's persisted row the sweep would also see.
-        store.enqueue("sessA", payload, paneId = paneId)
+        val row = store.enqueue("sessA", payload, paneId = paneId)
 
         val client = FakeTmuxClient().apply {
             // The ack gate sees the pasted payload immediately (fresh payload ⇒ baseline 0).
@@ -86,7 +93,15 @@ class Issue1587SingleStoreWiringTest : TmuxSessionViewModelTestBase() {
         vm.setAgentSubmitEnterDelayForTest(0)
         vm.setAgentSubmitAckTimeoutForTest(50)
 
-        val result = async { vm.sendAgentPayloadToPaneResult(paneId, payload, AgentKind.ClaudeCode) }
+        val result = async {
+            vm.sendAgentPayloadToPaneResult(
+                paneId,
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = DurableOutboundRowIdentity("sessA", row.id),
+            )
+        }
         advanceUntilIdle()
         assertTrue("the agent send should succeed", result.await().isSuccess)
 
@@ -99,7 +114,7 @@ class Issue1587SingleStoreWiringTest : TmuxSessionViewModelTestBase() {
         assertTrue(
             "the durable wireAttempted flag must be readable via the SAME store the sweep reads " +
                 "(one instance, one lock — no lost-update race)",
-            store.hasWireAttempt(paneId, payload),
+            store.hasWireAttempt("sessA", row.id),
         )
     }
 }

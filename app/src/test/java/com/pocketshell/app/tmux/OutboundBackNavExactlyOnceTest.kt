@@ -86,7 +86,13 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         // The composer enqueued the row that is being delivered (Queued, matching
         // pane + payload). Same prefs file the VMs' ledgers read.
         val store = SharedPrefsOutboundQueueStore(context)
-        store.enqueue("sessA", payload, paneId = "%0", route = OutboundRoute.AgentConversation)
+        val row = store.enqueue(
+            "sessA",
+            payload,
+            paneId = "%0",
+            route = OutboundRoute.AgentConversation,
+        )
+        val durableRow = DurableOutboundRowIdentity("sessA", row.id)
 
         // VM #1: attempt 1 pastes, the pane shows it (ack passes), then the submit
         // Enter's exec result is lost after the server ran the paste.
@@ -94,12 +100,20 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         val vm1 = newDurableConnectedVm(client1)
         client1.throwOnCommandPrefix = "send-keys -t %0 Enter"
         client1.throwOnCommandRemaining = 1
-        val first = async { vm1.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }
+        val first = async {
+            vm1.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue("attempt 1 must surface the ambiguous failure", first.await().isFailure)
         assertEquals("attempt 1 pastes exactly once", 1, client1.pasteCount(payload))
         // The wire attempt is now DURABLE on the row (survives the VM-clear).
-        assertTrue(store.hasWireAttempt("%0", payload))
+        assertTrue(store.hasWireAttempt("sessA", row.id))
 
         // The user taps BACK mid-delivery → VM #1 is cleared (its volatile ledger
         // dies). #780 model: a synthetic VM-clear, not process death.
@@ -110,7 +124,15 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         // shows the landed payload.
         val client2 = clientShowing("> $payload")
         val vm2 = newDurableConnectedVm(client2)
-        val second = async { vm2.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }
+        val second = async {
+            vm2.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue("the verified resend must succeed", second.await().isSuccess)
 
@@ -135,26 +157,54 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
     fun backNavWithUndeliveredRowStillDeliversOnRebuiltVm() = runTest(scheduler) {
         val payload = "restart the worker pool"
         val store = SharedPrefsOutboundQueueStore(context)
-        store.enqueue("sessB", payload, paneId = "%0", route = OutboundRoute.AgentConversation)
+        val row = store.enqueue(
+            "sessB",
+            payload,
+            paneId = "%0",
+            route = OutboundRoute.AgentConversation,
+        )
+        val durableRow = DurableOutboundRowIdentity("sessB", row.id)
 
         // VM #1: the paste never lands (the send fails before it reaches the pane).
         val client1 = clientShowing("$ ")
         val vm1 = newDurableConnectedVm(client1)
         client1.throwOnCommandPrefix = "send-keys -l -t %0"
         client1.throwOnCommandRemaining = 1
-        val first = async { vm1.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }
+        val first = async {
+            vm1.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue(first.await().isFailure)
         // The attempt was still recorded durably (it reached the wire, outcome lost).
-        assertTrue(store.hasWireAttempt("%0", payload))
+        assertTrue(store.hasWireAttempt("sessB", row.id))
 
         vm1.clearForTest()
 
         // VM #2 rebuilds: the probe shows the payload NEVER landed ⇒ full re-paste,
-        // the row is NOT dropped.
+        // then the ack capture proves the retry paste landed. The row is NOT dropped.
         val client2 = clientShowing("$ ")
+        client2.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("$ "), isError = false),
+        )
+        client2.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("> $payload"), isError = false),
+        )
         val vm2 = newDurableConnectedVm(client2)
-        val second = async { vm2.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }
+        val second = async {
+            vm2.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue(second.await().isSuccess)
         assertEquals(
@@ -179,7 +229,16 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         val client = clientShowing("> $payload")
         val vm = newDurableConnectedVm(client)
 
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }
+        val durableRow = DurableOutboundRowIdentity("sessC", row.id)
+        val first = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.ClaudeCode,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue(first.await().isSuccess)
         assertEquals(1, client.pasteCount(payload))
@@ -187,7 +246,7 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         // The composer acks delivery: the row is delivered+pruned, dropping the
         // durable flag so a later identical send is not falsely suppressed.
         store.markDelivered(row.id)
-        assertFalse(store.hasWireAttempt("%0", payload))
+        assertFalse(store.hasWireAttempt("sessC", row.id))
 
         // A deliberate identical re-send is a normal full send (2 pastes total).
         val second = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode) }

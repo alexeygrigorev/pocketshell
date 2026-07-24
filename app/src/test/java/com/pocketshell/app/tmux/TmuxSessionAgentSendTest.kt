@@ -153,6 +153,8 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     fun sendToAgentPaneAppendsOptimisticMessageAndWritesCarriageReturn() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
+        client.defaultCaptureResponse =
+            CommandResponse(number = 0L, output = listOf("> run tests"), isError = false)
         vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
@@ -391,7 +393,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
      * prior paste) must NOT false-confirm; only OUR chip (a count increase) does.
      * Here the pane permanently shows `[Pasted text #1 +9 lines]` and NEVER renders
      * a new chip, so the ack must poll past the first capture (no instant match) and
-     * fall back — not fire on the pre-existing chip.
+     * resolve unconfirmed without Enter — not fire on the pre-existing chip.
      */
     @Test
     fun collapsedChipAlreadyOnPaneDoesNotFalseConfirm() = runTest(scheduler) {
@@ -421,12 +423,16 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val send = async { vm.sendToAgentPaneResult("%0", payload) }
         advanceUntilIdle()
 
-        assertTrue("send still completes via the bounded fallback", send.await().isSuccess)
+        assertTrue("unconfirmed chip count must resolve as failure", send.await().isFailure)
         assertTrue(
             "a pre-existing collapsed chip must NOT instant-confirm the ack — the gate " +
-                "must poll past the first capture to the fallback (polls=" +
+                "must poll past the first capture to the deadline (polls=" +
                 "${client.capturePaneTextViaExecCalls.size})",
             client.capturePaneTextViaExecCalls.size > 2,
+        )
+        assertFalse(
+            "a pre-existing chip never authorizes blind Enter",
+            client.sentCommands.contains("send-keys -t %0 Enter"),
         )
     }
 
@@ -566,13 +572,13 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * Issue #869: when the agent's input rendering can never be recognised (the
-     * payload never shows up in `capture-pane`), Send must NOT hang — it falls
-     * back to pressing Enter after the bounded ack timeout (the pre-#869 blind
-     * behaviour as the worst case, never a deadlock).
+     * Issue #1739: absence of acknowledgement is ambiguous: the paste may have
+     * landed, but there is no identity-safe proof that Enter belongs to this
+     * client/session/pane. Resolve the attempt at the bounded deadline and keep
+     * it retryable; never turn a marker miss into a blind Enter.
      */
     @Test
-    fun sendToAgentPaneFallsBackToSubmitEnterAfterAckTimeout() = runTest(scheduler) {
+    fun sendToAgentPaneMarkerAbsentResolvesBoundedWithoutBlindEnter() = runTest(scheduler) {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -598,11 +604,10 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         )
 
         advanceUntilIdle()
-        assertTrue("submit must not hang — it falls back after the timeout", send.await().isSuccess)
+        assertTrue("unconfirmed paste must resolve as a retryable failure", send.await().isFailure)
         assertEquals(
             listOf(
                 "send-keys -l -t %0 -- 'never-rendered prompt'",
-                "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )
@@ -612,8 +617,8 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
      * Codex input-freeze follow-up: a Codex/agent output storm can wedge the
      * `capture-pane` command the submit ack gate uses to confirm the paste
      * landed. The ack timeout must bound the WHOLE capture loop, including a
-     * single stuck capture command, so typing never parks forever before the
-     * submit Enter.
+     * single stuck capture command. An unconfirmed paste remains ambiguous, so
+     * the bounded result is failure without a submit Enter.
      */
     @Test
     fun sendToAgentPaneAckTimeoutBoundsStuckCaptureCommand() = runTest(scheduler) {
@@ -636,7 +641,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         )
 
         advanceUntilIdle()
-        assertTrue("stuck capture must fall back instead of hanging Send", send.await().isSuccess)
+        assertTrue("stuck capture must fail bounded instead of hanging Send", send.await().isFailure)
         assertEquals(
             "a stuck ack capture should be tried once, then cancelled by the wall-clock timeout",
             1,
@@ -645,94 +650,222 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         assertEquals(
             listOf(
                 "send-keys -l -t %0 -- 'blocked capture prompt'",
-                "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )
     }
 
     /**
-     * Issue #869 (reviewer BLOCKED-G4 follow-up): the needle-miss FALLBACK must
-     * NOT degrade to the pre-#869 short floor — that short delay IS the
-     * maintainer's missed-submit symptom. When the ack is never observed (an
-     * unrecognised / reflowed input box the needle can't match) the submit Enter
-     * must be held to an ADEQUATE working floor:
-     *   max(configuredFloor, AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + measuredRtt).
+     * Issue #1739 regression-first reproduction of the preserved #1733 hang.
+     * RealSshSession cancellation enters a NonCancellable close on the
+     * serialized TransportDispatcher. A structured `withTimeout` therefore
+     * waits for teardown and leaves the durable row InFlight indefinitely.
      *
-     * This test injects a known per-`capture-pane` RTT and a ZERO configured
-     * floor (so neither the Codex floor nor the #526 setting masks the assertion)
-     * and proves the Enter does NOT fire until at least
-     * `AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS + injectedRtt` of virtual time has
-     * elapsed since the gate started — i.e. the worst case is a working delay,
-     * proportionally larger under latency, never the 150ms that raced.
-     *
-     * RED (pre-hardening): the fallback returns after only the short floor, so
-     * the Enter is present well before FALLBACK_FLOOR + RTT → the
-     * "not pressed before the adequate floor" assertion fails.
-     * GREEN (hardened): the Enter is held until the adequate floor elapses.
+     * RED on current main: at 80ms [send] is still incomplete because the
+     * timeout is waiting on [nonCancellableCaptureTeardownGate].
+     * GREEN: the capture runs in a detached, invalidatable attempt; the caller
+     * returns failure at 80ms, cancels cleanup without joining it, and never
+     * presses Enter.
      */
     @Test
-    fun sendToAgentPaneFallbackHoldsEnterForAdequateFloorPlusRttOnNeedleMiss() =
+    fun sendToAgentPaneDeadlineDoesNotJoinNonCancellableCaptureTeardown() =
         runTest(scheduler) {
             val vm = newVm()
             val client = FakeTmuxClient()
-            // Read the runTest virtual clock so the gate's RTT measurement +
-            // fallback-floor top-up are deterministic (SystemClock reads 0 here).
-            vm.setAgentSubmitMonotonicClockForTest { scheduler.currentTime }
+            val teardownGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            client.nonCancellableCaptureTeardownGate = teardownGate
             vm.attachClientForTest(client)
             vm.startAgentConversationForTest("%0", newClaudeDetection())
-            // Zero configured floor so the fallback floor is the only thing
-            // gating the Enter (not the #526 setting / Codex floor).
             vm.setAgentSubmitEnterDelayForTest(0)
-            // SHORT poll window so the incidental poll-loop duration is BELOW the
-            // fallback floor — making the floor (not the loop) the binding
-            // constraint, so this is a genuine red→green of the floor itself.
-            vm.setAgentSubmitAckTimeoutForTest(80L) // 2 polls at 40ms
+            vm.setAgentSubmitAckTimeoutForTest(80L)
 
-            val injectedRttMs = 20L
-            client.captureCommandDelayMs = injectedRttMs
-            // Every capture comes back WITHOUT the payload — the needle never
-            // matches (a reflowed/unrecognised input box).
-            repeat(200) {
-                client.capturePaneResponses.addLast(
-                    CommandResponse(number = 0L, output = listOf("> "), isError = false),
+            val send = async {
+                vm.sendAgentPayloadToPaneResult(
+                    "%0",
+                    "post reconnect blocked capture",
+                    AgentKind.ClaudeCode,
+                    "issue-1739-stuck-capture",
                 )
             }
 
-            val gateStart = scheduler.currentTime
-            // Record the virtual-clock instant the submit Enter reaches the wire.
-            var enterSentAtMs: Long = -1L
-            client.onCommandSent = { cmd ->
-                if (cmd == "send-keys -t %0 Enter" && enterSentAtMs < 0L) {
-                    enterSentAtMs = scheduler.currentTime
-                }
+            try {
+                advanceTimeBy(80L)
+                runCurrent()
+                assertTrue(
+                    "the ack deadline must resolve without joining non-cancellable SSH exec teardown",
+                    send.isCompleted,
+                )
+                assertTrue("the ambiguous send must remain retryable", send.await().isFailure)
+                assertFalse(
+                    "an unconfirmed capture must never authorize Enter",
+                    client.sentCommands.contains("send-keys -t %0 Enter"),
+                )
+            } finally {
+                teardownGate.complete(Unit)
+                advanceUntilIdle()
             }
-            val send = async { vm.sendToAgentPaneResult("%0", "never-matched prompt") }
+        }
 
-            // The adequate floor: the Enter must NOT have fired before this.
-            val adequateFloorMs =
-                com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
-                    injectedRttMs
-            advanceUntilIdle()
-            assertTrue(
-                "fallback submit must have fired (no hang)",
-                send.await().isSuccess,
-            )
-            // The Enter was eventually pressed.
-            assertTrue(
-                "fallback must press the submit Enter",
-                client.sentCommands.contains("send-keys -t %0 Enter"),
-            )
-            // Load-bearing: the submit Enter fired only AFTER the adequate floor
-            // (FALLBACK_FLOOR + injectedRtt) elapsed — never the old short delay.
-            val enterAtMs = enterSentAtMs - gateStart
-            assertTrue(
-                "needle-miss fallback must hold the submit Enter for at least the " +
-                    "adequate floor (FALLBACK_FLOOR + measuredRtt = ${adequateFloorMs}ms); " +
-                    "Enter fired after only ${enterAtMs}ms",
-                enterAtMs >= adequateFloorMs,
+    @Test
+    fun retryAfterUnconfirmedAckVerifiesLandedPasteThenSendsEnterOnly() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(80L)
+        val payload = "verify me after reconnect\nthrough the collapsed chip\nwithout a duplicate paste"
+        val token = "issue-1739-exactly-once"
+
+        val first = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, token)
+        }
+        advanceUntilIdle()
+        assertTrue("the first unconfirmed attempt remains retryable", first.await().isFailure)
+        assertFalse(client.sentCommands.contains("send-keys -t %0 Enter"))
+
+        // The paste did land despite the lost acknowledgement. The durable
+        // attempt's retry must prove that fact and complete with Enter-only.
+        val landedChip = CommandResponse(
+            number = 0L,
+            output = listOf("> [Pasted text #1 +2 lines]"),
+            isError = false,
+        )
+        client.scrollbackCaptureResponse = landedChip
+        client.defaultCaptureResponse = landedChip
+        val retry = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, token)
+        }
+        advanceUntilIdle()
+
+        assertTrue("verified retry should complete", retry.await().isSuccess)
+        assertEquals(
+            "collapsed payload is pasted exactly once",
+            1,
+            client.sentCommands.count { it.startsWith("paste-buffer ") },
+        )
+        assertEquals(
+            "verified retry submits exactly one Enter",
+            1,
+            client.sentCommands.count { it == "send-keys -t %0 Enter" },
+        )
+    }
+
+    @Test
+    fun clientSwapDuringAckInvalidatesLateCaptureWithoutEnter() = runTest(scheduler) {
+        val vm = newVm()
+        val oldClient = FakeTmuxClient()
+        vm.attachClientForTest(oldClient)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(80L)
+        oldClient.captureCommandDelayMs = 20L
+        oldClient.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("> swap guarded"), isError = false),
+        )
+
+        val send = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                "swap guarded",
+                AgentKind.ClaudeCode,
+                "issue-1739-client-swap",
             )
         }
+        runCurrent()
+        vm.attachClientForTest(FakeTmuxClient())
+        advanceUntilIdle()
+
+        assertTrue("superseded-client ack must fail", send.await().isFailure)
+        assertFalse(
+            "a capture returned by the old client must never authorize Enter",
+            oldClient.sentCommands.contains("send-keys -t %0 Enter"),
+        )
+    }
+
+    @Test
+    fun disconnectDuringAckInvalidatesCaptureWithoutEnter() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(80L)
+        client.captureCommandDelayMs = 20L
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("> drop guarded"), isError = false),
+        )
+
+        val send = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                "drop guarded",
+                AgentKind.ClaudeCode,
+                "issue-1739-drop",
+            )
+        }
+        runCurrent()
+        client.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertTrue("drop during acknowledgement must fail", send.await().isFailure)
+        assertFalse(client.sentCommands.contains("send-keys -t %0 Enter"))
+    }
+
+    @Test
+    fun callerCancellationDoesNotJoinCaptureCleanupOrSendEnter() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val teardownGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        client.nonCancellableCaptureTeardownGate = teardownGate
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+
+        val send = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                "cancel guarded",
+                AgentKind.ClaudeCode,
+                "issue-1739-cancel",
+            )
+        }
+        try {
+            runCurrent()
+            send.cancel()
+            runCurrent()
+            assertTrue(
+                "caller cancellation must complete without joining non-cancellable capture cleanup",
+                send.isCompleted,
+            )
+            assertTrue(send.isCancelled)
+            assertFalse(client.sentCommands.contains("send-keys -t %0 Enter"))
+        } finally {
+            teardownGate.complete(Unit)
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun foreignPaneIsRejectedBeforePasteOrEnter() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%foreign",
+            "wrong pane",
+            AgentKind.ClaudeCode,
+            "issue-1739-foreign-pane",
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(
+            "foreign pane must receive neither payload nor Enter",
+            client.sentCommands.none { it.startsWith("send-keys") },
+        )
+    }
 
     /**
      * Issue #869 (reviewer BLOCKED-G4 follow-up): the load-bearing needle-vs-
@@ -817,6 +950,57 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
+    fun lateAckFromPreviousSessionCannotAuthorizeEnterAfterTargetOnlySwap() = runTest(scheduler) {
+        val payload = "do not submit this into the next session"
+        val client = FakeTmuxClient().apply {
+            captureCommandDelayMs = 200L
+            defaultCaptureResponse = CommandResponse(
+                number = 0L,
+                output = listOf("> $payload"),
+                isError = false,
+            )
+        }
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "session-a",
+            client = client,
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+        vm.setAgentSubmitAckTimeoutForTest(500)
+
+        val clientIdentity = vm.currentClientIdentityForTest()
+        val generation = vm.currentConnectGenerationForTest()
+        val send = async { vm.sendToAgentPaneResult("%0", payload) }
+        runCurrent()
+
+        assertEquals(
+            "precondition: the old session received exactly one paste before ack capture suspended",
+            listOf("send-keys -l -t %0 -- '${payload.replace("'", "'\\''")}'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        vm.swapActiveSessionTargetForTest("session-b")
+        assertEquals("the target-only seam must retain the exact client", clientIdentity, vm.currentClientIdentityForTest())
+        assertEquals("the target-only seam must retain the generation", generation, vm.currentConnectGenerationForTest())
+
+        advanceUntilIdle()
+
+        assertTrue("late evidence from session A must fail the send after session B becomes current", send.await().isFailure)
+        assertEquals(
+            "a stale capture must authorize neither a second paste nor Enter in the new session",
+            listOf("send-keys -l -t %0 -- '${payload.replace("'", "'\\''")}'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
     fun codexSendInFlightSurvivesTerminalOverflowWithoutReconnectOrDuplicateSend() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
@@ -826,6 +1010,12 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         val client = FakeTmuxClient()
+        client.captureCommandDelayMs = 40L
+        client.defaultCaptureResponse = CommandResponse(
+            number = 0L,
+            output = listOf("> previous user prompt"),
+            isError = false,
+        )
         vm.replaceClientForTest(
             hostId = 7L,
             hostName = "alpha",
@@ -912,7 +1102,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun agentSubmitDelaysFinalEnterByConfiguredDelayForClaudeCode() = runTest(scheduler) {
+    fun bareAgentSubmitDelaysEnterByConfiguredDelayForClaudeCode() = runTest(scheduler) {
         // Issue #526: the composer/agent send path types the message text,
         // waits the user-configurable delay, then presses the submit Enter as
         // a SEPARATE send-keys so the Enter can't race ahead of the agent
@@ -924,14 +1114,21 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         vm.startAgentConversationForTest("%0", newClaudeDetection())
         vm.setAgentSubmitEnterDelayForTest(200)
 
-        val send = async { vm.sendToAgentPaneResult("%0", "  run tests  ") }
+        val send = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                "",
+                AgentKind.ClaudeCode,
+                "bare-enter-delay",
+            )
+        }
         runCurrent()
 
-        // Text is typed immediately; the submit Enter must NOT have been sent
-        // yet — it waits out the configured delay first.
+        // A bare submit has no paste to acknowledge, so it must wait the
+        // configured floor before Enter.
         assertEquals(
-            "Send should type the prompt before waiting to press Enter",
-            listOf("send-keys -l -t %0 -- 'run tests'"),
+            "bare submit must wait before pressing Enter",
+            emptyList<String>(),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )
 
@@ -939,7 +1136,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         runCurrent()
         assertEquals(
             "Submit Enter must not fire before the configured delay elapses",
-            listOf("send-keys -l -t %0 -- 'run tests'"),
+            emptyList<String>(),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )
 
@@ -947,10 +1144,7 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         assertTrue(send.await().isSuccess)
         assertEquals(
             "After the configured delay the submit Enter fires as a separate key",
-            listOf(
-                "send-keys -l -t %0 -- 'run tests'",
-                "send-keys -t %0 Enter",
-            ),
+            listOf("send-keys -t %0 Enter"),
             client.sentCommands.filter { it.startsWith("send-keys") },
         )
     }
@@ -1279,7 +1473,22 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val scenarioScope = newReconnectScenarioScope()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
-        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0").apply {
+            defaultCaptureResponse = CommandResponse(
+                number = 0L,
+                output = listOf("> work ready"),
+                isError = false,
+            )
+            onCommandSent = { command ->
+                if (command == "send-keys -l -t %0 -- 'codex terminal send'") {
+                    defaultCaptureResponse = CommandResponse(
+                        number = 0L,
+                        output = listOf("> codex terminal send"),
+                        isError = false,
+                    )
+                }
+            }
+        }
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(
@@ -1402,7 +1611,22 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         val scenarioScope = newReconnectScenarioScope()
         val registry = ActiveTmuxClients()
         val connector = QueueLeaseConnector(FakeSshSession())
-        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0")
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%0").apply {
+            defaultCaptureResponse = CommandResponse(
+                number = 0L,
+                output = listOf("> work ready"),
+                isError = false,
+            )
+            onCommandSent = { command ->
+                if (command == "send-keys -l -t %0 -- 'send after return'") {
+                    defaultCaptureResponse = CommandResponse(
+                        number = 0L,
+                        output = listOf("> send after return"),
+                        isError = false,
+                    )
+                }
+            }
+        }
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(
@@ -1607,7 +1831,10 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         vm.appendAgentEventsForTest("%0", listOf(failed))
 
         // Bring up a live client and retry.
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            defaultCaptureResponse =
+                CommandResponse(number = 0L, output = listOf("> retry me"), isError = false)
+        }
         vm.attachClientForTest(client)
         vm.retryFailedAgentSend("%0", failed.id)
         advanceUntilIdle()

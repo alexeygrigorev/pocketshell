@@ -8,6 +8,8 @@ import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -16,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.withContext
 
 /**
  * Test double for [TmuxClient] used by [TmuxSessionViewModelTest].
@@ -237,6 +240,15 @@ internal open class FakeTmuxClient(
 
     var suspendForeverOnCapturePaneTextViaExec: Boolean = false
 
+    /**
+     * Issue #1739: models the real post-reconnect SSH exec failure. The capture
+     * is cancelled by the ack deadline, but `RealSshSession.exec` then enters
+     * non-cancellable command/session-channel teardown on the serialized
+     * transport dispatcher. A structured timeout waits for that teardown and
+     * therefore does not actually bound the caller.
+     */
+    var nonCancellableCaptureTeardownGate: CompletableDeferred<Unit>? = null
+
     var sendCommandGatePrefix: String? = null
 
     var sendCommandGate: CompletableDeferred<Unit>? = null
@@ -428,6 +440,16 @@ internal open class FakeTmuxClient(
         capturePaneTextViaExecScrollbackLines += scrollbackLines
         if (suspendForeverOnCapturePaneTextViaExec) {
             CompletableDeferred<Unit>().await()
+        }
+        nonCancellableCaptureTeardownGate?.let { teardownGate ->
+            try {
+                CompletableDeferred<Unit>().await()
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) {
+                    teardownGate.await()
+                }
+                throw cancelled
+            }
         }
         scrollbackCaptureResponse?.let { if (scrollbackLines > 0) return it }
         val command = if (scrollbackLines > 0) {

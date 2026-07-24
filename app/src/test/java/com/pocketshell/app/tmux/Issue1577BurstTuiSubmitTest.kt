@@ -191,9 +191,9 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
     /**
      * Class coverage — the footer-present FALSE-MATCH itself: when the pane NEVER
      * renders the typed input (a fully wedged busy Codex), the ack gate must NOT
-     * confirm on the permanent footer occurrence. It holds Enter to the bounded
-     * fallback floor instead of firing early on the footer — proving the count-baseline
-     * gate is not satisfied by the pre-existing `(/goal resume)`.
+     * confirm on the permanent footer occurrence. It fails within the bounded
+     * acknowledgement window without Enter — proving the count-baseline gate is
+     * not satisfied by the pre-existing `(/goal resume)`.
      */
     @Test
     fun ackGateDoesNotFalseConfirmOnPermanentFooterOccurrence() = runTest(scheduler) {
@@ -204,13 +204,12 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
 
         val result = async { vm.sendAgentPayloadToPaneResult("%0", "/goal resume", AgentKind.Codex) }
         advanceUntilIdle()
-        // The send still completes (fallback floor), but it must have POLLED capture-pane
-        // more than once — i.e. it did NOT accept the footer as an instant ack (RED on
-        // base: presence-ack fires on the first poll → exactly one poll).
-        assertTrue(result.await().isSuccess)
+        // Issue #1739 hard cut: an unproven paste is retryable failure, never
+        // "timeout then blind Enter".
+        assertTrue(result.await().isFailure)
         assertTrue(
             "the count-baseline ack must NOT confirm on the permanent footer occurrence — " +
-                "it polls to the bounded fallback (multiple polls), not a first-poll footer match " +
+                "it polls to the bounded failure (multiple polls), not a first-poll footer match " +
                 "(pollCount=${client.capturePaneTextViaExecCalls.size})",
             client.capturePaneTextViaExecCalls.size > 2,
         )
@@ -218,6 +217,10 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
             "a wedged Codex that never renders the paste must not report a swallowed-then-" +
                 "spuriously-submitted state from the footer",
             client.submittedCommands.contains("/goal resume"),
+        )
+        assertFalse(
+            "an unproven paste must never receive a blind submit Enter",
+            client.sentCommands.any { it == "send-keys -t %0 Enter" },
         )
     }
 }

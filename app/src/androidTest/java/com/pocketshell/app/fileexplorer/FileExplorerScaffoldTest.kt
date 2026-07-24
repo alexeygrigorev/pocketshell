@@ -243,7 +243,23 @@ class FileExplorerScaffoldTest {
             transfer = FileTransferState.InProgress(name = "a.txt", isUpload = true),
         )
         compose.onNodeWithTag(FILE_EXPLORER_TRANSFER_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Uploading a.txt…").assertIsDisplayed()
+        compose.onNodeWithText("Uploading a.txt (size unknown)…").assertIsDisplayed()
+        // Upload is suppressed while a transfer is running.
+        compose.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun inProgressTransferWithKnownSizeShowsFormattedCopyAndHidesUpload() {
+        setReady(
+            listOf(file("a.txt", 1)),
+            transfer = FileTransferState.InProgress(
+                name = "a.txt",
+                isUpload = true,
+                bytesTotal = 1536,
+            ),
+        )
+        compose.onNodeWithTag(FILE_EXPLORER_TRANSFER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Uploading a.txt (1.5 KB)…").assertIsDisplayed()
         // Upload is suppressed while a transfer is running.
         compose.onNodeWithTag(FILE_EXPLORER_UPLOAD_TAG).assertDoesNotExist()
     }

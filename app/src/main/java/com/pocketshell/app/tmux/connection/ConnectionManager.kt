@@ -1,8 +1,10 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.app.diagnostics.ConnectionJournalDiagnostics
 import com.pocketshell.core.connection.Clock
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent
+import com.pocketshell.core.connection.ConnectionJournalPort
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.connection.HostKey
@@ -100,8 +102,9 @@ class ConnectionManager(
      *  the effect driver observes. In PRODUCTION this is the REAL [SshLeaseTransportPort]
      *  over the VM's `SshLeaseManager`. */
     val transport: TransportPort,
+    journal: ConnectionJournalPort = ConnectionJournalDiagnostics,
 ) {
-    private val controller = ConnectionController(clock = clock, transport = transport)
+    private val controller = ConnectionController(clock = clock, transport = transport, journal = journal)
 
     /**
      * The `:shared:core-connection` reducer the facade owns. Exposed so the VM can wire the
@@ -119,7 +122,11 @@ class ConnectionManager(
      * equivalence suite; production always injects the real [SshLeaseTransportPort].
      */
     constructor(clock: Clock = SystemElapsedClock, warmSnapshot: (HostKey) -> Boolean = { true }) :
-        this(clock = clock, transport = WarmSnapshotTransportPort(warmSnapshot))
+        this(
+            clock = clock,
+            transport = WarmSnapshotTransportPort(warmSnapshot),
+            journal = ConnectionJournalPort.Noop,
+        )
 
     /** The controller's current state — the SOLE connection-state authority. */
     val state: ConnectionState

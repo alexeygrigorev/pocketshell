@@ -3,6 +3,7 @@ package com.pocketshell.app.diagnostics
 import android.content.Context
 import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.core.connection.ConnectionJournalSchema
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -68,9 +69,18 @@ class DiagnosticRecorder @Inject constructor(
         val connectionLog = ConnectionLogPartStore(
             directory = File(context.filesDir, "diagnostics/connection-log"),
         )
+        val connectionJournal = ConnectionLogPartStore(
+            directory = File(context.filesDir, "diagnostics/connection-journal"),
+            baseName = CONNECTION_JOURNAL_BASE_NAME,
+            maxBaseBytes = CONNECTION_JOURNAL_MAX_BASE_BYTES,
+        )
         lastSequenceReadThreadName = currentPhysicalThreadName()
         sequence.set(store.lastSequence())
-        RecorderStores(events = store, connectionLog = connectionLog)
+        RecorderStores(
+            events = store,
+            connectionLog = connectionLog,
+            connectionJournal = connectionJournal,
+        )
     }
 
     init {
@@ -85,12 +95,14 @@ class DiagnosticRecorder @Inject constructor(
                     is RecorderCommand.Clear -> {
                         stores.events.clear()
                         stores.connectionLog.clear()
+                        stores.connectionJournal.clear()
                         sequence.set(0L)
                         command.done.complete(Unit)
                     }
                     is RecorderCommand.ClearAndRecord -> {
                         stores.events.clear()
                         stores.connectionLog.clear()
+                        stores.connectionJournal.clear()
                         sequence.set(0L)
                         if (settingsRepository.settings.value.diagnosticsRecordingEnabled) {
                             persist(stores, pendingEvent(command.category, command.event, command.fields))
@@ -155,6 +167,15 @@ class DiagnosticRecorder @Inject constructor(
         flush()
         return withContext(Dispatchers.IO) {
             storeDeferred.await().connectionLog.readAllLines().mapNotNull(DiagnosticEventJson::decode)
+        }
+    }
+
+    /** Full device-only replay journal; never used as an automatic host payload. */
+    suspend fun connectionJournalArchive(): List<DiagnosticsEvent> {
+        flush()
+        return withContext(Dispatchers.IO) {
+            storeDeferred.await().connectionJournal.readAllLines()
+                .mapNotNull(DiagnosticEventJson::decode)
         }
     }
 
@@ -231,6 +252,9 @@ class DiagnosticRecorder @Inject constructor(
         val event = buildEvent(pending)
         val line = DiagnosticEventJson.encode(event)
         stores.events.appendLine(line)
+        if (event.category == ConnectionJournalSchema.CATEGORY) {
+            stores.connectionJournal.append(line)
+        }
         if (MirroredDiagnostics.isMirrored(event)) {
             stores.connectionLog.append(line)
         }
@@ -298,6 +322,7 @@ class DiagnosticRecorder @Inject constructor(
     private class RecorderStores(
         val events: DiagnosticLogStore,
         val connectionLog: ConnectionLogPartStore,
+        val connectionJournal: ConnectionLogPartStore,
     )
 
     private sealed interface RecorderCommand {
@@ -314,6 +339,8 @@ class DiagnosticRecorder @Inject constructor(
 
     private companion object {
         const val RECORDER_BUFFER_CAPACITY = 256
+        const val CONNECTION_JOURNAL_BASE_NAME = "connection-journal.jsonl"
+        const val CONNECTION_JOURNAL_MAX_BASE_BYTES = 4L * 1024L * 1024L
     }
 }
 

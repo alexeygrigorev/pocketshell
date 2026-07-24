@@ -91,6 +91,8 @@ class ConnectionController(
      * Injectable so tests pin the distribution deterministically instead of skipping it.
      */
     private val random: Random = Random.Default,
+    /** Issue #1709: replay-complete submit-boundary journal. */
+    private val journal: ConnectionJournalPort = ConnectionJournalPort.Noop,
 ) {
     /**
      * Enforces the single-confining-dispatcher contract in DEBUG builds by
@@ -146,7 +148,8 @@ class ConnectionController(
      * A plain `var` mutated only from the confining dispatcher (via [setReconnectLadder]),
      * same single-confining-dispatcher contract as [graceDeadlineMs].
      */
-    private var reconnectLadderMs: List<Long> = jitteredLadder(reconnectLadderMs)
+    private val initialReconnectLadderMs: List<Long> = reconnectLadderMs.toList()
+    private var reconnectLadderMs: List<Long> = jitteredLadder(initialReconnectLadderMs)
 
     /**
      * Issue #1328 (S5): the SINGLE reconnect-attempt counter. It lives HERE, in the
@@ -198,6 +201,36 @@ class ConnectionController(
      */
     private var episodeStartMs: Long? = null
 
+    /**
+     * One physical [Clock] read and one nullable warm consult per submit (#1709).
+     *
+     * This is a stack because StateFlow publication can synchronously drive an
+     * existing same-thread effect which re-enters [submit]. The confinement
+     * contract explicitly permits that re-entry.
+     */
+    private val activeSubmits = ArrayDeque<ActiveSubmit>()
+    private val pendingJournalEntries = ArrayDeque<ConnectionJournalEntry>()
+    private var journalSeq: Long = 0L
+
+    init {
+        // Preserve the true zero-overhead default: old/controller-only call sites
+        // neither build an entry nor consult the clock when journaling is absent.
+        if (journal !== ConnectionJournalPort.Noop) {
+            journal.record(
+                ConnectionJournalEntry.Construct(
+                    nowMs = clock.nowMs(),
+                    graceMs = graceMs,
+                    stabilityWindowMs = stabilityWindowMs,
+                    episodeBudgetMs = episodeBudgetMs,
+                    baseLadderMs = initialReconnectLadderMs,
+                    // Qualify `this`: the constructor parameter has the same
+                    // name, but replay needs the resolved post-jitter property.
+                    jitteredLadderMs = this.reconnectLadderMs,
+                ),
+            )
+        }
+    }
+
     /** Current target id — the drop-by-id reference for events and seeds. */
     private val currentTargetId: SessionId?
         get() = _state.value.targetIdOrNull()
@@ -217,12 +250,45 @@ class ConnectionController(
      * [confinement].
      */
     fun submit(event: ConnectionEvent): ConnectionState = confinement.guarded("submit") {
-        val next = reduce(_state.value, event)
-        if (next !== _state.value || next != _state.value) {
-            _state.value = next
+        val submit = ActiveSubmit(nowMs = clock.nowMs())
+        val outermost = activeSubmits.isEmpty()
+        activeSubmits.addLast(submit)
+        val pre = _state.value
+        val seq = ++journalSeq
+        var succeeded = false
+        try {
+            val next = reduce(pre, event)
+            if (journal !== ConnectionJournalPort.Noop) {
+                // Queue before StateFlow publication: publication may re-enter
+                // submit synchronously, and replay must observe outer then inner.
+                pendingJournalEntries.addLast(
+                    ConnectionJournalEntry.Submit(
+                        journalSeq = seq,
+                        nowMs = submit.nowMs,
+                        event = event.journalSafe(),
+                        preState = pre.journalSafe(),
+                        postState = next.journalSafe(),
+                        isWarm = submit.isWarm,
+                        internals = journalInternals(),
+                    ),
+                )
+            }
+            if (next !== _state.value || next != _state.value) {
+                _state.value = next
+            }
+            _revealGate.value = revealFor(next)
+            succeeded = true
+            _state.value
+        } finally {
+            check(activeSubmits.removeLast() === submit)
+            if (outermost) {
+                if (succeeded) {
+                    flushPendingJournal()
+                } else {
+                    pendingJournalEntries.clear()
+                }
+            }
         }
-        _revealGate.value = revealFor(next)
-        _state.value
     }
 
     /**
@@ -260,6 +326,18 @@ class ConnectionController(
         // reducer deterministic (same inputs + same ladder -> same states) while preserving
         // the desynchronisation property: every ladder install is a fresh independent roll.
         reconnectLadderMs = jitteredLadder(delaysMs)
+        if (journal !== ConnectionJournalPort.Noop) {
+            // Order the resolved ladder before publishing a re-stamped state:
+            // StateFlow collectors may synchronously re-enter submit, and that
+            // nested reduction already observes this replacement ladder.
+            recordOrBuffer(
+                ConnectionJournalEntry.LadderInstall(
+                    journalSeq = journalSeq,
+                    baseLadderMs = delaysMs.toList(),
+                    jitteredLadderMs = reconnectLadderMs,
+                ),
+            )
+        }
         // If a reconnect is already in flight when the ladder is (re)installed — the
         // proactive network-handoff / passive-drop paths enter [ConnectionState.Reconnecting]
         // BEFORE the VM effect installs its `autoReconnectDelaysMs` — re-stamp the current
@@ -270,6 +348,40 @@ class ConnectionController(
             _state.value = reconnectingAt(current.host, current.targetId, current.attempt)
         }
     }
+
+    /** The submit's memoized timestamp, or a direct read for the non-submit ladder setter. */
+    private fun reducerNowMs(): Long = activeSubmits.lastOrNull()?.nowMs ?: clock.nowMs()
+
+    /** Record the reducer's sole environmental consultation exactly where it happens. */
+    private fun consultWarm(host: HostKey): Boolean =
+        transport.isWarm(host).also { activeSubmits.lastOrNull()?.isWarm = it }
+
+    private fun recordOrBuffer(entry: ConnectionJournalEntry) {
+        if (activeSubmits.isEmpty()) {
+            journal.record(entry)
+        } else {
+            pendingJournalEntries.addLast(entry)
+        }
+    }
+
+    private fun flushPendingJournal() {
+        val batch = pendingJournalEntries.toList()
+        pendingJournalEntries.clear()
+        batch.forEach(journal::record)
+    }
+
+    private fun journalInternals(): ConnectionJournalInternals =
+        ConnectionJournalInternals(
+            reconnectAttempt = reconnectAttempt,
+            episodeStartMs = episodeStartMs,
+            liveSinceMs = liveSinceMs,
+            graceDeadlineMs = graceDeadlineMs,
+        )
+
+    private data class ActiveSubmit(
+        val nowMs: Long,
+        var isWarm: Boolean? = null,
+    )
 
     /**
      * The attempt budget for the current ladder — the ONE exhaustion boundary.
@@ -334,7 +446,7 @@ class ConnectionController(
      *  episode start if this is the episode's first rung (issue #1633). */
     private fun reconnectingAt(host: HostKey, target: SessionId, attempt: Int): ConnectionState.Reconnecting {
         reconnectAttempt = attempt
-        if (episodeStartMs == null) episodeStartMs = clock.nowMs()
+        if (episodeStartMs == null) episodeStartMs = reducerNowMs()
         liveSinceMs = null
         return ConnectionState.Reconnecting(
             host = host,
@@ -361,7 +473,7 @@ class ConnectionController(
 
     /** Enter [ConnectionState.Live], stamping the stability window's start (issue #1633). */
     private fun liveAt(host: HostKey, target: SessionId): ConnectionState.Live {
-        liveSinceMs = clock.nowMs()
+        liveSinceMs = reducerNowMs()
         return ConnectionState.Live(host, target)
     }
 
@@ -369,7 +481,7 @@ class ConnectionController(
     private fun episodeExhausted(nextAttempt: Int): Boolean {
         if (nextAttempt > effectiveMaxAttempts) return true
         val started = episodeStartMs ?: return false
-        return clock.nowMs() - started >= episodeBudgetMs
+        return reducerNowMs() - started >= episodeBudgetMs
     }
 
     /**
@@ -381,7 +493,7 @@ class ConnectionController(
     private fun endLiveAndCommitIfStable() {
         val since = liveSinceMs
         liveSinceMs = null
-        if (since != null && clock.nowMs() - since >= stabilityWindowMs) endEpisode()
+        if (since != null && reducerNowMs() - since >= stabilityWindowMs) endEpisode()
     }
 
     /** The rung an ending Live should resume the episode at: 1 when none is in flight. */
@@ -408,7 +520,7 @@ class ConnectionController(
 
         if (reconnectAttempt == 0) {
             // A fresh episode: heal silently first; the counter arms only if that fails.
-            episodeStartMs = clock.nowMs()
+            episodeStartMs = reducerNowMs()
             return ConnectionState.Reattaching(host, target)
         }
         val next = reconnectAttempt + 1
@@ -450,7 +562,7 @@ class ConnectionController(
         // affordance out of a terminal Unreachable routes through here.
         graceDeadlineMs = null
         endEpisode()
-        return if (transport.isWarm(event.host)) {
+        return if (consultWarm(event.host)) {
             ConnectionState.Attaching(event.host, event.targetId)
         } else {
             ConnectionState.Connecting(event.host, event.targetId)
@@ -492,7 +604,7 @@ class ConnectionController(
         if (current is ConnectionState.Gone || current is ConnectionState.Unreachable) {
             return current
         }
-        val now = clock.nowMs()
+        val now = reducerNowMs()
         graceDeadlineMs = now + graceMs
         return ConnectionState.Backgrounded(host, target, sinceMs = now)
     }
@@ -512,8 +624,8 @@ class ConnectionController(
         val deadline = graceDeadlineMs
         graceDeadlineMs = null
         val withinGrace = deadline != null &&
-            clock.nowMs() < deadline &&
-            transport.isWarm(current.host)
+            reducerNowMs() < deadline &&
+            consultWarm(current.host)
         return if (withinGrace) {
             ConnectionState.Reattaching(current.host, current.targetId)
         } else {

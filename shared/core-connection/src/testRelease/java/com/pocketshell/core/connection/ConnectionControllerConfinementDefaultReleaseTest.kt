@@ -39,7 +39,7 @@ class ConnectionControllerConfinementDefaultReleaseTest {
         val insideMutation = CountDownLatch(1)
         val releaseMutation = CountDownLatch(1)
         val blockingClock = object : Clock {
-            @Volatile var blockOnce = true
+            @Volatile var blockOnce = false
             override fun nowMs(): Long {
                 if (blockOnce) {
                     blockOnce = false
@@ -52,6 +52,7 @@ class ConnectionControllerConfinementDefaultReleaseTest {
         // Default constructor: confinementAssertionsEnabled defaults to BuildConfig.DEBUG.
         val controller = ConnectionController(clock = blockingClock, transport = FakeTransportPort())
         controller.submit(ConnectionEvent.Enter(host, target))
+        blockingClock.blockOnce = true
 
         val threadA = Thread { controller.submit(ConnectionEvent.Background) }
         threadA.start()

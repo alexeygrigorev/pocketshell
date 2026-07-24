@@ -89,7 +89,7 @@ class ConnectionControllerConfinementTest {
         // A clock whose nowMs() (called inside submit(Background)'s reduce) parks
         // thread A inside the guarded mutation until the racing call has happened.
         val blockingClock = object : Clock {
-            @Volatile var blockOnce = true
+            @Volatile var blockOnce = false
             override fun nowMs(): Long {
                 if (blockOnce) {
                     blockOnce = false
@@ -106,6 +106,7 @@ class ConnectionControllerConfinementTest {
         )
         // Establish a target so Background reduces down the grace path (calls nowMs).
         controller.submit(ConnectionEvent.Enter(host, target))
+        blockingClock.blockOnce = true
 
         val threadA = Thread { controller.submit(ConnectionEvent.Background) }
         threadA.start()
@@ -140,7 +141,7 @@ class ConnectionControllerConfinementTest {
         val insideMutation = CountDownLatch(1)
         val releaseMutation = CountDownLatch(1)
         val blockingClock = object : Clock {
-            @Volatile var blockOnce = true
+            @Volatile var blockOnce = false
             override fun nowMs(): Long {
                 if (blockOnce) {
                     blockOnce = false
@@ -156,6 +157,7 @@ class ConnectionControllerConfinementTest {
             confinementAssertionsEnabled = true,
         )
         controller.submit(ConnectionEvent.Enter(host, target))
+        blockingClock.blockOnce = true
 
         val threadA = Thread { controller.submit(ConnectionEvent.Background) }
         threadA.start()
@@ -185,7 +187,7 @@ class ConnectionControllerConfinementTest {
         val insideMutation = CountDownLatch(1)
         val releaseMutation = CountDownLatch(1)
         val blockingClock = object : Clock {
-            @Volatile var blockOnce = true
+            @Volatile var blockOnce = false
             override fun nowMs(): Long {
                 if (blockOnce) {
                     blockOnce = false
@@ -201,6 +203,7 @@ class ConnectionControllerConfinementTest {
             confinementAssertionsEnabled = false,
         )
         controller.submit(ConnectionEvent.Enter(host, target))
+        blockingClock.blockOnce = true
 
         val threadA = Thread { controller.submit(ConnectionEvent.Background) }
         threadA.start()

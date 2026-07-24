@@ -47,10 +47,18 @@ internal class ConnectionLogPartStore(
     private val baseName: String = DEFAULT_BASE_NAME,
     private val maxLinesPerPart: Int = DEFAULT_MAX_LINES_PER_PART,
     private val maxParts: Int = DEFAULT_MAX_PARTS,
+    /**
+     * Optional drop-oldest ceiling for the folded base file. The ordinary
+     * connection log leaves this null to preserve #1669 losslessness; the much
+     * chattier replay journal opts in so months of dogfooding cannot grow the
+     * compacted base without bound (#1709).
+     */
+    private val maxBaseBytes: Long? = null,
 ) {
     init {
         require(maxLinesPerPart > 0) { "maxLinesPerPart must be positive" }
         require(maxParts > 0) { "maxParts must be positive" }
+        require(maxBaseBytes == null || maxBaseBytes > 0L) { "maxBaseBytes must be positive when set" }
     }
 
     private val lock = Any()
@@ -124,18 +132,39 @@ internal class ConnectionLogPartStore(
 
     private fun compactLocked() {
         val parts = partFilesLocked().sortedBy { indexOf(it) }
-        if (parts.size <= maxParts) return
-        val base = baseFile()
-        base.parentFile?.mkdirs()
-        // Fold all but the newest [maxParts] parts into base, oldest first.
-        val toFold = parts.dropLast(maxParts)
-        for (part in toFold) {
-            val lines = part.readNonEmptyLines()
-            if (lines.isNotEmpty()) {
-                base.appendText(lines.joinToString(separator = "\n", postfix = "\n"))
+        if (parts.size > maxParts) {
+            val base = baseFile()
+            base.parentFile?.mkdirs()
+            // Fold all but the newest [maxParts] parts into base, oldest first.
+            val toFold = parts.dropLast(maxParts)
+            for (part in toFold) {
+                val lines = part.readNonEmptyLines()
+                if (lines.isNotEmpty()) {
+                    base.appendText(lines.joinToString(separator = "\n", postfix = "\n"))
+                }
+                part.delete()
             }
-            part.delete()
         }
+        trimBaseToByteCapLocked()
+    }
+
+    /** Keep the newest complete JSONL lines whose UTF-8 bytes fit the cap. */
+    private fun trimBaseToByteCapLocked() {
+        val cap = maxBaseBytes ?: return
+        val base = baseFile()
+        if (!base.isFile || base.length() <= cap) return
+        val kept = ArrayDeque<String>()
+        var bytes = 0L
+        for (line in base.readNonEmptyLines().asReversed()) {
+            val cost = line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
+            if (cost > cap) continue
+            if (bytes + cost > cap) break
+            kept.addFirst(line)
+            bytes += cost
+        }
+        base.writeText(
+            if (kept.isEmpty()) "" else kept.joinToString(separator = "\n", postfix = "\n"),
+        )
     }
 
     private fun baseFile(): File = File(directory, baseName)

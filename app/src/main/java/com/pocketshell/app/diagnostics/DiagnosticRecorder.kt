@@ -180,6 +180,19 @@ class DiagnosticRecorder @Inject constructor(
     }
 
     /**
+     * Render the complete device-only connection journal for the opt-in host
+     * pull (#1710). This deliberately serializes [connectionJournalArchive]
+     * directly: the automatic mirror's category policy and 64 KiB transport-up
+     * budget do not apply to a user-triggered replay archive export.
+     */
+    suspend fun connectionJournalJsonl(): String =
+        connectionJournalArchive().joinToString(
+            separator = "\n",
+            postfix = "\n",
+            transform = DiagnosticEventJson::encode,
+        ).takeIf { it != "\n" }.orEmpty()
+
+    /**
      * The host-mirrored connection log rendered as JSONL — one JSON object per
      * line, the same on-disk encoding the rolling diagnostics file uses. This is
      * the payload [com.pocketshell.app.diagnostics.ConnectionLogHostMirror] writes

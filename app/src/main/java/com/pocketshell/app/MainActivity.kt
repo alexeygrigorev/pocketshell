@@ -1162,6 +1162,8 @@ private fun AppNavigator(
 
         AppDestination.Settings -> {
             val hostListViewModel: HostListViewModel = hiltViewModel()
+            val journalHostPullState by
+                tmuxSessionViewModel.connectionJournalHostPullState.collectAsState()
             SettingsScreen(
                 onBack = ::back,
                 onOpenCrashReports = { navigate(AppDestination.CrashReports) },
@@ -1172,6 +1174,11 @@ private fun AppNavigator(
                     hostListViewModel.importSharedHostUri(uri)
                     popToHostList()
                 },
+                connectionJournalHostPullState = journalHostPullState,
+                onMirrorFullConnectionJournal =
+                    tmuxSessionViewModel::mirrorFullConnectionJournalToHost,
+                onConsumeConnectionJournalHostPullState =
+                    tmuxSessionViewModel::consumeConnectionJournalHostPullState,
                 // Issue #206: Settings → Watched folders host picker routes
                 // here without SSH credentials. The destination's SSH
                 // fields stay null so the discover-from-remote button is

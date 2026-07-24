@@ -228,6 +228,17 @@ jobs:
           chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
           scripts/test-ci-ndk-retry.sh
 
+      # Issue #1724: the hosted release-confidence gate reproducibly exhausted
+      # the Kotlin compiler heap before any journey ran because debug + release
+      # compilation shared a 2 GiB daemon concurrently. Pin the hosted-only
+      # single-worker / split-heap budget, and prove the guard rejects renewed
+      # parallelism or either missing heap bound.
+      - name: Release-emulator compiler-memory guard (issue #1724)
+        run: |
+          chmod +x scripts/check-release-emulator-memory-budget.sh
+          scripts/check-release-emulator-memory-budget.sh --self-test
+          scripts/check-release-emulator-memory-budget.sh
+
       # Issue #1646: the executed-test-count guard's OWN red->green self-test.
       # Proves — with synthetic result XML + synthetic Gradle console output, no
       # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run

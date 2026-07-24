@@ -56,7 +56,21 @@ class AvdLockScriptTest {
         runShellHarness("tests/scripts/avd-pool-test.sh", timeoutSeconds = 180)
     }
 
-    private fun runShellHarness(relativePath: String, timeoutSeconds: Long) {
+    /** Hosted emulator jobs pin a real device; the fake pool harness must ignore that caller state. */
+    @Test
+    fun avdPoolHarnessIgnoresCallerAndroidSerial() {
+        runShellHarness(
+            "tests/scripts/avd-pool-test.sh",
+            timeoutSeconds = 180,
+            environmentOverrides = mapOf("ANDROID_SERIAL" to "emulator-5554"),
+        )
+    }
+
+    private fun runShellHarness(
+        relativePath: String,
+        timeoutSeconds: Long,
+        environmentOverrides: Map<String, String> = emptyMap(),
+    ) {
         val script = projectRoot.resolve(relativePath)
         assertTrue("harness is missing: $relativePath", script.toFile().exists())
 
@@ -82,6 +96,7 @@ class AvdLockScriptTest {
             keys.removeAll { it.startsWith("POCKETSHELL_TOXIPROXY") }
             put("POCKETSHELL_AVD_LOCK_DIR", lockSandbox.resolve("locks").toString())
             put("TMPDIR", lockSandbox.toString())
+            putAll(environmentOverrides)
         }
         val process = builder.start()
 

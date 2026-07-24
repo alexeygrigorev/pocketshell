@@ -44,6 +44,21 @@ jobs:
       ANDROID_SDK: /usr/local/lib/android/sdk
       ANDROID_HOME: /usr/local/lib/android/sdk
       RELEASE_VALIDATION_SKIP_MAIN_GUARD: "1"
+      POCKETSHELL_TEST_MEM: "8G"
+      # Issue #1724: the confidence gate used to start compileDebugKotlin and
+      # compileReleaseKotlin together on the hosted runner. The Kotlin daemon's
+      # inherited 2 GiB heap then exhausted itself lowering the large
+      # TmuxSessionViewModel before any emulator journey ran. Keep this scoped
+      # to the hosted fallback: serialize Gradle work, leave a small launcher
+      # heap, and give the compiler enough room inside cgroup-run.sh's 8 GiB
+      # build scope. Local release validation retains its default two workers.
+      GRADLE_FLAGS: >-
+        --no-daemon
+        --no-build-cache
+        --no-parallel
+        --max-workers=1
+        -Dorg.gradle.jvmargs=-Xmx1536m
+        -Pkotlin.daemon.jvmargs=-Xmx3072m
 
     steps:
       - name: Checkout

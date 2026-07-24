@@ -1,3 +1,33 @@
+# PocketShell
+
+Voice-first, tmux-native, agent-aware Android SSH client.
+
+PocketShell is in active development and daily use as the maintainer's primary
+way of working on a dev box from a phone. Work is tracked as GitHub issues
+across phases 0–4. The visual specification is the Pixel 7 HTML mockups in
+`docs/mockups/`; locked design decisions live in `docs/decisions.md`.
+
+## Key docs
+
+- [docs/README.md](docs/README.md) — full planning-document index
+- [docs/architecture.md](docs/architecture.md) — modules, sshj, tmux `-CC`,
+  and per-pane rendering
+- [docs/roadmap.md](docs/roadmap.md) — phased build and sizing
+- [docs/decisions.md](docs/decisions.md) — locked decisions, open questions,
+  and rejected alternatives
+- [docs/input-methods.md](docs/input-methods.md) — voice, key bar, and snippets
+- [docs/agent-awareness.md](docs/agent-awareness.md) — agent detection,
+  parsers, and conversation view
+- [docs/usage-panel.md](docs/usage-panel.md) — provider quotas through
+  server-side `quse`
+- [docs/testing.md](docs/testing.md) — Android emulator and Docker test setup
+- [docs/mockups/index.html](docs/mockups/index.html) — Pixel 7 mockups; serve
+  with `python3 -m http.server --directory docs/mockups`
+
+Issues: <https://github.com/alexeygrigorev/pocketshell/issues>
+
+Milestones: <https://github.com/alexeygrigorev/pocketshell/milestones>
+
 # Agent Roles
 
 PocketShell uses the agent workflow defined in [process.md](process.md). That
@@ -661,3 +691,5 @@ before relying on them.
   Earlier memory described 3 parallel orchestrators (Vega/Meridian/Kepler)
   coordinating via a gitignored `chat/` channel — that is dormant unless the
   maintainer explicitly restarts it; do not spend startup time on peer discovery.
+
+@process.md

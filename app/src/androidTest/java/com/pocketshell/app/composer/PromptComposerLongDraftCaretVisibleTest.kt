@@ -1,7 +1,7 @@
 package com.pocketshell.app.composer
 
-import android.graphics.Bitmap
-import android.os.SystemClock
+import android.os.Build
+import android.view.inspector.WindowInspector
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -18,12 +18,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -35,23 +39,18 @@ import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
-import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.core.voice.WhisperClient
-import com.pocketshell.app.test.testArtifactsRoot
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.File
-import java.io.FileOutputStream
 
 /**
  * Issue #765 — long-draft caret cut-off with the keyboard up.
@@ -81,13 +80,15 @@ import java.io.FileOutputStream
  *     minus the header + sticky controls) when the keyboard is up, so the field
  *     gets a real viewport and the controls stay just above the keyboard.
  *
- * This test types a LONG multi-line draft into the REAL production sheet, raises
- * the REAL soft IME, then asserts from the editor's own text-layout that the
- * caret (end of text) is followed into the field's visible viewport — i.e. the
- * field scrolled so the last typed line is visible, not clipped below the
- * field's bottom edge. It also keeps the field un-squished and the controls
- * reachable above the keyboard, and supports an optional hold for a host-side
- * keyboard-up screenshot.
+ * The direct #780 proof renders production [SheetContent] in a fixed-size host
+ * and asserts exact above-keyboard containment. The connected and offline
+ * journeys keep the full production [PromptComposerSheet] / ModalBottomSheet
+ * mounted while they type a LONG multi-line draft through the real editor.
+ * They dispatch keyboard-down and synthetic-IME insets to every attached app
+ * window root, hard-assert that the modal's own Compose tree observes the exact
+ * nonzero inset, then prove the actual modal controls lift and every asserted
+ * node remains within its owning root. No renderer substitution or real soft
+ * keyboard is required, so a keyboard-down layout cannot pass vacuously.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RunWith(AndroidJUnit4::class)
@@ -272,6 +273,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     PromptComposerSheet(
                         onDismiss = {},
                         onSend = { _ -> true },
+                        modifier = Modifier.observeProductionSheetIme(),
                         viewModel = vm,
                     )
                 }
@@ -280,7 +282,8 @@ class PromptComposerLongDraftCaretVisibleTest {
 
         compose.waitForIdle()
 
-        // Real user gesture: tap + type a LONG multi-line draft, raising the IME.
+        // Real user gesture: tap + type a LONG multi-line draft. The unavailable
+        // system-window IME resize is supplied deterministically below.
         val longDraft = (1..18).joinToString("\n") {
             "line $it of a long prompt I'm typing to check the composer"
         }
@@ -288,51 +291,23 @@ class PromptComposerLongDraftCaretVisibleTest {
             .performClick()
             .performTextInput(longDraft)
 
-        val imeShown = raiseSoftImeDeterministically(timeoutMs = 30_000L)
-        // A no-IME emulator must FAIL this gate, never silently skip (#736) — the
-        // whole point of this test is to catch the keyboard-up caret cut-off.
         assertTrue(
-            "IME could not be raised within 30s; cannot validate the issue #765 " +
-                "long-draft caret-visibility geometry. A no-IME emulator must FAIL " +
-                "this gate, not silently skip it (#736).",
-            imeShown,
+            "The real production PromptComposerSheet must receive the typed long draft.",
+            vm.uiState.value.draft == longDraft,
         )
-
-        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
-        compose.waitForIdle()
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        android.os.SystemClock.sleep(500)
-        compose.waitForIdle()
-
-        val screenshotName = InstrumentationRegistry.getArguments()
-            .getString("issue1619ScreenshotName")
-            ?: "issue-1619-green-long-draft-caret-visible-keyboard-up.png"
-        captureFullDevice(screenshotName)
-
-        // Optional hold BEFORE the assertions so a host-side full-device
-        // screenshot can capture the keyboard-up composer state even on a base
-        // (no-fix) build where the assertions below would fail and abort.
-        val holdMs = InstrumentationRegistry.getArguments()
-            .getString("issue765HoldMs")?.toLongOrNull() ?: 0L
-        if (holdMs > 0L) {
-            println("ISSUE765_HOLD_BEGIN ms=$holdMs")
-            android.os.SystemClock.sleep(holdMs)
-            println("ISSUE765_HOLD_END")
-        }
+        val keyboardDownSendBottom = applySyntheticKeyboardDownAndReadSendBottom()
+        val syntheticIme = applySyntheticImeAndAssertObservedInProductionSheet()
 
         val draftNode = compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
             .fetchSemanticsNode()
         val draftBounds = draftNode.boundsInRoot
         val sendBounds = compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
             .fetchSemanticsNode()
             .boundsInRoot
 
-        val decorHeight = readDecorHeightPx()
-        val imeTop = decorHeight - readImeBottomPx()
         val density = InstrumentationRegistry.getInstrumentation()
             .targetContext.resources.displayMetrics.density
+        val expectedIme = syntheticIme.observedImeBottomPx.toFloat()
 
         // Read the editor's text layout so we know where the CARET (end of text)
         // sits in the field's text-layout coordinate space (top of the first
@@ -369,7 +344,8 @@ class PromptComposerLongDraftCaretVisibleTest {
                 "caretHeightPx=$caretHeightPx textHeightPx=$textHeightPx " +
                 "viewportHeightPx=$viewportHeightPx draftTop=${draftBounds.top} " +
                 "draftBottom=${draftBounds.bottom} sendTop=${sendBounds.top} " +
-                "sendBottom=${sendBounds.bottom} imeTop=$imeTop decorHeight=$decorHeight",
+                "sendBottom=${sendBounds.bottom} keyboardDownSendBottom=$keyboardDownSendBottom " +
+                "modalRootBottom=${syntheticIme.modalComposeRootBottomPx}",
         )
 
         // 1) The long draft overflows the field's viewport — otherwise this test
@@ -390,7 +366,7 @@ class PromptComposerLongDraftCaretVisibleTest {
             caretHeightPx <= viewportHeightPx + 1f,
         )
 
-        // 3) The real-IME field keeps at least three complete caret lines. The
+        // 3) The synthetic-IME field keeps at least three complete caret lines. The
         //    #1619 layout deliberately bounds the editor to the ACTUAL remaining
         //    room (rather than preserving the old arbitrary 80dp floor), so use
         //    the measured line height as the device/font-scale invariant.
@@ -402,23 +378,30 @@ class PromptComposerLongDraftCaretVisibleTest {
             viewportHeightPx >= caretHeightPx * 3f,
         )
 
-        // 4) The field's visible bottom sits ABOVE the controls row, which sits
-        //    above the keyboard — so the caret region (the field bottom) is never
-        //    occluded by the controls or the IME.
+        // 4) The field's visible bottom remains above the controls row. The
+        //    mounted modal's keyboard-down -> IME-up movement is load-bearing,
+        //    while the direct #780 host proof above owns exact keyboard-boundary
+        //    containment.
         assertTrue(
             "Draft field bottom must be above the Send controls row. " +
                 "draftBottom=${draftBounds.bottom} sendTop=${sendBounds.top}",
             draftBounds.bottom <= sendBounds.top + 2f,
         )
         assertTrue(
-            "Send controls must stay above the IME. sendBottom=${sendBounds.bottom} " +
-                "imeTop=$imeTop",
-            sendBounds.bottom <= imeTop + 2f,
+            "The mounted production sheet must lift its controls substantially when the " +
+                "synthetic IME reaches the modal root. keyboardDownSendBottom=" +
+                "$keyboardDownSendBottom keyboardUpSendBottom=${sendBounds.bottom} " +
+                "observedImeBottomPx=$expectedIme",
+            keyboardDownSendBottom - sendBounds.bottom >= expectedIme * 0.5f,
         )
+        listOf(COMPOSER_DRAFT_TAG, COMPOSER_SEND_ENTER_TAG, COMPOSER_ATTACH_TAG, COMPOSER_MIC_TAG)
+            .forEach { tag ->
+                assertNodeFullyWithinOwningComposeRoot(tag)
+            }
     }
 
     @Test
-    fun offlineBannerStaysAboveLongDraftWithRealImeUp() {
+    fun offlineBannerStaysAboveLongDraftWithSyntheticImeUp() {
         val vm = newViewModel()
         compose.activityRule.scenario.onActivity { activity ->
             WindowCompat.setDecorFitsSystemWindows(activity.window, false)
@@ -436,6 +419,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     PromptComposerSheet(
                         onDismiss = {},
                         onSend = { _ -> true },
+                        modifier = Modifier.observeProductionSheetIme(),
                         connectionLost = true,
                         viewModel = vm,
                     )
@@ -451,17 +435,13 @@ class PromptComposerLongDraftCaretVisibleTest {
             .performClick()
             .performTextInput(longDraft)
         assertTrue(
-            "Real IME is required for the offline keyboard-up proof.",
-            raiseSoftImeDeterministically(timeoutMs = 30_000L),
+            "The offline production PromptComposerSheet must receive the typed long draft.",
+            vm.uiState.value.draft == longDraft,
         )
-        compose.waitUntil(timeoutMillis = 5_000) { readImeBottomPx() > 0 }
-        compose.waitForIdle()
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        SystemClock.sleep(500)
-        compose.waitForIdle()
+        val keyboardDownSendBottom = applySyntheticKeyboardDownAndReadSendBottom()
+        val syntheticIme = applySyntheticImeAndAssertObservedInProductionSheet()
 
         compose.onNodeWithText(OFFLINE_COPY, useUnmergedTree = true).assertExists()
-        captureFullDevice("issue-1619-green-offline-banner-above-long-draft-keyboard-up.png")
 
         val statusBounds = compose.onNodeWithTag(
             COMPOSER_STATUS_VIEWPORT_TAG,
@@ -489,12 +469,14 @@ class PromptComposerLongDraftCaretVisibleTest {
         val caretRect = layout.getCursorRect(longDraft.length)
         val density = displayDensity()
         val draftHeightPx = (draftBounds.bottom - draftBounds.top).value * density
-        val imeTop = readDecorHeightPx() - readImeBottomPx()
+        val keyboardUpSendBottomPx = sendBounds.bottom.value * density
 
         println(
-            "ISSUE1619_REAL_OFFLINE status=$statusBounds banner=$bannerBounds " +
+            "ISSUE1619_SYNTHETIC_OFFLINE status=$statusBounds banner=$bannerBounds " +
                 "draftViewport=$draftViewportBounds draft=$draftBounds send=$sendBounds " +
-                "textHeight=${layout.size.height} caret=$caretRect imeTop=$imeTop",
+                "textHeight=${layout.size.height} caret=$caretRect " +
+                "keyboardDownSendBottom=$keyboardDownSendBottom " +
+                "modalRootBottom=${syntheticIme.modalComposeRootBottomPx}",
         )
         assertTrue(
             "Offline banner must be fully contained in its bounded status viewport. " +
@@ -508,11 +490,11 @@ class PromptComposerLongDraftCaretVisibleTest {
             bannerBounds.bottom <= draftViewportBounds.top + 1.dp,
         )
         assertTrue(
-            "Real offline text must overflow the editor so caret-follow is exercised.",
+            "Synthetic-IME offline text must overflow the editor so caret-follow is exercised.",
             layout.size.height > draftHeightPx + 1f,
         )
         assertTrue(
-            "Real offline draft must retain one complete caret line.",
+            "Synthetic-IME offline draft must retain one complete caret line.",
             caretRect.height <= draftHeightPx + 1f,
         )
         assertTrue(
@@ -520,50 +502,16 @@ class PromptComposerLongDraftCaretVisibleTest {
             draftBounds.bottom <= sendBounds.top + 1.dp,
         )
         assertTrue(
-            "Offline controls must remain above the real IME.",
-            sendBounds.bottom.value * density <= imeTop + 2f,
+            "The mounted offline production sheet must lift its controls substantially when " +
+                "the synthetic IME reaches the modal root.",
+            keyboardDownSendBottom - keyboardUpSendBottomPx >=
+                syntheticIme.observedImeBottomPx * 0.5f,
         )
-    }
-
-    /**
-     * Raise the soft IME deterministically (re-issuing the request each poll)
-     * and return whether it became visible within [timeoutMs]. Mirrors the
-     * robust approach in [PromptComposerImeSquishProofTest] — a single show()
-     * can be dropped while the window settles after focus, so we keep nudging.
-     */
-    private fun raiseSoftImeDeterministically(timeoutMs: Long): Boolean {
-        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
-        while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-                .performClick()
-            compose.waitForIdle()
-
-            compose.activity.runOnUiThread {
-                val window = compose.activity.window
-                val imm = compose.activity.getSystemService(
-                    android.content.Context.INPUT_METHOD_SERVICE,
-                ) as? android.view.inputmethod.InputMethodManager
-                val focused = window.decorView.findFocus()
-                if (focused != null && imm != null) {
-                    imm.showSoftInput(
-                        focused,
-                        android.view.inputmethod.InputMethodManager.SHOW_FORCED,
-                    )
-                }
-                WindowInsetsControllerCompat(window, window.decorView)
-                    .show(WindowInsetsCompat.Type.ime())
+        assertNodeFullyWithinOwningComposeRoot(COMPOSER_CONNECTION_LOST_TAG)
+        listOf(COMPOSER_DRAFT_TAG, COMPOSER_SEND_ENTER_TAG, COMPOSER_ATTACH_TAG, COMPOSER_MIC_TAG)
+            .forEach { tag ->
+                assertNodeFullyWithinOwningComposeRoot(tag)
             }
-            val shown = waitForInputMethodVisible(
-                scenario = compose.activityRule.scenario,
-                expected = true,
-                timeoutMs = minOf(
-                    3_000L,
-                    (deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L),
-                ),
-            )
-            if (shown) return true
-        }
-        return false
     }
 
     @Composable
@@ -574,76 +522,162 @@ class PromptComposerLongDraftCaretVisibleTest {
         )
     }
 
-    private fun readImeBottomPx(): Int {
-        var result = 0
-        compose.activityRule.scenario.onActivity { activity ->
-            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
-            result = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
+    private data class SyntheticImeGeometry(
+        val observedImeBottomPx: Int,
+        val modalComposeRootBottomPx: Float,
+    )
+
+    private fun applySyntheticKeyboardDownAndReadSendBottom(): Float {
+        repeat(2) {
+            applySyntheticInsets(
+                imeBottomPx = 0,
+                navBarBottomPx = 0,
+                statusBarTopPx = (SYNTHETIC_STATUS_BAR_DP * displayDensity()).toInt(),
+                requireModalRoot = true,
+            )
+            compose.waitForIdle()
         }
-        return result
+        val observedIme = compose.onNodeWithTag(PRODUCTION_SHEET_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(PRODUCTION_SHEET_IME_BOTTOM_PX)
+            ?: -1
+        assertTrue(
+            "Keyboard-down baseline must be Compose-observed as zero in the mounted sheet; " +
+                "observedImeBottomPx=$observedIme",
+            observedIme == 0,
+        )
+        return compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot.bottom
     }
 
-    private fun readDecorHeightPx(): Int {
-        var result = 0
-        compose.activityRule.scenario.onActivity { activity ->
-            result = activity.window.decorView.height
+    private fun assertNodeFullyWithinOwningComposeRoot(tag: String) {
+        val node = compose.onNodeWithTag(tag, useUnmergedTree = true).fetchSemanticsNode()
+        val root = compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+            .single { it.root === node.root }
+        val bounds = node.boundsInRoot
+        val rootBounds = root.boundsInRoot
+        val slop = 2f * compose.density.density
+        assertTrue(
+            "Node '$tag' must remain fully contained in the mounted production modal root. " +
+                "node=$bounds root=$rootBounds",
+            bounds.left >= rootBounds.left - slop &&
+                bounds.top >= rootBounds.top - slop &&
+                bounds.right <= rootBounds.right + slop &&
+                bounds.bottom <= rootBounds.bottom + slop,
+        )
+    }
+
+    private fun applySyntheticImeAndAssertObservedInProductionSheet(): SyntheticImeGeometry {
+        repeat(2) {
+            applySyntheticInsets(
+                imeBottomPx = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt(),
+                navBarBottomPx = 0,
+                statusBarTopPx = (SYNTHETIC_STATUS_BAR_DP * displayDensity()).toInt(),
+                requireModalRoot = true,
+            )
+            compose.waitForIdle()
         }
-        return result
+
+        val sheetNode = compose.onNodeWithTag(PRODUCTION_SHEET_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+        val observedIme = sheetNode.config.getOrNull(PRODUCTION_SHEET_IME_BOTTOM_PX)
+            ?: 0
+        val expectedIme = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt()
+        assertTrue(
+            "Synthetic ime() inset must be Compose-observed in the mounted production " +
+                "ModalBottomSheet root; keyboard-down or activity-only dispatch would be " +
+                "vacuous. observedImeBottomPx=$observedIme expectedImeBottomPx=$expectedIme",
+            expectedIme > 0 && observedIme == expectedIme,
+        )
+        val modalComposeRoot = compose.onAllNodes(isRoot())
+            .fetchSemanticsNodes()
+            .single { it.root === sheetNode.root }
+        println(
+            "ISSUE1677_PRODUCTION_MODAL_GEOMETRY root=${modalComposeRoot.boundsInRoot} " +
+                "observedImeBottomPx=$observedIme",
+        )
+        assertTrue(
+            "Mounted production modal Compose root must have nonzero geometry. " +
+                "bounds=${modalComposeRoot.boundsInRoot}",
+            modalComposeRoot.boundsInRoot.height > 0f,
+        )
+        return SyntheticImeGeometry(
+            observedImeBottomPx = observedIme,
+            modalComposeRootBottomPx = modalComposeRoot.boundsInRoot.bottom,
+        )
+    }
+
+    private fun Modifier.observeProductionSheetIme(): Modifier = composed {
+        val density = LocalDensity.current
+        val imeBottomPx = WindowInsets.ime.getBottom(density)
+        testTag(PRODUCTION_SHEET_TAG).semantics {
+            this[PRODUCTION_SHEET_IME_BOTTOM_PX] = imeBottomPx
+        }
     }
 
     private fun applySyntheticInsets(
         imeBottomPx: Int,
         navBarBottomPx: Int,
         statusBarTopPx: Int,
+        requireModalRoot: Boolean = false,
     ) {
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "Issue #1677 synthetic modal-window proof requires API 29+ WindowInspector; " +
+                "deviceApi=${Build.VERSION.SDK_INT}"
+        }
+        val insets = WindowInsetsCompat.Builder()
+            .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
+            .setVisible(WindowInsetsCompat.Type.ime(), imeBottomPx > 0)
+            .setInsets(
+                WindowInsetsCompat.Type.navigationBars(),
+                Insets.of(0, 0, 0, navBarBottomPx),
+            )
+            .setInsets(
+                WindowInsetsCompat.Type.statusBars(),
+                Insets.of(0, statusBarTopPx, 0, 0),
+            )
+            .setInsets(
+                WindowInsetsCompat.Type.systemBars(),
+                Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
+            )
+            .build()
         compose.activityRule.scenario.onActivity { activity ->
-            val insets = WindowInsetsCompat.Builder()
-                .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
-                .setInsets(
-                    WindowInsetsCompat.Type.navigationBars(),
-                    Insets.of(0, 0, 0, navBarBottomPx),
-                )
-                .setInsets(
-                    WindowInsetsCompat.Type.statusBars(),
-                    Insets.of(0, statusBarTopPx, 0, 0),
-                )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
-                .build()
-            ViewCompat.dispatchApplyWindowInsets(activity.window.decorView, insets)
+            val roots = activeAppWindowRoots(activity)
+            val activityDecor = activity.window.decorView
+            val modalRoots = roots.filterNot { it === activityDecor }
+            check(roots.any { it === activityDecor }) {
+                "Active app roots must include the activity decor."
+            }
+            if (requireModalRoot && modalRoots.isEmpty()) {
+                error("Mounted PromptComposerSheet modal root disappeared before inset dispatch.")
+            }
+            println(
+                "ISSUE1677_SYNTHETIC_WINDOW_ROOTS count=${roots.size} " +
+                    "modalCount=${modalRoots.size} " +
+                    "roots=${roots.map { "${it.javaClass.name}:${it.width}x${it.height}" }}",
+            )
+            roots.forEach { root ->
+                ViewCompat.dispatchApplyWindowInsets(root, insets)
+            }
         }
     }
+
+    private fun activeAppWindowRoots(activity: ComponentActivity) =
+        WindowInspector.getGlobalWindowViews()
+            .asSequence()
+            .map { it.rootView }
+            .distinctBy { System.identityHashCode(it) }
+            .filter { root ->
+                root.isAttachedToWindow &&
+                    root.context.applicationContext.packageName ==
+                    activity.applicationContext.packageName
+            }
+            .toList()
 
     private fun displayDensity(): Float =
         InstrumentationRegistry.getInstrumentation()
             .targetContext.resources.displayMetrics.density
-
-    private fun captureFullDevice(name: String) {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.waitForIdleSync()
-        SystemClock.sleep(200)
-        val bitmap: Bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
-            "Could not capture issue #1619 full-device screenshot"
-        }
-        val dir = File(
-            testArtifactsRoot(instrumentation.targetContext),
-            "additional_test_output/issue-1619-composer",
-        )
-        check(dir.exists() || dir.mkdirs()) { "Could not create ${dir.absolutePath}" }
-        val file = File(dir, name)
-        try {
-            FileOutputStream(file).use { output ->
-                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                    "Could not write ${file.absolutePath}"
-                }
-            }
-            println("ISSUE1619_SCREENSHOT ${file.absolutePath}")
-        } finally {
-            bitmap.recycle()
-        }
-    }
 
     private companion object {
         const val SYNTHETIC_HOST_TAG = "issue1619-long-draft-host"
@@ -651,6 +685,9 @@ class PromptComposerLongDraftCaretVisibleTest {
         const val SYNTHETIC_HOST_HEIGHT_DP = 470f
         const val SYNTHETIC_IME_HEIGHT_DP = 295f
         const val SYNTHETIC_STATUS_BAR_DP = 52f
+        const val PRODUCTION_SHEET_TAG = "issue1677-production-composer-sheet"
+        val PRODUCTION_SHEET_IME_BOTTOM_PX =
+            SemanticsPropertyKey<Int>("Issue1677ProductionSheetImeBottomPx")
         const val OFFLINE_COPY = "Offline — prompts will be queued and sent on reconnect."
     }
 }

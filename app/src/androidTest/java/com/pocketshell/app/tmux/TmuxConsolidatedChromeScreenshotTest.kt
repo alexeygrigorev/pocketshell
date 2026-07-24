@@ -90,18 +90,18 @@ class TmuxConsolidatedChromeScreenshotTest {
     }
 
     /**
-     * Issue #601: regression guard. The maintainer's #601 feedback (the
-     * cyan-circled "/" forwarding chip in the header) is that the active
-     * port-forwarding status must NOT live in the session header row — it
-     * stole terminal chrome/content space. Active forwarding is surfaced ONLY
-     * via the kebab menu's "Port forwarding" status row (covered by
-     * [TmuxMoreMenuPortForwardingTest]); the header NEVER renders a forwarding
-     * chip, even when forwarding is active. This asserts the header carries no
-     * forwarding chip and that the terminal pane sits right under the bare
-     * header, reclaiming the rows the chip used to need.
+     * Issue #1487 (reverses #601): the maintainer now wants the active
+     * port-forwarding status as an always-visible, glanceable pill in the
+     * session top chrome (Google-Maps-chip intent), NOT buried in the kebab
+     * menu. Hard-cut per D22 — the old #601 "the header NEVER renders a
+     * forwarding chip" rule is deleted, not gated. This asserts that when
+     * forwarding is active the header DOES render the `⇄` pill (with the
+     * per-host content description), while an INACTIVE host still renders no
+     * pill (covered by [ForwardingPillPresenceTest]). The kebab is still
+     * present as the tap-through to the port-forward panel.
      */
     @Test
-    fun activeForwardingDoesNotRenderInHeaderChrome() {
+    fun activeForwardingRendersHeaderPill() {
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -115,6 +115,11 @@ class TmuxConsolidatedChromeScreenshotTest {
                         sessionName = "scratch",
                         onBack = {},
                         onMore = {},
+                        forwardingState =
+                            com.pocketshell.app.portfwd.SessionForwardingIndicatorState(
+                                active = true,
+                                tunnelCount = 2,
+                            ),
                     )
                     PaneProxy()
                 }
@@ -122,18 +127,19 @@ class TmuxConsolidatedChromeScreenshotTest {
         }
 
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
-        // The header row must expose its kebab (forwarding status moved inside
-        // it) but must NOT carry a standalone forwarding status chip.
+        // The kebab (tap-through to the port-forward panel) is still present.
         compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).assertIsDisplayed()
+        // Issue #1487: the header now DOES carry the forwarding pill when active.
+        compose.onNodeWithTag(TMUX_PORT_FORWARD_PILL_TAG).assertIsDisplayed()
         assertTrue(
-            "active port-forwarding status must NOT render as a header chrome chip (#601)",
+            "active port-forwarding must render its per-host pill in the header (#1487)",
             compose.onAllNodesWithContentDescription(
                 "2 ports forwarding active for this host",
-            ).fetchSemanticsNodes().isEmpty(),
+            ).fetchSemanticsNodes().isNotEmpty(),
         )
         compose.waitForIdle()
         SystemClock.sleep(200)
-        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding-no-header-chip.png"))
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding-header-pill.png"))
     }
 
     @Test

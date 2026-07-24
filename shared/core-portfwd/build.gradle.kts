@@ -17,7 +17,7 @@ val duplicateJavaResourceExcludes = listOf(
 
 android {
     namespace = "com.pocketshell.core.portfwd"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 26

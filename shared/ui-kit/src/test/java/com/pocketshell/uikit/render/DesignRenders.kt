@@ -133,6 +133,18 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1487: the always-visible in-session port-forwarding pill (three
+     * states: `⇄ 1 port`, `⇄ 3 ports` accent-tinted, `⇄ …` amber/restoring).
+     * Faithful replica of the app's `ForwardingStatusPill` (same pill style +
+     * exact glyph geometry) since the real pill is app-only. Fast first visual
+     * check; the emulator acceptance is `ForwardingPillPresenceTest`.
+     */
+    @Test
+    fun forwardingPill() = render("forwarding-pill") {
+        ForwardingPillStatesRender()
+    }
+
+    /**
      * Issue #1449: the design-token / hex swatch sheet — the ONE coverage gap
      * ported over when the redundant IDE-only `@Preview` composables in
      * `shared/ui-kit/src/main/.../preview/` were deleted (hard-cut D22;
